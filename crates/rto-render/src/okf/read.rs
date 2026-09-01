@@ -740,6 +740,18 @@ pub fn read_bundle(
 }
 
 /// Read every markdown file into a concept, or into a reason it is not one.
+///
+/// Both results come back sorted by bundle path, **at this boundary rather than
+/// at the caller's**. [`read_bundle`] is public and takes a slice, so the order
+/// is whatever a caller happened to build; the CLI's directory walk sorts, but
+/// that is one caller's habit and not a property of the reader.
+///
+/// Three things depend on it, and only one of them is cosmetic:
+/// [`OkfReport::skipped`]'s order, the first-three failures named in
+/// [`OkfError::NoConcepts`], and — the one that matters — the order of
+/// `facts.nodes`, which is serialized verbatim into the persisted import layer.
+/// Without this, one unchanged bundle read twice could store two different
+/// layer blobs. [`super::assemble`] sorts on the write side for the same reason.
 fn collect_concepts(
     files: &[(String, String)],
     report: &mut OkfReport,
@@ -777,6 +789,8 @@ fn collect_concepts(
             }
         }
     }
+    concepts.sort_by(|a, b| a.path.cmp(&b.path));
+    skipped.sort_by(|a, b| a.path.cmp(&b.path));
     (concepts, skipped)
 }
 
@@ -1301,11 +1315,15 @@ mod tests {
             .iter()
             .map(|s| (s.path.as_str(), s.reason.as_str()))
             .collect();
+        // Sorted by path, not by the order the files were handed over — see
+        // `collect_concepts`. Asserting the *whole* list in a fixed order is the
+        // point: a report that named the same three skips in a different order
+        // each run would be a report nobody could diff.
         assert_eq!(
             rows,
             vec![
-                ("/decisions/plain.md", "no YAML frontmatter block"),
                 ("/decisions/open.md", "frontmatter block is never closed"),
+                ("/decisions/plain.md", "no YAML frontmatter block"),
                 (
                     "/decisions/typeless.md",
                     "no non-empty `type` (OKF's one required key)"
@@ -1467,6 +1485,60 @@ mod tests {
         assert!(import.report.extrefs_filled.is_empty());
         assert!(import.report.extrefs_ambiguous.is_empty());
         assert_eq!(keys(&import), vec!["okf:acme/notes/adr-0021.md"]);
+    }
+
+    /// Reading one bundle twice gives the same answer, whatever order the files
+    /// arrive in.
+    ///
+    /// `read_bundle` takes a slice, so the order is the caller's — and the CLI's
+    /// directory walk sorting is that caller's habit, not the reader's contract.
+    /// The stake is not tidiness: `facts.nodes` is serialized verbatim into the
+    /// persisted import layer, so an unsorted caller would make one unchanged
+    /// bundle store a different blob on each read.
+    #[test]
+    fn the_answer_does_not_depend_on_the_order_the_files_arrive_in() {
+        let files: Vec<(String, String)> = vec![
+            ("/decisions/a.md", AUTHORED),
+            ("/docs/b.md", "---\ntype: \"doc\"\n---\n\n# B\n"),
+            ("/docs/plain.md", "# no frontmatter\n"),
+            ("/docs/typeless.md", "---\ntitle: \"x\"\n---\n\nB\n"),
+            ("/symbols/c.md", "---\ntype: \"fn\"\n---\n\n# C\n"),
+        ]
+        .into_iter()
+        .map(|(p, c)| (p.to_owned(), c.to_owned()))
+        .collect();
+
+        let forwards = read_bundle("okf/", &files, &opts(Trust::Trust, &[])).expect("read");
+        let mut backwards_input = files;
+        backwards_input.reverse();
+        let backwards =
+            read_bundle("okf/", &backwards_input, &opts(Trust::Trust, &[])).expect("read");
+
+        assert_eq!(
+            keys(&forwards),
+            keys(&backwards),
+            "node order is what reaches the persisted import layer"
+        );
+        assert_eq!(
+            forwards
+                .report
+                .skipped
+                .iter()
+                .map(|s| s.path.as_str())
+                .collect::<Vec<_>>(),
+            backwards
+                .report
+                .skipped
+                .iter()
+                .map(|s| s.path.as_str())
+                .collect::<Vec<_>>(),
+        );
+        // And the whole fact set, byte for byte, which is the property the store
+        // actually depends on.
+        assert_eq!(
+            serde_json::to_string(&forwards.facts).expect("json"),
+            serde_json::to_string(&backwards.facts).expect("json"),
+        );
     }
 
     #[test]

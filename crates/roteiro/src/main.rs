@@ -5874,6 +5874,16 @@ fn run_import_okf(
                 )
             })?,
     };
+    // The peer names the layer and namespaces every imported key, so a blank one
+    // would produce `import:okf/` and `okf:/…` — a layer nobody can name and
+    // keys that collide with the next unnamed import. `.`/`..` are the same
+    // problem arriving from a path like `./`, which is an easy thing to type.
+    if peer.trim().is_empty() || peer == "." || peer == ".." {
+        anyhow::bail!(
+            "`{peer}` is not a usable peer name: it names the import layer and \
+             namespaces every imported concept's key. Pass --peer <NAME>."
+        );
+    }
 
     let files = read_bundle_files(root)?;
 
@@ -5921,46 +5931,68 @@ fn run_import_okf(
         report["durable"] = serde_json::json!(true);
         emit_json(&report)?;
     } else {
-        println!(
-            "imported okf from {} as `{peer}` ({}): {} concept(s), {} edge(s) \
-             ({} unresolved, {} reciprocal, {} pruned stale), {} placeholder(s) filled, \
-             {} node(s) removed as withdrawn — persisted under {src_ref} (durable)",
-            root.display(),
-            mode.as_str(),
-            r.concepts_read,
-            applied.edges_applied,
-            r.links_unresolved,
-            r.links_reciprocal,
-            applied.edges_pruned,
-            r.extrefs_filled.len(),
-            applied.nodes_removed,
+        print_okf_report(
+            &root.display().to_string(),
+            &peer,
+            &src_ref,
+            mode,
+            r,
+            &applied,
         );
-        // Loud about what it declined. A partly readable bundle that said nothing
-        // would leave the graph missing concepts nobody knows to look for.
-        for skipped in &r.skipped {
-            println!("  skipped {}: {}", skipped.path, skipped.reason);
-        }
-        for stub in &r.extrefs_ambiguous {
-            println!(
-                "  left {stub} unfilled: more than one concept could be it, and a wrong \
-                 fill is worse than a stub"
-            );
-        }
-        if r.links_outside_relationships > 0 {
-            println!(
-                "  {} markdown link(s) outside a `## Relationships` heading were read as \
-                 citations, not imported as edges",
-                r.links_outside_relationships
-            );
-        }
-        if !trust {
-            println!(
-                "  every concept is `external-inferred`: their information without their \
-                 confirmation. Re-run with --trust to adopt the tiers they claimed."
-            );
-        }
     }
     Ok(())
+}
+
+/// The human-readable half of [`run_import_okf`]'s report.
+///
+/// Split out because it is where the *loudness* lives: everything the reader
+/// declined has to reach the operator here, and a block that keeps growing
+/// inside the command is a block that eventually gets trimmed to fit.
+fn print_okf_report(
+    root: &str,
+    peer: &str,
+    src_ref: &str,
+    mode: rto_render::okf::read::Trust,
+    r: &rto_render::okf::read::OkfReport,
+    applied: &rto_graph::ImportApplied,
+) {
+    println!(
+        "imported okf from {root} as `{peer}` ({}): {} concept(s), {} edge(s) \
+         ({} unresolved, {} reciprocal, {} pruned stale), {} placeholder(s) filled, \
+         {} node(s) removed as withdrawn — persisted under {src_ref} (durable)",
+        mode.as_str(),
+        r.concepts_read,
+        applied.edges_applied,
+        r.links_unresolved,
+        r.links_reciprocal,
+        applied.edges_pruned,
+        r.extrefs_filled.len(),
+        applied.nodes_removed,
+    );
+    // Loud about what it declined. A partly readable bundle that said nothing
+    // would leave the graph missing concepts nobody knows to look for.
+    for skipped in &r.skipped {
+        println!("  skipped {}: {}", skipped.path, skipped.reason);
+    }
+    for stub in &r.extrefs_ambiguous {
+        println!(
+            "  left {stub} unfilled: more than one concept could be it, and a wrong \
+             fill is worse than a stub"
+        );
+    }
+    if r.links_outside_relationships > 0 {
+        println!(
+            "  {} markdown link(s) outside a `## Relationships` heading were read as \
+             citations, not imported as edges",
+            r.links_outside_relationships
+        );
+    }
+    if mode == rto_render::okf::read::Trust::Acknowledge {
+        println!(
+            "  every concept is `external-inferred`: their information without their \
+             confirmation. Re-run with --trust to adopt the tiers they claimed."
+        );
+    }
 }
 
 /// Every markdown file under an OKF bundle root, keyed by its bundle-relative
@@ -5973,11 +6005,34 @@ fn read_bundle_files(root: &std::path::Path) -> anyhow::Result<Vec<(String, Stri
             .map_err(|e| anyhow::anyhow!("reading {}: {e}", dir.display()))?
         {
             let entry = entry.map_err(|e| anyhow::anyhow!("reading {}: {e}", dir.display()))?;
+            // Symlinks are not followed. A bundle is somebody **else's**
+            // directory, so `is_dir()` — which follows them — would let a link
+            // pointing at an ancestor spin this walk forever, and one pointing
+            // outside the bundle pull in files that are not part of it. Neither
+            // is hypothetical for input a peer produced, and a bundle is a
+            // directory of documents: nothing legitimate is lost by refusing.
+            if entry.file_type().is_ok_and(|t| t.is_symlink()) {
+                continue;
+            }
             let p = entry.path();
             if p.is_dir() {
                 stack.push(p);
             } else if p.extension().is_some_and(|e| e == "md") {
-                let rel = p.strip_prefix(root).unwrap_or(&p);
+                // Erroring rather than falling back to the full path. With
+                // symlinks skipped above this cannot fail — every path descends
+                // from `root` by construction — but the fallback was the wrong
+                // shape for the case it covered: a path outside the bundle would
+                // have been recorded *as* a bundle path, so `/Users/…/secret.md`
+                // would become an imported concept's key and the node would
+                // claim to be part of the peer's bundle. A refusal names the
+                // problem; a fallback launders it into data.
+                let rel = p.strip_prefix(root).map_err(|_| {
+                    anyhow::anyhow!(
+                        "{} is not inside the bundle root {}",
+                        p.display(),
+                        root.display()
+                    )
+                })?;
                 let rel = rel.to_string_lossy().replace('\\', "/");
                 let text = std::fs::read_to_string(&p)
                     .map_err(|e| anyhow::anyhow!("reading {}: {e}", p.display()))?;

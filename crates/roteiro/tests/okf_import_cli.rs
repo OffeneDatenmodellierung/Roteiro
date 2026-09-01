@@ -511,3 +511,84 @@ fn a_trusted_concept_re_emits_the_peers_verifier_by_name() {
 
     std::fs::remove_dir_all(bundle.parent().expect("base")).ok();
 }
+
+/// A bundle is somebody **else's** directory, so the walk that reads it does not
+/// follow symlinks.
+///
+/// Two failures, one guard. A link pointing at an ancestor makes `is_dir()` —
+/// which follows links — recurse for ever; a link pointing outside the bundle
+/// pulls in files that are not part of it and imports them as the peer's
+/// concepts. Nothing legitimate is lost: a bundle is a directory of documents.
+#[test]
+#[cfg(unix)]
+fn the_bundle_walk_does_not_follow_symlinks() {
+    let (repo, bundle) = repo_with_bundle("symlink");
+
+    // A loop: `decisions/loop` -> the bundle root.
+    std::os::unix::fs::symlink(&bundle, bundle.join("decisions/loop")).expect("symlink loop");
+    // And an escape: a concept living outside the bundle entirely.
+    let outside = bundle.parent().expect("base").join("outside");
+    write(
+        &outside.join("secret.md"),
+        &concept("adr", "Not theirs", Some("human:mallory"), "# Not theirs\n"),
+    );
+    std::os::unix::fs::symlink(&outside, bundle.join("escape")).expect("symlink escape");
+
+    let out = roteiro(
+        &repo,
+        &[
+            "import",
+            "--from",
+            "okf",
+            bundle.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(out.status.success(), "import failed: {out:?}");
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON");
+    assert_eq!(
+        report["concepts_read"], 2,
+        "only the bundle's own two concepts, and the walk terminated: {report}"
+    );
+    assert!(
+        !roteiro(
+            &repo,
+            &["query", "okf:symlink-okf/escape/secret.md", "--json"]
+        )
+        .status
+        .success(),
+        "a document reached only through a symlink out of the bundle is not in it"
+    );
+
+    std::fs::remove_dir_all(bundle.parent().expect("base")).ok();
+}
+
+/// The peer names the import layer and namespaces every imported key, so a blank
+/// one would give `import:okf/` and `okf:/…` — a layer nobody can name and keys
+/// that collide with the next unnamed import.
+#[test]
+fn an_unusable_peer_name_is_refused_rather_than_namespacing_nothing() {
+    let (repo, bundle) = repo_with_bundle("peername");
+    for name in ["", "  ", ".", ".."] {
+        let out = roteiro(
+            &repo,
+            &[
+                "import",
+                "--from",
+                "okf",
+                bundle.to_str().unwrap(),
+                "--peer",
+                name,
+            ],
+        );
+        assert!(!out.status.success(), "`{name}` must be refused: {out:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr).trim(),
+            format!(
+                "Error: `{name}` is not a usable peer name: it names the import layer and \
+                 namespaces every imported concept's key. Pass --peer <NAME>."
+            )
+        );
+    }
+    std::fs::remove_dir_all(bundle.parent().expect("base")).ok();
+}
