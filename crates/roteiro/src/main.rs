@@ -17446,9 +17446,9 @@ mod workspace_scoped_tools {
     ///
     /// `additionalProperties: false` is what `rto_serve::tools` enforces, so a
     /// definition arriving without it is a tool that silently drops a key nobody
-    /// reads — which is how a model asking `debt` for `todo` markers with the MCP
+    /// reads — which is how a model asking `debt` for one category with the MCP
     /// surface's `kind` spelling received every marker in the repository,
-    /// presented as the filtered set. The flag has to sit on the **composed**
+    /// presented as the filtered set it asked for. The flag has to sit on the **composed**
     /// schema rather than inside `with_project`'s properties fragment, and this
     /// reads `parameters` exactly where the tool loop reads it, so a flag placed
     /// one level too deep fails here rather than doing nothing in production.

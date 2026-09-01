@@ -216,6 +216,13 @@ fn unknown_argument(def: &ToolDef, arguments: &serde_json::Value) -> Option<Stri
     if def.parameters.get("additionalProperties") != Some(&serde_json::Value::Bool(false)) {
         return None;
     }
+    // Arguments that are not an object carry no keys, so a rule about keys has
+    // nothing to say about them, and this leaves that shape exactly as it was:
+    // the JSON dialect carries a scalar `arguments` through to the registry so
+    // that the registry's own error gives the model a round to correct itself.
+    // `the_two_envelopes_differ_on_a_non_object_arguments` records that as a
+    // decision, and changing it would be a claim about what a declared
+    // `"type": "object"` obliges rather than about an unrecognised key.
     let sent = arguments.as_object()?;
     let declared = def.parameters.get("properties").and_then(|p| p.as_object());
     let is_declared = |key: &String| declared.is_some_and(|d| d.contains_key(key));
@@ -2358,7 +2365,7 @@ mod tests {
             model: "scripted".to_owned(),
             messages: vec![Message {
                 role: "user".to_owned(),
-                content: "what todo markers are there?".to_owned(),
+                content: "which markers are there?".to_owned(),
             }],
             images: vec![],
             audio: vec![],
@@ -2380,7 +2387,7 @@ mod tests {
     /// argument, over the surface that does not know it.
     #[test]
     fn an_argument_the_tool_does_not_declare_is_refused_not_dropped() {
-        let response = debt_call_response(r#"{"kind":["todo"]}"#);
+        let response = debt_call_response(r#"{"kind":["todo"]}"#); // roteiro:ignore
         // What the caller actually receives — the model, which is who a tool
         // error is addressed to on this surface.
         assert!(
@@ -2406,7 +2413,7 @@ mod tests {
     /// then extends.
     #[test]
     fn the_declared_arguments_still_run() {
-        let response = debt_call_response(r#"{"categories":["todo"],"project":"roteiro"}"#);
+        let response = debt_call_response(r#"{"categories":["todo"],"project":"roteiro"}"#); // roteiro:ignore
         assert!(
             response.contains("ran `debt`"),
             "a call using only declared keys must execute: {response}",
