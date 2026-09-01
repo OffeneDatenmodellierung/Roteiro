@@ -557,6 +557,10 @@ impl PackageCache {
         std::iter::once((&self.registry, GUEST_CARGO_REGISTRY))
             .chain(self.git.as_ref().map(|git| (git, GUEST_CARGO_GIT)))
             .map(|(host, guest)| VolumeSpec {
+                // See `Builder::volumes` for why this is `None` and not a
+                // default: every mount in this file is a host path this process
+                // chose.
+                managed_volume: None,
                 host_path: host.to_string_lossy().into_owned(),
                 guest_path: guest.to_owned(),
                 read_only: true,
@@ -587,6 +591,14 @@ impl Builder<'_> {
     fn volumes(&self) -> Vec<VolumeSpec> {
         let mut volumes = vec![
             VolumeSpec {
+                // The origin of the mount, and it is the host. The alternative
+                // `managed_volume` names a volume a **remote** boxlite server
+                // resolves, which would put the contents of the guest's source
+                // tree under someone else's control and needs the egress
+                // ADR-0020 denies. Written out rather than defaulted so the
+                // next field boxlite adds to this struct stops the build here,
+                // at the boundary, instead of arriving as a silent default.
+                managed_volume: None,
                 host_path: self.root.to_string_lossy().into_owned(),
                 guest_path: GUEST_WORKTREE.to_owned(),
                 // Unchanged, and the point. Nine tools were measured and none
@@ -596,6 +608,7 @@ impl Builder<'_> {
                 read_only: true,
             },
             VolumeSpec {
+                managed_volume: None,
                 host_path: self.scratch.to_string_lossy().into_owned(),
                 guest_path: GUEST_SCRATCH.to_owned(),
                 // The single `false` in this file. A malicious build script gets
@@ -657,7 +670,11 @@ impl Builder<'_> {
             cmd: Some(Vec::new()),
             // Nothing survives the build. The scratch directory does, on the
             // host, because it is a mount rather than part of the box.
-            auto_remove: true,
+            //
+            // See `boxlite.rs` for why this is `Some(1)` and not a larger
+            // number: on a local runtime the value is a boolean wearing a
+            // seconds type.
+            auto_delete: Some(1),
             detach: false,
             ..Default::default()
         };

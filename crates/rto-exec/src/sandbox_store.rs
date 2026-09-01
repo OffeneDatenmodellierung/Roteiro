@@ -1412,8 +1412,8 @@ mod tests {
     };
     use std::path::PathBuf;
 
-    /// The three `boxlite` 0.9.7 tables this module reads, declared as that crate
-    /// declares them.
+    /// The three `boxlite` 0.10.0 tables this module reads, declared as that
+    /// crate declares them.
     ///
     /// A restatement, and deliberately a literal one: issue #433's hand-clearing
     /// notes describe an `images` table and a `disk-images/` directory, and the

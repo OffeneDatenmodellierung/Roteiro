@@ -131,7 +131,7 @@ def members(target: str, body: bytes, cache: Path) -> list[tuple[str, str, int]]
             if member.isdir():
                 continue
             if not member.isreg():
-                # Not reachable for 0.9.7 — every member of all three archives is
+                # Not reachable for 0.10.0 — every member of all three archives is
                 # a regular file or the one directory entry. Refused rather than
                 # skipped: a symlink or device node appearing in a later release
                 # changes what lands in the runtime directory, and this script
