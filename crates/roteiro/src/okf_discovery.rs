@@ -309,6 +309,10 @@ pub enum Unasked {
     NotWriting,
     /// The bundle did not read, so there is nothing to consent to.
     Unreadable,
+    /// `--json`: stdout is a document for a program, and a program is not a
+    /// person to ask. The *refresh* still runs — a flag that selects an output
+    /// format must not change behaviour — but nothing is prompted or recorded.
+    MachineOutput,
 }
 
 impl Unasked {
@@ -319,6 +323,7 @@ impl Unasked {
             Self::NoTerminal => "This run is not interactive",
             Self::NotWriting => "This run does not write (`links` without `--write`)",
             Self::Unreadable => "The bundle could not be read, so there is nothing to decide",
+            Self::MachineOutput => "This run emits `--json`, so there is nobody to ask",
         }
     }
 }

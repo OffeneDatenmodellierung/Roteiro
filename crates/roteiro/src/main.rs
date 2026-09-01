@@ -6001,7 +6001,9 @@ fn print_okf_report(
             r.links_outside_relationships
         );
     }
-    print_okf_screen(r);
+    for line in okf_screen_lines(r) {
+        println!("{line}");
+    }
     if mode == rto_render::okf::read::Trust::Acknowledge {
         println!(
             "  every concept is `external-inferred`: their information without their \
@@ -6015,39 +6017,46 @@ fn print_okf_report(
 /// Shared by the import report and the discovery prompt, so the sentence the
 /// operator is asked to answer is the same one the command prints. Never quotes
 /// the offending text — see [`rto_render::okf::read::ScreenedRow`].
-fn print_okf_screen(r: &rto_render::okf::read::OkfReport) {
+///
+/// Returns lines rather than printing them because its two callers write to
+/// **different streams**: the import command's report is the command's result
+/// and goes to stdout, while discovery's is a diagnostic that must stay off
+/// stdout so a `--json` document is not corrupted by it.
+fn okf_screen_lines(r: &rto_render::okf::read::OkfReport) -> Vec<String> {
     if r.concepts_quarantined == 0 && r.concepts_blocked == 0 {
-        return;
+        return Vec::new();
     }
-    println!(
+    let mut out = vec![format!(
         "  screen: {} concept(s) quarantined, {} blocked [{}]",
         r.concepts_quarantined,
         r.concepts_blocked,
         r.screen_classes.join(", ")
-    );
+    )];
     // Bounded: a hostile bundle can carry any number of findings, and a report
     // that scrolls the decision off the screen is a report nobody reads.
     for row in r.screened.iter().take(OKF_SCREEN_ROWS) {
-        println!(
+        out.push(format!(
             "    {} ({}) {}: {}",
             row.path,
             row.field,
             row.verdict,
             row.detail.join("; ")
-        );
+        ));
     }
     if r.screened.len() > OKF_SCREEN_ROWS {
-        println!(
+        out.push(format!(
             "    … and {} more (use --json for all of them)",
             r.screened.len() - OKF_SCREEN_ROWS
-        );
+        ));
     }
     if r.concepts_blocked > 0 {
-        println!(
+        out.push(
             "    a blocked concept carried text addressed to a language model that was \
              *hidden*, and was not imported at all"
+                .to_owned(),
         );
     }
+    out
 }
 
 /// How many screening rows the human-readable report names before summarising.
@@ -8519,17 +8528,53 @@ fn repo_path_identity(p: &std::path::Path) -> std::path::PathBuf {
 /// `decide` is `--write`: it gates asking and importing, not discovering. See
 /// [`okf_discovery`] for the whole policy, in particular what happens when there
 /// is no terminal — which is where this delegates rather than deciding again.
+/// How much a caller lets discovery do.
+///
+/// Three levels rather than a `bool`, because `--json` needs the middle one:
+/// gating discovery on `!json` made a flag that selects an **output format**
+/// change **behaviour**, so automation using `--json` never refreshed a standing
+/// grant and its OKF layers went stale. Reported by Copilot on #711.
+///
+/// Deliberately **not `#[non_exhaustive]`**: it enumerates how much authority a
+/// caller grants this scan, and a fourth level would be a new answer to that
+/// question rather than a detail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Discovery {
+    /// May ask, and may write: `links --write` with a terminal.
+    Decide,
+    /// May write, must not ask. `links --write --json`, where stdout is a
+    /// document for a program and there is no person behind it to answer.
+    RefreshOnly,
+    /// May do neither: a server start, or `links` without `--write`.
+    ReportOnly,
+}
+
+impl Discovery {
+    /// Whether this level may change the graph.
+    fn writes(self) -> bool {
+        matches!(self, Self::Decide | Self::RefreshOnly)
+    }
+}
+
+/// Discover the OKF bundles published by members of this workspace, ask about
+/// the undecided ones, and act on the answers (#706 phase 2, ADR-0021).
+///
+/// Every line this prints goes to **stderr**, including the import summaries.
+/// Discovery is a diagnostic about *peers*, not the result of the command that
+/// triggered it — and under `--json` the result is the JSON document, which a
+/// stray `println!` would corrupt.
 fn discover_okf_in_workspace(
     workspace: &rto_graph::Workspace,
     paths: &[std::path::PathBuf],
-    decide: bool,
+    level: Discovery,
 ) -> anyhow::Result<()> {
+    let decide = level.writes();
     let bundles = rto_graph::discover_okf_bundles(paths);
     if bundles.is_empty() {
         return Ok(());
     }
     let mut noted = okf_discovery::Noted::default();
-    let interactive = decide && okf_discovery::may_prompt();
+    let interactive = level == Discovery::Decide && okf_discovery::may_prompt();
 
     for (path, project) in workspace_project_names(paths) {
         // A repo never consumes its own bundle: it already holds those concepts,
@@ -8591,10 +8636,10 @@ fn discover_okf_in_workspace(
                         // terminal on a command that does not write. Telling a
                         // user at a terminal that their run "is not interactive"
                         // sends them hunting a TTY problem they do not have.
-                        let because = if decide {
-                            okf_discovery::Unasked::NoTerminal
-                        } else {
-                            okf_discovery::Unasked::NotWriting
+                        let because = match level {
+                            Discovery::Decide => okf_discovery::Unasked::NoTerminal,
+                            Discovery::RefreshOnly => okf_discovery::Unasked::MachineOutput,
+                            Discovery::ReportOnly => okf_discovery::Unasked::NotWriting,
                         };
                         eprintln!("{}", okf_discovery::note_text(&d, because));
                     }
@@ -8674,7 +8719,7 @@ fn apply_okf_decision(
     }
 
     if !decision.imports() {
-        println!(
+        eprintln!(
             "  okf: {} ignored — the cross-repo placeholder stays as it is",
             d.bundle.peer
         );
@@ -8715,7 +8760,9 @@ fn apply_okf_decision(
     })??;
     let (report, applied) = applied;
 
-    println!(
+    // stderr, not stdout: this is a diagnostic about a peer, and under `--json`
+    // stdout carries a document a program parses.
+    eprintln!(
         "  okf: {} {} — {} concept(s), {} edge(s), {} placeholder(s) filled, \
          {} removed as withdrawn (under {src_ref})",
         d.bundle.peer,
@@ -8725,7 +8772,9 @@ fn apply_okf_decision(
         report.extrefs_filled.len(),
         applied.nodes_removed,
     );
-    print_okf_screen(&report);
+    for line in okf_screen_lines(&report) {
+        eprintln!("{line}");
+    }
     Ok(())
 }
 
@@ -8843,9 +8892,20 @@ fn run_links(
     // is a verification command, and a check that silently changed the graph it
     // was checking would be the wrong kind of surprise. Without `--write` the
     // undecided bundles are reported and nothing is asked or recorded.
-    if !json {
-        discover_okf_in_workspace(&workspace, &paths, write)?;
-    }
+    // Runs under `--json` too. Gating this on `!json` made a flag that selects
+    // an *output format* change *behaviour*: automation using `--json` never
+    // refreshed a standing grant, so its OKF layers went stale. All of
+    // discovery's output goes to stderr, so the JSON document on stdout stays a
+    // JSON document.
+    discover_okf_in_workspace(
+        &workspace,
+        &paths,
+        match (write, json) {
+            (true, false) => Discovery::Decide,
+            (true, true) => Discovery::RefreshOnly,
+            (false, _) => Discovery::ReportOnly,
+        },
+    )?;
 
     if json {
         emit_json(&results)?;
@@ -12117,7 +12177,7 @@ fn run_explorer(
     if from_config
         && let Ok(paths) = resolved_repo_paths(&resolved, &[])
         && let Ok(flat) = rto_graph::Workspace::from_repo_paths(&paths)
-        && let Err(e) = discover_okf_in_workspace(&flat, &paths, false)
+        && let Err(e) = discover_okf_in_workspace(&flat, &paths, Discovery::ReportOnly)
     {
         eprintln!("roteiro explorer: could not check for peer OKF bundles: {e}");
     }
@@ -12738,7 +12798,7 @@ fn build_serve_workspaces(
     // a server's silence never becomes an answer a later interactive run reads.
     // The argument in full is in `okf_discovery`. Failures are swallowed: a
     // bundle nobody has decided about is not a reason to refuse to serve.
-    if let Err(e) = discover_okf_in_workspace(&flat, &paths, false) {
+    if let Err(e) = discover_okf_in_workspace(&flat, &paths, Discovery::ReportOnly) {
         eprintln!("roteiro {cmd}: could not check for peer OKF bundles: {e}");
     }
     // Both surfaces, from one snapshot: `set` backs `/v1/graph/*` and the UI,

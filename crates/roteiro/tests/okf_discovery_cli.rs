@@ -367,6 +367,52 @@ fn a_standing_grant_keeps_the_layer_current_on_a_later_scan() {
     std::fs::remove_dir_all(&base).ok();
 }
 
+/// `--json` selects an **output format**, and must not change **behaviour**.
+///
+/// Discovery was gated on `!json`, so automation reading machine output never
+/// refreshed a standing grant and its OKF layers went stale — reported by
+/// Copilot on #711. Both halves are asserted: the refresh happens, and stdout is
+/// still a parseable JSON document, because every line discovery prints now goes
+/// to stderr.
+#[test]
+fn json_output_does_not_disable_the_refresh_and_stays_parseable() {
+    let (base, hub, spoke, home) = workspace("json", "The original prose.\n");
+    sync_all(&hub, &spoke);
+    let bundle = spoke.join("okf");
+
+    let out = roteiro(&hub, &["import", "--from", "okf", bundle.to_str().unwrap()]);
+    assert!(out.status.success(), "import failed: {out:?}");
+
+    publish_bundle(&spoke, "The revised prose.\n");
+
+    let out = in_workspace(
+        &hub,
+        &home,
+        &["links", "--write", "--json", "--workspace-name", "ws"],
+    );
+    assert!(out.status.success(), "links failed: {out:?}");
+
+    // stdout is still exactly a JSON document.
+    let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "stdout must stay parseable JSON ({e}): {:?}",
+            String::from_utf8_lossy(&out.stdout)
+        )
+    });
+    assert!(parsed.is_array(), "links --json emits an array: {parsed}");
+
+    // And the refresh still happened.
+    let q = roteiro(&hub, &["query", "okf:spoke/docs/cache.md", "--json"]);
+    let node: serde_json::Value =
+        serde_json::from_slice(&q.stdout).unwrap_or_else(|e| panic!("query failed ({e})"));
+    assert_eq!(
+        node["meta"]["content"], "The revised prose.",
+        "`--json` must not turn the standing-grant refresh off"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
 /// A peer breaking their own bundle must not break **our** command, and must
 /// not delete what they published before it broke.
 ///
