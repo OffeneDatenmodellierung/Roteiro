@@ -21,6 +21,21 @@ pub const REVIEW_SCHEMA: &str = "roteiro.review/v1";
 pub struct ReviewReport {
     /// Stable schema tag.
     pub schema: &'static str,
+    /// **What `--base` actually compared against** (issue #649), or `None` for a
+    /// working-tree review, which compares against `HEAD` and has no spec to
+    /// resolve.
+    ///
+    /// Without this there was no field a reader could consult to tell a review
+    /// measured against a seventeen-commit-stale `main` from a correct one: the
+    /// two rendered identically, both with `drift: []` and exit 0. A report that
+    /// cannot say what it compared against is insufficient in exactly the way a
+    /// report without the diff was — the reader cannot reconstruct the question
+    /// from the answer.
+    ///
+    /// Additive within `roteiro.review/v1` — see `docs/JSON_SCHEMA.md`, which
+    /// permits new fields within a major version.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base: Option<rto_graph::BaseResolution>,
     /// Number of changed tracked files reviewed.
     pub changed_files: usize,
     /// Per-file review context.
@@ -197,6 +212,7 @@ pub fn build(
     violations: &[rto_spec::Violation],
     ignore: &[String],
     diff: Option<DiffSource<'_>>,
+    base: Option<rto_graph::BaseResolution>,
 ) -> Result<ReviewReport, StoreError> {
     let changed_paths: BTreeSet<&str> = changed.iter().map(|c| c.path.as_str()).collect();
     // Every marker `debt` retains under this repository's `[debt] ignore`, keyed
@@ -293,6 +309,7 @@ pub fn build(
 
     Ok(ReviewReport {
         schema: REVIEW_SCHEMA,
+        base,
         changed_files: changed.len(),
         files,
         drift,

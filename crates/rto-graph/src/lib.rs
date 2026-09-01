@@ -113,7 +113,8 @@ pub use findings::{
     WorktreeAccess, WorktreeId, analyzer_id_error, is_valid_analyzer_id, layer_key,
 };
 pub use git::{
-    BlobRef, ChangeStatus, ChangedFile, GitError, GraphSource, PathAuthor, Repo, Submodule,
+    BaseResolution, BlobRef, ChangeStatus, ChangedFile, GitError, GraphSource, PathAuthor, Repo,
+    Submodule, Upstream,
 };
 #[cfg(feature = "inference")]
 pub use infer::{

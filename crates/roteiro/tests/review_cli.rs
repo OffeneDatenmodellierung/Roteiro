@@ -27,6 +27,39 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} failed");
 }
 
+/// `git`, capturing stdout — for reading a sha back out of the fixture.
+fn git_out(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(["-c", "user.name=Test", "-c", "user.email=test@example.com"])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("run git");
+    assert!(out.status.success(), "git {args:?} failed");
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+/// Give `main` an upstream at `refs/remotes/origin/main`, pointing at `at`.
+///
+/// A real remote-tracking ref and real `branch.main.*` settings, not a stub: the
+/// resolver reads the fetch refspec to map `branch.main.merge` onto a tracking
+/// ref, so a fixture that skipped either would exercise a path production never
+/// takes and pass on an implementation that does nothing.
+fn set_upstream(dir: &Path, at: &str) {
+    git(dir, &["config", "remote.origin.url", "."]);
+    git(
+        dir,
+        &[
+            "config",
+            "remote.origin.fetch",
+            "+refs/heads/*:refs/remotes/origin/*",
+        ],
+    );
+    git(dir, &["config", "branch.main.remote", "origin"]);
+    git(dir, &["config", "branch.main.merge", "refs/heads/main"]);
+    git(dir, &["update-ref", "refs/remotes/origin/main", at]);
+}
+
 fn roteiro(dir: &Path, args: &[&str]) -> std::process::Output {
     Command::new(BIN)
         .args(args)
@@ -728,4 +761,322 @@ fn a_file_still_in_head_is_never_reported_as_added() {
         entries[0]["status"], "modified",
         "a file HEAD still has is modified, never added: {text}"
     );
+}
+
+/// **The stale-base defect, contained** (issue #649).
+///
+/// `--base main` binds to the *local* branch, so a `main` its upstream has moved
+/// past measures a different question from the one asked — and answers it in
+/// output textually identical to a correct run. The fixture therefore has to hold
+/// the difference itself: `refs/heads/main` genuinely behind
+/// `refs/remotes/origin/main`, with a real fetch refspec, because a same-commit
+/// fixture would pass against an implementation that resolved nothing.
+///
+/// The three things asserted are the three the report could not previously say:
+/// which ref the spec bound to, which commit that was, and that the upstream has
+/// moved on.
+#[test]
+fn a_base_behind_its_upstream_is_reported_and_warned_about() {
+    let dir = fresh_dir("stale-base");
+    write(&dir, "src/main.rs", "fn main() { a(); }\nfn a() {}\n");
+    git(&dir, &["init", "-q"]);
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "base"]);
+
+    // Two commits the upstream has and the local ref does not — built on a scratch
+    // branch and then pointed at by `refs/remotes/origin/main`, which is exactly
+    // the state a fetch leaves behind when nobody fast-forwards `main`.
+    git(&dir, &["checkout", "-q", "-b", "upstream-sim"]);
+    write(&dir, "src/upstream_one.rs", "pub fn one() {}\n");
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "upstream one"]);
+    write(&dir, "src/upstream_two.rs", "pub fn two() {}\n");
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "upstream two"]);
+    let upstream_sha = git_out(&dir, &["rev-parse", "HEAD"]);
+    git(&dir, &["checkout", "-q", "main"]);
+    set_upstream(&dir, &upstream_sha);
+
+    // The change actually under review: one file, on a branch based on the
+    // **upstream** — which is what rebasing onto `origin/main` leaves you with,
+    // and the reason rebasing does not save you here. The branch has caught up;
+    // the local `main` ref has not moved.
+    git(&dir, &["checkout", "-q", "-b", "feature", &upstream_sha]);
+    write(
+        &dir,
+        "src/main.rs",
+        "fn main() { a(); b(); }\nfn a() {}\nfn b() {}\n",
+    );
+    git(&dir, &["commit", "-q", "-am", "add b"]);
+    assert!(roteiro(&dir, &["sync"]).status.success(), "sync");
+
+    let out = roteiro(&dir, &["review", "--base", "main", "--json"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let doc: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+
+    // 1. The report says which ref the spec bound to, and which commit.
+    let base = &doc["base"];
+    assert_eq!(base["spec"], "main", "the spec as typed is kept: {stdout}");
+    assert_eq!(
+        base["ref"], "refs/heads/main",
+        "the LOCAL branch is what `main` binds to, and the report now says so: {stdout}"
+    );
+    let local_main = git_out(&dir, &["rev-parse", "main"]);
+    assert_eq!(
+        base["commit"].as_str(),
+        Some(local_main.as_str()),
+        "the reported commit is the one that was diffed: {stdout}"
+    );
+
+    // 2. It says the upstream has moved on, and by how much, in both directions.
+    let up = &base["upstream"];
+    assert_eq!(
+        up["ref"], "refs/remotes/origin/main",
+        "the upstream is named: {stdout}"
+    );
+    assert_eq!(up["behind"], 2, "two commits behind: {stdout}");
+    assert_eq!(up["ahead"], 0, "and none ahead of it: {stdout}");
+    assert_eq!(
+        up["commit"].as_str(),
+        Some(upstream_sha.as_str()),
+        "the upstream commit is named too, so both sides can be checked: {stdout}"
+    );
+
+    // 3. The warning goes to stderr, so `--json` on stdout stays parseable — which
+    //    the `from_str` above has already proved.
+    assert!(
+        stderr.contains("behind") && stderr.contains("refs/remotes/origin/main"),
+        "stderr warns and names the upstream: {stderr}"
+    );
+    assert!(
+        !stdout.contains("warning:"),
+        "nothing about the warning reaches stdout: {stdout}"
+    );
+
+    // The defect itself: a stale base reports a SUPERSET. Asserted rather than
+    // described, because it is the reason nothing ever failed — the review reads
+    // as more thorough, not less.
+    let files: Vec<&str> = doc["files"]
+        .as_array()
+        .expect("files")
+        .iter()
+        .filter_map(|f| f["path"].as_str())
+        .collect();
+    assert!(
+        files.contains(&"src/upstream_one.rs"),
+        "a stale base pulls in files this change never touched: {files:?}"
+    );
+
+    // And spelling it `origin/main` — the workaround, and the correct question —
+    // gives the real footprint and reports no upstream to be stale against.
+    let good = roteiro(&dir, &["review", "--base", "origin/main", "--json"]);
+    let text = String::from_utf8_lossy(&good.stdout);
+    let doc: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+    assert_eq!(
+        doc["base"]["ref"], "refs/remotes/origin/main",
+        "`origin/main` binds to the tracking ref: {text}"
+    );
+    assert!(
+        doc["base"].get("upstream").is_none(),
+        "a tracking ref has no upstream of its own: {text}"
+    );
+    let files: Vec<&str> = doc["files"]
+        .as_array()
+        .expect("files")
+        .iter()
+        .filter_map(|f| f["path"].as_str())
+        .collect();
+    assert_eq!(
+        files,
+        vec!["src/main.rs"],
+        "the real footprint is one file: {files:?}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&good.stderr).contains("behind"),
+        "and there is nothing to warn about"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The text surface names its base too, in the summary line that gets quoted and
+/// in the "nothing to review" sentence that reads as *you are done* (issue #649).
+#[test]
+fn the_text_review_names_the_base_it_resolved() {
+    let dir = fresh_dir("base-line");
+    write(&dir, "src/main.rs", "fn main() { a(); }\nfn a() {}\n");
+    git(&dir, &["init", "-q"]);
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "base"]);
+    git(&dir, &["checkout", "-q", "-b", "feature"]);
+    write(
+        &dir,
+        "src/main.rs",
+        "fn main() { a(); b(); }\nfn a() {}\nfn b() {}\n",
+    );
+    git(&dir, &["commit", "-q", "-am", "add b"]);
+    assert!(roteiro(&dir, &["sync"]).status.success(), "sync");
+    let main_sha = git_out(&dir, &["rev-parse", "main"]);
+
+    let out = roteiro(&dir, &["review", "--base", "main"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "no drift: {text}");
+    assert!(
+        text.contains(&format!(
+            "base: main -> refs/heads/main @ {}",
+            &main_sha[..12]
+        )),
+        "the header names the spec, the ref and the commit: {text}"
+    );
+    assert!(
+        text.contains(&format!("against main @ {}", &main_sha[..12])),
+        "and the quotable summary line carries its own basis: {text}"
+    );
+
+    // The empty case is the one most likely to be read as "you are done", so it is
+    // the one that most needs to say what it compared against.
+    let empty = roteiro(&dir, &["review", "--base", "feature"]);
+    let text = String::from_utf8_lossy(&empty.stdout);
+    assert!(
+        text.contains("base: feature -> refs/heads/feature @"),
+        "an empty range still reports its base: {text}"
+    );
+    assert!(
+        text.contains("no changes in feature..HEAD to review"),
+        "and still says there was nothing: {text}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Divergence is warned about **differently**, because its consequence is
+/// different: a behind-only base over-reports, while a diverged one can leave the
+/// change out of the diff entirely (issue #649).
+///
+/// It is still a warning. `review`'s exit status means authored-layer drift and
+/// nothing else; a second meaning folded into the same non-zero would make a hook
+/// that reads it wrong in the other direction.
+#[test]
+fn a_diverged_base_is_warned_about_separately_and_still_exits_zero() {
+    let dir = fresh_dir("diverged");
+    write(&dir, "src/main.rs", "fn main() { a(); }\nfn a() {}\n");
+    git(&dir, &["init", "-q"]);
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "base"]);
+
+    // The upstream gains a commit the local ref will never see...
+    git(&dir, &["checkout", "-q", "-b", "upstream-sim"]);
+    write(&dir, "src/upstream_only.rs", "pub fn one() {}\n");
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "upstream only"]);
+    let upstream_sha = git_out(&dir, &["rev-parse", "HEAD"]);
+
+    // ...and the local `main` gains one the upstream has not. Now they have forked.
+    git(&dir, &["checkout", "-q", "main"]);
+    write(&dir, "src/local_only.rs", "pub fn two() {}\n");
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "local only"]);
+    set_upstream(&dir, &upstream_sha);
+
+    git(&dir, &["checkout", "-q", "-b", "feature"]);
+    write(
+        &dir,
+        "src/main.rs",
+        "fn main() { a(); b(); }\nfn a() {}\nfn b() {}\n",
+    );
+    git(&dir, &["commit", "-q", "-am", "add b"]);
+    assert!(roteiro(&dir, &["sync"]).status.success(), "sync");
+
+    let out = roteiro(&dir, &["review", "--base", "main", "--json"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "a diverged base warns, it does not gate: {stderr}"
+    );
+    let doc: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let up = &doc["base"]["upstream"];
+    assert_eq!(up["behind"], 1, "one commit behind: {stdout}");
+    assert_eq!(up["ahead"], 1, "and one ahead — forked: {stdout}");
+    assert!(
+        stderr.contains("DIVERGED"),
+        "the diverged case says so in its own words: {stderr}"
+    );
+    assert!(
+        stderr.contains("OUT of the diff"),
+        "and names the consequence that makes it worse than staleness: {stderr}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A base with no upstream configured — the ordinary case, and every case before
+/// this change — resolves, reports its commit, and warns about nothing.
+///
+/// Guards the direction that would be worst to get wrong: a review that started
+/// printing a staleness warning where there is no upstream to be stale against
+/// would train people to ignore it.
+#[test]
+fn a_base_with_no_upstream_reports_its_commit_and_warns_about_nothing() {
+    let dir = fresh_dir("no-upstream");
+    write(&dir, "src/main.rs", "fn main() { a(); }\nfn a() {}\n");
+    git(&dir, &["init", "-q"]);
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "base"]);
+    let base_sha = git_out(&dir, &["rev-parse", "HEAD"]);
+    git(&dir, &["checkout", "-q", "-b", "feature"]);
+    write(
+        &dir,
+        "src/main.rs",
+        "fn main() { a(); b(); }\nfn a() {}\nfn b() {}\n",
+    );
+    git(&dir, &["commit", "-q", "-am", "add b"]);
+    assert!(roteiro(&dir, &["sync"]).status.success(), "sync");
+
+    let out = roteiro(&dir, &["review", "--base", "main", "--json"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let doc: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(doc["base"]["ref"], "refs/heads/main");
+    assert!(
+        doc["base"].get("upstream").is_none(),
+        "an unpushed branch has no upstream, and that is not an error: {stdout}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("behind"),
+        "nothing to warn about: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // A raw sha names no ref at all, which the report says rather than inventing
+    // one.
+    let out = roteiro(&dir, &["review", "--base", &base_sha, "--json"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let doc: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert!(
+        doc["base"].get("ref").is_none(),
+        "a sha binds to no ref: {stdout}"
+    );
+    assert_eq!(
+        doc["base"]["commit"].as_str(),
+        Some(base_sha.as_str()),
+        "and still reports the commit it compared against: {stdout}"
+    );
+
+    // A working-tree review has no spec to have got wrong, so it carries no base
+    // at all rather than a fabricated one.
+    write(
+        &dir,
+        "src/main.rs",
+        "fn main() { a(); }\nfn a() {}\nfn c() {}\n",
+    );
+    let out = roteiro(&dir, &["review", "--json"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let doc: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert!(
+        doc.get("base").is_none(),
+        "a working-tree review compares against HEAD and says nothing about a base: {stdout}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
 }

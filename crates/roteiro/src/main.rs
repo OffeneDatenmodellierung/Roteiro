@@ -330,7 +330,11 @@ enum Command {
         json: bool,
         /// Review the commit range `<base>..HEAD` (any revspec — a branch,
         /// `HEAD~3`, a sha) against the committed graph, instead of the
-        /// working-tree change. Use for a whole-branch review (e.g. `--base main`).
+        /// working-tree change. Use for a whole-branch review, and spell it
+        /// `--base origin/main`: a bare `main` binds to the LOCAL branch, which
+        /// rebasing does not move, so a stale one reviews a superset of your
+        /// change. The report names the commit it resolved, and warns when that
+        /// ref is behind its upstream.
         #[arg(long, conflicts_with = "score")]
         base: Option<String>,
         /// Score a candidate reviewer's findings against the adjudicated review
@@ -4314,8 +4318,17 @@ fn run_review(
         GraphSource::Worktree
     };
     let report = build_graph(&repo, &mut store, &cache, ingest, source)?;
-    let changed = if let Some(base) = base {
-        repo.changed_between(base)?
+    // Resolved **once**, and everything downstream is keyed off the commit it
+    // yielded rather than off the spec (issue #649). The graph change set, the
+    // diff text and the line the report prints then cannot be three answers to
+    // one question — which is the shape of the original defect, where the report
+    // could not be checked against what it had actually compared.
+    let resolved = base.map(|b| repo.resolve_base(b)).transpose()?;
+    if let Some(resolved) = resolved.as_ref() {
+        warn_about_stale_base(resolved);
+    }
+    let changed = if let Some(resolved) = resolved.as_ref() {
+        repo.changed_between(&resolved.commit)?
     } else {
         // Working-tree review: tracked edits/deletes, plus brand-new files as
         // additions — the overlaid graph already includes them, so the change
@@ -4363,9 +4376,13 @@ fn run_review(
     // decided where it should be: `changed_files` returns empty without a
     // workdir, so there is nothing to ask for a diff of.
     let diff_root = repo.workdir().unwrap_or_else(|| repo.git_dir());
+    // The resolved commit, not the spec: `git diff` would otherwise re-resolve the
+    // name itself, and a report that names one commit while quoting another's
+    // hunks is the same defect one layer down.
+    let base_commit = resolved.as_ref().map(|r| r.commit.clone());
     let diff_source = (!no_diff).then_some(review::DiffSource {
         repo: diff_root,
-        base,
+        base: base_commit.as_deref(),
     });
     let review = review::build(
         &store,
@@ -4373,12 +4390,13 @@ fn run_review(
         &report.violations,
         debt_ignore,
         diff_source,
+        resolved,
     )?;
 
     if json {
         emit_json(&review)?;
     } else {
-        print_review(&review, base);
+        print_review(&review);
     }
     if review.has_drift() {
         exit_gate_failure();
@@ -4413,15 +4431,125 @@ fn print_file_diff(diff: Option<&str>) {
     }
 }
 
+/// Say on **stderr** that a `--base <name>` bound to a local branch its upstream
+/// has moved past, and what that does to the review (issue #649).
+///
+/// # stderr, so a warning about the review cannot corrupt the review
+///
+/// `--json` writes the report to stdout, and a consumer piping it into `jq` must
+/// get JSON and nothing else. The same fact is carried in the document itself as
+/// `base.upstream`, so nothing is lost to a reader who is parsing rather than
+/// watching.
+///
+/// # Two warnings, because they are two situations
+///
+/// **Behind but not ahead** over-reports: the diff is a strict superset of the
+/// true one, so every drift item is still found and the gate still holds. It is
+/// the *silent* case — the run looks more thorough, not less, which is exactly
+/// why `--base main` went uncorrected for a whole session while reporting 33
+/// changed files for a 2-file change.
+///
+/// **Diverged** is the one a clean verdict actively misleads about, because the
+/// diff can *omit* changes that exist on both sides of the fork. It is worth
+/// separate words rather than a bigger number.
+///
+/// # Why neither refuses
+///
+/// `review`'s exit status has exactly one meaning — authored-layer drift, via
+/// `ReviewReport::has_drift` — and a second meaning folded into the same
+/// non-zero would make both unreadable: a pre-commit hook or a CI step that
+/// treats non-zero as "drift" would then be wrong, silently, in the other
+/// direction. That is the same argument the owner settled the model verdict on
+/// in this issue, applied to the case it was not asked about.
+///
+/// Refusing would also make a legitimate question unaskable — reviewing against
+/// a topic branch that has since moved is a normal thing to want — and there is
+/// no override flag by decision. The failure mode of refusing is the one that
+/// was rejected for the provenance warning: people route around it (`--base
+/// <sha>`) and lose the warning too. What the silence needed was a voice, not a
+/// veto; with the resolved commit in the report and both counts named here, it
+/// is no longer silent.
+fn warn_about_stale_base(base: &rto_graph::BaseResolution) {
+    let Some(up) = base.upstream.as_ref() else {
+        return;
+    };
+    if !up.is_behind() {
+        return;
+    }
+    let (reference, spec) = (base.reference.as_deref().unwrap_or(&base.spec), &base.spec);
+    if up.diverged() {
+        eprintln!(
+            "warning: `--base {spec}` resolved to {reference} at {}, which has \
+             DIVERGED from {} at {} — {} commit(s) behind and {} ahead. A diverged \
+             base can leave your changes OUT of the diff entirely, so a clean \
+             verdict here says nothing about them. Review against the upstream: \
+             `--base {}`.",
+            base.short_commit(),
+            up.reference,
+            up.short_commit(),
+            up.behind,
+            up.ahead,
+            up.reference,
+        );
+        return;
+    }
+    eprintln!(
+        "warning: `--base {spec}` resolved to {reference} at {}, which is {} \
+         commit(s) behind {} at {}. This reviews a SUPERSET of your change — its \
+         files plus everything the upstream has since gained — so the counts below \
+         overstate your footprint. Rebasing does not fix it: rebasing the branch \
+         does not move the local ref. Spell it `--base {}`.",
+        base.short_commit(),
+        up.behind,
+        up.reference,
+        up.short_commit(),
+        up.reference,
+    );
+}
+
+/// The one line that says **what this review compared against**, printed with
+/// every range review including the empty one (issue #649).
+///
+/// Both the spec as typed and the ref it bound to, because the gap between them
+/// is the whole defect: `main` next to `refs/heads/main` is what shows a reader
+/// they did not get `refs/remotes/origin/main`. A working-tree review prints
+/// nothing here — it compares against `HEAD` and has no spec to have got wrong.
+fn print_review_base(base: Option<&rto_graph::BaseResolution>) {
+    let Some(base) = base else {
+        return;
+    };
+    match base.reference.as_deref() {
+        Some(name) => println!("base: {} -> {name} @ {}", base.spec, base.short_commit()),
+        None => println!("base: {} @ {}", base.spec, base.short_commit()),
+    }
+    if let Some(up) = base.upstream.as_ref()
+        && up.is_behind()
+    {
+        println!(
+            "      {} behind (and {} ahead of) {} @ {}",
+            up.behind,
+            up.ahead,
+            up.reference,
+            up.short_commit()
+        );
+    }
+}
+
 /// Render a review report as a compact, scannable summary.
-fn print_review(review: &review::ReviewReport, base: Option<&str>) {
+fn print_review(review: &review::ReviewReport) {
     if review.changed_files == 0 {
-        match base {
-            Some(base) => println!("no changes in {base}..HEAD to review"),
+        // Printed *before* the early return, not after it. "No changes to review"
+        // is the reading most likely to be taken as "you are done", and it is the
+        // one a wrong base produces on a diverged branch — so it is the sentence
+        // that most needs to say what it compared against.
+        print_review_base(review.base.as_ref());
+        match review.base.as_ref() {
+            Some(base) => println!("no changes in {}..HEAD to review", base.spec),
             None => println!("no working-tree changes to review"),
         }
         return;
     }
+    print_review_base(review.base.as_ref());
     for file in &review.files {
         println!("\n{} [{}]", file.path, file.status);
         for sym in &file.symbols {
@@ -4456,8 +4584,18 @@ fn print_review(review: &review::ReviewReport, base: Option<&str>) {
     } else {
         println!("\nno authored-layer drift introduced");
     }
+    // The basis is repeated **into the summary line** rather than left to the
+    // `base:` header above, because this is the line that gets quoted — "33
+    // changed files, 0 drift" was quoted as a change's footprint across a whole
+    // session, and there was nothing in it a reader could have checked. A quoted
+    // line that carries its own basis can be checked against
+    // `git rev-parse --short <spec>` by whoever reads it.
+    let against = match review.base.as_ref() {
+        Some(base) => format!(" against {} @ {}", base.spec, base.short_commit()),
+        None => String::new(),
+    };
     println!(
-        "\nreviewed {} changed file(s), {} impacted node(s), {} drift item(s)",
+        "\nreviewed {} changed file(s){against}, {} impacted node(s), {} drift item(s)",
         review.changed_files,
         review.impacted.len(),
         review.drift.len()
