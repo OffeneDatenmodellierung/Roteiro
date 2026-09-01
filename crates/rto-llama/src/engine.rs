@@ -97,8 +97,14 @@ pub struct ChatRequest {
     /// the tools a second time itself, or would be duplicating what the engine
     /// already said.
     ///
-    /// `None` and an empty list are the same to a template (`{% if tools %}` is
-    /// false for both); `None` means the caller had none to offer.
+    /// `None` means the caller had none to offer, and a template never sees it
+    /// as Jinja `none`: the renderer substitutes an **empty list**. That is not
+    /// cosmetic — `qwen3-coder-30b-a3b` guards with
+    /// `tools is iterable and tools | length > 0`, which Jinja2 short-circuits
+    /// and minijinja does not, so `none` would reach `| length` and fail the
+    /// render outright. `{% if tools %}` is false for `[]` exactly as it is for
+    /// `none`, so the substitution costs nothing a template can observe except
+    /// an explicit `tools is none`, which no registry template tests.
     pub tools: Option<serde_json::Value>,
     /// Audio clips attached to the request (raw encoded WAV/MP3/FLAC bytes), in
     /// order — non-empty only for requests to an audio-capable model. The

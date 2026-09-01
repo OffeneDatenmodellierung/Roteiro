@@ -76,7 +76,7 @@ fn tools() -> serde_json::Value {
     serde_json::json!([{
         "type": "function",
         "function": {
-            "name": "search",
+            "name": PROBE_TOOL,
             "description": "Find nodes by text.",
             "parameters": {
                 "type": "object",
@@ -86,6 +86,26 @@ fn tools() -> serde_json::Value {
         }
     }])
 }
+
+/// The probe tool's name, deliberately unpronounceable.
+///
+/// It was `search` until review pointed out the obvious: the negative control
+/// below asserts the *absence* of this name from a render given no tools, and a
+/// template is entitled to use an ordinary English word in its own fixed
+/// instructions. The moment one does, that control fails and blames the template
+/// for prose it was always allowed to contain.
+///
+/// No registry template contains `search` today — measured, 0 occurrences in all
+/// three — so the test passes for the right reason right now. That is exactly
+/// what makes it worth changing: a guard that holds only because the corpus
+/// happens not to contain the word is guarded by absence, not by logic.
+///
+/// The same argument is already written into
+/// `chat_template::render_advertising`, which settles "did this template use the
+/// tools" by rendering twice and comparing rather than by searching for a name,
+/// because a tool called `search` may appear in a conversation by coincidence.
+/// This test is that argument applied to itself.
+const PROBE_TOOL: &str = "roteiro_probe_zqx7";
 
 #[test]
 fn every_registry_template_renders() {
@@ -114,7 +134,7 @@ fn tools_reach_every_template() {
         let with = rto_llama::chat_template::render(&src, &messages(), Some(&tools), true)
             .unwrap_or_else(|e| panic!("{name} failed to render with tools: {e}"));
         assert!(
-            with.contains("search"),
+            with.contains(PROBE_TOOL),
             "{name} did not name the tool it was given — a model trained to \
              receive tools in its template got none: {with}"
         );
@@ -124,7 +144,7 @@ fn tools_reach_every_template() {
         let without = rto_llama::chat_template::render(&src, &messages(), None, true)
             .unwrap_or_else(|e| panic!("{name} failed to render without tools: {e}"));
         assert!(
-            !without.contains("search"),
+            !without.contains(PROBE_TOOL),
             "{name} names the tool even when given none, so the positive case \
              above is not evidence: {without}"
         );
@@ -145,7 +165,7 @@ fn tools_reach_every_template() {
 /// | template | inside `<tools>` |
 /// | --- | --- |
 /// | `qwen3-32b` | a JSON object |
-/// | `qwen3-coder-30b-a3b` | XML — `<function><name>search</name>…` |
+/// | `qwen3-coder-30b-a3b` | XML — `<function><name>…</name>…` |
 /// | `qwen3.8-27b` | a JSON object |
 #[test]
 fn each_template_renders_tools_in_its_own_shape() {
@@ -155,7 +175,7 @@ fn each_template_renders_tools_in_its_own_shape() {
         let out = rto_llama::chat_template::render(&src, &messages(), Some(&tools), true)
             .unwrap_or_else(|e| panic!("{name}: {e}"));
         // The tool declared as an XML element rather than a JSON object.
-        shapes.push((name, out.contains("<name>search</name>")));
+        shapes.push((name, out.contains(&format!("<name>{PROBE_TOOL}</name>"))));
     }
     assert!(
         shapes.iter().any(|(_, xml)| *xml),
