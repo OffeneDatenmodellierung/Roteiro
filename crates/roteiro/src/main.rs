@@ -352,7 +352,10 @@ enum Command {
         #[arg(long, value_name = "CORPUS.jsonl", requires = "score")]
         corpus: Option<String>,
         /// Review the change with a local generative model, one file at a time
-        /// (Stage 35b), instead of the graph-grounded report.
+        /// (Stage 35b), instead of the graph-grounded report. Ends with one
+        /// judgement over the whole change — a model's opinion, which gates
+        /// nothing: `review`'s exit status is authored-layer drift and nothing
+        /// else. Warns on stderr when the reviewing model also wrote the change.
         ///
         /// Local only. `ModelTask::Review` may use the remote tier under
         /// ADR-0019, but a remote review would send the diff and the payload

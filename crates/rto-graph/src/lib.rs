@@ -12,6 +12,12 @@
 //! @rto:0001
 
 mod artifact;
+// Who wrote the change under review, from its `Co-Authored-By` trailers (#649).
+// In *this* crate for the reason `model_choice` and `review_corpus` are: the
+// comparison is against the model this crate resolves, and keeping the rule pure
+// is what lets "would this reviewer be reviewing its own work" be answered with
+// no engine, no git and no network.
+pub mod authorship;
 // Audio metadata (ADR-0016): codec, rate, bit depth, channels, duration and tags,
 // read from the container without decoding and without a model. Unlike the media
 // module below, these *are* `derived` facts and do live in `nodes`/`edges` — the

@@ -497,6 +497,25 @@ fn print_score(score: &rto_graph::review_score::Score) {
             score.unadjudicated
         ),
     }
+    // The whole-change verdicts (#649, part 2), below the findings because they
+    // are a different question and must not be read as part of the recall figure.
+    // Printed even at zero when the run carried any, so a reader can tell "no
+    // verdict was contradicted" from "this run had no verdicts to check".
+    if score.verdicts > 0 {
+        println!(
+            "\n{} whole-change verdict(s) — a model's opinion, gating nothing:",
+            score.verdicts
+        );
+        println!(
+            "  {} declared a change CLEAN that the corpus knows carries a real defect",
+            score.verdicts_contradicted
+        );
+        println!(
+            "  {} the corpus cannot judge (every `concerns` verdict, and `clean` on \
+             a commit with no real row)",
+            score.verdicts_unadjudicated
+        );
+    }
     if score.suppressed_real + score.suppressed_known_false + score.suppressed_unadjudicated > 0 {
         println!(
             "suppression filter withheld: {} real, {} known-false, {} unadjudicated",

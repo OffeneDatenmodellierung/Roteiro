@@ -438,6 +438,106 @@ fn run_doc(shas: &[&str], findings: &[(&str, &str, u32)]) -> String {
     )
 }
 
+/// A run document carrying one whole-change verdict (issue #649, part 2).
+fn run_doc_with_verdict(sha: &str, stance: &str) -> String {
+    format!(
+        "{{\"schema\": \"roteiro.review-run/v1\", \"attempted_shas\": [{sha:?}], \
+         \"findings\": [], \"verdicts\": [{{\"reviewed_sha\": {sha:?}, \
+         \"stance\": {stance:?}, \"summary\": \"nothing to push back on\"}}]}}"
+    )
+}
+
+/// **The verdict is scoreable through the shipped `--score` path** (issue #649,
+/// part 2) — the whole reason it is expressible in `roteiro.review-run/v1` at
+/// all. A summary nobody has scored is an opinion with a confident tone.
+///
+/// `SHA_308` carries an adjudicated **real** row, so a `clean` verdict over it is
+/// contradicted by evidence. That is the one thing the corpus can say about a
+/// whole-change judgement without a human, and it is the failure that matters:
+/// a missed finding is silence, and this is a reader being told there is nothing
+/// to look at.
+#[test]
+fn a_whole_change_verdict_is_scored_against_the_corpus() {
+    let (out, err, ok) = score_run(
+        "verdict-contradicted",
+        &run_doc_with_verdict(SHA_308, "clean"),
+        &[],
+    );
+    assert!(ok, "scoring should succeed: {out}{err}");
+    assert!(
+        out.contains("1 whole-change verdict(s)"),
+        "the verdict is counted: {out}"
+    );
+    assert!(
+        out.contains("1 declared a change CLEAN"),
+        "and adjudicated against the corpus: {out}"
+    );
+    assert!(
+        out.contains("a model's opinion, gating nothing"),
+        "and labelled as an opinion where it is printed: {out}"
+    );
+    assert!(
+        out.contains("DECLARED A CHANGE CLEAN"),
+        "the caveat fires: {out}"
+    );
+
+    // `concerns` is matched against nothing: the corpus records what one reviewer
+    // said about these trees, not every defect in them.
+    let (out, err, ok) = score_run(
+        "verdict-concerns",
+        &run_doc_with_verdict(SHA_308, "concerns"),
+        &[],
+    );
+    assert!(ok, "scoring should succeed: {out}{err}");
+    assert!(
+        out.contains("0 declared a change CLEAN"),
+        "a `concerns` verdict is never contradicted: {out}"
+    );
+    assert!(
+        out.contains("1 the corpus cannot judge"),
+        "it is unadjudicated, which is a different thing: {out}"
+    );
+
+    // And a verdict changes no recall figure — it is not a finding.
+    let (json, err, ok) = score_run(
+        "verdict-json",
+        &run_doc_with_verdict(SHA_308, "clean"),
+        &["--json"],
+    );
+    assert!(ok, "scoring should succeed: {json}{err}");
+    let doc: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    assert_eq!(doc["verdicts"], 1);
+    assert_eq!(doc["verdicts_contradicted"], 1);
+    assert_eq!(
+        doc["found"], 0,
+        "a verdict is never counted as a defect the reviewer detected: {json}"
+    );
+    assert_eq!(
+        doc["unadjudicated"], 0,
+        "nor as an unadjudicated finding: {json}"
+    );
+}
+
+/// A run document written before verdicts existed still scores, unchanged. The
+/// field is additive within `roteiro.review-run/v1`.
+#[test]
+fn a_run_document_without_verdicts_scores_exactly_as_before() {
+    let doc = run_doc(
+        &[SHA_308],
+        &[(SHA_308, "docs/adr/0005-image-ocr-vision-ingestion.md", 16)],
+    );
+    let (out, err, ok) = score_run("verdict-absent", &doc, &[]);
+    assert!(ok, "scoring should succeed: {out}{err}");
+    assert!(
+        !out.contains("whole-change verdict"),
+        "no verdicts means no verdict section, not a section of zeroes: {out}"
+    );
+    assert!(
+        out.contains("recall by defect class"),
+        "and everything else is untouched: {out}"
+    );
+}
+
 /// The embedded corpus scores a run end to end, and the report is **per class**.
 /// A single averaged number is deliberately absent: which classes a reviewer can
 /// see is the only thing an implementer can act on.
