@@ -921,6 +921,101 @@ fn is_repo(dir: &Path) -> bool {
     dir.join(".git").exists()
 }
 
+/// Where `render okf` writes when `--out` is omitted, and therefore where a
+/// workspace member's published bundle is looked for.
+///
+/// A convention rather than a discovery: nothing in OKF says where a bundle
+/// lives in a repository, so the only directory we can name without guessing is
+/// the one **this** tool writes to. A peer who publishes elsewhere is still
+/// importable by hand with `roteiro import --from okf <path>`, which is the
+/// reason that command survives automatic discovery (issue #706, decision 3).
+pub const OKF_BUNDLE_DIR: &str = "okf";
+
+/// The OKF bundle a repository at `repo_root` publishes, if it publishes one.
+///
+/// # The test is `okf_version`, not the directory's existence
+///
+/// A directory called `okf` proves nothing — it could be source, notes, or a
+/// half-written experiment. OKF §10 says a bundle root's `index.md` declares
+/// `okf_version`, and that declaration is the only thing in the format that says
+/// "this is a bundle, and it is one of these". Requiring it is what stops
+/// discovery from offering to import an arbitrary directory of markdown, and it
+/// is deliberately the *stricter* of the two available tests: a false positive
+/// here becomes a consent prompt about something that is not a bundle, which
+/// trains the reader to dismiss the prompt.
+///
+/// # Why this parses a little YAML rather than calling the reader
+///
+/// `rto-render` depends on this crate, so the OKF reader cannot be called from
+/// here without inverting the dependency. The probe is deliberately tiny — a
+/// bounded read of the leading frontmatter block, looking for one key — rather
+/// than a second parser: it decides only *whether to offer* the bundle, and the
+/// reader still decides what the bundle contains.
+#[must_use]
+pub fn okf_bundle_in(repo_root: &Path) -> Option<PathBuf> {
+    let dir = repo_root.join(OKF_BUNDLE_DIR);
+    let index = dir.join("index.md");
+    // Bounded: a bundle index's frontmatter is a few hundred bytes, and a file
+    // that is not one should not be read into memory to find that out.
+    let mut buf = Vec::new();
+    {
+        use std::io::Read as _;
+        let file = std::fs::File::open(&index).ok()?;
+        file.take(4096).read_to_end(&mut buf).ok()?;
+    }
+    let head = String::from_utf8_lossy(&buf);
+    let rest = head
+        .strip_prefix("---\n")
+        .or_else(|| head.strip_prefix("---\r\n"))?;
+    let block = rest.split("\n---").next()?;
+    block
+        .lines()
+        .any(|line| {
+            line.split_once(':')
+                .is_some_and(|(k, v)| k.trim() == "okf_version" && !v.trim().is_empty())
+        })
+        .then_some(dir)
+}
+
+/// A workspace member's published OKF bundle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OkfBundle {
+    /// The member repository's working-tree root.
+    pub repo: PathBuf,
+    /// The bundle directory inside it.
+    pub bundle: PathBuf,
+    /// The peer name: the member repository's directory name, which is also the
+    /// project name [`build_registry`] derives and the `--peer` default
+    /// `roteiro import --from okf` uses. One name, so a bundle discovered
+    /// automatically and the same bundle imported by hand land on **one** import
+    /// layer rather than two.
+    pub peer: String,
+}
+
+/// Every OKF bundle published by a member in `repo_roots`, in path order.
+///
+/// Pure filesystem probing: one `open` and one bounded read per member. It opens
+/// no store and makes no decision — [`crate::Store::okf_consent_holds`] is what
+/// says whether a bundle may be read, and that is a separate question asked of a
+/// separate crate.
+#[must_use]
+pub fn discover_okf_bundles(repo_roots: &[PathBuf]) -> Vec<OkfBundle> {
+    let mut out: Vec<OkfBundle> = repo_roots
+        .iter()
+        .filter_map(|repo| {
+            let bundle = okf_bundle_in(repo)?;
+            let peer = repo.file_name()?.to_str()?.to_owned();
+            Some(OkfBundle {
+                repo: repo.clone(),
+                bundle,
+                peer,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.repo.cmp(&b.repo));
+    out
+}
+
 /// What a shallow scan of one root found, **including what it walked past**.
 ///
 /// [`discover_repos_under`] answers the membership question and is what building
