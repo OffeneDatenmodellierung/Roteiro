@@ -1374,11 +1374,16 @@ enum Reading {
 ///    `Unreadable` refusal asks for a bug report, and a truncated generation is
 ///    not a bug worth reporting.
 ///
-/// Today's dialects cannot exercise that ranking: [`Dialect::Json`] and
-/// [`Dialect::Xml`] share one envelope, so they always agree on whether a call
-/// arrived and differ only in whether they can read it. The order is written
-/// down because a mixed generation becomes possible the moment a third envelope
-/// exists, and rare is where silent corruption lives.
+/// [`Dialect::Json`] and [`Dialect::Xml`] share one envelope, so between them the
+/// ranking never comes up: they always agree on whether a call arrived and
+/// differ only in whether they can read it — which is exactly what the old
+/// two-level read did, and why those two do not move. It comes up only across
+/// envelopes, and a model writes the one form it was trained on, so a mixed
+/// generation is not something to expect. It is expressible, though, and every
+/// ranking here refuses either way — what is at stake is which sentence the user
+/// is given — so the order is pinned by
+/// `a_call_that_did_not_arrive_outranks_one_that_could_not_be_read` rather than
+/// left to the shape of a loop. Rare is where silent corruption lives.
 fn read_markup(completion: &Completion) -> Markup {
     let mut unarrived = false;
     let mut unreadable = false;
