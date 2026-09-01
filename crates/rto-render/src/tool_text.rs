@@ -440,6 +440,42 @@ mod tests {
         assert!(for_tool("nope").is_none());
     }
 
+    /// **No advertised description may contain a run of spaces.**
+    ///
+    /// Every constant here is one long chain of Rust's string-continuation
+    /// escape, and that escape is unforgiving in both directions. A trailing
+    /// `\` eats the newline *and* the continued line's indentation, so the
+    /// single separating space has to be written **before** the backslash:
+    /// forget it and two words weld together, put one on each side and a double
+    /// space reaches the model.
+    ///
+    /// Worth a guard rather than an eyeball, for the reason #675 exists: the
+    /// defect is invisible in review — the source reads the same either way and
+    /// nothing fails to compile — and its only symptom is bytes, in a surface
+    /// this module now budgets to tens of bytes of slack.
+    ///
+    /// It also settles the question mechanically. Copilot read
+    /// `SANDBOX_CLEAR`'s *"Report what it \ freed:"* break as producing several
+    /// spaces on the #675 PR. It does not, because the escape swallows the
+    /// indentation — but "I read the reference and disagree" is a weaker answer
+    /// than a test that runs the real `for_tool` and would fail if it ever did.
+    #[test]
+    fn no_advertised_description_carries_a_run_of_spaces() {
+        for name in OWNED {
+            let text = for_tool(name).expect("owned");
+            let Some(at) = text.find("  ") else { continue };
+            let from = at.saturating_sub(60);
+            let to = (at + 60).min(text.len());
+            panic!(
+                "`{name}` has a run of spaces at byte {at}. It reaches the model and \
+                 costs bytes against `DESCRIPTION_BYTE_BUDGET`. A continued line \
+                 carries its separating space BEFORE the backslash, never after it \
+                 as well: …{}…",
+                &text[from..to],
+            );
+        }
+    }
+
     /// The cap really is substituted, rather than the placeholder merely being
     /// absent because somebody deleted it from the prose.
     #[test]
