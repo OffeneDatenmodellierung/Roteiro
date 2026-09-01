@@ -2,8 +2,10 @@
 //! importing it (ADR-0021).
 //!
 //! These test the **CLI wiring**: that each action reaches the right library
-//! entry point, that `--check` gates and the bare command does not, and that the
-//! two feature-gated actions refuse by name in a build without their feature.
+//! entry point, that `--json` parses, and that `--check` gates while the bare
+//! command does not. All five actions ship in a stock build — `validate` and
+//! `lint` were behind a feature earlier on this branch and are not any more, so
+//! there is no unavailable-surface case left to test.
 //! What the underlying checks *mean* is settled in `rto-render`'s
 //! `okf_inspect.rs` against the specification's own published bundles; there is
 //! no value in asserting it twice, and a fixture copied into two crates is a

@@ -255,6 +255,39 @@ fn a_published_bundle_validates_as_conformant() {
     assert_eq!(report.check, "validate");
 }
 
+/// Findings are ordered by severity, errors first.
+///
+/// [`inspect::CheckReport`] promises this, and upstream does not: its
+/// diagnostics come out in bundle-traversal order, "errors first" being a
+/// property of how it happens to walk rather than a guarantee it owes us. This
+/// is what makes the promise ours to keep.
+///
+/// `acme_retail` carries warnings and info and no errors, so the assertion is
+/// that no `info` precedes a `warning` — which is the half of the ordering this
+/// fixture can actually witness.
+#[test]
+fn findings_are_ordered_by_severity() {
+    let lint = inspect::lint_report(&fixture("acme_retail")).expect("lint acme_retail");
+    let rank = |s: &str| match s {
+        "error" => 0u8,
+        "warning" => 1,
+        _ => 2,
+    };
+    let ranks: Vec<u8> = lint.findings.iter().map(|f| rank(f.severity)).collect();
+    let mut sorted = ranks.clone();
+    sorted.sort_unstable();
+    assert_eq!(
+        ranks, sorted,
+        "findings must be ordered error, warning, info — this is the order a \
+         reader sees first and a CI log diff compares"
+    );
+    assert!(
+        ranks.contains(&1) && ranks.contains(&2),
+        "acme_retail must yield both warnings and info, or this test witnesses \
+         no ordering at all"
+    );
+}
+
 /// Linting is a *different* question from conformance, and must be wired to the
 /// different entry point.
 ///

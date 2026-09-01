@@ -362,7 +362,8 @@ pub struct CheckReport {
     pub root: String,
     /// Which check produced this: `validate` or `lint`.
     pub check: &'static str,
-    /// Findings, errors first.
+    /// Findings, errors first, then warnings, then info. Within one severity,
+    /// upstream's own order is preserved.
     pub findings: Vec<Finding>,
     /// Count of `error` findings. Non-zero means the check failed.
     pub errors: usize,
@@ -385,26 +386,37 @@ impl CheckReport {
 /// Convert one of the validator's reports into ours.
 fn findings(root: &Path, check: &'static str, report: &okf_validator::Report) -> CheckReport {
     use okf_validator::Severity;
+    let mut findings: Vec<Finding> = report
+        .diagnostics
+        .iter()
+        .map(|d| Finding {
+            severity: match d.severity {
+                Severity::Error => "error",
+                Severity::Warning => "warning",
+                Severity::Info => "info",
+            },
+            concept: d.concept.as_ref().map(ToString::to_string),
+            path: d.path.as_ref().map(|p| p.display().to_string()),
+            message: d.message.clone(),
+            fixable: d.fixable,
+        })
+        .collect();
+    // Sorted here rather than relied upon. Upstream documents its diagnostics as
+    // "errors first by construction order", which is a property of how it
+    // happens to traverse a bundle, not a guarantee it owes us — and this
+    // ordering is what a reader sees first and what a CI log diff compares.
+    // `sort_by_key` is stable, so within a severity upstream's order survives.
+    findings.sort_by_key(|f| match f.severity {
+        "error" => 0u8,
+        "warning" => 1,
+        _ => 2,
+    });
     CheckReport {
         root: root.display().to_string(),
         check,
         errors: report.error_count(),
         warnings: report.warning_count(),
-        findings: report
-            .diagnostics
-            .iter()
-            .map(|d| Finding {
-                severity: match d.severity {
-                    Severity::Error => "error",
-                    Severity::Warning => "warning",
-                    Severity::Info => "info",
-                },
-                concept: d.concept.as_ref().map(ToString::to_string),
-                path: d.path.as_ref().map(|p| p.display().to_string()),
-                message: d.message.clone(),
-                fixable: d.fixable,
-            })
-            .collect(),
+        findings,
     }
 }
 

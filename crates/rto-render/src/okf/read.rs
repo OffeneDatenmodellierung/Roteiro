@@ -438,14 +438,19 @@ impl ParsedFrontmatter {
 /// so the attribution survives even when the category does not.
 fn parse_actor(token: &str) -> Actor {
     let actor = okf_core::Actor::parse(token);
-    let id = actor.id().to_owned();
     match actor.kind() {
-        ActorKind::Human => Actor::Human(id),
-        ActorKind::Agent => Actor::Tool(
-            actor.producer().unwrap_or_default().to_owned(),
-            actor.version().unwrap_or_default().to_owned(),
-        ),
-        ActorKind::Process | ActorKind::Other => Actor::Process(id),
+        ActorKind::Human => Actor::Human(actor.id().to_owned()),
+        // Both halves are matched rather than unwrapped. `okf-core` classifies a
+        // token as an agent only when it splits into a non-empty producer and a
+        // non-empty version, so the fallback is unreachable today — but
+        // defaulting the halves would manufacture a `"/"` token out of an actor
+        // that named somebody, and inventing an attribution is worse than
+        // recording an unclassified one.
+        ActorKind::Agent => match (actor.producer(), actor.version()) {
+            (Some(producer), Some(version)) => Actor::Tool(producer.to_owned(), version.to_owned()),
+            _ => Actor::Process(actor.as_str().to_owned()),
+        },
+        ActorKind::Process | ActorKind::Other => Actor::Process(actor.id().to_owned()),
     }
 }
 
