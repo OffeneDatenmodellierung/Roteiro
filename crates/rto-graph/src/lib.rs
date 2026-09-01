@@ -184,6 +184,6 @@ pub use text::{
 };
 pub use trust::ProducerTrust;
 pub use workspace::{
-    Follow, ResolvedWorkspace, RootScan, Workspace, WorkspaceError, WorkspaceSet,
-    discover_repos_under, parse_qualified, scan_root,
+    Follow, ReloadPlan, ResolvedWorkspace, RootScan, SetReloadPlan, Workspace, WorkspaceError,
+    WorkspaceSet, discover_repos_under, parse_qualified, scan_root,
 };

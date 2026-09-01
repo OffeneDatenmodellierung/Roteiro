@@ -11,8 +11,8 @@ architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.3"
-last-modified: 2026-08-20
+version: "1.4"
+last-modified: 2026-09-01
 confluence-url:
 ---
 
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | Accepted |
 | **Architectural Significance** | HIGH |
 | **Domain** | Developer Tooling |
-| **Document version** | 1.3 |
+| **Document version** | 1.4 |
 
 ## Reference
 
@@ -184,13 +184,43 @@ graphs opened on demand, and an explicit `project` selector on every surface.**
   graph on first touch (a first-open hook on the workspace), so a stale or
   never-synced repo is prepared before it is served — slower first query, never
   a stale answer.
-- **The registry reloads on `SIGHUP`.** The *set* of hosted projects is read at
-  `serve` start; sending the running server `SIGHUP` re-scans the roots and swaps
-  the registry in place — added repos become available, removed ones are dropped
-  (their cached store evicted), and still-present ones keep their warm connection
-  — with no restart and no dropped requests. (Windows has no `SIGHUP`; there the
-  set is fixed at start.) A registered-but-unsynced repo is picked up once its
-  first sync lands, since a missing graph is not cached.
+- **`SIGHUP` is handled by every server, and reloads all of one.** Two rules,
+  because they failed independently.
+
+  *Handled.* `SIGHUP`'s default disposition **terminates the process**, so a
+  server that does not handle it dies on the signal (exit 129). The handler is
+  therefore installed in `main`, before dispatch, for every long-lived server —
+  `serve`, `mcp` and `explorer` alike — rather than by whichever code path
+  happens to build a reloadable workspace. What the signal *does* is registered
+  separately by that path; a server whose hosted set cannot change (single-repo
+  `serve`/`mcp`, `explorer`'s cwd fallback) registers *why*, and says so on the
+  signal instead of exiting. (Windows has no `SIGHUP`; there the set is fixed at
+  start.)
+
+  *All of one.* A `serve`/`mcp` process holds **two** views — the
+  [[crates/rto-graph/src/workspace.rs#WorkspaceSet]] behind `/v1/graph/*` and the
+  served UI, and the flattened [[crates/rto-graph/src/workspace.rs#Workspace]]
+  behind the model tools, `/v1/{project}/…` and the MCP router. A reload swaps
+  both from **one** `resolved_workspaces()` and **one walk of the roots** — the
+  flat view is planned from the very paths the set's own discovery found, not
+  from a second scan, because two scans are two filesystem views and a repo
+  created between them would land in one surface and not the other. Both discover
+  first and swap second (a `plan_reload` that does all the git discovery, then an
+  `apply_reload` that only takes a lock), so the two swaps are adjacent lock
+  acquisitions with no I/O between them; a request reads one view or the other,
+  never both, so no single response can straddle a reload.
+
+  *What a reload sees.* The **roots are re-scanned** — added repos become
+  available, removed ones are dropped (their cached store evicted), and
+  still-present ones keep their warm connection, with no restart and no dropped
+  requests. A registered-but-unsynced repo is picked up once its first sync
+  lands, since a missing graph is not cached. The **configuration is not
+  re-read**: `SIGHUP` re-scans what the running process was configured with, and
+  a workspace or root added to the config file needs a restart. Re-reading would
+  apply the handful of keys that can still take effect while silently ignoring
+  the many consumed at startup (`[serve] addr`, the TLS pair, the MCP surface,
+  `[models]` pins), and would let a file edit change a running server's remote
+  grant, which ADR-0019 v1.2 decides once per invocation on purpose.
 - **Security:** one port now exposes multiple graphs — acceptable on the
   loopback default, but the "front a public bind with a proxy" guidance from
   ADR-0006 becomes load-bearing. No new network exposure by default.
@@ -292,3 +322,4 @@ person to tidy it away would reintroduce diamonds silently.
 | 1.1 | 2026-08-11 | Added `busy_timeout` on every store connection (a workspace read that lands during a project's concurrent `sync`-commit waits briefly instead of failing with `database is locked`), and **live registry reload on `SIGHUP`** — a dedicated thread re-scans the workspace roots and swaps the registry in place (added/removed repos, no restart). Content freshness already needed no reload (in-place `graph.db` writes are read on the next query). |
 | 1.2 | 2026-08-11 | Implemented the two optional extras this ADR left open. **`/v1/{project}/…` path routing** (`rto-serve`): a client uses `…/v1/<project>` as its base URL and tool calls are pre-bound to that project (a `ScopedTools` wrapper fills `project` when the model omits it); `models`/`embeddings` accept and ignore the prefix. **`serve --sync-on-access`**: a first-open hook on the `Workspace` (re)builds a project's graph on first touch, so a stale/never-synced repo is prepared before serving. Also added **`GET /v1/projects`** so a client-side router can enumerate hosted projects without a model round-trip. And `serve --models --mcp` **merges `/v1` and `/mcp` onto one port** (both are axum path prefixes), so a single process — one loaded model, one Workspace — serves both surfaces. |
 | 1.3 | 2026-08-20 | Added **nested workspaces**: a `[[workspaces]]` entry may `includes` other named workspaces, whose members fold in transitively. Resolution **flattens** — a composed workspace is a flat `ResolvedWorkspace` like any other, so no surface learns a new concept and none changes. Records that nesting adds no expressiveness, only non-duplication (the lists cannot drift), and that whether a surface should *display* hierarchy is undecided and unforeclosed, since the declaration survives in config for a later tree-aware surface to re-derive. Cycles and unknown names are named errors; `[standalone]` is unnameable and therefore uncomposable, which removes the `linked`-across-a-boundary incoherence by construction. |
+| 1.4 | 2026-09-01 | Split the `SIGHUP` guarantee in two, after both halves were found broken. **Installing** the handler moved to `main`, before dispatch, driven by an exhaustive `is_long_lived_server` match over the CLI: it had lived at the tail of `build_serve_workspaces`, which `explorer` never calls and which the single-repo fallback returns before reaching — so those two servers had no handler and the signal's fatal default killed them (exit 129). **Reloading** now covers the whole server: `WorkspaceSet` gained a reload (it had none), and a `SIGHUP` swaps it beside the flattened `Workspace` from one snapshot, so the server can no longer log a fresh project list and serve a stale one — both are planned from one walk of the roots and then swapped back to back. Records that a reload re-scans the roots but does **not** re-read config, and why. |

@@ -136,6 +136,14 @@ impl IsolatedHome {
         Self { path }
     }
 
+    /// The home directory itself, so a test can write the `config.toml` the
+    /// child will read. It must be `<home>/config.toml`: a `roteiro.toml` placed
+    /// here is the *project* layer and is ignored by user-config discovery.
+    #[must_use]
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
     /// Point `cmd` at this isolated home for every config-discovery route:
     /// `ROTEIRO_HOME` (the direct override) plus `HOME`/`USERPROFILE` (the
     /// `~/.roteiro` fallback), so the child is hermetic regardless of the real

@@ -14,7 +14,14 @@
 //! The registry can be **reloaded** in place ([`Workspace::reload_from`]) so a
 //! long-lived server can pick up added/removed repos without a restart (a SIGHUP
 //! trigger); already-open stores for still-present projects keep their warm
-//! connections, and dropped projects are evicted. An optional first-open hook
+//! connections, and dropped projects are evicted. The outer
+//! [`WorkspaceSet`] reloads the same way ([`WorkspaceSet::reload_from_resolved`])
+//! — it must, because a `serve` process holds *both*, and reloading only the
+//! inner one left the read-only graph API and the served UI reporting a stale
+//! repo list beside a log line announcing a fresh one. Each reload splits into a
+//! `plan_reload` that does all the git discovery and an `apply_reload` that only
+//! takes a lock, so a caller holding both registries can swap them back to back
+//! rather than interleaved with a filesystem walk. An optional first-open hook
 //! ([`Workspace::with_on_open`], `serve --sync-on-access`) (re)builds a project's
 //! graph the first time it is queried.
 
@@ -162,6 +169,22 @@ fn source_eq(a: &Source, b: &Source) -> bool {
 /// used by `serve --sync-on-access` to (re)build a stale or missing graph before
 /// it is served (ADR-0008). Returns a human-readable error on failure.
 pub type OnOpen = Arc<dyn Fn(&Path) -> Result<(), String> + Send + Sync>;
+
+/// A fully-discovered registry, ready to be swapped into a live [`Workspace`].
+///
+/// Opaque on purpose: it exists so that the **I/O half** of a reload (git
+/// discovery, [`Workspace::plan_reload`]) can be separated from the **swap half**
+/// ([`Workspace::apply_reload`]), which takes one lock and does no I/O. A server
+/// that must reload several registries coherently plans them all first and then
+/// applies them back to back, so the window in which two surfaces could report
+/// different repo sets is a pair of adjacent lock acquisitions rather than a
+/// filesystem walk.
+pub struct ReloadPlan {
+    /// Project name → its store source, in stable name order.
+    projects: BTreeMap<String, Source>,
+    /// The project a bare (no-`project`) call resolves to, if unambiguous.
+    default: Option<String>,
+}
 
 /// A named set of per-repo graphs, each opened on demand and cached. Cheap to
 /// hold: the stores are small `SQLite` files opened lazily; the caller (a server)
@@ -346,6 +369,10 @@ impl Workspace {
     /// restart. A single-project pre-opened workspace ([`Workspace::single`]) has
     /// no repo paths, so reloading it simply replaces it with the given repos.
     ///
+    /// This is [`Workspace::plan_reload`] followed immediately by
+    /// [`Workspace::apply_reload`]; use the two halves separately when several
+    /// registries must be swapped together (see [`WorkspaceSet::plan_reload`]).
+    ///
     /// # Errors
     /// As [`Workspace::from_repo_paths`].
     pub fn reload_from<I, P>(&self, paths: I) -> Result<Vec<String>, WorkspaceError>
@@ -353,8 +380,33 @@ impl Workspace {
         I: IntoIterator<Item = P>,
         P: AsRef<Path>,
     {
-        // Build the new registry outside the lock (discovery does git I/O).
+        self.apply_reload(Self::plan_reload(paths)?)
+    }
+
+    /// Discover `paths` into the registry a reload would install, **without
+    /// touching the live workspace**. All of a reload's I/O (git discovery)
+    /// happens here, so [`Workspace::apply_reload`] is a lock-and-swap with no
+    /// I/O in it — which is what lets a caller holding several registries swap
+    /// them all back to back rather than interleaved with discovery.
+    ///
+    /// # Errors
+    /// As [`Workspace::from_repo_paths`].
+    pub fn plan_reload<I, P>(paths: I) -> Result<ReloadPlan, WorkspaceError>
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
         let (projects, default) = build_registry(paths)?;
+        Ok(ReloadPlan { projects, default })
+    }
+
+    /// Install a [`ReloadPlan`] built by [`Workspace::plan_reload`], returning the
+    /// new project names. Takes the registry lock once and does no I/O under it.
+    ///
+    /// # Errors
+    /// [`WorkspaceError::Poisoned`] if the registry lock was poisoned.
+    pub fn apply_reload(&self, plan: ReloadPlan) -> Result<Vec<String>, WorkspaceError> {
+        let ReloadPlan { projects, default } = plan;
         let names: Vec<String> = projects.keys().cloned().collect();
         let mut inner = self.lock()?;
         // Keep a warm connection only where the project still maps to the *same*
@@ -619,8 +671,8 @@ impl Workspace {
 }
 
 /// Comma-separated project names (for error messages).
-fn keys(projects: &BTreeMap<String, Source>) -> String {
-    projects.keys().cloned().collect::<Vec<_>>().join(", ")
+fn keys<V>(entries: &BTreeMap<String, V>) -> String {
+    entries.keys().cloned().collect::<Vec<_>>().join(", ")
 }
 
 /// Split a **project-qualified** key `"<project>::<key>"` into `(project, key)`,
@@ -970,6 +1022,50 @@ pub struct ResolvedWorkspace {
     pub linked: bool,
 }
 
+/// Discover each resolved group's member repo paths as
+/// `(workspace name, repo paths, linked)`, in config order.
+///
+/// The **one** place a `[[workspaces]]`/`[standalone]` group becomes a concrete
+/// set of repos, shared by [`WorkspaceSet::from_resolved`] and
+/// [`WorkspaceSet::plan_reload`] so a reloaded set is exactly the set a restart
+/// would have produced. A **standalone** (`linked = false`) group is split into
+/// one single-repo entry per member, upholding the "a standalone workspace is
+/// exactly one repo" invariant structurally; the extras take a `-2`/`-3` suffix.
+/// A group that resolves to no repos is skipped, so a stale root never aborts the
+/// whole set.
+fn discover_groups(
+    resolved: Vec<ResolvedWorkspace>,
+) -> Result<Vec<(String, Vec<PathBuf>, bool)>, WorkspaceError> {
+    let mut out: Vec<(String, Vec<PathBuf>, bool)> = Vec::new();
+    for rw in resolved {
+        let mut paths: Vec<PathBuf> = Vec::new();
+        for root in &rw.roots {
+            paths.extend(discover_repos_under(Path::new(root))?);
+        }
+        for repo in &rw.repos {
+            paths.push(PathBuf::from(repo));
+        }
+        if paths.is_empty() {
+            // A group naming nothing (e.g. a `roots` dir with no repos) is simply
+            // absent rather than an error.
+            continue;
+        }
+        if rw.linked {
+            out.push((rw.name.clone(), paths, true));
+        } else {
+            for (i, path) in paths.into_iter().enumerate() {
+                let name = if i == 0 {
+                    rw.name.clone()
+                } else {
+                    format!("{}-{}", rw.name, i + 1)
+                };
+                out.push((name, vec![path], false));
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// One entry in a [`WorkspaceSet`]: a built [`Workspace`] plus whether its member
 /// repos are cross-linked. The workspace is held behind an `Arc` so an
 /// already-shared workspace (e.g. the one a `serve` process holds for its model
@@ -990,6 +1086,15 @@ struct WorkspaceEntry {
 /// projects within it. Built from normalised config ([`WorkspaceSet::from_resolved`])
 /// so the `serve`/`links` selection logic is shared.
 pub struct WorkspaceSet {
+    /// The named workspaces plus the default selection, behind one lock so the
+    /// set is **reloadable in place** ([`WorkspaceSet::apply_reload`]) exactly as
+    /// a [`Workspace`]'s project registry is. Held only long enough to clone the
+    /// `Arc` a selection resolves to, never across a graph query.
+    inner: std::sync::RwLock<SetInner>,
+}
+
+/// The mutable half of a [`WorkspaceSet`].
+struct SetInner {
     /// Workspace name → its entry, in stable (`BTreeMap`) name order.
     entries: BTreeMap<String, WorkspaceEntry>,
     /// The workspace used when a selection omits a name (the sole workspace, if
@@ -997,7 +1102,68 @@ pub struct WorkspaceSet {
     default: Option<String>,
 }
 
+/// A fully-built set of named workspaces, ready to be swapped into a live
+/// [`WorkspaceSet`]. The [`ReloadPlan`] counterpart for the outer layer — see
+/// [`WorkspaceSet::plan_reload`].
+pub struct SetReloadPlan {
+    /// The entries to install, and for a **retained** workspace the project
+    /// registry to swap into it (planned, not yet applied).
+    entries: Vec<(String, WorkspaceEntry, Option<ReloadPlan>)>,
+    /// The default selection the new set will carry.
+    default: Option<String>,
+    /// Every member repo path this plan discovered, across all groups, in group
+    /// order — see [`SetReloadPlan::repo_paths`].
+    repo_paths: Vec<PathBuf>,
+}
+
+impl SetReloadPlan {
+    /// Every member repo path this plan discovered, across all groups, in group
+    /// order.
+    ///
+    /// This exists so that a caller holding a **flattened** [`Workspace`] beside
+    /// the set — `roteiro serve`/`mcp` does, one per surface — can plan its
+    /// reload from *these very paths* rather than walking the same roots a second
+    /// time. Two walks is two filesystem views: a repo created between them lands
+    /// in one surface and not the other, which is a smaller version of the exact
+    /// disagreement the whole reload-both change exists to remove. Not
+    /// deduplicated here, because [`Workspace::from_repo_paths`] deduplicates by
+    /// resolved `graph.db`, which is the stronger identity anyway.
+    #[must_use]
+    pub fn repo_paths(&self) -> &[PathBuf] {
+        &self.repo_paths
+    }
+}
+
 impl WorkspaceSet {
+    /// Take the read lock for a **decision** — a selection, or the snapshot a
+    /// reload plans against — reporting a poisoned lock as an error.
+    ///
+    /// The only writer is [`WorkspaceSet::apply_reload`], which replaces
+    /// `entries` and `default` as two separate moves. If it panicked between
+    /// them the pair is genuinely inconsistent, and resolving a default against a
+    /// half-swapped set would hand back the wrong workspace. So a decision fails
+    /// loudly here; see [`WorkspaceSet::peek`] for the reporting counterpart.
+    fn read(&self) -> Result<std::sync::RwLockReadGuard<'_, SetInner>, WorkspaceError> {
+        self.inner.read().map_err(|_| WorkspaceError::Poisoned)
+    }
+
+    /// Take the read lock for a **report** — a listing, never a resolution —
+    /// reading *through* a poisoned lock.
+    ///
+    /// These accessors cannot return a `Result`, so the alternative is an empty
+    /// list, and an empty list is a lie: it renders a poisoned set as "no
+    /// workspaces configured", which is the confidently-wrong-message shape this
+    /// whole change exists to remove — and it would empty the `known:` list in
+    /// the very error a person is reading to find out what went wrong. The data
+    /// behind the lock is a map of `Arc`s replaced by whole-value assignment, so
+    /// reading it after a panicking writer yields the old or the new map, never
+    /// a torn one.
+    fn peek(&self) -> std::sync::RwLockReadGuard<'_, SetInner> {
+        self.inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Assemble a set from pre-built named workspaces — the shared core of
     /// [`WorkspaceSet::from_resolved`] and the test constructor. With exactly one
     /// entry, that workspace is the default (a bare selection resolves to it).
@@ -1021,7 +1187,9 @@ impl WorkspaceSet {
         let default = (entries.len() == 1)
             .then(|| entries.keys().next().cloned())
             .flatten();
-        Self { entries, default }
+        Self {
+            inner: std::sync::RwLock::new(SetInner { entries, default }),
+        }
     }
 
     /// Wrap an already-built [`Workspace`] (shared via `Arc`) as a one-entry set
@@ -1037,8 +1205,10 @@ impl WorkspaceSet {
         let mut entries = BTreeMap::new();
         entries.insert(name.clone(), WorkspaceEntry { workspace, linked });
         Self {
-            entries,
-            default: Some(name),
+            inner: std::sync::RwLock::new(SetInner {
+                entries,
+                default: Some(name),
+            }),
         }
     }
 
@@ -1059,60 +1229,145 @@ impl WorkspaceSet {
     /// [`WorkspaceError::Git`] if an explicit repo path is not inside a git repo.
     pub fn from_resolved(resolved: Vec<ResolvedWorkspace>) -> Result<Self, WorkspaceError> {
         let mut entries: BTreeMap<String, WorkspaceEntry> = BTreeMap::new();
-        for rw in resolved {
-            let mut paths: Vec<PathBuf> = Vec::new();
-            for root in &rw.roots {
-                paths.extend(discover_repos_under(Path::new(root))?);
-            }
-            for repo in &rw.repos {
-                paths.push(PathBuf::from(repo));
-            }
-            if paths.is_empty() {
-                // A group naming nothing (e.g. a `roots` dir with no repos) is
-                // simply absent rather than an error.
-                continue;
-            }
-            if rw.linked {
-                let workspace = Workspace::from_repo_paths(&paths)?;
-                entries.insert(
-                    rw.name.clone(),
-                    WorkspaceEntry {
-                        workspace: Arc::new(workspace),
-                        linked: true,
-                    },
-                );
-            } else {
-                // Standalone: one single-repo graph per member, enforcing the
-                // `linked = false` ⇒ exactly-one-repo invariant structurally (the
-                // config normaliser already emits one repo per group, so this is a
-                // no-op split there; it only matters if a group is hand-built).
-                for (i, path) in paths.iter().enumerate() {
-                    let workspace = Workspace::from_repo_paths([path])?;
-                    let name = if i == 0 {
-                        rw.name.clone()
-                    } else {
-                        format!("{}-{}", rw.name, i + 1)
-                    };
-                    entries.insert(
-                        name,
-                        WorkspaceEntry {
-                            workspace: Arc::new(workspace),
-                            linked: false,
-                        },
-                    );
-                }
-            }
+        for (name, paths, linked) in discover_groups(resolved)? {
+            entries.insert(
+                name,
+                WorkspaceEntry {
+                    workspace: Arc::new(Workspace::from_repo_paths(&paths)?),
+                    linked,
+                },
+            );
         }
         let default = (entries.len() == 1)
             .then(|| entries.keys().next().cloned())
             .flatten();
-        Ok(Self { entries, default })
+        Ok(Self {
+            inner: std::sync::RwLock::new(SetInner { entries, default }),
+        })
+    }
+
+    /// Re-discover `resolved` into the set a reload would install, **without
+    /// touching the live set**. All of the reload's I/O (root scans, git
+    /// discovery) happens here; [`WorkspaceSet::apply_reload`] is then a swap.
+    ///
+    /// A workspace whose **name and linkage** survive the reload keeps its very
+    /// `Arc<Workspace>` — so its open stores stay warm and any handle already
+    /// shared out (`workspace_handles`, a scoped tool registry) keeps pointing at
+    /// the live workspace — and receives a planned [`ReloadPlan`] for its own
+    /// project registry, which retains warm connections per
+    /// [`Workspace::apply_reload`]. A workspace that is new, gone, or has flipped
+    /// between linked and standalone is rebuilt or dropped, because in those
+    /// cases the name no longer denotes the same thing.
+    ///
+    /// Planning reads the current entries; concurrent reloads must be serialised
+    /// by the caller (the SIGHUP handler holds one lock for the whole reload), or
+    /// the later plan simply wins.
+    ///
+    /// # Errors
+    /// As [`WorkspaceSet::from_resolved`].
+    pub fn plan_reload(
+        &self,
+        resolved: Vec<ResolvedWorkspace>,
+    ) -> Result<SetReloadPlan, WorkspaceError> {
+        let groups = discover_groups(resolved)?;
+        // Snapshot the current entries (cheap `Arc` clones) and release the lock
+        // before any further discovery.
+        let current: BTreeMap<String, WorkspaceEntry> = {
+            let inner = self.read()?;
+            inner
+                .entries
+                .iter()
+                .map(|(n, e)| {
+                    (
+                        n.clone(),
+                        WorkspaceEntry {
+                            workspace: e.workspace.clone(),
+                            linked: e.linked,
+                        },
+                    )
+                })
+                .collect()
+        };
+        let mut entries: Vec<(String, WorkspaceEntry, Option<ReloadPlan>)> = Vec::new();
+        // Every path this one walk found, kept so a flattened workspace beside
+        // the set can be planned from the same discovery rather than a second.
+        let mut repo_paths: Vec<PathBuf> = Vec::new();
+        for (name, paths, linked) in groups {
+            repo_paths.extend(paths.iter().cloned());
+            match current.get(&name) {
+                Some(existing) if existing.linked == linked => entries.push((
+                    name,
+                    WorkspaceEntry {
+                        workspace: existing.workspace.clone(),
+                        linked,
+                    },
+                    Some(Workspace::plan_reload(&paths)?),
+                )),
+                _ => entries.push((
+                    name,
+                    WorkspaceEntry {
+                        workspace: Arc::new(Workspace::from_repo_paths(&paths)?),
+                        linked,
+                    },
+                    None,
+                )),
+            }
+        }
+        // `from_resolved` collects into a `BTreeMap`, so a duplicated group name
+        // keeps the last entry; count distinct names the same way here.
+        let distinct: std::collections::BTreeSet<&String> =
+            entries.iter().map(|(n, _, _)| n).collect();
+        let default = (distinct.len() == 1)
+            .then(|| distinct.into_iter().next().cloned())
+            .flatten();
+        Ok(SetReloadPlan {
+            entries,
+            default,
+            repo_paths,
+        })
+    }
+
+    /// Install a [`SetReloadPlan`], returning the new workspace names in stable
+    /// order. Does no I/O: each retained workspace's planned registry is swapped
+    /// in, then the entry map is replaced under one write lock.
+    ///
+    /// # Errors
+    /// [`WorkspaceError::Poisoned`] if a lock was poisoned.
+    pub fn apply_reload(&self, plan: SetReloadPlan) -> Result<Vec<String>, WorkspaceError> {
+        let SetReloadPlan {
+            entries, default, ..
+        } = plan;
+        let mut next: BTreeMap<String, WorkspaceEntry> = BTreeMap::new();
+        for (name, entry, registry) in entries {
+            if let Some(registry) = registry {
+                entry.workspace.apply_reload(registry)?;
+            }
+            next.insert(name, entry);
+        }
+        let names: Vec<String> = next.keys().cloned().collect();
+        let mut inner = self.inner.write().map_err(|_| WorkspaceError::Poisoned)?;
+        inner.entries = next;
+        inner.default = default;
+        Ok(names)
+    }
+
+    /// Re-discover `resolved` and install it — [`WorkspaceSet::plan_reload`]
+    /// followed by [`WorkspaceSet::apply_reload`]. Use the halves separately when
+    /// another registry must be swapped in the same breath.
+    ///
+    /// # Errors
+    /// As [`WorkspaceSet::plan_reload`].
+    pub fn reload_from_resolved(
+        &self,
+        resolved: Vec<ResolvedWorkspace>,
+    ) -> Result<Vec<String>, WorkspaceError> {
+        self.apply_reload(self.plan_reload(resolved)?)
     }
 
     /// The configured workspace names, in stable order.
     #[must_use]
     pub fn names(&self) -> Vec<String> {
-        self.entries.keys().cloned().collect()
+        self.peek().entries.keys().cloned().collect()
     }
 
     /// Each configured workspace as a `(name, shared handle)` pair, in stable name
@@ -1124,7 +1379,8 @@ impl WorkspaceSet {
     /// read-only `/v1/graph/workspaces/{ws}/…` routes.
     #[must_use]
     pub fn workspace_handles(&self) -> Vec<(String, Arc<Workspace>)> {
-        self.entries
+        self.peek()
+            .entries
             .iter()
             .map(|(name, entry)| (name.clone(), entry.workspace.clone()))
             .collect()
@@ -1134,37 +1390,49 @@ impl WorkspaceSet {
     /// (`Some(false)`), or unknown (`None`).
     #[must_use]
     pub fn linked(&self, name: &str) -> Option<bool> {
-        self.entries.get(name).map(|e| e.linked)
+        self.peek().entries.get(name).map(|e| e.linked)
     }
 
     /// Select a workspace by `name`, or the default when `name` is `None`.
+    ///
+    /// Hands back the shared `Arc` rather than a borrow, because the set is
+    /// reloadable: a caller that held a reference into the entry map would pin it
+    /// against the swap. The handle stays valid across a reload — a retained
+    /// workspace *is* reloaded in place, so a caller reading through it sees the
+    /// new project set rather than a detached snapshot.
     ///
     /// # Errors
     /// [`WorkspaceError::UnknownWorkspace`] if named but absent,
     /// [`WorkspaceError::AmbiguousWorkspace`] if omitted with several configured,
     /// or [`WorkspaceError::Empty`] if none are configured.
-    pub fn select(&self, name: Option<&str>) -> Result<&Workspace, WorkspaceError> {
+    pub fn select(&self, name: Option<&str>) -> Result<Arc<Workspace>, WorkspaceError> {
+        // One guard for the lookup *and* the error it may raise. Two reads would
+        // let a reload land between them, so the `known:` list could name a set
+        // the lookup never saw — a message that is confidently wrong about the
+        // very thing the reader is consulting it for. (It also removes a nested
+        // read-lock acquisition on one thread, which `RwLock` does not promise.)
+        let inner = self.read()?;
         if let Some(n) = name {
-            return self
+            return inner
                 .entries
                 .get(n)
-                .map(|e| e.workspace.as_ref())
+                .map(|e| e.workspace.clone())
                 .ok_or_else(|| WorkspaceError::UnknownWorkspace {
                     name: n.to_owned(),
-                    known: self.known(),
+                    known: keys(&inner.entries),
                 });
         }
         // No name given: the sole workspace, else ambiguous / empty.
-        let name = self.default.as_ref().ok_or_else(|| {
-            if self.entries.is_empty() {
+        let name = inner.default.as_ref().ok_or_else(|| {
+            if inner.entries.is_empty() {
                 WorkspaceError::Empty
             } else {
                 WorkspaceError::AmbiguousWorkspace {
-                    known: self.known(),
+                    known: keys(&inner.entries),
                 }
             }
         })?;
-        Ok(self.entries[name].workspace.as_ref())
+        Ok(inner.entries[name].workspace.clone())
     }
 
     /// The **name** of the workspace [`WorkspaceSet::select`] resolves for `name`:
@@ -1175,23 +1443,24 @@ impl WorkspaceSet {
     ///
     /// # Errors
     /// As [`WorkspaceSet::select`].
-    pub fn select_name(&self, name: Option<&str>) -> Result<&str, WorkspaceError> {
+    pub fn select_name(&self, name: Option<&str>) -> Result<String, WorkspaceError> {
+        let inner = self.read()?;
         if let Some(n) = name {
-            return self
+            return inner
                 .entries
                 .get_key_value(n)
-                .map(|(k, _)| k.as_str())
+                .map(|(k, _)| k.clone())
                 .ok_or_else(|| WorkspaceError::UnknownWorkspace {
                     name: n.to_owned(),
-                    known: self.known(),
+                    known: keys(&inner.entries),
                 });
         }
-        self.default.as_deref().ok_or_else(|| {
-            if self.entries.is_empty() {
+        inner.default.clone().ok_or_else(|| {
+            if inner.entries.is_empty() {
                 WorkspaceError::Empty
             } else {
                 WorkspaceError::AmbiguousWorkspace {
-                    known: self.known(),
+                    known: keys(&inner.entries),
                 }
             }
         })
@@ -1202,19 +1471,16 @@ impl WorkspaceSet {
     /// contains it. Used to default `--workspace-name` to the workspace the current
     /// directory belongs to.
     #[must_use]
-    pub fn containing(&self, cwd_repo_db: &Path) -> Option<&str> {
-        self.entries.iter().find_map(|(name, e)| {
-            e.workspace
-                .member_dbs()
+    pub fn containing(&self, cwd_repo_db: &Path) -> Option<String> {
+        // Snapshot the handles first: `member_dbs` takes each workspace's own
+        // lock, and holding the set's lock across that would nest two locks in an
+        // order nothing else uses.
+        self.workspace_handles().into_iter().find_map(|(name, ws)| {
+            ws.member_dbs()
                 .iter()
                 .any(|db| db == cwd_repo_db)
-                .then_some(name.as_str())
+                .then_some(name)
         })
-    }
-
-    /// Comma-separated workspace names (for error messages).
-    fn known(&self) -> String {
-        self.entries.keys().cloned().collect::<Vec<_>>().join(", ")
     }
 }
 
@@ -1225,6 +1491,52 @@ mod tests {
 
     fn store() -> Store {
         Store::open_in_memory().expect("in-memory store")
+    }
+
+    /// A poisoned [`WorkspaceSet`] must still *report* what it holds, and must
+    /// still *refuse* to resolve one.
+    ///
+    /// The split is a decision, not an accident, so it is asserted rather than
+    /// left to a doc comment. A reader (`names`, `workspace_handles`, `linked`,
+    /// and through them `containing` and the error messages' `known:` list) reads
+    /// through the poisoning: returning an empty list instead would render a
+    /// poisoned set as "no workspaces configured" and blank the `known:` list in
+    /// the very error someone is reading to find out what broke. A resolver
+    /// (`select`, `select_name`) still fails, because the one writer replaces
+    /// `entries` and `default` as two moves and a default resolved against a
+    /// half-swapped set is silently the wrong workspace.
+    ///
+    /// Without this, "simplifying" `peek` back to `unwrap_or_default()` is a
+    /// green diff.
+    #[test]
+    fn a_poisoned_set_still_reports_but_refuses_to_resolve() {
+        let set = WorkspaceSet::from_workspaces([
+            ("api".to_owned(), Workspace::single("api", store()), true),
+            ("web".to_owned(), Workspace::single("web", store()), false),
+        ]);
+        // Poison the lock the way a writer panicking mid-swap would.
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = set.inner.write().expect("write lock");
+            panic!("simulated panic while swapping the registry");
+        }));
+        assert!(poisoned.is_err(), "the closure must have panicked");
+        assert!(set.inner.is_poisoned(), "the lock must be poisoned");
+
+        // Reports still report.
+        assert_eq!(set.names(), vec!["api".to_owned(), "web".to_owned()]);
+        assert_eq!(set.workspace_handles().len(), 2);
+        assert_eq!(set.linked("api"), Some(true));
+        assert_eq!(set.linked("web"), Some(false));
+
+        // Resolutions still refuse.
+        assert!(matches!(
+            set.select(Some("api")).err().expect("select must fail"),
+            WorkspaceError::Poisoned
+        ));
+        assert!(matches!(
+            set.select_name(None).expect_err("select_name must fail"),
+            WorkspaceError::Poisoned
+        ));
     }
 
     #[test]
@@ -1576,8 +1888,8 @@ mod tests {
                 false,
             ),
         ]);
-        assert_eq!(set.containing(&api_db), Some("api"));
-        assert_eq!(set.containing(&web_db), Some("web"));
+        assert_eq!(set.containing(&api_db).as_deref(), Some("api"));
+        assert_eq!(set.containing(&web_db).as_deref(), Some("web"));
         // A db in no workspace matches nothing.
         assert_eq!(
             set.containing(Path::new("/elsewhere/.git/roteiro/graph.db")),

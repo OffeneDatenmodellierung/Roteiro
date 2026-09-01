@@ -298,9 +298,90 @@ fn workspace_set_from_resolved_partitions_linked_and_standalone() {
         .join(".git")
         .join("roteiro")
         .join("graph.db");
-    assert_eq!(set.containing(&api_db), Some("prod"));
-    assert_eq!(set.containing(&tools_db), Some("tools"));
+    assert_eq!(set.containing(&api_db).as_deref(), Some("prod"));
+    assert_eq!(set.containing(&tools_db).as_deref(), Some("tools"));
     assert_eq!(set.containing(Path::new("/nope/graph.db")), None);
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
+/// A [`WorkspaceSet`] reloads in place, the way a [`Workspace`] does — the half
+/// of a SIGHUP that was missing entirely, so `serve` logged a fresh project list
+/// and went on serving the stale one.
+///
+/// The retention rule is the point, not just the new names: a workspace that
+/// survives the reload must keep the **same handle**, or every store it has open
+/// is dropped and every `Arc<Workspace>` already shared out (a scoped tool
+/// registry, `workspace_handles`) silently detaches from the live set.
+#[test]
+fn workspace_set_reload_picks_up_repos_and_keeps_surviving_handles() {
+    let base = std::env::temp_dir().join(format!("rto-set-reload-{}", std::process::id()));
+    std::fs::remove_dir_all(&base).ok();
+    let root = base.join("group");
+    std::fs::create_dir_all(&root).expect("mkdir root");
+    repo_with_node(&root.join("api"), "sym:rust:a.rs#in_api");
+
+    let group = |name: &str, root: &Path| ResolvedWorkspace {
+        name: name.to_owned(),
+        roots: vec![root.to_string_lossy().into_owned()],
+        repos: Vec::new(),
+        linked: true,
+    };
+    let resolved = vec![group("prod", &root)];
+    let set = WorkspaceSet::from_resolved(resolved.clone()).expect("build set");
+    assert_eq!(set.select(Some("prod")).unwrap().names(), vec!["api"]);
+
+    // The handle a caller took before the reload (as `serve` does when it scopes
+    // a tool registry to one workspace).
+    let held = set.select(Some("prod")).expect("select");
+    // Warm one store, so the retention rule has something to preserve.
+    held.with_store(Some("api"), |s| s.node_count().unwrap())
+        .expect("warm the api store");
+
+    // A second repo appears under the same root.
+    repo_with_node(&root.join("web"), "sym:rust:b.rs#in_web");
+    let names = set.reload_from_resolved(resolved).expect("reload");
+    assert_eq!(names, vec!["prod".to_owned()], "the group itself survives");
+
+    // The set now hosts both repos …
+    assert_eq!(
+        set.select(Some("prod")).unwrap().names(),
+        vec!["api".to_owned(), "web".to_owned()]
+    );
+    // … through the very handle taken *before* the reload: a retained workspace
+    // is reloaded in place, never replaced.
+    assert_eq!(
+        held.names(),
+        vec!["api".to_owned(), "web".to_owned()],
+        "a handle taken before the reload must see the new project set"
+    );
+    assert!(
+        Arc::ptr_eq(&held, &set.select(Some("prod")).unwrap()),
+        "a surviving workspace must keep the same handle across a reload"
+    );
+    // The still-present project's warm connection survives; the new one resolves.
+    assert!(
+        held.with_store(Some("web"), |s| s
+            .get_node("sym:rust:b.rs#in_web")
+            .unwrap()
+            .is_some())
+            .unwrap()
+    );
+
+    // A group that disappears from config is dropped, and a new one appears.
+    let other = base.join("other");
+    std::fs::create_dir_all(&other).expect("mkdir other root");
+    repo_with_node(&other.join("tools"), "sym:rust:c.rs#in_tools");
+    let names = set
+        .reload_from_resolved(vec![group("staging", &other)])
+        .expect("reload");
+    assert_eq!(names, vec!["staging".to_owned()]);
+    assert!(matches!(
+        set.select(Some("prod")).err().expect("prod is gone"),
+        WorkspaceError::UnknownWorkspace { .. }
+    ));
+    // A lone remaining workspace becomes the default again.
+    assert_eq!(set.select(None).unwrap().names(), vec!["tools".to_owned()]);
 
     std::fs::remove_dir_all(&base).ok();
 }

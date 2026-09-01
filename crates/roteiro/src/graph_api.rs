@@ -260,9 +260,13 @@ fn param<'a>(params: &'a RawPathParams, name: &str) -> Option<&'a str> {
 
 /// Select the [`Workspace`] a request targets: the `{ws}` path segment for a
 /// nested route, else the flat routes' default workspace (which itself falls
-/// back to the set's sole/ambiguous default). Borrows from `st`, so it is called
-/// synchronously inside a handler before any query runs.
-fn select_ws<'a>(st: &'a AppState, params: &RawPathParams) -> Result<&'a Workspace, ApiError> {
+/// back to the set's sole/ambiguous default).
+///
+/// Returns the shared handle rather than a borrow because the set is reloadable
+/// (SIGHUP, ADR-0008): a borrow would pin the entry map against the swap. The
+/// handle stays live across a reload — a retained workspace is reloaded in place
+/// — so a handler holding one is never reading a detached snapshot.
+fn select_ws(st: &AppState, params: &RawPathParams) -> Result<Arc<Workspace>, ApiError> {
     match param(params, "ws") {
         Some(name) => Ok(st.set.select(Some(name))?),
         None => Ok(st.set.select(st.default.as_deref())?),
@@ -493,7 +497,7 @@ async fn project_links(State(st): State<AppState>, params: RawPathParams) -> Api
         // A link whose hub node is gone — or whose project isn't hosted / has no
         // graph — is drift for that link, not a fatal error for the endpoint
         // (mirroring `/resolve` and `/matrix`).
-        let resolved = resolve_link(ws, node)?;
+        let resolved = resolve_link(&ws, node)?;
         let drift = resolved.is_none();
         let to_name = resolved.map(|n| n.name);
         links.push(json!({
@@ -694,7 +698,7 @@ async fn neighbourhood(
 async fn project_debt(State(st): State<AppState>, params: RawPathParams) -> ApiResult {
     let ws = select_ws(&st, &params)?;
     let project = require_project(&params)?;
-    let ignore = crate::config::debt_ignore_for(ws, Some(project))
+    let ignore = crate::config::debt_ignore_for(&ws, Some(project))
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     let report = ws.with_store(Some(project), |s| debt(s, &[], &ignore))??;
     Ok(Json(report).into_response())
@@ -760,7 +764,7 @@ async fn debt_density(
             ))
         })?,
     };
-    let ignore = crate::config::debt_ignore_for(ws, Some(project))
+    let ignore = crate::config::debt_ignore_for(&ws, Some(project))
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     let limit = dq.limit.unwrap_or(DEFAULT_HOTSPOTS);
     let min_lines = dq.min_lines.unwrap_or(rto_graph::DEFAULT_MIN_LINES);
@@ -884,7 +888,7 @@ async fn follow(
     // The workspace resolution actually ran in — for the UI's breadcrumb trail.
     // Resolve the concrete NAME (not `st.default`, which is `None` on a flat route
     // whose sole workspace is auto-selected), so a resolved hop is never `null`.
-    let workspace = st.set.select_name(param(&params, "ws"))?.to_owned();
+    let workspace = st.set.select_name(param(&params, "ws"))?;
 
     let (target, kind, field) = match ws.follow_definition(&qualified)? {
         Follow::StructField { node, field } => (Some(node), Some("struct_field"), Some(field)),
@@ -933,8 +937,8 @@ async fn topology(State(st): State<AppState>, params: RawPathParams) -> ApiResul
     // the loop because a project's role depends on the *whole* workspace — who
     // points at it, which the loop only learns about when it reaches that project
     // — and built before the hub because the hub is a reduction over it.
-    let pgraph = dependency_graph(ws, &names)?;
-    let hub = effective_hub_from(ws, &names, &pgraph)?;
+    let pgraph = dependency_graph(&ws, &names)?;
+    let hub = effective_hub_from(&ws, &names, &pgraph)?;
     // The hub's config keys are the live-inference target (empty when there is no
     // hub, so `spoke_correspondence` yields persisted links only).
     let hub_keys = match &hub {
@@ -959,7 +963,7 @@ async fn topology(State(st): State<AppState>, params: RawPathParams) -> ApiResul
         let (refs, live_orphans) = if Some(name) == hub.as_ref() {
             (ws.with_store(Some(name), external_refs)??, Vec::new())
         } else {
-            spoke_correspondence(ws, name, hub.as_deref(), &hub_keys)?
+            spoke_correspondence(&ws, name, hub.as_deref(), &hub_keys)?
         };
         // A project with nothing to say about the hub is not part of this view.
         // The hub itself is the exception, and a load-bearing one: in the ordinary
@@ -1000,7 +1004,7 @@ async fn topology(State(st): State<AppState>, params: RawPathParams) -> ApiResul
             }
             // A link whose target is gone — or whose project isn't hosted / has no
             // graph — is drift for that link, not a fatal error for the endpoint.
-            if resolve_link(ws, node)?.is_none() {
+            if resolve_link(&ws, node)?.is_none() {
                 drift_count += 1;
             }
         }
@@ -1051,7 +1055,7 @@ async fn topology(State(st): State<AppState>, params: RawPathParams) -> ApiResul
 async fn matrix(State(st): State<AppState>, params: RawPathParams) -> ApiResult {
     let ws = select_ws(&st, &params)?;
     let names = ws.names();
-    let Some(hub) = effective_hub(ws, &names)? else {
+    let Some(hub) = effective_hub(&ws, &names)? else {
         // Nothing references (or can infer against) anything — no hub, so an empty
         // (but well-shaped) matrix.
         //
@@ -1076,7 +1080,7 @@ async fn matrix(State(st): State<AppState>, params: RawPathParams) -> ApiResult 
         if name == &hub {
             continue;
         }
-        let (refs, live_orphans) = spoke_correspondence(ws, name, Some(&hub), &hub_keys)?;
+        let (refs, live_orphans) = spoke_correspondence(&ws, name, Some(&hub), &hub_keys)?;
         if refs.is_empty() && live_orphans.is_empty() {
             continue;
         }
@@ -1096,7 +1100,7 @@ async fn matrix(State(st): State<AppState>, params: RawPathParams) -> ApiResult 
                 .get(src)
                 .cloned()
                 .unwrap_or_else(|| (src.clone(), String::new()));
-            match resolve_link(ws, node)? {
+            match resolve_link(&ws, node)? {
                 // Resolves to its hub node → a real override cell, tagged with the
                 // link's real provenance (authored vs inferred).
                 Some(hub_node) => matches.push(overview::MatchInput {
@@ -1158,7 +1162,7 @@ async fn matrix(State(st): State<AppState>, params: RawPathParams) -> ApiResult 
 async fn write_links(State(st): State<AppState>, params: RawPathParams) -> ApiResult {
     let ws = select_ws(&st, &params)?;
     let names = ws.names();
-    let Some(hub) = effective_hub(ws, &names)? else {
+    let Some(hub) = effective_hub(&ws, &names)? else {
         return Ok(Json(WriteLinksReport {
             note: Some("no cross-repo hub — nothing to infer".to_owned()),
             ..WriteLinksReport::default()

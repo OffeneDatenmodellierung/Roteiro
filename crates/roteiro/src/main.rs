@@ -1840,6 +1840,70 @@ fn exit_gate_failure() -> ! {
     std::process::exit(1)
 }
 
+/// Whether `cmd` starts a **long-lived server** — a process that stays up
+/// waiting for requests, rather than doing a job and exiting.
+///
+/// This is the list `main` installs the SIGHUP handler from, and it is
+/// deliberately an **exhaustive match with no `_` arm**. SIGHUP's default
+/// disposition kills the process, so a server that is not on this list dies on
+/// the signal; that is precisely how `explorer` and single-repo `serve` came to
+/// exit 129 while workspace-mode `serve` survived. A wildcard arm would let the
+/// next server be added without anyone deciding, so instead a new `Command`
+/// variant fails to compile until someone classifies it — and
+/// `tests/sighup_cli.rs` reads the `true` arms out of this function to build the
+/// set of servers it actually signals, so a fourth server is either covered or
+/// red.
+///
+/// Short-lived commands are `false`: SIGHUP terminating `roteiro sync` is
+/// ordinary Unix behaviour, and installing a signal thread for a command that
+/// exits in milliseconds would cost every invocation.
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+fn is_long_lived_server(cmd: &Command) -> bool {
+    match cmd {
+        // --- long-lived servers (the SIGHUP set) -------------------------------
+        // `serve` binds the network HTTP server (or, without a model, the
+        // llama-free graph API + UI).
+        Command::Serve { .. } => true,
+        // `mcp` serves MCP over stdio or streamable HTTP; both stay up.
+        #[cfg(any(feature = "mcp", feature = "serve"))]
+        Command::Mcp { .. } => true,
+        // `explorer` binds the read-only graph API + web app.
+        #[cfg(feature = "explorer")]
+        Command::Explorer { .. } => true,
+
+        // --- everything else does a job and exits ------------------------------
+        Command::Init { .. }
+        | Command::Sync { .. }
+        | Command::Review { .. }
+        | Command::Check { .. }
+        | Command::Query { .. }
+        | Command::Search { .. }
+        | Command::Media { .. }
+        | Command::Memory { .. }
+        | Command::Context { .. }
+        | Command::Config { .. }
+        | Command::Debt { .. }
+        | Command::DebtDensity { .. }
+        | Command::ConfigSecrets { .. }
+        | Command::Coupling { .. }
+        | Command::Path { .. }
+        | Command::Links { .. }
+        | Command::Export { .. }
+        | Command::Load { .. }
+        | Command::Import { .. }
+        | Command::Render { .. }
+        | Command::Spec { .. } => false,
+        #[cfg(feature = "remote")]
+        Command::Remote { .. } => false,
+        #[cfg(feature = "inference")]
+        Command::Infer { .. } | Command::Duplicates { .. } => false,
+        #[cfg(feature = "models")]
+        Command::Model { .. } => false,
+        #[cfg(feature = "execution")]
+        Command::Lint { .. } | Command::Security { .. } | Command::Sandbox { .. } => false,
+    }
+}
+
 // `main` is a one-arm-per-subcommand dispatcher; splitting the match further just
 // scatters the CLI wiring, so the line-count lint is noise here.
 #[allow(clippy::too_many_lines)]
@@ -1857,6 +1921,31 @@ fn main() -> anyhow::Result<()> {
     // hence the `sigpipe` wrapper rather than a raw `libc::signal` call.)
     sigpipe::reset();
     let cli = Cli::parse();
+    // Handle SIGHUP for every long-lived server, **as early as the command is
+    // known**. Its default disposition *terminates the process*, so this is first
+    // a safety measure and only second a reload trigger: `explorer` and
+    // single-repo `serve`/`mcp` installed no handler at all and died on the
+    // signal with exit 129.
+    //
+    // Two placement decisions, both about how small the fatal window is.
+    //
+    // *Here, not in each server's build.* One call driven by
+    // `is_long_lived_server`'s exhaustive match is what stops the three server
+    // paths drifting apart again, which is how this happened; what the signal
+    // then *does* is registered later by whichever path builds the workspaces
+    // (`register_workspace_reload` / `register_no_reload`), and a signal arriving
+    // before that says so rather than exiting.
+    //
+    // *Immediately after `parse`, not after the setup below.* Config loading,
+    // telemetry init and the engine guards all read the filesystem; putting the
+    // install after them would leave SIGHUP fatal for all of it. What remains is
+    // process start plus clap's own parse — a server signalled that early has not
+    // yet printed a word, and the reported defect is signalling a *running*
+    // server, which is now covered completely.
+    #[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+    if is_long_lived_server(&cli.command) {
+        install_signal_reload();
+    }
     // Load layered config once (project `roteiro.toml` + user `~/.roteiro/
     // config.toml`); a malformed file is a hard error for any command (ADR-0007).
     let cwd = std::env::current_dir()?;
@@ -11362,10 +11451,11 @@ fn run_explorer(
     // configured (the common single-repo case), fall back to hosting the current
     // directory's repo alone, so `roteiro explorer` "just works" with no config.
     let resolved = cfg.resolved_workspaces()?;
-    let set = if resolved.is_empty() {
-        explorer_cwd_set()?
-    } else {
+    let from_config = !resolved.is_empty();
+    let set = if from_config {
         rto_graph::WorkspaceSet::from_resolved(resolved.clone())?
+    } else {
+        explorer_cwd_set()?
     };
     if set.names().is_empty() {
         // Same depth diagnostic `serve`/`mcp` give (issue #580): a root scanned
@@ -11393,6 +11483,18 @@ fn run_explorer(
     // configured workspace resolves itself, so `None` is fine there (see
     // `WorkspaceSet::select`).
     let default = explorer_default_workspace(&set, workspace_name);
+    // `explorer` is the surface that literally displays the repo list to a
+    // person, and it installed no SIGHUP handler at all — the signal killed it.
+    // It holds no flattened workspace, so `set` is the whole of what it serves
+    // and the whole of what a reload has to swap.
+    if from_config {
+        register_workspace_reload(&set, None, cfg.clone(), Vec::new());
+    } else {
+        register_no_reload(
+            "this explorer hosts the current repository alone; configure \
+             `[[workspaces]]` for a reloadable set",
+        );
+    }
     serve_graph_ui(cfg, "explorer", set, default, addr)
 }
 
@@ -11489,7 +11591,7 @@ fn explorer_default_workspace(
     }
     // Reuse the one place the on-disk `<repo>/.git/roteiro/graph.db` layout lives.
     let db = graph_db_path(&std::env::current_dir().ok()?).ok()?;
-    set.containing(&db).map(str::to_owned)
+    set.containing(&db)
 }
 
 /// The resolved MCP tool restriction a `serve`/`mcp` process carries (issue #584).
@@ -11929,6 +12031,13 @@ fn build_serve_workspaces(
             flat.clone(),
             flat.is_multi(),
         ));
+        // Nothing here is derived from config, so there is no root to re-scan —
+        // but SIGHUP must still be *answered*, because its default disposition
+        // used to kill this exact path (exit 129).
+        register_no_reload(
+            "this server hosts the current repository alone; pass `--workspace <ROOT>` or \
+             configure `[[workspaces]]` for a reloadable set",
+        );
         return Ok(ServeWorkspaces { set, flat });
     }
 
@@ -11989,7 +12098,10 @@ fn build_serve_workspaces(
     for note in scanned_roots_note(&effective) {
         eprintln!("{note}");
     }
-    install_workspace_reload(&flat, cfg.clone(), workspace_roots.to_vec());
+    // Both surfaces, from one snapshot: `set` backs `/v1/graph/*` and the UI,
+    // `flat` backs the model tools, `/v1/{project}/…` and the MCP router. Reloading
+    // only `flat` is what made a SIGHUP log three projects and serve two.
+    register_workspace_reload(&set, Some(&flat), cfg.clone(), workspace_roots.to_vec());
     Ok(ServeWorkspaces { set, flat })
 }
 
@@ -12230,70 +12342,331 @@ fn sync_project_graph(
     Ok(())
 }
 
-/// Install a SIGHUP handler that re-scans the workspace roots and reloads the
-/// registry in place, so a running server picks up added/removed repos without a
-/// restart (ADR-0008). Runs on a dedicated thread with its own tokio runtime,
-/// independent of the serve runtime; reload is thread-safe (the `Workspace`
-/// serialises its own state). Best-effort: if SIGHUP cannot be registered, the
-/// server still runs, just without live reload.
+// ---------------------------------------------------------------------------
+// SIGHUP: one install, on every long-lived server
+// ---------------------------------------------------------------------------
+//
+// SIGHUP's **default disposition terminates the process**. So the question a
+// server has to answer is not "can I reload?" but "is the signal handled at
+// all?" — and the two answers had drifted apart: the handler was installed at
+// the tail of `build_serve_workspaces`, which `roteiro explorer` never calls and
+// which the single-repo `serve`/`mcp` fallback returns before reaching. Both
+// died on SIGHUP with exit 129.
+//
+// Hence the split below. **Installing** the handler is unconditional for every
+// long-lived server ([`is_long_lived_server`], consulted in `main` before
+// dispatch), so the signal can never be fatal. **Registering what it does** is
+// the server path's business: a path with a reloadable workspace registers a
+// reload, a path with a fixed set of repos registers why it has nothing to do.
+// Nothing to reload is then a printed sentence, not a dead process.
+
+/// What SIGHUP does for this process, registered by whichever server path built
+/// the workspaces. Boxed rather than typed because the two server shapes close
+/// over different things (a [`rto_graph::WorkspaceSet`] alone for `explorer`, a
+/// set *and* a flattened [`rto_graph::Workspace`] for `serve`/`mcp`).
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+type ReloadHook = Box<dyn Fn() + Send + 'static>;
+
+/// The process's single SIGHUP action. One slot, not a list: a process runs one
+/// server, and the whole point of this change is that its surfaces reload
+/// *together* rather than one hook per surface drifting apart again.
+///
+/// The signal thread holds this lock for the duration of the reload, which
+/// serialises two SIGHUPs arriving in quick succession — so a `plan`/`apply`
+/// pair can never interleave with another reload's.
 #[cfg(all(unix, any(feature = "mcp", feature = "serve", feature = "explorer")))]
-fn install_workspace_reload(
-    ws: &std::sync::Arc<rto_graph::Workspace>,
-    cfg: config::Config,
-    cli_roots: Vec<String>,
-) {
-    let ws = ws.clone();
-    std::thread::spawn(move || {
-        // A current-thread runtime with just the I/O driver — all unix signal
-        // handling needs (no timers), keeping this self-contained.
-        let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-            .enable_io()
-            .build()
-        else {
+static RELOAD_HOOK: std::sync::Mutex<Option<ReloadHook>> = std::sync::Mutex::new(None);
+
+/// Record what SIGHUP should do for this process (see [`RELOAD_HOOK`]).
+#[cfg(all(unix, any(feature = "mcp", feature = "serve", feature = "explorer")))]
+fn set_reload_hook(hook: ReloadHook) {
+    if let Ok(mut slot) = RELOAD_HOOK.lock() {
+        *slot = Some(hook);
+    }
+}
+
+/// On non-Unix there is no SIGHUP, so there is nothing to run: the hook is
+/// dropped and the hosted set is fixed for the process's lifetime.
+#[cfg(all(
+    not(unix),
+    any(feature = "mcp", feature = "serve", feature = "explorer")
+))]
+fn set_reload_hook(_hook: ReloadHook) {}
+
+/// Watch SIGHUP for the rest of the process, running whatever
+/// [`set_reload_hook`] has registered (or saying that nothing has).
+///
+/// Called from `main` **before dispatch**, for every long-lived server, so the
+/// signal is handled from the moment the command is known — including during the
+/// seconds a first `serve` spends building a graph, which is exactly when an
+/// operator is most likely to poke it. Runs on a dedicated thread with its own
+/// current-thread tokio runtime, independent of any serve runtime. Best-effort:
+/// if SIGHUP cannot be watched, the server still runs (and the signal reverts to
+/// its fatal default, which is reported).
+#[cfg(all(unix, any(feature = "mcp", feature = "serve", feature = "explorer")))]
+fn install_signal_reload() {
+    // A current-thread runtime with just the I/O driver — all unix signal handling
+    // needs (no timers), keeping this self-contained.
+    //
+    // A failure here must be *said*, not swallowed: this function's first job is
+    // to stop the signal killing the server, so returning quietly would leave the
+    // exact defect this change exists to remove, with nothing on stderr to
+    // explain the next exit 129.
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!(
+                "warning: cannot start the SIGHUP watcher ({e}) — the signal keeps its \
+                 default disposition and will terminate this server"
+            );
             return;
-        };
+        }
+    };
+    // Register the OS handler **synchronously, before returning**. This call is
+    // what replaces SIGHUP's fatal default disposition, so doing it on the calling
+    // thread closes the window a bare `thread::spawn` would leave open — during
+    // which a signal would still kill the process, which is the whole defect. Only
+    // the *waiting* moves to the background thread below.
+    let mut hup = match rt
+        .block_on(async { tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) })
+    {
+        Ok(sig) => sig,
+        Err(e) => {
+            eprintln!(
+                "warning: cannot watch SIGHUP ({e}) — the signal keeps its default \
+                 disposition and will terminate this server"
+            );
+            return;
+        }
+    };
+    std::thread::spawn(move || {
         rt.block_on(async move {
-            let mut hup =
-                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
-                    Ok(sig) => sig,
-                    Err(e) => {
-                        eprintln!("workspace reload disabled (cannot watch SIGHUP): {e}");
-                        return;
-                    }
-                };
-            eprintln!("send SIGHUP to reload the workspace (pick up added/removed repos)");
             while hup.recv().await.is_some() {
-                // Re-derive the full repo set the same way startup did: every
-                // configured workspace's members (`resolved_workspaces()`) plus the
-                // additive `--workspace <ROOT>` paths — so a SIGHUP picks up repos
-                // added/removed across ALL workspaces, not just the legacy block.
-                let result = cfg
-                    .resolved_workspaces()
-                    .and_then(|resolved| resolved_repo_paths(&resolved, &cli_roots))
-                    .and_then(|paths| ws.reload_from(paths).map_err(anyhow::Error::from));
-                match result {
-                    Ok(names) => eprintln!(
-                        "workspace reloaded: {} project(s) — {}",
-                        names.len(),
-                        names.join(", ")
+                // Held across the call: two SIGHUPs cannot reload concurrently.
+                let Ok(hook) = RELOAD_HOOK.lock() else {
+                    eprintln!("SIGHUP ignored: the reload hook was poisoned by an earlier panic");
+                    continue;
+                };
+                match hook.as_ref() {
+                    Some(run) => run(),
+                    // No server path has registered one *yet*. Deliberately not
+                    // "this server hosts a fixed set of repos": the handler is
+                    // installed before dispatch and the hook only after the
+                    // workspaces are built, so this branch also covers a
+                    // reloadable server that is still starting — a `serve` still
+                    // building its graph can sit here for seconds. Claiming the
+                    // set is fixed would be the same kind of confident-but-wrong
+                    // message this change exists to remove. The paths that
+                    // genuinely cannot reload say so themselves, in
+                    // `register_no_reload`, where it is true.
+                    None => eprintln!(
+                        "SIGHUP: no reload registered — the server is still starting, or this \
+                         one hosts a set that cannot change; retry once it reports it is listening"
                     ),
-                    Err(e) => eprintln!("workspace reload failed (registry unchanged): {e}"),
                 }
             }
         });
     });
 }
 
-/// On non-Unix, SIGHUP reload is unavailable; the server runs without it.
+/// On non-Unix, SIGHUP does not exist; the hosted set is fixed at start.
 #[cfg(all(
     not(unix),
     any(feature = "mcp", feature = "serve", feature = "explorer")
 ))]
-fn install_workspace_reload(
-    _ws: &std::sync::Arc<rto_graph::Workspace>,
-    _cfg: config::Config,
-    _cli_roots: Vec<String>,
+fn install_signal_reload() {}
+
+/// Register the SIGHUP reload for a server holding a reloadable
+/// [`rto_graph::WorkspaceSet`] and, for `serve`/`mcp`, the flattened
+/// [`rto_graph::Workspace`] beside it (ADR-0008).
+///
+/// Both are re-derived from **one** `resolved_workspaces()` snapshot, which is
+/// the whole fix for the half-reload: `set` backs `/v1/graph/*` and the UI while
+/// `flat` backs the model tools, `/v1/{project}/…` and the MCP router, and before
+/// this only `flat` was reloaded — so the server logged "3 project(s)" and went
+/// on serving two.
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+fn register_workspace_reload(
+    set: &std::sync::Arc<rto_graph::WorkspaceSet>,
+    flat: Option<&std::sync::Arc<rto_graph::Workspace>>,
+    cfg: config::Config,
+    cli_roots: Vec<String>,
 ) {
+    let set = set.clone();
+    let flat = flat.cloned();
+    set_reload_hook(Box::new(move || {
+        match reload_workspaces(&set, flat.as_ref(), &cfg, &cli_roots) {
+            Ok(line) => eprintln!("workspace reloaded: {line}"),
+            // Two failures, deliberately not one message. "Registry unchanged"
+            // is a *claim*, and once a registry has been swapped it is a false
+            // one: the surfaces now disagree about which repos are hosted, which
+            // is the exact state this whole change exists to prevent — so it has
+            // to be reported rather than papered over with a reassuring line.
+            Err(ReloadFailure {
+                error,
+                applied: false,
+            }) => eprintln!("workspace reload failed, nothing changed: {error}"),
+            Err(ReloadFailure {
+                error,
+                applied: true,
+            }) => eprintln!(
+                "workspace reload failed PART-WAY: some of this server's views were already \
+                 swapped, so its surfaces may now disagree about which repos are hosted — \
+                 restart the server: {error}"
+            ),
+        }
+    }));
+    // The startup "tell": a server that prints this line has a live handler, and
+    // one that does not, does not — which is how the two broken paths were found.
+    // Unix-only, because off Unix there is no signal to send and the invitation
+    // would be a lie.
+    #[cfg(unix)]
+    eprintln!(
+        "send SIGHUP to reload the workspace (re-scans the configured roots for added/removed \
+         repos; config-file changes need a restart)"
+    );
+}
+
+/// Register SIGHUP as an explained no-op for a server whose hosted set cannot
+/// change: the single-repo `serve`/`mcp` fallback and `explorer`'s cwd fallback
+/// both host repos that no config names, so there is nothing to re-scan.
+///
+/// Deliberately silent at startup and talkative on the signal: this is the common
+/// single-repo path, and the person who needs the sentence is the one who just
+/// sent the signal and is watching for what it did.
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+fn register_no_reload(reason: &'static str) {
+    set_reload_hook(Box::new(move || {
+        eprintln!("SIGHUP: nothing to reload — {reason}");
+    }));
+}
+
+/// Why a SIGHUP reload stopped, and — the part that matters — whether it had
+/// already changed anything when it did.
+///
+/// A reload is two phases: a **plan** phase that only reads (config, root scans,
+/// git discovery), and an **apply** phase that swaps registries. A failure in the
+/// first leaves the server exactly as it was. A failure in the second does not:
+/// `set` may be swapped while `flat` is not, or some workspaces reloaded and
+/// others not, and the server is then inconsistent until it restarts. Those two
+/// need different sentences, because one of them is an instruction.
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+#[derive(Debug)]
+struct ReloadFailure {
+    /// What went wrong.
+    error: anyhow::Error,
+    /// Whether a registry had already been swapped when it did.
+    applied: bool,
+}
+
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+impl ReloadFailure {
+    /// A failure while planning: the server is untouched.
+    fn planning(error: impl Into<anyhow::Error>) -> Self {
+        Self {
+            error: error.into(),
+            applied: false,
+        }
+    }
+
+    /// A failure while applying: at least one registry may already have been
+    /// swapped, so the server may be inconsistent until it restarts.
+    fn applying(error: impl Into<anyhow::Error>) -> Self {
+        Self {
+            error: error.into(),
+            applied: true,
+        }
+    }
+}
+
+/// Re-derive the hosted repo set and swap it into both surfaces, returning the
+/// startup line's own shape so the log and the API can be compared directly.
+///
+/// **Consistency.** `set` and `flat` are two registries with two locks, so they
+/// cannot be swapped in one atomic step. What is guaranteed instead:
+///
+/// 1. *Same content.* One `resolved_workspaces()` and — since the flat plan is
+///    built from `SetReloadPlan::repo_paths` — literally one walk of the roots,
+///    so the two cannot disagree because the filesystem moved between two scans.
+/// 2. *Adjacent swaps.* Every root scan and git discovery happens in the two
+///    `plan_reload` calls; the two `apply_reload` calls that follow take a lock
+///    and swap, with no I/O between them. The window in which one surface is new
+///    and the other old is a pair of lock acquisitions.
+/// 3. *No request straddles it.* A given request reads one surface —
+///    `/v1/graph/*` and the UI read `set`; `/v1/{project}/…`, the model tools and
+///    the MCP router read `flat` — so no single response can be internally
+///    inconsistent. Two requests microseconds apart could still see either side
+///    of the swap, which is the same window a reload has always had.
+/// 4. *Serialised.* The signal thread holds [`RELOAD_HOOK`] for the whole call,
+///    so two SIGHUPs cannot interleave their plan/apply pairs.
+///
+/// **Config is not re-read.** `cfg` is the configuration this process started
+/// with, on purpose. The roots are re-scanned every time (a repo added under a
+/// configured root *is* picked up), but a workspace added to the config file is
+/// not, and needs a restart. Re-reading would silently apply the handful of keys
+/// that can still take effect while ignoring the many consumed at startup —
+/// `[serve] addr`, the TLS pair, the MCP surface, `[models]` pins — which is the
+/// same confirming-message-beside-stale-data shape this whole change exists to
+/// remove. It would also let an edit to a file change a running server's remote
+/// grant, which ADR-0019 v1.2 decides once per invocation on purpose.
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+fn reload_workspaces(
+    set: &rto_graph::WorkspaceSet,
+    flat: Option<&std::sync::Arc<rto_graph::Workspace>>,
+    cfg: &config::Config,
+    cli_roots: &[String],
+) -> Result<String, ReloadFailure> {
+    // One filesystem view, shared by both registries (point 1 above).
+    let effective = fold_cli_roots(
+        cfg.resolved_workspaces().map_err(ReloadFailure::planning)?,
+        cli_roots,
+    );
+    // All the I/O, before either swap (point 2) — and it is **one** walk, not
+    // one per surface: the flat plan is built from the very paths the set's own
+    // discovery found (`SetReloadPlan::repo_paths`). Scanning the roots a second
+    // time would be a second filesystem view, and a repo created between the two
+    // would land in one surface and not the other — a smaller instance of the
+    // disagreement this whole change removes.
+    let set_plan = set
+        .plan_reload(effective)
+        .map_err(ReloadFailure::planning)?;
+    let flat_plan = flat
+        .map(|_| rto_graph::Workspace::plan_reload(set_plan.repo_paths()))
+        .transpose()
+        .map_err(ReloadFailure::planning)?;
+    // Adjacent swaps, no I/O between them. From here a failure has already
+    // changed something, so it is reported as such rather than as "unchanged".
+    let ws_names = set
+        .apply_reload(set_plan)
+        .map_err(ReloadFailure::applying)?;
+    let projects = match (flat, flat_plan) {
+        (Some(flat), Some(plan)) => flat.apply_reload(plan).map_err(ReloadFailure::applying)?,
+        // `explorer` has no flattened view; report what the set now hosts.
+        _ => set_project_names(set),
+    };
+    Ok(format!(
+        "{} workspace(s) [{}] — {} project(s) — {}",
+        ws_names.len(),
+        ws_names.join(", "),
+        projects.len(),
+        projects.join(", ")
+    ))
+}
+
+/// Every project hosted anywhere in `set`, deduplicated and in stable order —
+/// the set-side counterpart of the flattened workspace's `names()`, and the value
+/// a guard compares against it to prove the two surfaces agree.
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+fn set_project_names(set: &rto_graph::WorkspaceSet) -> Vec<String> {
+    set.workspace_handles()
+        .into_iter()
+        .flat_map(|(_, ws)| ws.names())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 /// Serve the graph over the Model Context Protocol, over stdio (default) or
@@ -19351,6 +19724,232 @@ mod serve_workspace_paths_tests {
             vec!["alpha".to_owned(), "beta".to_owned(), "gamma".to_owned()],
             "each repo is hosted exactly once across all groups + cli roots"
         );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+}
+
+/// A SIGHUP reload must move **both** of a `serve`/`mcp` process's workspace
+/// views, not one of them.
+///
+/// The end-to-end version of this lives in `tests/sighup_cli.rs`; this is the
+/// same property at the seam, where it can be stated as an equality rather than
+/// inferred from two HTTP responses. It is deliberately a *comparison*: a test
+/// asserting only "the flat view now has three projects" passes on the tree this
+/// change fixes, because the flat view was the half that always reloaded.
+#[cfg(all(test, any(feature = "mcp", feature = "serve", feature = "explorer")))]
+mod sighup_reload_tests {
+    use super::{fold_cli_roots, reload_workspaces, resolved_repo_paths, set_project_names};
+    use std::sync::Arc;
+
+    /// A git repo with one commit at `dir`.
+    fn repo(dir: &std::path::Path) {
+        std::fs::create_dir_all(dir).expect("mkdir");
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "init.defaultBranch=main",
+                    "-c",
+                    "user.email=t@example.com",
+                    "-c",
+                    "user.name=T",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .current_dir(dir)
+                .status()
+                .expect("run git");
+            assert!(status.success(), "git {args:?} in {}", dir.display());
+        };
+        git(&["init", "-q"]);
+        std::fs::write(dir.join("README.md"), "# fixture\n").expect("write");
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "seed"]);
+    }
+
+    #[test]
+    fn reload_leaves_the_graph_set_and_the_flat_view_hosting_the_same_projects() {
+        let base = std::env::temp_dir().join(format!("rto-sighup-unit-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        let root = base.join("ws");
+        std::fs::create_dir_all(&root).expect("mkdir root");
+        for name in ["one", "two"] {
+            repo(&root.join(name));
+        }
+
+        // The two views a `serve`/`mcp` process holds, built exactly as
+        // `build_serve_workspaces` builds them: `set` backs `/v1/graph/*` and the
+        // served UI, `flat` backs the model tools, `/v1/{project}/…` and the MCP
+        // router.
+        let cfg = crate::config::Config {
+            workspace: crate::config::WorkspaceConfig {
+                roots: Some(vec![root.to_string_lossy().into_owned()]),
+                repos: None,
+            },
+            ..crate::config::Config::default()
+        };
+        let effective = fold_cli_roots(cfg.resolved_workspaces().expect("resolve"), &[]);
+        let set =
+            Arc::new(rto_graph::WorkspaceSet::from_resolved(effective.clone()).expect("build set"));
+        let flat = Arc::new(
+            rto_graph::Workspace::from_repo_paths(
+                resolved_repo_paths(&effective, &[]).expect("paths"),
+            )
+            .expect("build flat"),
+        );
+        assert_eq!(set_project_names(&set), flat.names(), "built in step");
+
+        // A third repo appears under the already-configured root.
+        repo(&root.join("three"));
+
+        // A reload plans the flat view from the set's own discovery
+        // (`SetReloadPlan::repo_paths`) rather than walking the roots a second
+        // time — one filesystem view instead of two, so a repo created between
+        // the walks cannot land in one surface and not the other. That is only
+        // sound if the two derivations agree about what is hosted, which they
+        // must, because one is `resolved_repo_paths` and the other is the set's
+        // group discovery. Assert it rather than assume it: they are separate
+        // functions and could drift.
+        let plan = set.plan_reload(effective.clone()).expect("plan");
+        let via_set = rto_graph::Workspace::from_repo_paths(plan.repo_paths())
+            .expect("flat from the set's discovery")
+            .names();
+        let via_resolved = rto_graph::Workspace::from_repo_paths(
+            resolved_repo_paths(&effective, &[]).expect("paths"),
+        )
+        .expect("flat from resolved_repo_paths")
+        .names();
+        assert_eq!(
+            via_set, via_resolved,
+            "the flat view must host the same projects whether its paths come \
+             from the set's own discovery or from `resolved_repo_paths` — the \
+             single-walk reload depends on the two agreeing"
+        );
+        drop(plan);
+
+        let line = reload_workspaces(&set, Some(&flat), &cfg, &[]).expect("reload");
+
+        let expected = vec!["one".to_owned(), "three".to_owned(), "two".to_owned()];
+        assert_eq!(
+            flat.names(),
+            expected,
+            "the flat view must pick up the added repo"
+        );
+        // The assertion that fails on the pre-fix tree: only `flat` was reloaded,
+        // so the graph API went on serving two projects while the log said three.
+        assert_eq!(
+            set_project_names(&set),
+            expected,
+            "the WorkspaceSet behind `/v1/graph/*` and the explorer UI must be \
+             reloaded too — reloading only the flat view is what made the server \
+             report three projects and serve two"
+        );
+        assert_eq!(
+            set_project_names(&set),
+            flat.names(),
+            "the two views must never disagree after a reload"
+        );
+        // And the line the server prints has to describe what it actually serves.
+        assert!(
+            line.contains("3 project(s) — one, three, two"),
+            "reload line should name what is now hosted, got: {line}"
+        );
+
+        // A repo removed from the root is dropped from both views.
+        std::fs::remove_dir_all(root.join("two")).expect("rm repo");
+        reload_workspaces(&set, Some(&flat), &cfg, &[]).expect("reload after removal");
+        let shrunk = vec!["one".to_owned(), "three".to_owned()];
+        assert_eq!(flat.names(), shrunk);
+        assert_eq!(set_project_names(&set), shrunk);
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// A reload that fails while **planning** must leave both views exactly as
+    /// they were, and must say so.
+    ///
+    /// The failure line is a claim about state, and the previous one — "registry
+    /// unchanged" — was printed for every failure including those that had
+    /// already swapped a registry. A false reassurance in the one message an
+    /// operator reads after a failed reload is the same defect as a reload log
+    /// that disagrees with the API, so the two cases are now separate sentences
+    /// and this pins the safe one: nothing applied, nothing changed.
+    #[test]
+    fn a_reload_that_fails_while_planning_changes_nothing() {
+        let base = std::env::temp_dir().join(format!("rto-sighup-plan-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        let root = base.join("ws");
+        std::fs::create_dir_all(&root).expect("mkdir root");
+        repo(&root.join("alpha"));
+
+        let cfg = crate::config::Config {
+            workspace: crate::config::WorkspaceConfig {
+                roots: Some(vec![root.to_string_lossy().into_owned()]),
+                repos: None,
+            },
+            ..crate::config::Config::default()
+        };
+        let effective = fold_cli_roots(cfg.resolved_workspaces().expect("resolve"), &[]);
+        let set =
+            Arc::new(rto_graph::WorkspaceSet::from_resolved(effective.clone()).expect("build set"));
+        let flat = Arc::new(
+            rto_graph::Workspace::from_repo_paths(
+                resolved_repo_paths(&effective, &[]).expect("paths"),
+            )
+            .expect("build flat"),
+        );
+        let before = flat.names();
+
+        // The configured root disappears, so discovery — which is the whole of
+        // the plan phase — fails before anything is swapped.
+        std::fs::remove_dir_all(&root).expect("remove root");
+        let failure = reload_workspaces(&set, Some(&flat), &cfg, &[])
+            .expect_err("a vanished root must fail the reload");
+        assert!(
+            !failure.applied,
+            "a failure while planning must not claim anything was applied — that \
+             is what makes \"nothing changed\" safe to print"
+        );
+        assert_eq!(flat.names(), before, "the flat view must be untouched");
+        assert_eq!(
+            set_project_names(&set),
+            before,
+            "the graph API's view must be untouched too"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// `explorer` holds no flattened view, so its reload has to work from the set
+    /// alone — the path that had no SIGHUP handler at all before this change.
+    #[test]
+    fn reload_without_a_flat_view_still_moves_the_set() {
+        let base = std::env::temp_dir().join(format!("rto-sighup-solo-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        let root = base.join("ws");
+        std::fs::create_dir_all(&root).expect("mkdir root");
+        repo(&root.join("alpha"));
+
+        let cfg = crate::config::Config {
+            workspace: crate::config::WorkspaceConfig {
+                roots: Some(vec![root.to_string_lossy().into_owned()]),
+                repos: None,
+            },
+            ..crate::config::Config::default()
+        };
+        let effective = fold_cli_roots(cfg.resolved_workspaces().expect("resolve"), &[]);
+        let set = Arc::new(rto_graph::WorkspaceSet::from_resolved(effective).expect("build set"));
+        assert_eq!(set_project_names(&set), vec!["alpha".to_owned()]);
+
+        repo(&root.join("beta"));
+        let line = reload_workspaces(&set, None, &cfg, &[]).expect("reload");
+        assert_eq!(
+            set_project_names(&set),
+            vec!["alpha".to_owned(), "beta".to_owned()]
+        );
+        assert!(line.contains("2 project(s) — alpha, beta"), "got: {line}");
 
         std::fs::remove_dir_all(&base).ok();
     }
