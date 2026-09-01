@@ -191,53 +191,7 @@ fn a_path_that_is_not_a_bundle_is_refused_by_name() {
     );
 }
 
-/// **The gated actions parse and refuse by name in a build without the feature.**
-///
-/// This is the whole reason the clap variants are declared unconditionally.
-/// Gating the variant instead is how a documented command shipped invisible to
-/// crates.io users as `unrecognized subcommand` — recorded against `security
-/// run` and `lint`, and not worth a third instance.
-///
-/// The whole message is asserted, not a substring: a refusal that named the
-/// feature but not the rebuild command, or that failed to say what this build
-/// *can* still do, would satisfy a `contains` and leave the reader stuck.
-#[cfg(not(feature = "okf-validate"))]
-#[test]
-fn validate_and_lint_refuse_by_name_without_their_feature() {
-    for (action, expected) in [
-        (
-            "validate",
-            "Error: `roteiro okf validate` needs the `okf-validate` feature, which this build \
-             does not have; rebuild with `--features okf-validate`. It is off by default because \
-             the validator costs 73 additional crates, against one for everything else under \
-             `okf`. Without it this build can still run `okf trust`, `okf links` and `okf diff`, \
-             which between them cover tiers, link resolution and drift.\n",
-        ),
-        (
-            "lint",
-            "Error: `roteiro okf lint` needs the `okf-validate` feature, which this build does \
-             not have; rebuild with `--features okf-validate`. It shares that feature with `okf \
-             validate` because both come from one crate whose dependencies are not optional, so \
-             the hygiene rules cannot be had without the conformance checker. Without it this \
-             build can still run `okf trust`, `okf links` and `okf diff`.\n",
-        ),
-    ] {
-        let out = roteiro(&["okf", action, "."]);
-        assert_eq!(
-            out.status.code(),
-            Some(1),
-            "`okf {action}` must fail, not silently do nothing"
-        );
-        assert_eq!(
-            String::from_utf8(out.stderr).expect("utf-8"),
-            expected,
-            "`okf {action}` must name the feature, the rebuild, and the alternative"
-        );
-    }
-}
-
-/// With the feature, both actions run and are wired to *different* checks.
-#[cfg(feature = "okf-validate")]
+/// `validate` and `lint` are wired to *different* checks.
 #[test]
 fn validate_and_lint_are_wired_to_different_checks() {
     let root = two_tier_bundle("validate");

@@ -1221,14 +1221,17 @@ enum Command {
 /// reading one and deserves its own decision rather than arriving as a
 /// side-effect of this one.
 ///
-/// # Two of these need a feature, and three do not
+/// # All five ship in a stock build, and two of them are not cheap
 ///
 /// `trust`, `links` and `diff` come from `okf-core`, which has zero
 /// dependencies. `validate` and `lint` come from `okf-validator`, which is worth
-/// 73 crates, so they need `--features okf-validate` and say so by name when
-/// they do not have it. Every variant is declared unconditionally: a documented
-/// command that answers `unrecognized subcommand` in a stock build is the defect
-/// `security run` and `lint` already record.
+/// 73 crates and raises the workspace MSRV to 1.96.
+///
+/// That cost was weighed and accepted rather than gated. Roteiro both writes OKF
+/// and reads it, so an independent conformance checker is the only thing here
+/// that can disagree with us about our own output — and a check shipped off by
+/// default is a check almost nobody runs. Gating it would have made the cheap
+/// answer differ from the valuable one.
 #[derive(Subcommand)]
 enum OkfAction {
     /// What the bundle claims about its own trustworthiness: §5.3's tier per
@@ -1284,7 +1287,7 @@ enum OkfAction {
     },
     /// Check a bundle for conformance with the OKF v0.2 specification.
     ///
-    /// Needs `--features okf-validate`. Deterministic: `stale_after` is checked
+    /// Deterministic: `stale_after` is checked
     /// for syntax but never against the clock, so a bundle that validates today
     /// validates tomorrow — a check whose result depends on when it ran cannot
     /// be a gate. Exits non-zero on a conformance **error**; warnings do not
@@ -1299,9 +1302,9 @@ enum OkfAction {
     },
     /// Check a bundle against the hygiene rules (`L1`..`L12`).
     ///
-    /// Needs `--features okf-validate`. A different question from `validate`:
-    /// conformance asks whether the bundle *is* OKF, linting asks whether it is
-    /// *good* OKF. They share a feature only because they share a crate.
+    /// A different question from `validate`: conformance asks whether the bundle
+    /// *is* OKF, linting asks whether it is *good* OKF. Two entry points into one
+    /// crate, which is why neither could ever have been had without the other.
     Lint {
         /// The bundle directory.
         path: String,
@@ -6415,7 +6418,6 @@ fn run_okf_diff(before: &str, after: &str, json: bool) -> anyhow::Result<()> {
 
 /// Print a validator report and gate on its errors. Shared by `validate` and
 /// `lint`, which differ in the entry point they call and in nothing else.
-#[cfg(feature = "okf-validate")]
 fn print_okf_findings(
     report: &rto_render::okf::inspect::CheckReport,
     json: bool,
@@ -6447,46 +6449,15 @@ fn print_okf_findings(
 }
 
 /// `roteiro okf validate` — conformance against the specification.
-#[cfg(feature = "okf-validate")]
 fn run_okf_validate(path: &str, json: bool) -> anyhow::Result<()> {
     let report = rto_render::okf::inspect::validate_report(okf_bundle_root(path)?)?;
     print_okf_findings(&report, json)
 }
 
-/// The same command in a build without `okf-validate`: a refusal that names the
-/// feature and what this build *can* still answer.
-///
-/// A runtime error rather than a `cfg` on the clap variant, for the reason
-/// `security run` and `lint` record — gating the variant is how a documented
-/// command shipped invisible to crates.io users as `unrecognized subcommand`.
-#[cfg(not(feature = "okf-validate"))]
-fn run_okf_validate(_path: &str, _json: bool) -> anyhow::Result<()> {
-    anyhow::bail!(
-        "`roteiro okf validate` needs the `okf-validate` feature, which this build does not \
-         have; rebuild with `--features okf-validate`. It is off by default because the \
-         validator costs 73 additional crates, against one for everything else under `okf`. \
-         Without it this build can still run `okf trust`, `okf links` and `okf diff`, which \
-         between them cover tiers, link resolution and drift."
-    );
-}
-
 /// `roteiro okf lint` — the hygiene rules.
-#[cfg(feature = "okf-validate")]
 fn run_okf_lint(path: &str, json: bool) -> anyhow::Result<()> {
     let report = rto_render::okf::inspect::lint_report(okf_bundle_root(path)?)?;
     print_okf_findings(&report, json)
-}
-
-/// The same command in a build without `okf-validate`.
-#[cfg(not(feature = "okf-validate"))]
-fn run_okf_lint(_path: &str, _json: bool) -> anyhow::Result<()> {
-    anyhow::bail!(
-        "`roteiro okf lint` needs the `okf-validate` feature, which this build does not have; \
-         rebuild with `--features okf-validate`. It shares that feature with `okf validate` \
-         because both come from one crate whose dependencies are not optional, so the hygiene \
-         rules cannot be had without the conformance checker. Without it this build can still \
-         run `okf trust`, `okf links` and `okf diff`."
-    );
 }
 
 /// Every markdown file under an OKF bundle root, keyed by its bundle-relative

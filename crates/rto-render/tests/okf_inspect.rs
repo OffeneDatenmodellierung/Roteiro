@@ -237,7 +237,6 @@ fn a_path_that_is_not_a_bundle_is_refused_by_name() {
 
 /// The specification's own bundle is conformant, and Roteiro can say so without
 /// shelling out to another tool.
-#[cfg(feature = "okf-validate")]
 #[test]
 fn a_published_bundle_validates_as_conformant() {
     let report = inspect::validate_report(&fixture("acme_retail")).expect("load acme_retail");
@@ -262,7 +261,6 @@ fn a_published_bundle_validates_as_conformant() {
 /// Asserted by the label rather than by the findings: a bundle may legitimately
 /// carry hygiene warnings while being perfectly conformant, so pinning a count
 /// here would pin upstream's rule set rather than our wiring.
-#[cfg(feature = "okf-validate")]
 #[test]
 fn linting_is_reported_separately_from_conformance() {
     let root = fixture("acme_retail");

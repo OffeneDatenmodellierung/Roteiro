@@ -23,16 +23,18 @@
 //!
 //! # What is here, and what it costs
 //!
-//! The split is a dependency-cost boundary, not a taxonomy:
+//! The two crates behind this module differ in price by two orders of magnitude:
 //!
 //! | Surface | Crate | Cost |
 //! | --- | --- | --- |
 //! | [`trust_summary`], [`link_report`], [`diff_report`] | `okf-core` | **one crate**, zero transitive |
-//! | [`validate_report`], [`lint_report`] | `okf-validator` | 73 crates, behind `okf-validate` |
+//! | [`validate_report`], [`lint_report`] | `okf-validator` | **73 crates** |
 //!
-//! Everything reachable from `okf-core` alone is ungated because it is
-//! effectively free. See `Cargo.toml` for the measurement and ADR-0017 for the
-//! policy the adoption was argued under.
+//! Both are **unconditional**, which for the second was a decision rather than a
+//! default. It was behind a feature first, and the gate was removed on the
+//! reasoning that a conformance checker nobody enables checks nothing: the whole
+//! value of an independent implementation is that it runs. See `Cargo.toml` for
+//! the measurement and ADR-0017 for the policy the adoption was argued under.
 //!
 //! # Subcommand names are upstream's
 //!
@@ -49,10 +51,19 @@ use serde::Serialize;
 
 /// Why a bundle could not be inspected.
 ///
-/// One variant: every failure here is "the path is not a bundle we could load".
-/// The underlying [`okf_core::BundleError`] is rendered into the message rather
-/// than wrapped, so this type stays free of the dependency in its public shape.
+/// One variant today: every failure here is "the path is not a bundle we could
+/// load". The underlying [`okf_core::BundleError`] is rendered into the message
+/// rather than wrapped, so this type stays free of the dependency in its public
+/// shape.
+///
+/// `#[non_exhaustive]` because that set is closed by nothing but current
+/// implementation — unlike [`super::Actor`], whose three variants are closed by
+/// §7 of the specification and which is deliberately exhaustive for that reason.
+/// A second failure mode here (a bundle that loads but declares an OKF version
+/// this crate cannot read, say) is an ordinary addition, and these crates are
+/// published, so it must not be a breaking change.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum InspectError {
     /// The path could not be loaded as an OKF bundle.
     #[error("`{path}` is not a readable OKF bundle: {detail}")]
@@ -327,7 +338,6 @@ pub fn diff_report(before: &Path, after: &Path) -> Result<DiffReport, InspectErr
 }
 
 /// One finding from [`validate_report`] or [`lint_report`].
-#[cfg(feature = "okf-validate")]
 #[derive(Debug, Clone, Serialize)]
 pub struct Finding {
     /// `error`, `warning` or `info`.
@@ -346,7 +356,6 @@ pub struct Finding {
 }
 
 /// The findings from one check over a bundle.
-#[cfg(feature = "okf-validate")]
 #[derive(Debug, Clone, Serialize)]
 pub struct CheckReport {
     /// The bundle root, as the caller named it.
@@ -361,7 +370,6 @@ pub struct CheckReport {
     pub warnings: usize,
 }
 
-#[cfg(feature = "okf-validate")]
 impl CheckReport {
     /// `true` when nothing rose to `error`.
     ///
@@ -375,7 +383,6 @@ impl CheckReport {
 }
 
 /// Convert one of the validator's reports into ours.
-#[cfg(feature = "okf-validate")]
 fn findings(root: &Path, check: &'static str, report: &okf_validator::Report) -> CheckReport {
     use okf_validator::Severity;
     CheckReport {
@@ -410,7 +417,6 @@ fn findings(root: &Path, check: &'static str, report: &okf_validator::Report) ->
 /// # Errors
 ///
 /// [`InspectError::Unreadable`] if the path is not a loadable OKF bundle.
-#[cfg(feature = "okf-validate")]
 pub fn validate_report(root: &Path) -> Result<CheckReport, InspectError> {
     let bundle = load(root)?;
     Ok(findings(
@@ -429,7 +435,6 @@ pub fn validate_report(root: &Path) -> Result<CheckReport, InspectError> {
 /// # Errors
 ///
 /// [`InspectError::Unreadable`] if the path is not a loadable OKF bundle.
-#[cfg(feature = "okf-validate")]
 pub fn lint_report(root: &Path) -> Result<CheckReport, InspectError> {
     let bundle = load(root)?;
     Ok(findings(root, "lint", &okf_validator::lint_bundle(&bundle)))

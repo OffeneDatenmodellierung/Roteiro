@@ -78,14 +78,12 @@ serde_json = { workspace = true }
 # against *this* parser — a stronger proof than before, since this is the
 # parser a peer would actually read our bundles with.
 okf-core = "0.2.6"
-# `okf-validate`-only: independent conformance checking and hygiene linting of a
-# bundle (`roteiro okf validate` / `roteiro okf lint`).
+# Independent conformance checking and hygiene linting of a bundle
+# (`roteiro okf validate` / `roteiro okf lint`).
 #
-# Gated because it is expensive and, unlike `okf-core`, its cost is not
-# separable. Measured with `cargo tree -p rto-render -e normal`: the default
-# tree is 161 crates and this feature takes it to 234, so the gate is worth
-# **73 crates** — against **one** for `okf-core`, which is the whole reason the
-# two are treated differently.
+# **Not optional, by an explicit decision, and it is the expensive one.**
+# Measured with `cargo tree -p rto-render -e normal`: this crate's tree goes
+# from 161 to 234, so it is worth **73 crates** against **one** for `okf-core`.
 #
 # They are a *parallel* stack rather than reuse. It syntax-checks fenced code
 # blocks, parsing JavaScript/TypeScript with `oxc_parser` (15 `oxc_*` crates),
@@ -93,26 +91,22 @@ okf-core = "0.2.6"
 # this workspace already parses, with tree-sitter. What overlap there is is
 # generic plumbing (serde, syn, anyhow); nothing language-specific is shared.
 #
-# None of its dependencies is optional, so its conformance checking cannot be
-# taken without its syntax checking. That is a property of the dependency, not a
-# choice available to us.
-okf-validator = { version = "0.2.6", optional = true }
+# It was behind a feature until the cost was weighed against what it buys.
+# Roteiro both writes OKF and reads it, so an independent conformance checker is
+# the only thing in the workspace that can disagree with us about our own
+# output — and a check that ships off by default is a check almost nobody runs.
+# The gate would have made the cheap answer ("it built") differ from the
+# valuable one.
+#
+# Note also that none of its dependencies is optional, so its conformance
+# checking could never have been taken without its syntax checking; a
+# finer-grained gate was not on the table.
+#
+# **MSRV**: twelve `oxc_*` crates declare `rust-version = 1.96`, so this
+# dependency is what makes 1.96 the workspace floor.
+okf-validator = "0.2.6"
 
 [features]
-# Independent validation of an OKF bundle: `roteiro okf validate` (conformance,
-# against the specification) and `roteiro okf lint` (the L1..L12 hygiene rules).
-# Off by default, for the dependency cost recorded on `okf-validator` above.
-#
-# **Named for the capability, not the crate**, matching `mcp` (which gates
-# `rmcp`) and `execution` (which gates `rto-exec`). `validate` is the primary
-# subcommand and the one worth naming; `lint` rides along because the two live
-# in one crate with no feature separating them, so gating them apart would be a
-# promise the dependency cannot keep — the same reasoning ADR-0017 §5 applies to
-# a feature-scoped advisory ignore.
-#
-# Everything OKF that does **not** need this crate stays ungated: `roteiro okf
-# trust`, `okf links` and `okf diff` are all `okf-core`, which costs nothing.
-okf-validate = ["dep:okf-validator"]
 # MCP server support (`roteiro serve`), off by default — CLI-first. Adopts rmcp
 # (ADR-0002) for stdio + streamable-HTTP transports; entirely feature-gated so
 # the default build pulls none of it.
