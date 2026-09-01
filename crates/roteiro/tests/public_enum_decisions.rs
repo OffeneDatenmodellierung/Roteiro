@@ -91,7 +91,6 @@ const GRANDFATHERED: &[(&str, &str)] = &[
     ("crates/rto-graph/src/models.rs", "RangeKind"),
     ("crates/rto-graph/src/models.rs", "RangeReply<R>"),
     ("crates/rto-graph/src/models.rs", "ResourceTier"),
-    ("crates/rto-graph/src/provenance.rs", "Provenance"),
     ("crates/rto-graph/src/query.rs", "CouplingOrder"),
     ("crates/rto-graph/src/query.rs", "DensityOrder"),
     ("crates/rto-graph/src/query.rs", "RedactionState"),
