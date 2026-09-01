@@ -146,7 +146,7 @@ The comparison, against `okf-core` / `okf-validator` **0.2.6** (2026-08-27) on
 2026-09-01, over every bundle published in the specification's repository at
 commit `ad30107`:
 
-| Bundle | Concepts | `okf trust` | Roteiro's reader | |
+| Bundle | Concepts | `okf trust` | Roteiro's reader | Result |
 |---|---|---|---|---|
 | `acme_retail` | 9 | 8 human-reviewed, 1 unverified | 8 `external-authored`, 1 `external-inferred` | agree |
 | `ga4` | 9 | 9 unverified | 9 `external-inferred` | agree |
@@ -162,11 +162,22 @@ test encodes our own reading of §11.
 **What removing the oracle costs, and what covers it.** A check that runs once
 proves the code was right that day. Two of the four bundles are therefore
 vendored as fixtures, so the suite permanently exercises a *foreign* bundle — the
-thing phase 1 never did. What the fixtures cannot catch is a divergence in a
-shape no vendored bundle contains; `okf-validator` reading a fifth bundle
-differently would still be news. Re-running the comparison is one command
-(`cargo install okf`), and `okf::read`'s module documentation records exactly
-what to run.
+thing phase 1 never did, and the source of every defect this found.
+
+**The limit, stated so it is known rather than rediscovered:** the fixtures
+cannot catch a divergence in a YAML shape that no vendored bundle contains. That
+is not hypothetical. `stackoverflow` writes `tags: stackoverflow, posts,
+deprecated` — a bare comma-separated string where §4.1 asks for a list — in seven
+documents, and that bundle is *not* vendored. The oracle is how that shape was
+found at all; it is now pinned by
+`an_off_spec_shape_is_read_where_a_real_producer_writes_one`, but the **next**
+such shape has no tripwire and would be found the same way or not at all.
+
+So the standing advice is to re-run the comparison whenever the reader's parsing
+changes, or a new bundle is imported in anger. It is one command
+(`cargo install okf`), and `okf::read`'s module documentation records exactly what
+to run and what the answer was last time. That is discipline, not automation, and
+naming it as such is the point.
 
 ### What the four published bundles say about the spec
 
