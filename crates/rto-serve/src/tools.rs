@@ -248,8 +248,18 @@ fn unknown_argument(def: &ToolDef, arguments: &serde_json::Value) -> Option<Stri
     } else {
         format!("only {}", named(&takes))
     };
+    // Plural on the count, because this string's whole job is to make a silent
+    // failure legible to a model: "unknown argument `kind`, `limit`" reads as one
+    // argument with a strange name, which is a second thing to work out on top of
+    // the one being reported. The rest of the sentence states the rule rather
+    // than the offence, so it stays singular either way.
+    let noun = if unknown.len() == 1 {
+        "argument"
+    } else {
+        "arguments"
+    };
     Some(format!(
-        "unknown argument {} — `{}` takes {expected}. Nothing was run: an argument this \
+        "unknown {noun} {} — `{}` takes {expected}. Nothing was run: an argument this \
          tool does not declare is refused rather than ignored, because ignoring it would \
          answer a narrower question than the one you asked and give you no way to tell.",
         named(&unknown),
@@ -2459,6 +2469,62 @@ mod tests {
         let why =
             unknown_argument(&def, &serde_json::json!({ "project": "roteiro" })).expect("refused");
         assert!(why.contains("takes no arguments at all"), "{why}");
+    }
+
+    /// **The refusal is a sentence, and it is asserted as one — at both counts.**
+    ///
+    /// Pinned whole rather than by substring because this string is the entire
+    /// remedy: a model that sent the wrong key learns what it did and what to
+    /// send instead from these words and nowhere else. A substring check passes
+    /// on a sentence that has become unreadable around the fragment it looks for,
+    /// which is how the plural was wrong in the first place — "unknown argument
+    /// `kind`, `limit`" reads as one argument with a strange name, so the model
+    /// is handed a second thing to work out on top of the one being reported.
+    ///
+    /// Both counts, because one of them is what a naive fix regresses: hard-code
+    /// either form and exactly one of these two fails.
+    #[test]
+    fn the_refusal_agrees_in_number_with_what_was_refused() {
+        /// The half of the sentence that states the rule rather than the
+        /// offence. It is about *an* argument in the general sense, so it does
+        /// not move with the count.
+        const RULE: &str = "Nothing was run: an argument this tool does not declare is \
+                            refused rather than ignored, because ignoring it would answer \
+                            a narrower question than the one you asked and give you no way \
+                            to tell.";
+
+        let debt = ToolDef {
+            name: "debt".to_owned(),
+            description: "list intent-debt markers".to_owned(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "categories": { "type": "array", "items": { "type": "string" } },
+                    "project": { "type": "string" },
+                },
+                "additionalProperties": false,
+            }),
+        };
+
+        // One key: the cross-surface spelling, which is the measured defect.
+        assert_eq!(
+            unknown_argument(&debt, &serde_json::json!({ "kind": ["todo"] })), // roteiro:ignore
+            Some(format!(
+                "unknown argument `kind` — `debt` takes only `categories`, `project`. {RULE}"
+            )),
+        );
+
+        // Two keys: plural noun, both names, still one sentence.
+        assert_eq!(
+            unknown_argument(
+                &debt,
+                &serde_json::json!({ "kind": ["todo"], "limit": 5 }), // roteiro:ignore
+            ),
+            Some(format!(
+                "unknown arguments `kind`, `limit` — `debt` takes only `categories`, \
+                 `project`. {RULE}"
+            )),
+        );
     }
 
     // ---------------------------------------------------------------- #485 ---
