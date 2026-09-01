@@ -53,7 +53,10 @@ fn walk(root: &Path) -> Vec<(String, String)> {
             }
         }
     }
-    out.sort();
+    // By path only. Paths are unique within a bundle, so the content half never
+    // decides the order — it would only be compared, and these are whole
+    // markdown documents.
+    out.sort_by(|(a, _), (b, _)| a.cmp(b));
     out
 }
 
