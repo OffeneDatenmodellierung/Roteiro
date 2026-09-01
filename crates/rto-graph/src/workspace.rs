@@ -967,7 +967,18 @@ pub fn okf_bundle_in(repo_root: &Path) -> Option<PathBuf> {
     let rest = head
         .strip_prefix("---\n")
         .or_else(|| head.strip_prefix("---\r\n"))?;
-    let block = rest.split("\n---").next()?;
+    // The **closing** fence is required, not optional. `split(…).next()` returns
+    // the whole remainder when there is no `\n---`, which would make any
+    // `index.md` opening with `---` and mentioning `okf_version:` anywhere in
+    // the first 4 KiB read as a bundle — including in ordinary prose under an
+    // unterminated block. This probe exists to be *stricter* than "a directory
+    // called okf", and a false positive here is a consent prompt about something
+    // that is not a bundle, which teaches the reader to dismiss the prompt.
+    //
+    // The cost is a false negative on an index whose frontmatter does not close
+    // within the bounded read. A bundle root's frontmatter is a handful of
+    // lines, so that is the safe direction to be wrong in.
+    let (block, _) = rest.split_once("\n---")?;
     block
         .lines()
         .any(|line| {
@@ -2032,6 +2043,59 @@ mod tests {
             "`limit` bounds the directories examined, not the ones reported",
         );
         assert!(scan.nested_repo_parents(0).is_empty());
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn a_bundle_is_a_closed_frontmatter_declaring_okf_version() {
+        let base = std::env::temp_dir().join(format!("rto-okfprobe-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+
+        let write = |repo: &str, index: &str| {
+            let dir = base.join(repo).join(super::OKF_BUNDLE_DIR);
+            std::fs::create_dir_all(&dir).expect("mkdir");
+            std::fs::write(dir.join("index.md"), index).expect("write");
+            base.join(repo)
+        };
+
+        let good = write("good", "---\nokf_version: \"0.2\"\n---\n\n# Peer\n");
+        assert_eq!(
+            super::okf_bundle_in(&good),
+            Some(good.join(super::OKF_BUNDLE_DIR))
+        );
+
+        // A directory called `okf` proves nothing.
+        let plain = write("plain", "# Just some notes\n");
+        assert_eq!(super::okf_bundle_in(&plain), None);
+
+        // No closing fence: `okf_version` here is prose under an unterminated
+        // block, not a declaration. Reported by Copilot on #711 — the earlier
+        // `split(…).next()` accepted it.
+        //
+        // The line must be a *bare* `okf_version:` at the start of a line, not
+        // prose mentioning it: the reader matches on the key before the first
+        // colon, so "we should set okf_version: 0.2" never matched anyway and a
+        // fixture using it proved nothing. This is an `index.md` whose
+        // frontmatter is unterminated and whose body shows an example block —
+        // an ordinary thing for a directory documenting the format.
+        let unterminated = write(
+            "unterminated",
+            "---\ntitle: notes\n\nAn example bundle root looks like:\n\nokf_version: \"0.2\"\n",
+        );
+        assert_eq!(super::okf_bundle_in(&unterminated), None);
+
+        // Frontmatter that closes but declares nothing.
+        let no_version = write("no-version", "---\ntitle: notes\n---\n\n# Notes\n");
+        assert_eq!(super::okf_bundle_in(&no_version), None);
+
+        // An empty value is not a declaration either.
+        let empty = write("empty", "---\nokf_version:\n---\n\n# Notes\n");
+        assert_eq!(super::okf_bundle_in(&empty), None);
+
+        // No bundle directory at all.
+        std::fs::create_dir_all(base.join("none")).expect("mkdir");
+        assert_eq!(super::okf_bundle_in(&base.join("none")), None);
 
         std::fs::remove_dir_all(&base).ok();
     }

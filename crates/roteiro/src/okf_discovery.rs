@@ -143,15 +143,24 @@ pub fn referenced_peers(store: &Store) -> anyhow::Result<BTreeSet<String>> {
 
 /// Screen every bundle `store` references and pair it with the recorded answer.
 ///
-/// Bundles whose answer holds are **excluded**: the whole point of recording is
-/// that they are not raised again. What comes back is the set somebody has to
-/// decide about.
+/// **Bundles whose answer holds come back too**, tagged
+/// [`ConsentState::Holds`]. They are not raised with the operator again — that
+/// is what recording is for — but the caller still has work to do for them: a
+/// recorded `trust` is a **standing grant to keep reading that peer**, not
+/// permission to read them exactly once.
+///
+/// Filtering them out here was the original shape and it was wrong. It meant
+/// that after the first answer, no later scan re-applied the layer, so a
+/// concept the peer had since edited or withdrawn stayed in this graph until
+/// somebody ran the manual command — quietly undoing phase 1's removal
+/// propagation on the very path that was supposed to inherit it.
+/// `a_standing_grant_keeps_the_layer_current_on_a_later_scan` is the guard.
 ///
 /// # Errors
 /// Propagates a store read failure. A bundle that will not *read* is not an
 /// error — it is reported as one of the things to decide about, because a peer
 /// publishing an unreadable bundle is exactly the case an operator should see.
-pub fn undecided(store: &Store, bundles: &[OkfBundle]) -> anyhow::Result<Vec<Discovered>> {
+pub fn discovered(store: &Store, bundles: &[OkfBundle]) -> anyhow::Result<Vec<Discovered>> {
     let referenced = referenced_peers(store)?;
     let mut out = Vec::new();
     for bundle in bundles {
@@ -168,9 +177,6 @@ pub fn undecided(store: &Store, bundles: &[OkfBundle]) -> anyhow::Result<Vec<Dis
             Err(_) => String::new(),
         };
         let state = store.okf_consent_holds(&bundle.peer, &root, &classes)?;
-        if state.decision().is_some() {
-            continue;
-        }
         out.push(Discovered {
             bundle: bundle.clone(),
             state,

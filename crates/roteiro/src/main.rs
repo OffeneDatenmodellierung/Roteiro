@@ -8548,18 +8548,36 @@ fn discover_okf_in_workspace(
         // the worst outcome of skipping is that a bundle goes unmentioned until
         // that repo has a graph, which is also the point at which it would have
         // had a placeholder to fill.
-        let Ok(Ok(undecided)) = workspace.with_store(Some(&project), |store| {
-            okf_discovery::undecided(store, &peers)
+        let Ok(Ok(found)) = workspace.with_store(Some(&project), |store| {
+            okf_discovery::discovered(store, &peers)
         }) else {
             continue;
         };
 
-        for d in undecided {
-            if interactive {
-                let decision = okf_discovery::ask(&d)?;
-                apply_okf_decision(workspace, &project, &d, decision)?;
-            } else if noted.should_note(&d.bundle.peer) {
-                eprintln!("{}", okf_discovery::note_text(&d));
+        for d in found {
+            match d.state.decision() {
+                // A standing grant. Re-apply the layer so the peer's edits and
+                // withdrawals reach this graph, without re-asking and without
+                // rewriting the record: `decided_at` records when the person
+                // answered, not when a scan last ran.
+                //
+                // Only under `decide`, which is `--write`. A verification run
+                // and a server start must not mutate the graph.
+                Some(recorded) if decide && recorded.imports() => {
+                    apply_okf_decision(workspace, &project, &d, recorded, Record::Keep)?;
+                }
+                // A recorded `ignore`, or a grant on a non-mutating run. Nothing
+                // to do and nothing to say — being asked once is the whole point.
+                Some(_) => {}
+                None if interactive => {
+                    let decision = okf_discovery::ask(&d)?;
+                    apply_okf_decision(workspace, &project, &d, decision, Record::Write)?;
+                }
+                None => {
+                    if noted.should_note(&d.bundle.peer) {
+                        eprintln!("{}", okf_discovery::note_text(&d));
+                    }
+                }
             }
         }
     }
@@ -8573,6 +8591,21 @@ fn discover_okf_in_workspace(
     Ok(())
 }
 
+/// Whether this call is answering the question or acting on a standing answer.
+///
+/// A refresh must not rewrite the record. `decided_at` is when a **person**
+/// answered, and stamping it with the time a scan happened to run would erase
+/// that; the screen fingerprint is what they were shown when they answered, and
+/// re-stamping it would silently re-grant consent over whatever the bundle
+/// carries now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Record {
+    /// A fresh answer: write it.
+    Write,
+    /// Acting on an answer already given: leave it exactly as it is.
+    Keep,
+}
+
 /// Record one answer, and import the bundle when the answer says to.
 ///
 /// Recording happens **whatever** the answer, `ignore` included: "asked once,
@@ -8583,15 +8616,18 @@ fn apply_okf_decision(
     project: &str,
     d: &okf_discovery::Discovered,
     decision: rto_graph::OkfDecision,
+    record: Record,
 ) -> anyhow::Result<()> {
-    let record = rto_graph::OkfConsent {
-        peer: d.bundle.peer.clone(),
-        decision,
-        root: d.root_key(),
-        screen_classes: d.screen_classes(),
-        decided_at: rto_graph::rfc3339_utc(std::time::SystemTime::now()),
-    };
-    workspace.with_store(Some(project), |store| store.put_okf_consent(&record))??;
+    if record == Record::Write {
+        let row = rto_graph::OkfConsent {
+            peer: d.bundle.peer.clone(),
+            decision,
+            root: d.root_key(),
+            screen_classes: d.screen_classes(),
+            decided_at: rto_graph::rfc3339_utc(std::time::SystemTime::now()),
+        };
+        workspace.with_store(Some(project), |store| store.put_okf_consent(&row))??;
+    }
 
     if !decision.imports() {
         println!(

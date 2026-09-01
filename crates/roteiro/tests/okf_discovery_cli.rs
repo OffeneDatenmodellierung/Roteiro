@@ -249,6 +249,61 @@ fn a_recorded_answer_stops_the_scan_raising_that_peer() {
     std::fs::remove_dir_all(&base).ok();
 }
 
+/// A recorded answer is a **standing grant**, not permission to read once.
+///
+/// A later `links --write` re-applies the peer's layer without re-asking, so an
+/// edit reaches this graph and a **withdrawn concept leaves it**. Discovery
+/// originally skipped every peer whose consent held, which silently undid phase
+/// 1's removal propagation on the one path that was supposed to inherit it —
+/// reported by Copilot on #711.
+///
+/// The removal half is the load-bearing assertion: an implementation that
+/// re-imported but never pruned would satisfy the edit half.
+#[test]
+fn a_standing_grant_keeps_the_layer_current_on_a_later_scan() {
+    let (base, hub, spoke, home) = workspace("standing", "The original prose.\n");
+    sync_all(&hub, &spoke);
+    let bundle = spoke.join("okf");
+
+    // Answer once, by hand.
+    let out = roteiro(&hub, &["import", "--from", "okf", bundle.to_str().unwrap()]);
+    assert!(out.status.success(), "import failed: {out:?}");
+
+    // The peer edits their concept and publishes a second one.
+    publish_bundle(&spoke, "The revised prose.\n");
+    write(
+        &bundle.join("docs/extra.md"),
+        &concept("doc", "Extra", "A second concept.\n"),
+    );
+
+    let out = in_workspace(&hub, &home, &["links", "--write", "--workspace-name", "ws"]);
+    assert!(out.status.success(), "links failed: {out:?}");
+
+    let q = roteiro(&hub, &["query", "okf:spoke/docs/cache.md", "--json"]);
+    let node: serde_json::Value =
+        serde_json::from_slice(&q.stdout).unwrap_or_else(|e| panic!("query failed ({e}): {out:?}"));
+    assert_eq!(
+        node["meta"]["content"], "The revised prose.",
+        "a standing grant must carry the peer's edit across"
+    );
+
+    let q = roteiro(&hub, &["query", "okf:spoke/docs/extra.md", "--json"]);
+    assert!(q.status.success(), "a new concept must arrive too: {q:?}");
+
+    // Now the peer withdraws the second concept. Removal must propagate.
+    std::fs::remove_file(bundle.join("docs/extra.md")).expect("rm");
+    let out = in_workspace(&hub, &home, &["links", "--write", "--workspace-name", "ws"]);
+    assert!(out.status.success(), "links failed: {out:?}");
+
+    let q = roteiro(&hub, &["query", "okf:spoke/docs/extra.md", "--json"]);
+    assert!(
+        !q.status.success(),
+        "a withdrawn concept must not survive as an orphan: {q:?}"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
 /// A recorded answer **lapses** when the bundle starts carrying a class of
 /// finding it did not carry when the question was answered — and does *not*
 /// lapse merely because the peer edited their prose.
