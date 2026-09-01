@@ -1181,9 +1181,11 @@ no duplicate/banned crates) and `cargo audit`. Prefer pure-Rust, offline-capable
 crates (`gix` over libgit2). Keep MCP/inference deps behind features so the
 default build stays lean and the MSRV surface stays small.
 
-**MSRV discipline:** stay on 1.94 until a dependency forces a move; the
-`rusqlite =0.39` pin exists for exactly this reason (documented in
-`Cargo.toml`). Any MSRV bump is an ADR-worthy decision.
+**MSRV discipline:** stay on 1.96 until a dependency forces a move; the
+`rusqlite =0.39` pin is one instance of pinning for it (documented in
+`Cargo.toml`, which also records the *second*, non-MSRV constraint now
+holding that pin in place — `boxlite`'s `rusqlite ^0.39` against a
+`links = "sqlite3"` crate). Any MSRV bump is an ADR-worthy decision.
 
 **Error handling:** libraries expose `thiserror` enums; the binary uses
 `anyhow` + process exit codes. `check`/`sync` return structured results so the
@@ -1232,7 +1234,7 @@ sync effectively instant; `--json` queries sub-100ms on the dogfood graph.
 | Offline embedding model size/licence (Stage 8) | Binary bloat or licence conflict | **Resolved by [ADR-0003](adr/0003-pluggable-embedding-models.md):** tiny static int8 default compiled in; GGUF local models opt-in behind `inference-local-models`; consent-gated fetch |
 | Unmaintained YAML crate flagged by audit | `check` gate can't ship | **Resolved:** hand-parsed frontmatter in `rto-spec` (no `serde_yaml`) |
 | Non-deterministic extraction → cache churn | Cache/CI-diff noise | Sort all emitted facts; snapshot + idempotency tests from Stage 3 |
-| MSRV drift from a new dep | CI `msrv` job breaks | Pin (as with rusqlite); gate new deps on 1.94; ADR any bump |
+| MSRV drift from a new dep | CI `msrv` job breaks | Pin (as with rusqlite); gate new deps on 1.96; ADR any bump |
 | Scope creep in `check`/dedup | Slips v0.4 | **Handled:** structural `check` shipped (v0.0.5); semantic dedup → Stage 12 |
 | Image OCR/vision has no good pure-Rust path (Stage 12) | Blocks image ingestion or forces a C++ FFI / heavy model dep | De-risk (MSRV + `deny`) and ADR before committing; keep behind its own feature; ship text + PDF ingestion first (both low-risk) so image is isolated |
 | Generative local model for authoring is bigger than the embedding default (Stage 13) | "Light mode" still needs a pulled model | Tier-0 (offline, no model) guarantees planning always works; light-tier reuses the Stage 8 candle/GGUF registry; foundation/agent tier for quality |

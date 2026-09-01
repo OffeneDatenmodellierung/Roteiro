@@ -80,7 +80,7 @@ project; keep it exact.
 
 CI (`.github/workflows/ci.yml`) enforces these; run them locally before pushing.
 
-- **MSRV 1.94**, edition 2024, `unsafe_code = "forbid"`.
+- **MSRV 1.96**, edition 2024, `unsafe_code = "forbid"`.
 - `cargo fmt --all --check` — clean.
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings` — clean
   (pedantic). Prefer fixing over `#[allow(...)]`; when an allow is right, justify

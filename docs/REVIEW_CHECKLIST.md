@@ -58,7 +58,7 @@ blast radius) rather than the diff alone.
 
 - [ ] **Offline by default** preserved — no new required network/model in the
       default build; heavy deps are feature-gated; no un-consented network.
-- [ ] **MSRV 1.94** and `unsafe_code = "forbid"` respected.
+- [ ] **MSRV 1.96** and `unsafe_code = "forbid"` respected.
 - [ ] Architectural changes are reflected in an **ADR** (house style), and
       authored links stay consistent (`roteiro review` shows no new drift).
 - [ ] **One concern** per PR; the commit/PR explains the *why*.
@@ -143,14 +143,17 @@ But adjudicate before acting, and one rule pays for itself:
       - **Features.** `msrv` and `checks` are `--all-features`;
         `default-features` is the default set. **Neither covers the other** —
         turning features on cannot find a defect in code being cfg'd *out*,
-        which is why that job exists. Nothing builds
-        `--no-default-features`.
+        which is why that job exists. Since #667 a third job,
+        `no-default-features`, builds the floor and two combinations above it
+        (`--no-default-features`, `+ mcp`, `+ execution`), so that axis **is**
+        covered now — but only in those three shapes. Any other feature
+        combination is still built by nothing.
       - **Targets.** `msrv` is `cargo check --workspace --all-features` with **no
         `--all-targets`**, so it never compiles `#[cfg(test)]` modules or
         `tests/` targets. The jobs that do compile test code (`checks`,
         `default-features`) run on **stable**. So a claim that *test* code will
-        not build **on MSRV 1.94** is refuted by no job in this repository.
-      - **Toolchain.** Only `msrv` is on 1.94. A green `stable` build says
+        not build **on MSRV 1.96** is refuted by no job in this repository.
+      - **Toolchain.** Only `msrv` is on 1.96. A green `stable` build says
         nothing about an MSRV claim.
 
       If no green job covers the configuration, the claim is unrefuted and you

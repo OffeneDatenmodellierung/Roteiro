@@ -15,7 +15,7 @@ members = [
 [workspace.package]
 version = "5.1.0"
 edition = "2024"
-rust-version = "1.94"
+rust-version = "1.96"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/OffeneDatenmodellierung/Roteiro"
 homepage = "https://roteiro.dev"
@@ -32,11 +32,22 @@ rto-render = { path = "crates/rto-render", version = "5.1.0" }
 rto-serve = { path = "crates/rto-serve", version = "5.1.0" }
 anyhow = "1.0"
 clap = { version = "4.6", features = ["derive", "env"] }
-# Pinned to 0.39 (not the latest 0.40.x): libsqlite3-sys's build script from
-# 0.38.0 onward uses the std `cfg_select!` macro, stabilized in Rust 1.95 —
-# newer than our 1.94 MSRV, which breaks the `bundled` feature's build.rs on
-# our MSRV toolchain. Revisit this pin if/when the project MSRV moves to
-# 1.95+ (see ADR-0001 for MSRV policy).
+# Pinned to 0.39 (not the latest 0.40.x). TWO constraints held it here and
+# only one of them has lifted.
+#
+# The first was an MSRV blocker: libsqlite3-sys's build script from 0.38.0
+# onward uses the std `cfg_select!` macro, stabilized in Rust 1.95 — newer
+# than the 1.94 MSRV in force at the time, which broke the `bundled`
+# feature's build.rs. That one is **gone** as of the 1.96 MSRV.
+#
+# The second still stands and is not ours to lift: `boxlite` 0.10.0 requires
+# `rusqlite ^0.39`, and `libsqlite3-sys` declares `links = "sqlite3"`, so the
+# graph admits exactly one version of it. Under `--all-features` (which turns
+# on `exec-boxlite`) moving to 0.40 is therefore a resolution conflict, not a
+# choice — boxlite has to move first.
+#
+# So this is a dependency-upgrade task gated on an upstream crate, NOT an
+# MSRV-gated one. Do not re-file it under the MSRV (see ADR-0001 for that).
 rusqlite = { version = "0.39", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

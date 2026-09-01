@@ -55,7 +55,7 @@
 # minimum age to Cargo's resolver, so a *transitive* dependency that `cargo
 # update` picks up inside such a PR is not itself age-gated. The resolver-level
 # fix is `-Zmin-publish-age` (RFC 3923, tracking rust-lang/cargo#17009), which is
-# nightly-only and therefore unusable against this project's 1.94 stable MSRV;
+# nightly-only and therefore unusable against this project's 1.96 stable MSRV;
 # Renovate's issue to wire it up (renovatebot/renovate#41659) is open and blocked
 # on the same thing. Revisit when it stabilises.
 #

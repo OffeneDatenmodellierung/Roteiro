@@ -11,8 +11,8 @@ architectural-significance: MEDIUM  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.3"
-last-modified: 2026-08-15
+version: "1.4"
+last-modified: 2026-09-01
 confluence-url:
 ---
 
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | Accepted |
 | **Architectural Significance** | MEDIUM |
 | **Domain** | Developer Tooling |
-| **Document version** | 1.3 |
+| **Document version** | 1.4 |
 
 ## Reference
 
@@ -49,7 +49,7 @@ Forces to reconcile (from ADR-0001 and the project's stance):
 1. **Pure-Rust, no C/C++ FFI (strong preference).** `unsafe_code = "forbid"` in our crates; the build must stay `cargo`-only with no system libraries to install. A bundled ONNX Runtime / tesseract binary is the thing to avoid.
 2. **Offline-by-default & lean binary.** Any model is opt-in and local, pulled through the ADR-0003 consent gate; the default `roteiro` binary must not grow, and must never make a network call implicitly.
 3. **`cargo deny` licence gate.** Every transitive dependency must satisfy the allow-list (MIT, Apache-2.0, BSD-2/3, Unicode-3.0, Zlib, ISC).
-4. **MSRV 1.94.** Any new dependency tree must build on 1.94.
+4. **MSRV 1.96.** Any new dependency tree must build on 1.96.
 5. **Correctness over fluency.** OCR text is `derived`-ish content fed to inference; a VLM description is clearly a *suggestion*. Neither should masquerade as authored fact.
 
 Three community Rust OCR projects were surveyed as candidates (the user's shortlist):
@@ -128,3 +128,4 @@ Project direction incorporated above: keep the **pure-Rust / no-C++-FFI** stance
 | 1.1 | 2026-08-15 | Consequence added: the shared vision/audio engine must be released before process exit — a `static`-cached engine is never dropped and aborts a Metal build in ggml-metal's exit-time teardown (issue #291). No decision changed. |
 | 1.2 | 2026-08-15 | Consequence added: the llama.cpp backend is a process-global, so it is initialised once and shared by every engine — a second engine used to fail to construct and go silently inert (issue #296). Release ordering (engines, then backend) is now enforced by `Arc` ownership rather than by call order. No decision changed. |
 | 1.3 | 2026-08-15 | Consequence added: the `mtmd` projector is cached per (loaded model, `mmproj` path) instead of being re-read per blob — 688 MB for the audio projector (issue #301), with the measured effect (initialisations N→1 per projector, ~⅓ less kernel CPU, wall-clock unchanged on a page-cache-warm host) recorded beside it. Records why both halves of the key are required (two live projectors are not interchangeable; an `mtmd` context holds the `llama_model *` it was built over) and that projectors join the existing ownership-ordered teardown rather than a parallel one. No decision changed. |
+| 1.4 | 2026-09-01 | Force 4 restated to **MSRV 1.96**, tracking the raise recorded in ADR-0001 v1.4 (driver: the OKF conformance stack's `oxc_*` crates). That clause is a restatement of ADR-0001's standing policy — it is not an ADR-0005 decision — so it moves with its source. The 1.94 figures elsewhere in this ADR are **left as written**: the go/no-go spike table, the options analysis and the 1.0 history row record what was measured in August 2026 on the toolchain in force at the time, and rewriting them would falsify the evidence rather than update it. No decision in this ADR changes; the `ocrs`/`rten` tree is unaffected. |

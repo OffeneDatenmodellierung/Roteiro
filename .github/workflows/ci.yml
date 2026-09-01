@@ -244,7 +244,7 @@ jobs:
       # them, and then throws them away.
       #
       # The per-job keys below are deliberate and stay as they are — `checks`
-      # (`--all-features`), `default-features`, `msrv` (1.94) and `coverage`
+      # (`--all-features`), `default-features`, `msrv` (1.96) and `coverage`
       # (`-C instrument-coverage`) produce genuinely different artefacts, and a
       # `shared-key` across them would thrash.
       # Restoring (and re-saving) ~1.4 GB of build artefacts to run `cargo
@@ -796,7 +796,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
-          toolchain: "1.94"
+          toolchain: "1.96"
       # A failed run must still save its cache, as above. Skipped on a release
       # PR for the reason given in the `checks` job.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -849,7 +849,7 @@ jobs:
         if: env.RELEASE_PR != 'true'
         run: python3 scripts/provision-sandbox-runtime.py --github-env
       # The whole of a release PR's verification in this job — see the
-      # `RELEASE_PR` comment at the top of this file. Running it on the 1.94
+      # `RELEASE_PR` comment at the top of this file. Running it on the 1.96
       # toolchain rather than stable earns this job something the other two
       # cannot: it proves the `Cargo.lock` release-plz just rewrote is still
       # parseable by MSRV cargo. A lockfile regenerated in a newer format is a
