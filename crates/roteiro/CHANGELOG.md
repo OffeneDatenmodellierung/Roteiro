@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.2.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.1.0...roteiro-v5.2.0) - 2026-09-01
+
+### Added
+
+- *(okf)* discover a peer's bundle, ask once, and screen what it says
+
+### Fixed
+
+- *(okf)* `--json` selected an output format and changed behaviour
+- *(okf)* a peer's broken bundle must not fail our scan or delete their concepts
+- *(okf)* ordinary markup was an evasion, and two silences told the wrong story
+- *(okf)* a recorded grant is standing, `<div hidden>` conceals, and a bundle must close its frontmatter
+
+### Other
+
+- *(okf)* bring the discovery module's own argument up to date
+
 ## [5.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.0.0...roteiro-v5.1.0) - 2026-09-01
 
 ### Added
