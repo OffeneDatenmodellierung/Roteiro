@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v4.0.0...rto-llama-v4.1.0) - 2026-09-01
+
+### Added
+
+- *(serve)* each tool is stated to the model exactly once
+
+### Fixed
+
+- *(llama)* a crafted GGUF header aborted the process instead of declining
+- *(llama)* a skip that says nothing is indistinguishable from a pass
+- *(llama)* the header contradicted the code fifteen lines below it
+- *(serve)* the prompt stops claiming a graph it was not given
+
+### Other
+
+- *(llama)* the probe was named for a word a template may legitimately use
+- *(llama)* the contract promised one engine's behaviour to all of them
+- *(llama)* a tooled turn renders the template twice, not three times
+
 ## [3.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v2.3.0...rto-llama-v3.0.0) - 2026-08-22
 
 ### Added

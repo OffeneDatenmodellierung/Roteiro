@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v4.0.0...roteiro-v4.1.0) - 2026-09-01
+
+### Added
+
+- *(serve)* each tool is stated to the model exactly once
+
+### Fixed
+
+- *(serve)* the prompt stops claiming a graph it was not given
+- *(tests)* a signed tag is an annotated tag, and wants a message
+- *(spec)* a blueprint is rendered, and the comment said otherwise
+- *(spec)* two headings claiming one id, and one of them lost
+- *(ci)* the matrix never once turned `execution` off
+
+### Other
+
+- Merge pull request #682 from OffeneDatenmodellierung/fix/667-ci-feature-matrix
+
 ## [4.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v3.3.0...roteiro-v4.0.0) - 2026-08-29
 
 ### Added
