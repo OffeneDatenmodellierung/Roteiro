@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v4.0.0...rto-spec-v4.1.0) - 2026-09-01
+
+### Fixed
+
+- *(spec)* a blueprint is rendered, and the comment said otherwise
+- *(spec)* two headings claiming one id, and one of them lost
+
 ## [4.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v3.3.0...rto-spec-v4.0.0) - 2026-08-29
 
 ### Added

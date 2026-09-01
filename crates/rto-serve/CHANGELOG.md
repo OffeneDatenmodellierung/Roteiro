@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v4.0.0...rto-serve-v4.1.0) - 2026-09-01
+
+### Added
+
+- *(serve)* each tool is stated to the model exactly once
+
+### Fixed
+
+- *(serve)* the envelope instruction is still the last line of defence
+- *(serve)* one refusal serves every envelope, so it cannot name a tag
+- *(serve)* a comment claimed an invariant across dialects that never held
+- *(serve)* a dialect nobody can reach is not a dialect
+- *(serve)* the prompt stops claiming a graph it was not given
+
+### Other
+
+- *(serve)* an envelope, not a envelope
+- *(serve)* the fold order is exercised, so stop saying it cannot be
+
 ## [2.1.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v2.1.0...rto-serve-v2.1.1) - 2026-08-22
 
 ### Other
