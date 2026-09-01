@@ -189,6 +189,7 @@ pub fn review_file(
     let prompt = build_prompt(file, context, REVIEW_PROMPT_BUDGET);
     let completion = engine
         .chat(&rto_llama::ChatRequest {
+            tools: None,
             model: model.to_owned(),
             messages: vec![rto_llama::Message {
                 role: "user".to_owned(),

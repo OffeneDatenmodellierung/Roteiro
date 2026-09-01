@@ -292,6 +292,7 @@ impl MediaProducer for LlamaProducer {
         let engine = (self.engine)()?;
         let completion = engine
             .chat(&rto_llama::ChatRequest {
+                tools: None,
                 model: self.producer.model.clone(),
                 messages: vec![rto_llama::Message {
                     role: "user".to_owned(),

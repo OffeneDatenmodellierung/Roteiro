@@ -1233,6 +1233,7 @@ mod tests {
         // Sanity-check the engine/registry pair in isolation (no HTTP): the tool loop
         // over each per-workspace registry yields that workspace's own tag.
         let req = ChatRequest {
+            tools: None,
             model: "echo".to_owned(),
             messages: vec![Message {
                 role: "user".to_owned(),

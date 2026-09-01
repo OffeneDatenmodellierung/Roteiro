@@ -213,6 +213,7 @@ fn engine(path: &Path, speculative: bool) -> LlamaEngine {
 fn complete(engine: &LlamaEngine, prompt: &str) -> (String, u32) {
     let completion = engine
         .chat(&ChatRequest {
+            tools: None,
             model: MODEL.to_owned(),
             messages: vec![Message {
                 role: "user".to_owned(),

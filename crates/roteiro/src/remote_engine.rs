@@ -260,6 +260,17 @@ impl RemoteBackedEngine {
 }
 
 impl Engine for RemoteBackedEngine {
+    /// For the local models, yes; for the hosted one, no.
+    ///
+    /// `payload_for` builds an allow-listed body under ADR-0019, and that
+    /// allow-list has no `tools` field — deliberately, since every key sent to a
+    /// third party is a key someone approved. So a request routed to the tier
+    /// carries no tools of its own and the caller must advertise them in the
+    /// conversation, which is the one place the allow-list does let through.
+    fn carries_tools(&self, model: &str) -> bool {
+        model != self.endpoint.model() && self.local.carries_tools(model)
+    }
+
     /// The hosted model **first**, then everything the wrapped engine serves.
     ///
     /// First because `chat_capable_model_ids` places the Ask default at the head
@@ -420,6 +431,7 @@ mod tests {
 
     fn ask(model: &str, turns: &[(&str, &str)]) -> ChatRequest {
         ChatRequest {
+            tools: None,
             model: model.to_owned(),
             messages: turns
                 .iter()
