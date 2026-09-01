@@ -367,6 +367,48 @@ fn a_standing_grant_keeps_the_layer_current_on_a_later_scan() {
     std::fs::remove_dir_all(&base).ok();
 }
 
+/// A peer breaking their own bundle must not break **our** command, and must
+/// not delete what they published before it broke.
+///
+/// A standing grant survives the bundle becoming unreadable — `screen_regressed`
+/// compares two empty fingerprints and holds — so the refresh path is the one
+/// that actually reaches an unreadable bundle. Reported by Copilot on #711; the
+/// hard-failure half was the sharper edge of it.
+#[test]
+fn a_peers_broken_bundle_does_not_fail_our_scan_or_delete_their_concepts() {
+    let (base, hub, spoke, home) = workspace("broken", "Ordinary prose.\n");
+    sync_all(&hub, &spoke);
+    let bundle = spoke.join("okf");
+
+    let out = roteiro(&hub, &["import", "--from", "okf", bundle.to_str().unwrap()]);
+    assert!(out.status.success(), "import failed: {out:?}");
+    let q = roteiro(&hub, &["query", "okf:spoke/docs/cache.md", "--json"]);
+    assert!(q.status.success(), "precondition: the concept imported");
+
+    // The peer breaks their bundle: the only concept stops being one.
+    write(&bundle.join("docs/cache.md"), "no frontmatter at all\n");
+
+    let out = in_workspace(&hub, &home, &["links", "--write", "--workspace-name", "ws"]);
+    assert!(
+        out.status.success(),
+        "one peer's broken publish must not fail our scan: {out:?}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no longer reads"),
+        "and it must say so: {stderr}"
+    );
+
+    let q = roteiro(&hub, &["query", "okf:spoke/docs/cache.md", "--json"]);
+    assert!(
+        q.status.success(),
+        "a bundle that stopped parsing is not a peer withdrawing their concepts, \
+         so what was already imported must survive: {q:?}"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
 /// A recorded answer **lapses** when the bundle starts carrying a class of
 /// finding it did not carry when the question was answered — and does *not*
 /// lapse merely because the peer edited their prose.

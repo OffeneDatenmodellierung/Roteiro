@@ -8639,6 +8639,29 @@ fn apply_okf_decision(
     decision: rto_graph::OkfDecision,
     record: Record,
 ) -> anyhow::Result<()> {
+    // An importing decision over a bundle that does not read is refused here as
+    // well as at the prompt, and this arm is the one that is actually reachable:
+    // a peer whose grant is **standing** can break their bundle at any time, and
+    // `screen_regressed("", "")` is false, so the grant still holds. Without
+    // this, a refresh would reach `read_bundle` and fail — turning one peer's
+    // broken publish into a failure of `roteiro links --write` for everybody.
+    //
+    // The previously imported layer is deliberately **left alone** rather than
+    // cleared: a bundle that stopped parsing is not a peer withdrawing their
+    // concepts, and treating it as one would delete real content over a syntax
+    // error at the other end. Copilot raised the recording half of this on #711;
+    // the failure half was the sharper edge of the same finding.
+    if decision.imports() && !d.is_readable() {
+        eprintln!(
+            "roteiro: {}'s OKF bundle at {} no longer reads ({}), so it was not \
+             re-imported. Anything already imported from it is untouched.",
+            d.bundle.peer,
+            d.bundle.bundle.display(),
+            d.summary(),
+        );
+        return Ok(());
+    }
+
     if record == Record::Write {
         let row = rto_graph::OkfConsent {
             peer: d.bundle.peer.clone(),
