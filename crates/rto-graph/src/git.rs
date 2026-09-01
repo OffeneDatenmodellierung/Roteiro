@@ -525,11 +525,162 @@ impl Repo {
         Ok(out)
     }
 
+    /// **What a `--base <spec>` actually bound to** — the ref, the commit, and how
+    /// that commit stands against its upstream (issue #649).
+    ///
+    /// # The defect this exists to make visible
+    ///
+    /// [`Repo::changed_between`] resolves its base with `rev_parse_single`, so the
+    /// bare name `main` binds to the **local branch**, never to
+    /// `refs/remotes/origin/main`. That is correct for `rev_parse_single` and it is
+    /// what git itself does; the problem was that nothing surfaced the consequence.
+    /// A local `main` seventeen commits behind its upstream answers a *different
+    /// question* from the one that was asked, and answers it in output textually
+    /// identical to a correct run: `review --base main` reported 33 changed files
+    /// where the real footprint was 2, with `drift: []` and exit 0.
+    ///
+    /// Rebasing does not save you, which is what made it durable — rebasing the
+    /// branch does not move the local `main` ref.
+    ///
+    /// # Why a superset is the *silent* case and divergence is the dangerous one
+    ///
+    /// When the base is an **ancestor** of its upstream ([`Upstream::ahead`] is 0),
+    /// the diff is a strict superset of the true one: more files, all of yours
+    /// included. Every drift item that would have been found is still found, so the
+    /// gate still holds and the run looks *more* thorough rather than less. Nothing
+    /// fails, which is why it went unnoticed for a whole session.
+    ///
+    /// When the two have **diverged** ([`Upstream::ahead`] and [`Upstream::behind`]
+    /// are both non-zero), the diff can *omit* changes that exist on both sides of
+    /// the fork, and then a clean verdict is worthless rather than merely wide.
+    /// [`Upstream::diverged`] separates the two so a caller can say different
+    /// things about them.
+    ///
+    /// # Errors
+    /// Returns [`GitError::Git`] if `spec` cannot be resolved to a single commit,
+    /// or if a reachability walk against the upstream fails.
+    pub fn resolve_base(&self, spec: &str) -> Result<BaseResolution, GitError> {
+        // Two reads of one spec, deliberately. `rev_parse` is the only one that
+        // reports *which ref* the name bound to — the whole point here, since
+        // `main` and `origin/main` are the two answers a reader has to be able to
+        // tell apart — while `single()` yields the same commit `changed_between`
+        // resolves. A spec that names no ref at all (a raw sha, `HEAD~3`) leaves
+        // `reference` as `None`, which is honest: there is no upstream question to
+        // ask about a commit nobody named.
+        let parsed = self.inner.rev_parse(spec).map_err(ge)?;
+        let reference = parsed
+            .first_reference()
+            .map(|r| r.name.as_bstr().to_string());
+        let oid = parsed
+            .single()
+            .ok_or_else(|| GitError::Git(format!("`{spec}` names a range, not a single commit")))?
+            .detach();
+
+        let upstream = match reference.as_deref() {
+            Some(name) => self.upstream_of(name, oid)?,
+            None => None,
+        };
+        Ok(BaseResolution {
+            spec: spec.to_owned(),
+            reference,
+            commit: oid.to_hex().to_string(),
+            upstream,
+        })
+    }
+
+    /// The remote-tracking ref configured for the local branch `reference`, with
+    /// the two reachability counts, or `None` when there is no upstream to compare
+    /// against.
+    ///
+    /// `None` is the ordinary answer for most inputs and is never an error: a
+    /// remote-tracking ref (`origin/main`) has no upstream of its own, a tag has
+    /// none, and a local branch that was never pushed has none. A caller that
+    /// cannot find out whether a base is stale must proceed exactly as it did
+    /// before rather than refuse, so every failure to answer here resolves to
+    /// `None` — the base is still resolved and still reported, and only the
+    /// staleness check is missing.
+    fn upstream_of(
+        &self,
+        reference: &str,
+        base: gix::ObjectId,
+    ) -> Result<Option<Upstream>, GitError> {
+        let Ok(full) = gix::refs::FullName::try_from(reference) else {
+            return Ok(None);
+        };
+        // `Fetch`, not `Push`: the question is "has the world moved on since this
+        // ref last caught up", which is what a fetch would bring in. A `pushRemote`
+        // pointing elsewhere does not make the base any less stale.
+        // A misconfigured tracking setting — a `branch.<name>.merge` that no fetch
+        // refspec maps — lands here as `Some(Err(_))` and is treated as "no
+        // upstream", not as a failed review.
+        let Some(Ok(tracking)) = self
+            .inner
+            .branch_remote_tracking_ref_name(full.as_ref(), gix::remote::Direction::Fetch)
+        else {
+            return Ok(None);
+        };
+        let Ok(mut tracking_ref) = self.inner.find_reference(tracking.as_ref()) else {
+            // Configured but not present: a branch whose upstream has never been
+            // fetched into this clone. Nothing to compare against.
+            return Ok(None);
+        };
+        let Ok(upstream_id) = tracking_ref.peel_to_id() else {
+            return Ok(None);
+        };
+        let upstream = upstream_id.detach();
+
+        // The overwhelmingly common case, and it costs nothing: an up-to-date base
+        // needs no traversal at all. Short-circuited rather than left to the walk
+        // because `with_hidden` is documented to be able to visit every commit when
+        // the two sides are disjoint, and paying that on every `--base main` of a
+        // healthy branch would be a real cost for a guaranteed pair of zeroes.
+        let (behind, ahead) = if upstream == base {
+            (0, 0)
+        } else {
+            (
+                self.count_reachable(upstream, base)?,
+                self.count_reachable(base, upstream)?,
+            )
+        };
+        Ok(Some(Upstream {
+            reference: tracking.as_bstr().to_string(),
+            commit: upstream.to_hex().to_string(),
+            behind,
+            ahead,
+        }))
+    }
+
+    /// Commits reachable from `tip` but not from `hidden` — `git rev-list --count
+    /// hidden..tip`.
+    fn count_reachable(
+        &self,
+        tip: gix::ObjectId,
+        hidden: gix::ObjectId,
+    ) -> Result<usize, GitError> {
+        let walk = self
+            .inner
+            .rev_walk([tip])
+            .with_hidden([hidden])
+            .all()
+            .map_err(ge)?;
+        let mut n = 0usize;
+        for info in walk {
+            info.map_err(ge)?;
+            n += 1;
+        }
+        Ok(n)
+    }
+
     /// The tracked files that differ between `base` (any revspec — a branch,
     /// `HEAD~3`, a sha) and the current `HEAD`, sorted by path. Used for
     /// change-scoped tooling over a commit range (e.g. `roteiro review --base
     /// main`), distinct from [`Repo::changed_files`], which compares the working
     /// tree to `HEAD`. A path only in `HEAD` is added, only in `base` is deleted.
+    ///
+    /// Callers that report *what they compared against* should resolve the spec
+    /// once with [`Repo::resolve_base`] and pass [`BaseResolution::commit`] here,
+    /// so the commit named in the report and the commit actually diffed cannot be
+    /// two different answers to one question.
     ///
     /// # Errors
     /// Returns [`GitError`] if `base` cannot be resolved to a tree, a tree cannot
@@ -904,6 +1055,94 @@ impl ChangeStatus {
             Self::Modified => "modified",
             Self::Deleted => "deleted",
         }
+    }
+}
+
+/// What a review's `--base <spec>` resolved to — see [`Repo::resolve_base`].
+///
+/// Serialisable because a report that does not say what it compared against
+/// cannot be checked against the question it was asked. Issue #649's whole
+/// complaint about `review` was that its output under-describes its own basis:
+/// the diff was missing, and so was this.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct BaseResolution {
+    /// The revspec exactly as it was given on the command line.
+    ///
+    /// Kept beside [`BaseResolution::reference`] rather than replaced by it,
+    /// because the gap between the two *is* the defect: `main` and
+    /// `refs/heads/main` printed together are what let a reader see that they did
+    /// not ask for `refs/remotes/origin/main`.
+    pub spec: String,
+    /// The full name of the ref the spec bound to (`refs/heads/main`), or `None`
+    /// when the spec named no ref — a raw sha, `HEAD~3`.
+    #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+    /// The commit it resolved to, in full hex.
+    pub commit: String,
+    /// How that commit stands against its upstream, when it has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream: Option<Upstream>,
+}
+
+impl BaseResolution {
+    /// The first twelve hex digits of [`BaseResolution::commit`], for a summary
+    /// line.
+    ///
+    /// Twelve rather than git's default seven: seven is chosen for typing, and
+    /// this is chosen for *comparing* — the reader's next move is
+    /// `git rev-parse --short main origin/main`, whose seven-digit answer is a
+    /// prefix of this one, so the comparison still works in the direction it is
+    /// actually made.
+    #[must_use]
+    pub fn short_commit(&self) -> &str {
+        let n = self.commit.len().min(12);
+        &self.commit[..n]
+    }
+}
+
+/// The remote-tracking ref a resolved base is measured against, and the two
+/// reachability counts that say how far apart they are.
+///
+/// Both counts, never one. "Behind by 17" and "behind by 17, ahead by 3" are
+/// different situations with different consequences — the first over-reports a
+/// change, the second can *omit* it — and a single number could not tell them
+/// apart. See [`Repo::resolve_base`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Upstream {
+    /// Full name of the tracking ref (`refs/remotes/origin/main`).
+    #[serde(rename = "ref")]
+    pub reference: String,
+    /// The commit it points at, in full hex.
+    pub commit: String,
+    /// Commits the upstream has that the base does not — `base..upstream`.
+    pub behind: usize,
+    /// Commits the base has that the upstream does not — `upstream..base`.
+    pub ahead: usize,
+}
+
+impl Upstream {
+    /// The first twelve hex digits of [`Upstream::commit`]; see
+    /// [`BaseResolution::short_commit`].
+    #[must_use]
+    pub fn short_commit(&self) -> &str {
+        let n = self.commit.len().min(12);
+        &self.commit[..n]
+    }
+
+    /// Whether the base is missing commits its upstream has — the diff is then a
+    /// superset of the true one, which is the *silent* failure: more files, all of
+    /// yours included, so nothing fails and the run reads as more thorough.
+    #[must_use]
+    pub fn is_behind(&self) -> bool {
+        self.behind > 0
+    }
+
+    /// Whether the two have genuinely forked. This is the case a clean verdict
+    /// actively misleads about, because the diff can omit changes present on both
+    /// sides of the fork.
+    #[must_use]
+    pub fn diverged(&self) -> bool {
+        self.behind > 0 && self.ahead > 0
     }
 }
 
