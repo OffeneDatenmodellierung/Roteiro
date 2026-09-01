@@ -237,6 +237,16 @@ mcp = ["rto-render/mcp", "dep:tokio"]
 # builds, serves (`roteiro explorer`), and tests without a C/C++ toolchain. Also
 # merged onto `/v1` when combined with `serve` (see `serve_v1_tail`).
 explorer = ["dep:axum", "dep:tokio"]
+# `roteiro okf validate` and `roteiro okf lint`, off by default. Forwarded to
+# `rto-render`, where the cost is recorded: `okf-validator` is worth 73 crates,
+# against one for `okf-core`, which is why the other three `okf` subcommands
+# (`trust`, `links`, `diff`) are ungated and these two are not.
+#
+# The clap variants are declared unconditionally and the handlers refuse by name
+# without this feature — `security run` and `lint` record what gating the variant
+# instead costs: a documented command that answers `unrecognized subcommand` in
+# a stock install.
+okf-validate = ["rto-render/okf-validate"]
 # Offline similarity inference (`roteiro infer`) — the `inferred` provenance
 # class. Adds no dependencies (pure-Rust hashing embedding; ADR-0003).
 inference = ["rto-graph/inference"]

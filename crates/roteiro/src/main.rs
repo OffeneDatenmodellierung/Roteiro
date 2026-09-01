@@ -791,6 +791,23 @@ enum Command {
         #[arg(long, value_name = "NAME")]
         peer: Option<String>,
     },
+    /// Inspect an OKF bundle **without importing it**: what it claims, whether
+    /// it hangs together, how it differs from another copy.
+    ///
+    /// `import --from okf` asks what a bundle would add to *this* graph. These
+    /// ask about the bundle itself, and answer with an independent
+    /// implementation of the specification rather than with Roteiro's reading of
+    /// it — which is the point. Roteiro both writes OKF and reads it, so a
+    /// checker of our own construction run over our own output can only catch a
+    /// mistake we did not make twice.
+    ///
+    /// Works on **anybody's** bundle, including one `roteiro render okf` just
+    /// produced. Nothing here writes: no graph is opened and no bundle is
+    /// modified.
+    Okf {
+        #[command(subcommand)]
+        action: OkfAction,
+    },
     /// Render the graph: docs site or OKF bundle.
     ///
     /// **The output directory is deleted and rebuilt on every render.** A bundle is
@@ -1181,6 +1198,116 @@ enum Command {
         /// explicitly and ignore this.
         #[arg(long = "workspace-name", short = 'w', value_name = "NAME")]
         workspace_name: Option<String>,
+    },
+}
+
+/// `roteiro okf` actions (ADR-0021).
+///
+/// The names are **upstream's**, deliberately: `trust`, `links`, `diff`,
+/// `validate` and `lint` are what the `okf` CLI calls the same five operations,
+/// so somebody who knows that tool already knows this one. Inventing synonyms
+/// would buy nothing and cost every reader who arrives from the specification.
+///
+/// The library is called **in-process**. Roteiro is a self-contained offline
+/// binary; requiring `okf` on `PATH` would make these commands work on the
+/// maintainer's machine and fail on everybody else's.
+///
+/// # Not everything upstream exposes
+///
+/// `graph` is left out: the explorer already renders the graph, and two tools
+/// answering that question drift apart. `info` is left out: its statistics are
+/// covered between `trust` and `validate`. `fix` and `fmt` are left out because
+/// they **rewrite** a bundle, which is a different kind of operation from
+/// reading one and deserves its own decision rather than arriving as a
+/// side-effect of this one.
+///
+/// # Two of these need a feature, and three do not
+///
+/// `trust`, `links` and `diff` come from `okf-core`, which has zero
+/// dependencies. `validate` and `lint` come from `okf-validator`, which is worth
+/// 73 crates, so they need `--features okf-validate` and say so by name when
+/// they do not have it. Every variant is declared unconditionally: a documented
+/// command that answers `unrecognized subcommand` in a stock build is the defect
+/// `security run` and `lint` already record.
+#[derive(Subcommand)]
+enum OkfAction {
+    /// What the bundle claims about its own trustworthiness: §5.3's tier per
+    /// concept, and who verified it.
+    ///
+    /// This is the question worth asking *before* `import --from okf --trust`,
+    /// because that flag adopts the peer's confirmations wholesale. "Eight
+    /// human-reviewed concepts and one unverified" is a far better basis for
+    /// that decision than the flag's name alone.
+    Trust {
+        /// The bundle directory.
+        path: String,
+        /// Emit the summary as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Resolve every internal link in a bundle, and report the ones that name a
+    /// concept it does not contain.
+    ///
+    /// Distinct from `roteiro check` and `roteiro links`, which cover the graph
+    /// and the rendered site. An emitted OKF bundle is a third artefact from a
+    /// third code path — the one ADR-0021 records guessing wrong for 43 links in
+    /// a real render — and nothing else here checks it.
+    Links {
+        /// The bundle directory.
+        path: String,
+        /// List only the broken links, not the totals.
+        #[arg(long)]
+        broken: bool,
+        /// Exit non-zero if any link is broken, for use as a CI gate.
+        #[arg(long)]
+        check: bool,
+        /// Emit the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Compare two bundles semantically: concepts added, removed, renamed, and
+    /// trust tiers that moved.
+    ///
+    /// ADR-0021 made `render okf` byte-deterministic precisely so "a consumer
+    /// can diff two downloads and learn something". This is that comparison, and
+    /// it reports a moved concept as a **rename** rather than as an unrelated
+    /// deletion and addition, which is the difference between "we lost a
+    /// concept" and "we moved one".
+    Diff {
+        /// The bundle to treat as "before".
+        before: String,
+        /// The bundle to treat as "after".
+        after: String,
+        /// Emit the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check a bundle for conformance with the OKF v0.2 specification.
+    ///
+    /// Needs `--features okf-validate`. Deterministic: `stale_after` is checked
+    /// for syntax but never against the clock, so a bundle that validates today
+    /// validates tomorrow — a check whose result depends on when it ran cannot
+    /// be a gate. Exits non-zero on a conformance **error**; warnings do not
+    /// fail, because §11 tells a consumer not to reject a document over a
+    /// soft-guidance deviation.
+    Validate {
+        /// The bundle directory.
+        path: String,
+        /// Emit the findings as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check a bundle against the hygiene rules (`L1`..`L12`).
+    ///
+    /// Needs `--features okf-validate`. A different question from `validate`:
+    /// conformance asks whether the bundle *is* OKF, linting asks whether it is
+    /// *good* OKF. They share a feature only because they share a crate.
+    Lint {
+        /// The bundle directory.
+        path: String,
+        /// Emit the findings as JSON.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1918,6 +2045,7 @@ fn is_long_lived_server(cmd: &Command) -> bool {
         | Command::Export { .. }
         | Command::Load { .. }
         | Command::Import { .. }
+        | Command::Okf { .. }
         | Command::Render { .. }
         | Command::Spec { .. } => false,
         #[cfg(feature = "remote")]
@@ -2200,6 +2328,7 @@ fn main() -> anyhow::Result<()> {
                 run_links(&cfg.effective, &scope, write, json)
             }
         }
+        Command::Okf { action } => run_okf(action),
         Command::Export { out } => run_export(ingest, out),
         Command::Load { file, force } => run_load(&file, force),
         Command::Init { fetch, okf } => run_init(ingest, fetch, okf, debt_ignore),
@@ -6133,6 +6262,231 @@ fn okf_root_key(root: &std::path::Path) -> String {
         .unwrap_or_else(|_| root.to_path_buf())
         .display()
         .to_string()
+}
+
+/// Dispatch a `roteiro okf` action.
+fn run_okf(action: OkfAction) -> anyhow::Result<()> {
+    match action {
+        OkfAction::Trust { path, json } => run_okf_trust(&path, json),
+        OkfAction::Links {
+            path,
+            broken,
+            check,
+            json,
+        } => run_okf_links(&path, broken, check, json),
+        OkfAction::Diff {
+            before,
+            after,
+            json,
+        } => run_okf_diff(&before, &after, json),
+        OkfAction::Validate { path, json } => run_okf_validate(&path, json),
+        OkfAction::Lint { path, json } => run_okf_lint(&path, json),
+    }
+}
+
+/// Refuse a path that is not a directory before the bundle loader sees it, so
+/// the common mistake — pointing at a concept file rather than at the bundle —
+/// is answered in Roteiro's vocabulary rather than by a loader error about a
+/// path it was never given.
+fn okf_bundle_root(path: &str) -> anyhow::Result<&std::path::Path> {
+    let root = std::path::Path::new(path);
+    if !root.is_dir() {
+        anyhow::bail!(
+            "OKF bundle not found: {} (expected a directory of concept documents)",
+            root.display()
+        );
+    }
+    Ok(root)
+}
+
+/// `roteiro okf trust` — §5.3's tier per concept.
+fn run_okf_trust(path: &str, json: bool) -> anyhow::Result<()> {
+    let summary = rto_render::okf::inspect::trust_summary(okf_bundle_root(path)?)?;
+    if json {
+        emit_json(&summary)?;
+        return Ok(());
+    }
+    println!(
+        "{}: {} concept(s){}",
+        summary.root,
+        summary.total,
+        summary
+            .okf_version
+            .as_ref()
+            .map_or_else(String::new, |v| format!(", okf_version {v}"))
+    );
+    println!(
+        "  human-reviewed {}, machine-confirmed {}, unverified {}",
+        summary.human_reviewed, summary.machine_confirmed, summary.unverified
+    );
+    for c in &summary.concepts {
+        let by = if c.verified_by.is_empty() {
+            String::new()
+        } else {
+            format!(" — verified by {}", c.verified_by.join(", "))
+        };
+        println!("  {:<18} {}{by}", c.tier, c.id);
+    }
+    // The tier is a claim the *bundle* makes, and `--trust` is what adopts it.
+    // Saying so here keeps the two commands legible as one decision.
+    if summary.human_reviewed > 0 || summary.machine_confirmed > 0 {
+        println!(
+            "these are the peer's claims, not this graph's: `import --from okf --trust` \
+             adopts them, and without --trust every concept arrives as external-inferred"
+        );
+    }
+    Ok(())
+}
+
+/// `roteiro okf links` — resolve a bundle's internal links.
+fn run_okf_links(path: &str, broken_only: bool, check: bool, json: bool) -> anyhow::Result<()> {
+    let report = rto_render::okf::inspect::link_report(okf_bundle_root(path)?)?;
+    if json {
+        emit_json(&report)?;
+    } else {
+        if !broken_only {
+            println!(
+                "{}: {} concept(s), {} internal link(s)",
+                report.root, report.concepts, report.links
+            );
+        }
+        for link in &report.broken {
+            println!("  broken: {} -> {}", link.from, link.target);
+        }
+        if report.is_clean() && !broken_only {
+            println!("  every internal link resolves");
+        }
+    }
+    // `--check` is what makes this a gate; without it a broken link is reported
+    // and the command still succeeds, which is what you want when inspecting
+    // somebody else's bundle rather than gating your own.
+    if check && !report.is_clean() {
+        exit_gate_failure();
+    }
+    Ok(())
+}
+
+/// `roteiro okf diff` — compare two bundles semantically.
+fn run_okf_diff(before: &str, after: &str, json: bool) -> anyhow::Result<()> {
+    let diff =
+        rto_render::okf::inspect::diff_report(okf_bundle_root(before)?, okf_bundle_root(after)?)?;
+    if json {
+        emit_json(&diff)?;
+        return Ok(());
+    }
+    println!("{} -> {}", diff.before, diff.after);
+    if diff.is_unchanged() {
+        println!("  no semantic change");
+        return Ok(());
+    }
+    for (from, to) in &diff.renamed {
+        println!("  renamed  {from} -> {to}");
+    }
+    for id in &diff.added {
+        println!("  added    {id}");
+    }
+    for id in &diff.removed {
+        println!("  removed  {id}");
+    }
+    for id in &diff.content_changed {
+        println!("  changed  {id}");
+    }
+    for id in &diff.frontmatter_changed {
+        println!("  frontmatter {id}");
+    }
+    // Listed last and labelled, because a tier that moved *down* between two
+    // renders is the one change here that is a problem rather than an update.
+    for t in &diff.trust_changed {
+        if let Some((was, now)) = &t.tier {
+            println!("  trust    {} {was} -> {now}", t.id);
+        }
+        if let Some((was, now)) = &t.status {
+            println!("  status   {} {was} -> {now}", t.id);
+        }
+    }
+    for (from, target) in &diff.links_broken {
+        println!("  link broken {from} -> {target}");
+    }
+    for (from, target) in &diff.links_mended {
+        println!("  link mended {from} -> {target}");
+    }
+    Ok(())
+}
+
+/// Print a validator report and gate on its errors. Shared by `validate` and
+/// `lint`, which differ in the entry point they call and in nothing else.
+#[cfg(feature = "okf-validate")]
+fn print_okf_findings(
+    report: &rto_render::okf::inspect::CheckReport,
+    json: bool,
+) -> anyhow::Result<()> {
+    if json {
+        emit_json(report)?;
+    } else {
+        println!(
+            "{} ({}): {} error(s), {} warning(s)",
+            report.root, report.check, report.errors, report.warnings
+        );
+        for f in &report.findings {
+            let where_ = f
+                .concept
+                .as_deref()
+                .or(f.path.as_deref())
+                .unwrap_or("(bundle)");
+            let fixable = if f.fixable { " [fixable]" } else { "" };
+            println!("  {:<8} {where_}: {}{fixable}", f.severity, f.message);
+        }
+        if report.findings.is_empty() {
+            println!("  nothing to report");
+        }
+    }
+    if !report.passed() {
+        exit_gate_failure();
+    }
+    Ok(())
+}
+
+/// `roteiro okf validate` — conformance against the specification.
+#[cfg(feature = "okf-validate")]
+fn run_okf_validate(path: &str, json: bool) -> anyhow::Result<()> {
+    let report = rto_render::okf::inspect::validate_report(okf_bundle_root(path)?)?;
+    print_okf_findings(&report, json)
+}
+
+/// The same command in a build without `okf-validate`: a refusal that names the
+/// feature and what this build *can* still answer.
+///
+/// A runtime error rather than a `cfg` on the clap variant, for the reason
+/// `security run` and `lint` record — gating the variant is how a documented
+/// command shipped invisible to crates.io users as `unrecognized subcommand`.
+#[cfg(not(feature = "okf-validate"))]
+fn run_okf_validate(_path: &str, _json: bool) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "`roteiro okf validate` needs the `okf-validate` feature, which this build does not \
+         have; rebuild with `--features okf-validate`. It is off by default because the \
+         validator costs 73 additional crates, against one for everything else under `okf`. \
+         Without it this build can still run `okf trust`, `okf links` and `okf diff`, which \
+         between them cover tiers, link resolution and drift."
+    );
+}
+
+/// `roteiro okf lint` — the hygiene rules.
+#[cfg(feature = "okf-validate")]
+fn run_okf_lint(path: &str, json: bool) -> anyhow::Result<()> {
+    let report = rto_render::okf::inspect::lint_report(okf_bundle_root(path)?)?;
+    print_okf_findings(&report, json)
+}
+
+/// The same command in a build without `okf-validate`.
+#[cfg(not(feature = "okf-validate"))]
+fn run_okf_lint(_path: &str, _json: bool) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "`roteiro okf lint` needs the `okf-validate` feature, which this build does not have; \
+         rebuild with `--features okf-validate`. It shares that feature with `okf validate` \
+         because both come from one crate whose dependencies are not optional, so the hygiene \
+         rules cannot be had without the conformance checker. Without it this build can still \
+         run `okf trust`, `okf links` and `okf diff`."
+    );
 }
 
 /// Every markdown file under an OKF bundle root, keyed by its bundle-relative
