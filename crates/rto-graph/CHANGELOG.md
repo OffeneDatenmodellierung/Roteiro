@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v5.0.0...rto-graph-v5.1.0) - 2026-09-01
+
+### Added
+
+- *(serve)* handle SIGHUP on every server, and reload the whole server
+
 ## [4.2.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v4.1.0...rto-graph-v4.2.0) - 2026-09-01
 
 ### Added

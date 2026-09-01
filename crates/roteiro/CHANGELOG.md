@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.0.0...roteiro-v5.1.0) - 2026-09-01
+
+### Added
+
+- *(serve)* handle SIGHUP on every server, and reload the whole server
+
 ## [5.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v4.2.0...roteiro-v5.0.0) - 2026-09-01
 
 ### Added
