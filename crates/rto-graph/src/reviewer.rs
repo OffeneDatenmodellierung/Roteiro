@@ -69,7 +69,7 @@ use std::fmt::Write as _;
 
 use crate::compile_claim::{ClaimSite, Features, TargetOs};
 use crate::review_corpus::{CLASSES, DefectClass};
-use crate::review_score::CandidateFinding;
+use crate::review_score::{CandidateFinding, CandidateVerdict, VerdictStance};
 
 /// The measured single-call context budget on this repository, in tokens.
 ///
@@ -399,6 +399,176 @@ const FINDING_PREFIX: &str = "FINDING";
 /// findings" and "the model ignored the format" are distinguishable in
 /// [`Parsed::unparsed`] rather than both arriving as silence.
 const NO_FINDINGS: &str = "NO FINDINGS";
+
+/// The whole-change verdict's output contract — stated once, asked for by
+/// [`build_verdict_prompt`] and read by [`parse_verdict`] (issue #649, part 2).
+///
+/// The same line format as `FINDING`, and for the same reason: a model that
+/// mangles one line loses one answer, while a model that mangles one brace of a
+/// JSON document loses the whole reply.
+const VERDICT_PREFIX: &str = "VERDICT";
+
+/// Build the **whole-change** prompt: judge the change as a unit, given the
+/// per-file pass's own findings beside the diffs (issue #649, part 2).
+///
+/// # Why the findings are in the prompt
+///
+/// This is a second pass, not a first one. The per-file reviewer has already read
+/// each file in isolation; what it cannot do is see the change *as a change* —
+/// two files whose edits are individually fine and jointly contradictory, or a
+/// change whose several small findings add up to one thing worth saying. Handing
+/// it back its own findings is what makes this a synthesis rather than a rerun
+/// with a shorter budget.
+///
+/// # Why the diffs are there too
+///
+/// A verdict built from the finding list alone would be a function of that list:
+/// "no findings" would mechanically produce "clean", and the verdict would
+/// measure the per-file pass rather than add to it.
+/// [`crate::review_score::Score::verdicts_contradicted`] would then be a
+/// second name for the recall figure. The diffs are truncated to fit like any
+/// other prompt here, and the amount dropped is reported on
+/// [`Prompt::dropped_tokens`] so a verdict over part of a change reads as one.
+///
+/// # It asks for an opinion and says so
+///
+/// The prompt states outright that this gates nothing. A model told its answer
+/// will block a merge has a reason to hedge; one told it is advice does not. The
+/// same words appear where the verdict is printed, so a reader and the model are
+/// told the same thing.
+#[must_use]
+pub fn build_verdict_prompt(files: &[FileUnderReview], findings: &[&str], budget: usize) -> Prompt {
+    let mut head = String::from(
+        "You have just reviewed a change one file at a time. Now judge it AS A \
+         WHOLE.\n\n\
+         This is a short opinion for a human about to read the change. It is NOT a \
+         gate: nothing about your answer blocks a merge, changes an exit status, \
+         or counts as a defect you detected. Say what you actually think, briefly.\n\n\
+         Look for what a per-file pass structurally cannot see:\n\
+         - two files whose edits are each fine and together contradictory;\n\
+         - a change that does most of a thing and leaves one caller, doc or test \
+         behind;\n\
+         - several small findings that are really one thing worth saying once.\n\n\
+         Output format. ONE line, nothing else on it:\n\
+         \x20   VERDICT | stance=<clean|concerns> | <one or two sentences>\n\n\
+         For example:\n\
+         \x20   VERDICT | stance=concerns | the new `retry` path is added in three \
+         callers and left out of the fourth, so one code path keeps the old \
+         behaviour the doc no longer describes\n\
+         \x20   VERDICT | stance=clean | a self-contained rename with its call \
+         sites and its doc comment moved together\n\n\
+         Rules:\n\
+         - `stance=clean` means you have nothing you would push back on. Use it \
+         when that is true; a routine change is a normal outcome.\n\
+         - `stance=concerns` means you have something to say. Say the ONE most \
+         important thing, not a list — the per-file findings below are already the \
+         list.\n\
+         - Judge only what is shown. Do not infer what code you have not been \
+         shown does.\n",
+    );
+
+    let _ = writeln!(head, "\nFiles in this change ({}):", files.len());
+    for file in files {
+        let _ = writeln!(head, "  {}", file.path);
+    }
+    if findings.is_empty() {
+        head.push_str(
+            "\nThe per-file pass reported no findings. That is not by itself a \
+             verdict: it read each file alone.\n",
+        );
+    } else {
+        let _ = writeln!(
+            head,
+            "\nWhat the per-file pass already reported ({}):",
+            findings.len()
+        );
+        for finding in findings {
+            let _ = writeln!(head, "  {finding}");
+        }
+    }
+
+    let mut body = String::from("\nThe change:\n");
+    for file in files {
+        let _ = writeln!(body, "\n--- {}\n{}", file.path, file.diff.trim_end());
+    }
+    let room = budget.saturating_sub(estimate_tokens(&head));
+    let (body, dropped_tokens) = truncate_to_tokens(&body, room);
+
+    let text = format!("{head}{body}");
+    Prompt {
+        tokens: estimate_tokens(&text),
+        text,
+        dropped_tokens,
+    }
+}
+
+/// Read a model's whole-change verdict, or `None` if the reply carried none.
+///
+/// `None` is a real outcome and is reported as one rather than defaulted to
+/// `clean`: a reply that never reached its answer — the truncated-reasoning case
+/// [`Parsed::reasoning_truncated`] exists for — would otherwise become a
+/// confident *"nothing to push back on"* generated by this parser rather than by
+/// any model. That is the stage's own silent zero in verdict form, and it is the
+/// single most inviting mistake in this function.
+///
+/// The first well-formed `VERDICT` line wins. A model that emits two has
+/// contradicted itself, and taking the first is at least the one it committed to
+/// before it changed its mind; a parser that merged them would be inventing a
+/// third answer.
+///
+/// `reviewed_sha` is a parameter rather than something the caller patches in
+/// afterwards, exactly as it is for [`parse_findings`]: a
+/// [`CandidateVerdict`] carrying an empty sha would not survive
+/// [`crate::review_score::score`], and a value that cannot round-trip through the
+/// scorer is a trap for whoever constructs the next one.
+#[must_use]
+pub fn parse_verdict(reviewed_sha: &str, reply: &str) -> Option<CandidateVerdict> {
+    for raw in reply.lines() {
+        let line = raw.trim().trim_start_matches(['-', '*', '>', '#', ' ']);
+        let line = line.trim_start_matches('`').trim_end();
+        let line = line.strip_suffix("**").unwrap_or(line).trim();
+        if !line
+            .get(..VERDICT_PREFIX.len())
+            .is_some_and(|p| p.eq_ignore_ascii_case(VERDICT_PREFIX))
+        {
+            continue;
+        }
+        let mut stance = None;
+        let mut summary = String::new();
+        for field in line.split('|').skip(1) {
+            let field = field.trim().trim_end_matches('`').trim();
+            let structural = field.replace("**", "");
+            match structural
+                .split_once('=')
+                .map(|(k, v)| (k.trim(), v.trim()))
+            {
+                // Only `stance=` is structural; everything else is the prose a
+                // human reads, kept verbatim for the reason `parse_one` keeps a
+                // description verbatim — a parser that rewrites the text it
+                // reports is editing the evidence.
+                Some((key, value)) if key.eq_ignore_ascii_case("stance") => {
+                    stance = VerdictStance::from_token(&value.to_ascii_lowercase());
+                }
+                _ => {
+                    if !summary.is_empty() {
+                        summary.push_str(" | ");
+                    }
+                    summary.push_str(field);
+                }
+            }
+        }
+        // A `VERDICT` line with no readable stance is dropped rather than guessed
+        // at. Guessing `clean` would manufacture the one answer that costs
+        // something to be wrong about.
+        let stance = stance?;
+        return Some(CandidateVerdict {
+            reviewed_sha: reviewed_sha.to_owned(),
+            stance,
+            summary: summary.trim().to_owned(),
+        });
+    }
+    None
+}
 
 /// Build the review prompt for one file.
 ///
@@ -916,10 +1086,12 @@ fn module_feature_gate(path: &str, parent_source: &str) -> Option<Features> {
 mod tests {
     use super::{
         FileUnderReview, GraphContext, NO_FINDINGS, Prompt, SINGLE_CALL_BUDGET_TOKENS,
-        annotate_diff, build_prompt, claim_site, class_gloss, estimate_tokens, parse_findings,
+        annotate_diff, build_prompt, build_verdict_prompt, claim_site, class_gloss,
+        estimate_tokens, parse_findings, parse_verdict,
     };
     use crate::compile_claim::{CheckRun, Conclusion, Features, TargetOs, Targets, suppression};
     use crate::review_corpus::{CLASSES, DefectClass};
+    use crate::review_score::VerdictStance;
 
     const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -1571,5 +1743,137 @@ FINDING | **line**=42 | class=**contract-drift** | **compile**=YES | the **remot
                 targets: Targets::AllTargets,
             },
         ]
+    }
+
+    #[test]
+    fn a_verdict_line_is_read_into_a_stance_and_its_prose() {
+        let parsed = parse_verdict(
+            SHA,
+            "Some deliberation.\n\
+             VERDICT | stance=concerns | `retry` is added in three callers and left \
+             out of the fourth\n",
+        )
+        .expect("a verdict");
+        assert_eq!(parsed.reviewed_sha, SHA);
+        assert_eq!(parsed.stance, VerdictStance::Concerns);
+        assert_eq!(
+            parsed.summary,
+            "`retry` is added in three callers and left out of the fourth"
+        );
+    }
+
+    #[test]
+    fn presentation_is_stripped_and_the_prose_is_not() {
+        let parsed = parse_verdict(
+            SHA,
+            "- **VERDICT | stance=**clean** | a *self-contained* rename**\n",
+        )
+        .expect("a verdict");
+        assert_eq!(parsed.stance, VerdictStance::Clean);
+        assert_eq!(
+            parsed.summary, "a *self-contained* rename",
+            "emphasis the model put in prose is evidence, not decoration"
+        );
+    }
+
+    /// **The stage's silent zero, in verdict form.** A reply that never reached
+    /// its answer must not become a confident "nothing to push back on" generated
+    /// by the parser rather than by any model.
+    #[test]
+    fn a_reply_with_no_verdict_is_none_and_never_defaults_to_clean() {
+        assert!(parse_verdict(SHA, "").is_none());
+        assert!(parse_verdict(SHA, "<think>still deliberating about the retry").is_none());
+        assert!(
+            parse_verdict(SHA, "I think this looks fine overall.").is_none(),
+            "prose that agrees with `clean` is still not a verdict in the required form"
+        );
+        assert!(
+            parse_verdict(SHA, "VERDICT | stance=probably ok | hmm").is_none(),
+            "an unreadable stance is dropped, never guessed at"
+        );
+    }
+
+    #[test]
+    fn the_first_well_formed_verdict_wins() {
+        let parsed = parse_verdict(
+            SHA,
+            "VERDICT | stance=concerns | the first thing\n\
+             VERDICT | stance=clean | on reflection, nothing\n",
+        )
+        .expect("a verdict");
+        assert_eq!(
+            parsed.stance,
+            VerdictStance::Concerns,
+            "a model that contradicts itself gets the answer it committed to first, \
+             not a third one this parser invented"
+        );
+    }
+
+    /// The verdict prompt carries the **diffs**, not only the finding list. A
+    /// prompt built from the findings alone would make the verdict a function of
+    /// the per-file pass, and `verdicts_contradicted` a second name for recall.
+    #[test]
+    fn the_verdict_prompt_carries_the_change_itself_and_the_findings() {
+        let files = vec![file("@@ -1,2 +1,3 @@\n+fn added() {}\n")];
+        let findings = ["src/lib.rs:12 [contract-drift] the doc says X"];
+        let prompt = build_verdict_prompt(&files, &findings, SINGLE_CALL_BUDGET_TOKENS);
+        assert!(
+            prompt.text.contains("+fn added() {}"),
+            "the diff is in the prompt: {}",
+            prompt.text
+        );
+        assert!(
+            prompt.text.contains("the doc says X"),
+            "and so is what the per-file pass already said"
+        );
+        assert!(
+            prompt.text.contains("crates/rto-graph/src/lib.rs"),
+            "and the file list"
+        );
+        assert!(
+            prompt.text.contains("stance=<clean|concerns>"),
+            "the output contract is asked for in the form the parser reads"
+        );
+        assert!(
+            prompt.text.contains("NOT a gate"),
+            "and the model is told its answer gates nothing, in the same words the \
+             reader is told"
+        );
+        assert_eq!(prompt.dropped_tokens, 0, "nothing dropped at this size");
+    }
+
+    /// "The per-file pass found nothing" is said in words rather than left as an
+    /// absent section, for the reason `announce_unreviewable` exists: a model
+    /// shown no findings and no explanation cannot tell "clean so far" from "that
+    /// part was skipped".
+    #[test]
+    fn an_empty_finding_list_is_stated_rather_than_omitted() {
+        let files = vec![file("@@ -1,1 +1,1 @@\n-a\n+b\n")];
+        let prompt = build_verdict_prompt(&files, &[], SINGLE_CALL_BUDGET_TOKENS);
+        assert!(
+            prompt.text.contains("reported no findings"),
+            "{}",
+            prompt.text
+        );
+    }
+
+    /// A verdict over part of a change must read as one, so the truncation is
+    /// reported exactly as the per-file prompt reports it.
+    #[test]
+    fn an_oversized_change_is_truncated_and_says_so() {
+        let big = format!(
+            "@@ -1,1 +1,1 @@\n{}",
+            "+line of a very long diff\n".repeat(400)
+        );
+        let files = vec![file(&big)];
+        let prompt = build_verdict_prompt(&files, &[], 200);
+        assert!(
+            prompt.dropped_tokens > 0,
+            "the drop is reported rather than absorbed"
+        );
+        assert!(
+            prompt.text.contains("truncated to fit the context budget"),
+            "and the model is told it is seeing part of the change"
+        );
     }
 }

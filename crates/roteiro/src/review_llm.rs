@@ -173,6 +173,60 @@ pub struct FileOutcome {
 /// [`rto_graph::compile_claim`] is opt-in on evidence, so a caller that cannot
 /// reach CI loses the filter rather than gaining a blanket suppression.
 ///
+/// Ask the model for **one judgement over the whole change** (issue #649, part 2).
+///
+/// # It is reported and never gated on
+///
+/// `roteiro review` exits non-zero on authored-layer drift and on nothing else,
+/// and this does not change that: the graph arm computes the exit status, this is
+/// the `--llm` arm, and no value returned here reaches a gate. A deterministic
+/// gate that sometimes depends on a generation is not a gate, and its failure
+/// mode is the worst kind — it passes when it should not, occasionally, for
+/// reasons nobody can reproduce.
+///
+/// # A missing verdict is reported as missing
+///
+/// `Ok(None)` covers both a reply that carried no `VERDICT` line and a generation
+/// that stopped inside a reasoning block. Neither is defaulted to `clean`: a
+/// verdict this function invented would be indistinguishable, to a reader and to
+/// the corpus, from one a model actually formed — which is the same silent zero
+/// [`FileOutcome::reasoning_truncated`] exists to prevent, one level up.
+///
+/// # Errors
+/// If the engine fails to generate.
+#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+pub fn verdict_on(
+    engine: &rto_llama::llama::LlamaEngine,
+    model: &str,
+    reviewed_sha: &str,
+    files: &[FileUnderReview],
+    findings: &[String],
+) -> anyhow::Result<Option<rto_graph::review_score::CandidateVerdict>> {
+    use rto_llama::Engine as _;
+
+    let lines: Vec<&str> = findings.iter().map(String::as_str).collect();
+    let prompt = rto_graph::reviewer::build_verdict_prompt(files, &lines, REVIEW_PROMPT_BUDGET);
+    let completion = engine
+        .chat(&rto_llama::ChatRequest {
+            tools: None,
+            model: model.to_owned(),
+            messages: vec![rto_llama::Message {
+                role: "user".to_owned(),
+                content: prompt.text,
+            }],
+            images: vec![],
+            audio: vec![],
+            temperature: 0.0,
+            max_tokens: REVIEW_MAX_TOKENS,
+        })
+        .map_err(|e| anyhow::anyhow!("summarising the change: {e}"))?;
+    let Ok(reply) = rto_llama::thinking::answer(&completion.content, completion.finish_reason)
+    else {
+        return Ok(None);
+    };
+    Ok(rto_graph::reviewer::parse_verdict(reviewed_sha, reply))
+}
+
 /// # Errors
 /// If the engine fails to generate.
 #[cfg(any(feature = "serve", feature = "inference-local-models"))]
@@ -717,6 +771,21 @@ pub struct ReplayReport {
     pub context_tokens: usize,
     /// Files that carried at least one context item.
     pub files_with_context: usize,
+    /// Whole-change verdicts the model actually formed (issue #649, part 2).
+    pub verdicts: usize,
+    /// Of those, how many said `clean`. Reported beside the total rather than as
+    /// a rate, because a replay over three commits makes "67% clean" a number with
+    /// no denominator worth quoting.
+    pub verdicts_clean: usize,
+    /// Commits whose reply carried **no** verdict in the required form, or whose
+    /// verdict call failed.
+    ///
+    /// Counted and printed rather than absorbed, on exactly the argument
+    /// [`ReplayReport::reasoning_truncated`] is counted on: "the model had nothing
+    /// to push back on" and "the model never answered" are opposite facts about a
+    /// reviewer, and a run that rendered them identically would report a clean
+    /// summary rate it did not measure.
+    pub verdicts_absent: usize,
     /// Files the engine refused (over its context window, or a decode failure).
     /// Named rather than counted: which files a budget cannot review is the
     /// actionable half, and a run that swallowed them would report coverage it
@@ -755,15 +824,7 @@ pub fn run_replay(
     let choice = rto_graph::resolve_model(rto_graph::ModelTask::Review)?;
     let model = choice.require_installed()?;
     eprintln!("reviewing with {model} — {}", choice.why());
-    let engine = rto_llama::llama::LlamaEngine::new(
-        vec![rto_llama::llama::Served {
-            name: model.to_owned(),
-            path: rto_graph::model_dir(model).join("model.gguf"),
-            mmproj: None,
-        }],
-        REVIEW_N_CTX,
-    )
-    .map_err(|e| anyhow::anyhow!("starting llama.cpp: {e}"))?;
+    let engine = start_engine(model)?;
 
     // Anchored (sha, path) pairs, so the report can say how much of what it
     // reviewed the corpus can judge at all.
@@ -811,6 +872,10 @@ pub fn run_replay(
                 format!(", {} with no reviewable diff", set.skipped.len())
             }
         );
+        // What this commit's per-file pass reported, handed back to the
+        // whole-change pass below so it synthesises rather than repeats. Per
+        // commit, not per run: a verdict is about one change.
+        let mut reported: Vec<String> = Vec::new();
         for file in &set.files {
             let sources = |p: &str| blob_at(repo, sha, p);
             let context = context_for(graph.as_ref(), file, &sources)?;
@@ -830,24 +895,167 @@ pub fn run_replay(
                     continue;
                 }
             };
-            report.files += 1;
-            report.findings += outcome.findings.len();
-            report.suppressed += outcome.suppressed.len();
-            report.unparsed += outcome.unparsed;
-            report.clean += usize::from(outcome.declared_clean);
-            report.truncated += usize::from(outcome.dropped_tokens > 0);
-            report.reasoning_truncated += usize::from(outcome.reasoning_truncated);
-            report.anchored_files += usize::from(anchors.contains(&(*sha, file.path.as_str())));
-            run.findings.extend(outcome.findings);
-            run.suppressed
-                .extend(outcome.suppressed.into_iter().map(|(f, _)| f));
+            record_outcome(
+                outcome,
+                &file.path,
+                anchors.contains(&(*sha, file.path.as_str())),
+                &mut run,
+                &mut report,
+                &mut reported,
+            );
         }
+
+        record_verdict(
+            &engine,
+            model,
+            sha,
+            &set.files,
+            &reported,
+            &mut run,
+            &mut report,
+        );
     }
 
     let json = serde_json::to_string_pretty(&run)?;
     std::fs::write(out, format!("{json}\n")).map_err(|e| anyhow::anyhow!("writing {out}: {e}"))?;
     print_replay(&report, out);
     Ok(())
+}
+
+/// Start llama.cpp on `model` with this reviewer's context window.
+///
+/// One definition rather than the two identical copies [`run_llm`] and
+/// [`run_replay`] carried: [`REVIEW_N_CTX`] is load-bearing — the first replay
+/// died on file two because the engine defaulted to 4,096 — and a second copy is
+/// a second place for it to be passed wrongly.
+///
+/// # Errors
+/// If the engine cannot be started.
+#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+fn start_engine(model: &str) -> anyhow::Result<rto_llama::llama::LlamaEngine> {
+    rto_llama::llama::LlamaEngine::new(
+        vec![rto_llama::llama::Served {
+            name: model.to_owned(),
+            path: rto_graph::model_dir(model).join("model.gguf"),
+            mmproj: None,
+        }],
+        REVIEW_N_CTX,
+    )
+    .map_err(|e| anyhow::anyhow!("starting llama.cpp: {e}"))
+}
+
+/// Fold one file's outcome into the run document and the replay's counters, and
+/// append its findings to `reported` in the form the whole-change pass is handed.
+///
+/// Suppressed findings are recorded in the run but **not** in `reported`: they
+/// were withheld from the reader under [`rto_graph::compile_claim`], and a
+/// verdict asked to synthesise a claim nobody was shown would be summarising
+/// evidence the reader cannot check.
+#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+fn record_outcome(
+    outcome: FileOutcome,
+    path: &str,
+    anchored: bool,
+    run: &mut CandidateRun,
+    report: &mut ReplayReport,
+    reported: &mut Vec<String>,
+) {
+    report.files += 1;
+    report.findings += outcome.findings.len();
+    report.suppressed += outcome.suppressed.len();
+    report.unparsed += outcome.unparsed;
+    report.clean += usize::from(outcome.declared_clean);
+    report.truncated += usize::from(outcome.dropped_tokens > 0);
+    report.reasoning_truncated += usize::from(outcome.reasoning_truncated);
+    report.anchored_files += usize::from(anchored);
+    for f in &outcome.findings {
+        let class = f.defect_class.map_or("unclassified", |c| c.as_str());
+        reported.push(format!("{path}:{} [{class}] {}", f.line, f.description));
+    }
+    run.findings.extend(outcome.findings);
+    run.suppressed
+        .extend(outcome.suppressed.into_iter().map(|(f, _)| f));
+}
+
+/// Print the whole-change verdict, labelled as an opinion in the same words the
+/// model was told (issue #649, part 2).
+///
+/// **`None` is printed, not skipped.** A missing verdict and a `clean` one are
+/// opposite facts, and silence would render as the first looking like the second
+/// — the same failure `announce_unreviewable` and
+/// [`FileOutcome::reasoning_truncated`] exist to prevent for files. A summary this
+/// code invented would be indistinguishable from one a model formed.
+///
+/// `never_reviewed` is the count of files whose review never happened, said
+/// *beside* the verdict rather than only above it: a judgement formed over an
+/// incomplete pass is worth less than one formed over a complete one, and the
+/// reader needs that where they read the judgement.
+#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+fn print_verdict(
+    verdict: Option<&rto_graph::review_score::CandidateVerdict>,
+    never_reviewed: usize,
+) {
+    let Some(verdict) = verdict else {
+        println!(
+            "\nno whole-change verdict: the model's reply carried none in the \
+             required form, so there is no summary here rather than an assumed \
+             clean one."
+        );
+        return;
+    };
+    println!(
+        "\nverdict on the whole change [{}] — ONE MODEL'S OPINION, not a gate: it \
+         changes no exit status and is not a finding.",
+        verdict.stance.as_str()
+    );
+    println!("  {}", verdict.summary);
+    if never_reviewed > 0 {
+        println!(
+            "  Read it against the {never_reviewed} file(s) above that were never \
+             reviewed: the verdict saw their diffs, but not a review of them."
+        );
+    }
+}
+
+/// Ask for one commit's whole-change verdict and record it in the run document
+/// (issue #649, part 2).
+///
+/// One verdict per commit, so `--score` can adjudicate the summaries the same way
+/// it adjudicates the findings. A commit with nothing reviewable gets none: a
+/// verdict over no review would be an opinion about nothing, and the corpus would
+/// score it as though it were about the change.
+///
+/// Never fatal, and never defaulted. A verdict the model did not form — because
+/// the reply carried none, or because the engine refused — is counted as
+/// **absent**, exactly as a file whose review was refused is recorded and stepped
+/// over. Writing an invented `clean` into the run document would put a claim no
+/// model made in front of the scorer.
+#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+fn record_verdict(
+    engine: &rto_llama::llama::LlamaEngine,
+    model: &str,
+    sha: &str,
+    files: &[FileUnderReview],
+    reported: &[String],
+    run: &mut CandidateRun,
+    report: &mut ReplayReport,
+) {
+    if files.is_empty() {
+        return;
+    }
+    match verdict_on(engine, model, sha, files, reported) {
+        Ok(Some(verdict)) => {
+            report.verdicts += 1;
+            report.verdicts_clean +=
+                usize::from(verdict.stance == rto_graph::review_score::VerdictStance::Clean);
+            run.verdicts.push(verdict);
+        }
+        Ok(None) => report.verdicts_absent += 1,
+        Err(e) => {
+            eprintln!("      no verdict for {}: {e}", &sha[..8.min(sha.len())]);
+            report.verdicts_absent += 1;
+        }
+    }
 }
 
 #[cfg(any(feature = "serve", feature = "inference-local-models"))]
@@ -901,6 +1109,14 @@ fn print_replay(report: &ReplayReport, out: &str) {
         "  {} file(s) declared clean in the required form",
         report.clean
     );
+    // The absent count is on the same line as the total, never below it: a
+    // whole-change verdict that never arrived and one that said `clean` are
+    // opposite facts, and only the first is silence.
+    println!(
+        "  {} whole-change verdict(s), {} of them `clean`; {} commit(s) produced \
+         none in the required form and are recorded as ABSENT, never as clean",
+        report.verdicts, report.verdicts_clean, report.verdicts_absent
+    );
     println!(
         "  {} compile claim(s) withheld by the filter",
         report.suppressed
@@ -944,6 +1160,68 @@ fn read_checks(path: &str) -> anyhow::Result<Vec<CheckRun>> {
 /// Split out of [`run_llm`] because collecting a diff and reviewing one are
 /// separate jobs, and only the second needs a model — which is what lets the
 /// interesting half of `run_llm` stay short enough to read.
+/// Say on **stderr** when the model about to review the change is also the model
+/// named in its `Co-Authored-By` trailers (issue #649, part 3).
+///
+/// # Warn, never refuse
+///
+/// A model reviewing its own output shares the blind spot that produced the
+/// defect, so the warning is worth printing — but it still finds things, and
+/// refusing would trade a weakened review for **no** review on exactly the
+/// machine most likely to have one model installed. The failure mode of refusing
+/// is silent: people stop running it. So this returns nothing and gates nothing.
+///
+/// # stderr, and not a finding
+///
+/// Two separate constraints, both deliberate. **stderr**, so it cannot corrupt a
+/// `--json` document on stdout. And it never enters [`FileOutcome::findings`],
+/// because a run document carrying it would be scored against the corpus as
+/// though it were a defect the reviewer *detected* — a warning about provenance
+/// counted as recall.
+///
+/// # A working-tree review has no trailers, and that is not a special case
+///
+/// Uncommitted work carries no commit message, so there is nothing to read and
+/// nothing is printed. That is the same silence a human-authored commit
+/// produces, arrived at by the same route: no trailer, no match, no warning.
+#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+fn warn_if_reviewing_own_work(repo: &Path, base: Option<&str>, model: &str) {
+    let Some(base) = base else {
+        return;
+    };
+    // `%B` is the raw subject and body, NUL-separated so a message containing
+    // blank lines cannot be split into two.
+    let range = format!("{base}..HEAD");
+    let Some(log) = git(repo, &["log", "--format=%B%x00", &range]) else {
+        return;
+    };
+    // Empties dropped, not merely trimmed: `git log` writes a newline after each
+    // record, so the split yields a trailing "" and every message after the first
+    // arrives with a leading one. Left in, they would inflate the "of N commits"
+    // denominator by one on every range — a wrong number in the warning's own
+    // sentence.
+    let messages: Vec<String> = log
+        .split('\0')
+        .map(|m| m.trim().to_owned())
+        .filter(|m| !m.is_empty())
+        .collect();
+    let own = rto_graph::authorship::reviewers_own_work(&messages, model);
+    if own.is_empty() {
+        return;
+    }
+    eprintln!(
+        "warning: {model} is reviewing its own work — {} of {} commit(s) in {range} \
+         name it as co-author (as {}). A model reviewing code it wrote shares the \
+         blind spot that produced the defect, so read a clean result here as weaker \
+         evidence than usual. This is a warning, not a gate: a weakened review \
+         beats no review, and nothing about it changes the exit status or enters \
+         the findings.",
+        own.commits,
+        messages.len(),
+        own.names.join(", "),
+    );
+}
+
 #[cfg(any(feature = "serve", feature = "inference-local-models"))]
 fn changed_files(repo: &Path, base: Option<&str>) -> ReviewSet {
     let head = git(repo, &["rev-parse", "HEAD"]).unwrap_or_else(|| "HEAD".to_owned());
@@ -1026,21 +1304,17 @@ pub fn run_llm(
         files.len(),
         choice.why()
     );
+    // Before the review rather than after it: the reader needs to know how to
+    // weigh the result while they are reading it, not once they have already
+    // formed a view of a clean one.
+    warn_if_reviewing_own_work(repo, base, model);
     if cfg!(debug_assertions) {
         eprintln!(
             "note: unoptimized build — local generation is very slow; use a \
              release build (`cargo build --release`) for usable speed."
         );
     }
-    let engine = rto_llama::llama::LlamaEngine::new(
-        vec![rto_llama::llama::Served {
-            name: model.to_owned(),
-            path: rto_graph::model_dir(model).join("model.gguf"),
-            mmproj: None,
-        }],
-        REVIEW_N_CTX,
-    )
-    .map_err(|e| anyhow::anyhow!("starting llama.cpp: {e}"))?;
+    let engine = start_engine(model)?;
 
     // The live surface reviews the working tree, so its graph is the working
     // tree's — `HEAD` plus uncommitted edits, which is what `review` and `check`
@@ -1054,6 +1328,11 @@ pub fn run_llm(
     let mut total = 0usize;
     let mut withheld = 0usize;
     let mut never_reviewed: Vec<&str> = Vec::new();
+    // What the per-file pass said, in the shape the whole-change pass is handed
+    // back so it can synthesise rather than repeat. Collected in the loop rather
+    // than reconstructed afterwards, so the two can never disagree about what was
+    // reported.
+    let mut reported: Vec<String> = Vec::new();
     for file in &files {
         let sources = |p: &str| std::fs::read_to_string(repo.join(p)).ok();
         let context = context_for(graph.as_ref(), file, &sources)?;
@@ -1068,6 +1347,10 @@ pub fn run_llm(
         for f in &outcome.findings {
             let class = f.defect_class.map_or("unclassified", |c| c.as_str());
             println!("  {}:{}  [{class}]  {}", file.path, f.line, f.description);
+            reported.push(format!(
+                "{}:{} [{class}] {}",
+                file.path, f.line, f.description
+            ));
             total += 1;
         }
         for (f, reason) in &outcome.suppressed {
@@ -1098,6 +1381,17 @@ pub fn run_llm(
              (currently {REVIEW_MAX_TOKENS} tokens)."
         );
     }
+
+    // The whole-change verdict (#649, part 2), after the per-file findings
+    // because it is a synthesis of them and the diffs.
+    let sha = files
+        .first()
+        .map_or_else(|| "HEAD".to_owned(), |f| f.reviewed_sha.clone());
+    print_verdict(
+        verdict_on(&engine, model, &sha, &files, &reported)?.as_ref(),
+        never_reviewed.len(),
+    );
+
     println!(
         "These are one model's opinions, unadjudicated. `docs/REVIEW_CHECKLIST.md` \
          has the triage rule; the corpus in `crates/rto-graph/tests/fixtures/review/` \

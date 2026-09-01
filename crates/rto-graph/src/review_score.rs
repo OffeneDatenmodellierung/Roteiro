@@ -108,6 +108,83 @@ pub struct CandidateFinding {
     pub defect_class: Option<DefectClass>,
 }
 
+/// Where a whole-change verdict comes down: nothing to push back on, or something
+/// to.
+///
+/// Two values and no third, and deliberately not `#[non_exhaustive]`.
+///
+/// A scale would invite a threshold, and a threshold on a generation is the
+/// probabilistic gate this issue exists to keep out of `review`. The only
+/// distinction the corpus can adjudicate is whether a verdict **claimed the
+/// change was clean** — see [`Score::verdicts_contradicted`] — and that is a bit.
+///
+/// The set is closed for a second reason that outlives the first: this is a
+/// **wire type**. It is deserialised from a `roteiro.review-run/v1` document, so
+/// a third variant is a breaking change for every reader of that schema whatever
+/// this attribute says. Marking it open would let a match arm compile while the
+/// document it came from could not be read — a compile-time promise the format
+/// cannot keep. A new stance belongs at a `/v2` bump.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum VerdictStance {
+    /// The reviewer found nothing it would push back on.
+    Clean,
+    /// The reviewer has something it would push back on.
+    Concerns,
+}
+
+impl VerdictStance {
+    /// The stable token used in the run document and in the model's own output
+    /// contract, so the prompt, the parser and the JSON cannot disagree.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Clean => "clean",
+            Self::Concerns => "concerns",
+        }
+    }
+
+    /// Read a stance token, or `None` if it is not one.
+    #[must_use]
+    pub fn from_token(token: &str) -> Option<Self> {
+        match token {
+            "clean" => Some(Self::Clean),
+            "concerns" => Some(Self::Concerns),
+            _ => None,
+        }
+    }
+}
+
+/// **A model's judgement over a whole change**, as opposed to its per-file
+/// findings (issue #649, part 2).
+///
+/// # It is an opinion, and it is carried here so it can be measured
+///
+/// The verdict is never wired to an exit status —
+/// [`crate::review_score`] is a scorer, and `ReviewReport::has_drift` remains the
+/// only thing `review` gates on. It lives in the run document for the reason the
+/// findings do: a summary nobody has scored is an opinion with a confident tone,
+/// and shipping one in the single shape `--score` cannot read would have made it
+/// permanently unmeasurable.
+///
+/// # It is deliberately not a `CandidateFinding`
+///
+/// A finding is anchored to a line and is scored against a corpus row. A verdict
+/// is anchored to nothing and answers a different question. Modelling it as a
+/// finding with `line: 0` would have put it into the recall denominator, where it
+/// would be counted as a defect the reviewer claimed to detect and missed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CandidateVerdict {
+    /// The commit the verdict is about — a corpus `reviewed_sha`.
+    pub reviewed_sha: String,
+    /// Whether it claims the change is clean.
+    pub stance: VerdictStance,
+    /// What it said, for a human reading the score. Kept verbatim: the prose is
+    /// the whole of what a verdict adds over a finding count.
+    pub summary: String,
+}
+
 /// One candidate reviewer's whole run.
 ///
 /// `attempted_shas` is not derivable from the findings, and the difference is the
@@ -130,6 +207,21 @@ pub struct CandidateRun {
     /// an explanation instead of an unexplained one.
     #[serde(default)]
     pub suppressed: Vec<CandidateFinding>,
+    /// **The whole-change judgement**, at most one per attempted commit (issue
+    /// #649, part 2).
+    ///
+    /// Carried here rather than left to the text output because the alternative
+    /// was shipping the verdict in the one shape `--score` cannot read, which
+    /// would have made it the only part of the reviewer nobody could ever
+    /// measure. [`Score::verdicts_contradicted`] is what the corpus can say about
+    /// it.
+    ///
+    /// Optional on exactly the terms [`CandidateRun::arm`] is: every `v1`
+    /// document written before this field existed still parses, and a build older
+    /// than this one refuses a document carrying it rather than silently dropping
+    /// the judgement.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verdicts: Vec<CandidateVerdict>,
     /// **Which arm produced this run**, when the producer knows — the context it
     /// was given and the model that generated it.
     ///
@@ -178,6 +270,7 @@ impl Default for CandidateRun {
             attempted_shas: BTreeSet::new(),
             findings: Vec::new(),
             suppressed: Vec::new(),
+            verdicts: Vec::new(),
             arm: None,
         }
     }
@@ -387,6 +480,32 @@ pub struct Score {
     /// `None` when the run offered no findings on any file carrying a row, since
     /// there is then nothing whose density to describe.
     pub expected_by_position: Option<f64>,
+    /// Whole-change verdicts the run offered on commits in scope (issue #649).
+    pub verdicts: usize,
+    /// **Verdicts that declared a change clean which the corpus knows carries a
+    /// real defect** — the one thing the corpus can adjudicate about a
+    /// whole-change judgement, and the failure that matters.
+    ///
+    /// A confident *"nothing to push back on"* over a change with an adjudicated
+    /// defect in it is worse than a missed finding: a missed finding is silence,
+    /// while this is a positive claim a reader may act on. It is computed purely,
+    /// from data already in the corpus, so it recomputes on any machine like every
+    /// other number here.
+    ///
+    /// A `concerns` verdict is **not** scored against anything. The corpus records
+    /// what one reviewer said about these trees, not every defect in them, so a
+    /// `concerns` verdict on a commit with no adjudicated row is unadjudicated in
+    /// exactly the sense [`Score::unadjudicated`] is — see
+    /// [`Score::verdicts_unadjudicated`].
+    pub verdicts_contradicted: usize,
+    /// Verdicts the corpus cannot judge: every `concerns` verdict, and every
+    /// `clean` verdict on a commit the corpus holds no **real** row for.
+    ///
+    /// Named rather than folded into a rate, for the reason the module's
+    /// precision discussion gives: the corpus is not an inventory of the defects
+    /// in these trees, so "clean, and the corpus knows of nothing" is not evidence
+    /// that the change was clean.
+    pub verdicts_unadjudicated: usize,
 }
 
 /// Schema tag for a serialised [`Score`].
@@ -485,23 +604,43 @@ impl Score {
                 self.suppressed_real
             ));
         }
+        // Loud, and phrased as the positive claim it is. A missed finding is
+        // silence; a `clean` verdict over a commit with an adjudicated defect is
+        // an assertion a reader may act on, and it is the reason the verdict is
+        // carried into the run document at all.
+        if self.verdicts_contradicted > 0 {
+            out.push(format!(
+                "{} WHOLE-CHANGE VERDICT(S) DECLARED A CHANGE CLEAN THAT THE CORPUS \
+                 KNOWS CARRIES A REAL DEFECT. A verdict is a model's opinion and \
+                 gates nothing, but this one is a positive claim contradicted by \
+                 adjudicated evidence, which is worse than a missed finding: a miss \
+                 is silence, and this is a reader being told there is nothing to \
+                 look at",
+                self.verdicts_contradicted
+            ));
+        }
+        if self.verdicts_unadjudicated > 0 {
+            out.push(format!(
+                "{} whole-change verdict(s) the corpus cannot judge — every \
+                 `concerns` verdict, and every `clean` one on a commit with no real \
+                 row. The corpus records what one reviewer said about these trees, \
+                 not every defect in them, so `clean` here is NOT evidence the \
+                 change was clean",
+                self.verdicts_unadjudicated
+            ));
+        }
         out
     }
 }
 
-/// Score `run` against `corpus`.
+/// Refuse a run whose commits the corpus does not know, or that the run did not
+/// declare as attempted.
 ///
-/// Matching is **one to one**: each row is credited to at most one finding and
-/// each finding to at most one row, resolved by nearest line and then by lowest
-/// comment id, so the result does not depend on the order the candidate emitted
-/// its findings in.
-///
-/// # Errors
-/// [`ScoreError::UnknownSha`] when a sha is in no corpus row (the PR-head
-/// mistake), [`ScoreError::UndeclaredSha`] when a finding is outside the attempted
-/// set, and [`ScoreError::NothingAttempted`] for an empty run.
-pub fn score(corpus: &Corpus, run: &CandidateRun) -> Result<Score, ScoreError> {
-    let known: BTreeSet<&str> = corpus.reviewed_shas();
+/// Applied to findings, suppressed findings **and** verdicts alike: a judgement
+/// against a merged PR head is a judgement of already-repaired code, and one
+/// outside the attempted set is a judgement of a commit this run never looked at.
+/// Either would be scored as though it meant something.
+fn check_shas(known: &BTreeSet<&str>, run: &CandidateRun) -> Result<(), ScoreError> {
     if run.attempted_shas.is_empty() {
         return Err(ScoreError::NothingAttempted);
     }
@@ -513,19 +652,65 @@ pub fn score(corpus: &Corpus, run: &CandidateRun) -> Result<Score, ScoreError> {
             });
         }
     }
-    for finding in run.findings.iter().chain(&run.suppressed) {
-        if !known.contains(finding.reviewed_sha.as_str()) {
+    let claimed = run
+        .findings
+        .iter()
+        .chain(&run.suppressed)
+        .map(|f| ("a finding", &f.reviewed_sha))
+        .chain(run.verdicts.iter().map(|v| ("a verdict", &v.reviewed_sha)));
+    for (what, sha) in claimed {
+        if !known.contains(sha.as_str()) {
             return Err(ScoreError::UnknownSha {
-                what: "a finding",
-                sha: finding.reviewed_sha.clone(),
+                what,
+                sha: sha.clone(),
             });
         }
-        if !run.attempted_shas.contains(&finding.reviewed_sha) {
-            return Err(ScoreError::UndeclaredSha {
-                sha: finding.reviewed_sha.clone(),
-            });
+        if !run.attempted_shas.contains(sha) {
+            return Err(ScoreError::UndeclaredSha { sha: sha.clone() });
         }
     }
+    Ok(())
+}
+
+/// How many `clean` verdicts the corpus contradicts: those over a commit it holds
+/// a **real** row for.
+///
+/// The only thing this scorer can say about a whole-change judgement without a
+/// human, and deliberately the *only* thing it says — a `concerns` verdict is
+/// matched against nothing, because the corpus records what one reviewer said
+/// about these trees rather than every defect in them. See
+/// [`Score::verdicts_contradicted`].
+fn contradicted_verdicts(in_scope: &[&CorpusRow], verdicts: &[CandidateVerdict]) -> usize {
+    let with_a_real_row: BTreeSet<&str> = in_scope
+        .iter()
+        .filter(|r| r.verdict == Verdict::Real)
+        .map(|r| r.reviewed_sha.as_str())
+        .collect();
+    verdicts
+        .iter()
+        .filter(|v| {
+            v.stance == VerdictStance::Clean && with_a_real_row.contains(v.reviewed_sha.as_str())
+        })
+        .count()
+}
+
+/// Score `run` against `corpus`.
+///
+/// Matching is **one to one**: each row is credited to at most one finding and
+/// each finding to at most one row, resolved by nearest line and then by lowest
+/// comment id, so the result does not depend on the order the candidate emitted
+/// its findings in.
+///
+/// Whole-change verdicts are scored separately and never enter the recall
+/// figures — see [`Score::verdicts_contradicted`].
+///
+/// # Errors
+/// [`ScoreError::UnknownSha`] when a sha is in no corpus row (the PR-head
+/// mistake), [`ScoreError::UndeclaredSha`] when a finding or verdict is outside
+/// the attempted set, and [`ScoreError::NothingAttempted`] for an empty run.
+pub fn score(corpus: &Corpus, run: &CandidateRun) -> Result<Score, ScoreError> {
+    let known: BTreeSet<&str> = corpus.reviewed_shas();
+    check_shas(&known, run)?;
 
     let in_scope: Vec<&CorpusRow> = corpus
         .rows()
@@ -592,8 +777,13 @@ pub fn score(corpus: &Corpus, run: &CandidateRun) -> Result<Score, ScoreError> {
             .count()
     };
 
+    let verdicts_contradicted = contradicted_verdicts(&in_scope, &run.verdicts);
+
     Ok(Score {
         schema: SCORE_SCHEMA,
+        verdicts: run.verdicts.len(),
+        verdicts_contradicted,
+        verdicts_unadjudicated: run.verdicts.len() - verdicts_contradicted,
         attempted_shas: run.attempted_shas.len(),
         corpus_shas: known.len(),
         per_class,
@@ -710,7 +900,10 @@ fn match_findings<'a>(rows: &[&'a CorpusRow], findings: &'a [CandidateFinding]) 
 
 #[cfg(test)]
 mod tests {
-    use super::{CandidateFinding, CandidateRun, LINE_WINDOW, SCORE_SCHEMA, ScoreError, score};
+    use super::{
+        CandidateFinding, CandidateRun, CandidateVerdict, LINE_WINDOW, RUN_SCHEMA, SCORE_SCHEMA,
+        ScoreError, VerdictStance, score,
+    };
     use crate::review_corpus::{Corpus, DefectClass, Verdict};
 
     const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -1262,5 +1455,176 @@ mod tests {
             corpus().with_verdict(Verdict::False).count(),
             scored.known_false_in_scope
         );
+    }
+
+    fn verdict(sha: &str, stance: VerdictStance) -> CandidateVerdict {
+        CandidateVerdict {
+            reviewed_sha: sha.to_owned(),
+            stance,
+            summary: "a judgement".to_owned(),
+        }
+    }
+
+    /// **The one thing the corpus can adjudicate about a whole-change judgement**
+    /// (issue #649, part 2): a verdict that declared a change clean over a commit
+    /// the corpus knows carries a real defect.
+    ///
+    /// # The fixture has to contain the difference
+    ///
+    /// A local corpus, not [`corpus`], and the two commits differ in the only
+    /// respect the rule reads: `SHA_A` carries a **real** row and `SHA_B` carries
+    /// only a **known-false** one. The shared fixture has a real row on both, so a
+    /// test built on it counted 1 against an implementation that inverted the
+    /// stance — found by injecting exactly that, which is why this fixture is
+    /// here rather than the convenient one.
+    #[test]
+    fn a_clean_verdict_over_a_known_defect_is_contradicted_and_said_so_loudly() {
+        let text = [
+            row(1, SHA_A, "src/a.rs", 100, "real", "contract-drift"),
+            row(2, SHA_B, "src/c.rs", 300, "false", "false-compile-claim"),
+        ]
+        .join("\n");
+        let corpus = Corpus::parse(&text).expect("the test corpus parses");
+
+        let both_clean = CandidateRun {
+            verdicts: vec![
+                verdict(SHA_A, VerdictStance::Clean),
+                verdict(SHA_B, VerdictStance::Clean),
+            ],
+            ..run(&[SHA_A, SHA_B], vec![])
+        };
+        let scored = score(&corpus, &both_clean).expect("scores");
+        assert_eq!(scored.verdicts, 2);
+        assert_eq!(
+            scored.verdicts_contradicted, 1,
+            "only the one over a commit the corpus holds a REAL row for — a \
+             known-false row is not a defect to have missed"
+        );
+        assert_eq!(scored.verdicts_unadjudicated, 1);
+        assert!(
+            scored
+                .caveats()
+                .iter()
+                .any(|c| c.contains("DECLARED A CHANGE CLEAN")),
+            "the contradiction caveat did not fire: {:?}",
+            scored.caveats()
+        );
+
+        // The stance is read, not ignored: `concerns` over the very same real row
+        // is not contradicted by anything.
+        let concerns = CandidateRun {
+            verdicts: vec![verdict(SHA_A, VerdictStance::Concerns)],
+            ..run(&[SHA_A], vec![])
+        };
+        let scored = score(&corpus, &concerns).expect("scores");
+        assert_eq!(
+            scored.verdicts_contradicted, 0,
+            "a reviewer that said it had concerns has not claimed the change was \
+             clean, whatever the corpus knows"
+        );
+        assert_eq!(scored.verdicts_unadjudicated, 1);
+    }
+
+    /// A verdict never enters the recall figures. Modelling it as a finding would
+    /// have put it in the denominator, where it would count as a defect the
+    /// reviewer claimed to detect.
+    #[test]
+    fn verdicts_do_not_move_recall_precision_or_the_unadjudicated_count() {
+        let findings = vec![finding(SHA_A, "src/a.rs", 100)];
+        let without = score(&corpus(), &run(&[SHA_A, SHA_B], findings.clone())).expect("scores");
+        let with = score(
+            &corpus(),
+            &CandidateRun {
+                verdicts: vec![
+                    verdict(SHA_A, VerdictStance::Clean),
+                    verdict(SHA_B, VerdictStance::Concerns),
+                ],
+                ..run(&[SHA_A, SHA_B], findings)
+            },
+        )
+        .expect("scores");
+        assert_eq!(with.found, without.found);
+        assert_eq!(with.real_in_scope, without.real_in_scope);
+        assert_eq!(with.unadjudicated, without.unadjudicated);
+        assert_eq!(with.per_class, without.per_class);
+        assert_eq!(with.corpus_precision(), without.corpus_precision());
+    }
+
+    /// A run carrying no verdict scores exactly as it did before the field
+    /// existed — the zero is a zero, not a contradiction.
+    #[test]
+    fn a_run_with_no_verdicts_reports_zeroes_and_no_caveat() {
+        let scored = score(&corpus(), &run(&[SHA_A], vec![])).expect("scores");
+        assert_eq!(
+            (
+                scored.verdicts,
+                scored.verdicts_contradicted,
+                scored.verdicts_unadjudicated
+            ),
+            (0, 0, 0)
+        );
+        assert!(!scored.caveats().iter().any(|c| c.contains("verdict")));
+    }
+
+    /// Verdicts are held to the same sha rules as findings: a judgement of a
+    /// commit the corpus does not know is overwhelmingly a merged PR head, whose
+    /// fix commits make any judgement of it a judgement of repaired code.
+    #[test]
+    fn a_verdict_naming_an_unknown_or_undeclared_commit_is_refused() {
+        let unknown = CandidateRun {
+            verdicts: vec![verdict(
+                "cccccccccccccccccccccccccccccccccccccccc",
+                VerdictStance::Clean,
+            )],
+            ..run(&[SHA_A], vec![])
+        };
+        assert!(matches!(
+            score(&corpus(), &unknown),
+            Err(ScoreError::UnknownSha {
+                what: "a verdict",
+                ..
+            })
+        ));
+
+        let undeclared = CandidateRun {
+            verdicts: vec![verdict(SHA_B, VerdictStance::Clean)],
+            ..run(&[SHA_A], vec![])
+        };
+        assert!(matches!(
+            score(&corpus(), &undeclared),
+            Err(ScoreError::UndeclaredSha { .. })
+        ));
+    }
+
+    /// A `v1` document written before verdicts existed still parses, and one
+    /// carrying them round-trips — the additive promise `arm` was added under.
+    #[test]
+    fn the_run_document_carries_verdicts_and_still_reads_one_without_them() {
+        let old = format!(
+            "{{\"schema\": \"{RUN_SCHEMA}\", \"attempted_shas\": [{SHA_A:?}], \
+             \"findings\": []}}"
+        );
+        let parsed = CandidateRun::parse(&old).expect("an older document still parses");
+        assert!(parsed.verdicts.is_empty());
+
+        let judged = CandidateRun {
+            verdicts: vec![verdict(SHA_A, VerdictStance::Concerns)],
+            ..run(&[SHA_A], vec![])
+        };
+        let text = serde_json::to_string(&judged).expect("serialises");
+        assert!(
+            text.contains("\"stance\":\"concerns\""),
+            "the stance is a stable kebab token: {text}"
+        );
+        assert_eq!(
+            CandidateRun::parse(&text).expect("round-trips"),
+            judged,
+            "a run document that cannot round-trip cannot be replayed"
+        );
+
+        // An empty list is omitted entirely, so a run with no verdicts is byte-wise
+        // what it always was and an older build can still read it.
+        let bare = serde_json::to_string(&run(&[SHA_A], vec![])).expect("serialises");
+        assert!(!bare.contains("verdicts"), "{bare}");
     }
 }
