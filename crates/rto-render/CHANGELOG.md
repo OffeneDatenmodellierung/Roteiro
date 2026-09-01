@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v4.2.0...rto-render-v5.0.0) - 2026-09-01
+
+### Added
+
+- *(mcp)* [**breaking**] spell `debt`'s category filter `categories` on both surfaces
+
+### Fixed
+
+- *(tools)* refuse a tool argument key neither surface recognises
+
+### Other
+
+- *(mcp)* use the module's existing `BTreeSet` import in the new signature
+
 ## [4.2.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v4.1.0...rto-render-v4.2.0) - 2026-09-01
 
 ### Fixed
