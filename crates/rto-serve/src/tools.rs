@@ -420,12 +420,22 @@ fn unfinished_refusal(why: Unfinished, limits: Limits) -> String {
         // message that contains the marker would be read as a call by the very
         // function that wrote it. So the property holds over this module's own
         // prose too — see `every_ending_that_returns_prose_is_markup_free`.
+        //
+        // **One sentence serves every [`Envelope`], so it may not describe a
+        // delimiter only some of them have.** It used to say the model "opened a
+        // tool-call block and never closed it", which was exact while every
+        // dialect was wrapped in `<tool_call>` and became false the moment one
+        // was not: [`Envelope::SelfClosing`] has no closing marker to be missing,
+        // so a Mistral call truncated inside its JSON was refused with a sentence
+        // describing a tag it was never going to write. "Started one and never
+        // finished it" is true of both, which is the property a shared sentence
+        // has to have.
         Unfinished::CutShort => format!(
-            "{REFUSAL}the model stopped part-way through a tool call — it opened a \
-             tool-call block and never closed it — so this reply is an unfinished call \
-             rather than an answer. Nothing was executed. Retry the question; if it keeps \
-             happening this model is not following the call protocol, and \
-             `roteiro model list` shows the others installed."
+            "{REFUSAL}the model stopped part-way through a tool call — it started one and \
+             never finished it — so this reply is an unfinished call rather than an answer. \
+             Nothing was executed. Retry the question; if it keeps happening this model is \
+             not following the call protocol, and `roteiro model list` shows the others \
+             installed."
         ),
         // Two situations share this sentence because they share a way forward:
         // a body in a dialect Roteiro has not learned, and a body in a dialect it
@@ -2988,7 +2998,10 @@ mod tests {
         let engine = ScriptedEngine::new(&["[TOOL_CALLS]echo[ARGS]{\"key\":\"ab"]);
         let out = chat_with_tools(&engine, &EchoRegistry, &ask_request(), 4).expect("completion");
         assert_refusal(&out.content);
-        assert!(out.content.contains("never closed it"), "{}", out.content);
+        // The phrase that separates this refusal from the token-cap one, and the
+        // reason it is not "never closed it": the sentence serves every
+        // `Envelope`, and this generation had no closing marker to be missing.
+        assert!(out.content.contains("never finished it"), "{}", out.content);
     }
 
     #[test]
@@ -3186,7 +3199,13 @@ mod tests {
         assert_refusal(&out.content);
         // The model stopped of its own accord rather than hitting the cap, so the
         // way forward is the model, not a bigger budget.
-        assert!(out.content.contains("never closed it"), "{}", out.content);
+        //
+        // The phrase moved from "never closed it" to "never finished it" in #592,
+        // and the assertion moved with it rather than being loosened. What it
+        // pins is unchanged — this is the stopped-mid-call sentence, not the
+        // token-cap one — but the old wording described a closing marker, and one
+        // sentence now serves envelopes that have none.
+        assert!(out.content.contains("never finished it"), "{}", out.content);
         assert!(
             out.content.contains("roteiro model list"),
             "{}",
