@@ -114,7 +114,7 @@ Verified against `main` at the time of writing:
 | Fact | Value | Consequence for V2 |
 |---|---|---|
 | Released | **v1.15.0** on crates.io, all seven crates | V2 work is post-1.0 — semver is now real. |
-| MSRV | `rust-version = "1.96"` | New deps must respect it. |
+| MSRV | `rust-version = "1.94"` | New deps must respect it. |
 | Lints | `unsafe_code = "forbid"`, clippy pedantic `-D warnings` | Native/FFI deps must be isolated behind a feature. |
 | Coverage | **measured in CI, not gated** — `cargo llvm-cov` runs non-blocking; the 85% per-file floor is an aspiration (ADR-0001), never an enforced check (issue #319) | Every stage below still carries test cost, but a DoD may not cite "85% coverage" as if something verified it. |
 | CI | Ubuntu-only; `--all-features` **and** the default set (the `default-features` job, added by #364 after the default set was found not to compile — issue #360) | `/dev/kvm` may be absent; Apple Silicon untested. Turning features *on* cannot find defects caused by code being cfg'd *out*. |
