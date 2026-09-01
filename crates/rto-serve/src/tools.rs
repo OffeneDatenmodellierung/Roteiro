@@ -1502,8 +1502,8 @@ impl Dialect {
     /// [`Reading::Absent`] is not reachable from here — the envelope already
     /// said this is the dialect's form — and [`Reading::Unarrived`] is reachable
     /// only under [`Envelope::SelfClosing`], where arrival is the body grammar's
-    /// to establish. A [`Envelope::Delimited`] dialect has had arrival proven by
-    /// its closing marker before this is called.
+    /// to establish. An [`Envelope::Delimited`] dialect has had arrival proven
+    /// by its closing marker before this is called.
     fn parse(self, body: &str) -> Reading {
         match self {
             Self::Json => parse_json_body(body).map_or(Reading::Unreadable, Reading::Call),
