@@ -1267,8 +1267,17 @@ struct ExternalRef {
 /// The cross-repo external-ref links persisted in `store` (ADR-0009): every
 /// external-ref placeholder node and the edge that points at it. Both
 /// [`Provenance::Authored`] (declared `[[links]]`) and [`Provenance::Inferred`]
-/// (matched) edges are collected, each carrying its real provenance — a
-/// *derived* edge never targets an external-ref placeholder, so it is excluded.
+/// (matched) edges are collected, each carrying its real provenance.
+///
+/// The filter names those two **exactly**, and both exclusions are deliberate:
+///
+/// * a *derived* edge never targets a placeholder at all;
+/// * an *`external-*`* edge can, now that an OKF import fills placeholders
+///   (issue #706) — and must still not appear here. This route reports the links
+///   **this** repository declares or infers into another one. An imported edge is
+///   a relationship inside the peer's own graph that happens to land on a node we
+///   use as a stand-in, so listing it would show a peer's internal edge as a
+///   cross-repo link this repo asserted.
 fn external_refs(store: &Store) -> Result<Vec<ExternalRef>, StoreError> {
     let placeholders = store.nodes_by_kind(&NodeKind::Other(EXTERNAL_REF_KIND.to_owned()))?;
     let mut out = Vec::new();
@@ -1575,15 +1584,18 @@ fn compute_hotspots(store: &Store, limit: usize) -> Result<Vec<Value>, StoreErro
 }
 
 /// Parse a provenance filter token, or a 400 for anything else.
+///
+/// Delegates to [`Provenance::from_token`] rather than re-listing the tokens.
+/// A second copy of the vocabulary is what made this route silently reject
+/// `external-authored` the moment the enum grew — a filter that 400s on a value
+/// the store is full of, with a message naming a set that is no longer the set.
 fn parse_provenance(s: &str) -> Result<Provenance, ApiError> {
-    match s {
-        "derived" => Ok(Provenance::Derived),
-        "authored" => Ok(Provenance::Authored),
-        "inferred" => Ok(Provenance::Inferred),
-        other => Err(ApiError::BadRequest(format!(
-            "unknown provenance `{other}` (expected derived|authored|inferred)"
-        ))),
-    }
+    Provenance::from_token(s).ok_or_else(|| {
+        ApiError::BadRequest(format!(
+            "unknown provenance `{s}` (expected {})",
+            Provenance::tokens().join("|")
+        ))
+    })
 }
 
 #[cfg(test)]

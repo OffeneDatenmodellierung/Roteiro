@@ -577,6 +577,132 @@ CREATE TABLE agent_cache_clock (
 INSERT INTO agent_cache_clock (id) VALUES (0);
 ";
 
+/// Migration 14: three more provenance tokens — `external-derived`,
+/// `external-authored`, `external-inferred` — for facts imported from another
+/// repository's OKF bundle (issue #706, ADR-0021).
+///
+/// # Why a table rebuild, and why it is unavoidable
+///
+/// The vocabulary is a `CHECK` constraint, written inline in migration 1
+/// (`edges`) and migration 6 (`nodes`). `SQLite` has no `ALTER TABLE … DROP
+/// CONSTRAINT`, so widening one means rebuilding the table — migration 10's
+/// precedent, applied to the two central tables instead of an artifact store.
+///
+/// # This is the **first** migration that widens a value vocabulary
+///
+/// Every migration before it added a column, an index or a table, which is what
+/// licenses [`crate::SchemaAhead`]'s claim that an older build can still *read* a
+/// newer store: additive schema leaves every column an older `SELECT` names. That
+/// is still true of the schema here — no column changes — but it is **no longer
+/// true of the values**. An older build reading a row whose provenance is
+/// `external-authored` gets [`crate::StoreError::Corrupt`] from
+/// `Provenance::from_token`, because to that build the token genuinely is
+/// unknown.
+///
+/// That is diagnosed rather than hidden, and this migration is the mechanism: a
+/// store carrying an external token necessarily records migration 14, so
+/// [`crate::Store::schema_ahead`] reports "written by a newer Roteiro" — the
+/// honest answer — and every write path refuses before touching it. A tolerant
+/// unknown-token path was rejected instead: its fallback would have to be one of
+/// the six, and each choice silently re-tiers a fact, which is the laundering the
+/// external variants exist to prevent.
+///
+/// # `nodes` is rebuilt without `ALTER TABLE … RENAME`
+///
+/// `edges` references `nodes(id)`, and `PRAGMA foreign_keys` is ON. Renaming a
+/// replacement table into place re-parses the whole schema, which fails while
+/// `edges` names a table that has just been dropped. So `nodes` is staged into a
+/// scratch table, dropped, **recreated under its own name**, and copied back —
+/// no rename, so no re-parse. `PRAGMA defer_foreign_keys` holds the reference
+/// from `edges` until commit, by which time every `id` is back.
+///
+/// `edges` itself has no inbound references, so it takes migration 10's simpler
+/// create/copy/drop/rename shape. It is rebuilt **first**, while `nodes` is still
+/// the original table, so its foreign key never points at a half-built one.
+///
+/// # What is deliberately *not* widened
+///
+/// `CHECK ((provenance = 'inferred') = (confidence IS NOT NULL))` keeps naming
+/// `inferred` alone. A confidence is a number this graph computed; OKF carries
+/// none for a relationship, so an imported edge has no confidence to adopt and
+/// inventing one would fabricate precision. `Edge::is_valid` says the same thing
+/// in Rust, and the two must agree or one of them rejects what the other writes.
+const M0014_EXTERNAL_PROVENANCE: &str = "
+PRAGMA defer_foreign_keys = ON;
+
+CREATE TABLE edges_v2 (
+    id         INTEGER PRIMARY KEY,
+    src        INTEGER NOT NULL REFERENCES nodes(id),
+    dst        INTEGER NOT NULL REFERENCES nodes(id),
+    kind       TEXT NOT NULL,
+    provenance TEXT NOT NULL CHECK (provenance IN (
+        'derived','authored','inferred',
+        'external-derived','external-authored','external-inferred'
+    )),
+    confidence REAL,
+    src_ref    TEXT,
+    -- Unchanged, and the omission of the external tokens is the decision: only
+    -- a locally inferred edge carries a score, because only a local inference
+    -- computed one.
+    CHECK ((provenance = 'inferred') = (confidence IS NOT NULL)),
+    CHECK (confidence IS NULL OR (confidence >= 0.0 AND confidence <= 1.0))
+);
+INSERT INTO edges_v2 (id, src, dst, kind, provenance, confidence, src_ref)
+    SELECT id, src, dst, kind, provenance, confidence, src_ref FROM edges;
+DROP TABLE edges;
+ALTER TABLE edges_v2 RENAME TO edges;
+CREATE INDEX idx_edges_src ON edges(src);
+CREATE INDEX idx_edges_dst ON edges(dst);
+CREATE INDEX idx_edges_provenance ON edges(provenance);
+-- Migration 3's unique index, rebuilt under a **new name**. Dropping the table
+-- took the original with it, and re-creating it under the old name would make
+-- this migration collide with migration 3 itself: `apply` repairs a *gap* by
+-- replaying the missing migration after the higher ones, so a store that met two
+-- branches in the wrong order and lacks 3 would run 14 first and then fail
+-- forever on `index idx_edges_unique already exists`. Renaming costs nothing —
+-- the index is addressed by the query planner, never by name — and the shipped
+-- SQL of migration 3 stays untouched, which is the rule this file opens with.
+CREATE UNIQUE INDEX idx_edges_unique_v2 ON edges(src, dst, kind, provenance);
+
+CREATE TABLE nodes_stage (
+    id         INTEGER PRIMARY KEY,
+    key        TEXT NOT NULL UNIQUE,
+    kind       TEXT NOT NULL,
+    name       TEXT NOT NULL,
+    path       TEXT,
+    lang       TEXT,
+    blob_hash  TEXT,
+    span_start INTEGER,
+    span_end   INTEGER,
+    meta       TEXT NOT NULL DEFAULT 'null',
+    provenance TEXT NOT NULL DEFAULT 'derived'
+);
+INSERT INTO nodes_stage (id, key, kind, name, path, lang, blob_hash, span_start, span_end, meta, provenance)
+    SELECT id, key, kind, name, path, lang, blob_hash, span_start, span_end, meta, provenance FROM nodes;
+DROP TABLE nodes;
+CREATE TABLE nodes (
+    id         INTEGER PRIMARY KEY,
+    key        TEXT NOT NULL UNIQUE,
+    kind       TEXT NOT NULL,
+    name       TEXT NOT NULL,
+    path       TEXT,
+    lang       TEXT,
+    blob_hash  TEXT,
+    span_start INTEGER,
+    span_end   INTEGER,
+    meta       TEXT NOT NULL DEFAULT 'null',
+    provenance TEXT NOT NULL DEFAULT 'derived' CHECK (provenance IN (
+        'derived','authored','inferred',
+        'external-derived','external-authored','external-inferred'
+    ))
+);
+INSERT INTO nodes (id, key, kind, name, path, lang, blob_hash, span_start, span_end, meta, provenance)
+    SELECT id, key, kind, name, path, lang, blob_hash, span_start, span_end, meta, provenance FROM nodes_stage;
+DROP TABLE nodes_stage;
+CREATE INDEX idx_nodes_kind ON nodes(kind);
+CREATE INDEX idx_nodes_provenance ON nodes(provenance);
+";
+
 /// The ordered list of all migrations. Append only.
 pub(crate) const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -630,6 +756,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 13,
         sql: M0013_AGENT_CACHE,
+    },
+    Migration {
+        version: 14,
+        sql: M0014_EXTERNAL_PROVENANCE,
     },
 ];
 
@@ -989,18 +1119,23 @@ mod tests {
         assert_eq!(
             super::store_version(&conn).expect("version"),
             11,
-            "with 12 missing, the store provides 11 — reporting 13 (the maximum \
-             recorded) would name a schema that is not there"
+            "with 12 missing, the store provides 11 — reporting the maximum \
+             recorded would name a schema that is not there"
         );
 
         // Once repaired, it reports the full contiguous run including the other
         // branch's version: this describes the store, not the binary.
         let mut conn = conn;
         apply(&mut conn).expect("repair");
+        // Read from `latest_version()` rather than written down: the number is
+        // whatever the list currently ends at, and a literal here has to be
+        // edited by every migration that lands, which is a test that rots on a
+        // schedule rather than one that checks anything.
         assert_eq!(
             super::store_version(&conn).expect("version"),
-            13,
-            "1..=13 contiguous after the repair"
+            latest_version(),
+            "1..={} contiguous after the repair",
+            latest_version()
         );
 
         // A store with nothing recorded is version 0, not an error.
@@ -1226,17 +1361,23 @@ mod tests {
         assert_eq!(stored, 2, "no refused shape may have slipped through");
     }
 
-    /// ADR-0015 adds an artifact store, **not** a provenance class. The three
-    /// tokens `nodes`/`edges` accept are a published contract, and migration 9
-    /// must leave them exactly as migration 1 and 6 defined them — so the check
+    /// ADR-0015 adds an artifact store, **not** a provenance class. The tokens
+    /// `nodes`/`edges` accept are a published contract, and migration 9 must
+    /// leave them exactly as migrations 1, 6 and 14 defined them — so the check
     /// is that the constraints still bite, on a store at the latest version.
+    ///
+    /// The vocabulary is read from [`crate::Provenance::tokens`] rather than
+    /// written out here. It grew once (migration 14, the `external-*` tier), and
+    /// a hand-copied list would have made that widening look like this test's
+    /// subject when it is not: what this test asserts is that a *media* migration
+    /// changes nothing about it, whatever it currently is.
     #[test]
     fn the_media_migration_leaves_the_provenance_vocabulary_alone() {
         let mut conn = Connection::open_in_memory().expect("open");
         apply(&mut conn).expect("apply");
 
-        // The three legitimate node provenances still insert…
-        for provenance in ["derived", "authored", "inferred"] {
+        // Every legitimate node provenance still inserts…
+        for provenance in crate::Provenance::tokens().iter().copied() {
             conn.execute(
                 "INSERT INTO nodes (key, kind, name, provenance) VALUES (?1, 'fn', 'n', ?2)",
                 [provenance, provenance],
@@ -1468,14 +1609,14 @@ mod tests {
     /// ADR-0013 adds an artifact store, **not** a provenance class. Memory has no
     /// source blob and was not written into a reviewed file, so it is neither
     /// `derived` nor `authored` — and the way to keep that true is for the table
-    /// to have no provenance column to borrow one from, while the three tokens
-    /// `nodes`/`edges` accept stay exactly as migrations 1 and 6 defined them.
+    /// to have no provenance column to borrow one from, while the tokens
+    /// `nodes`/`edges` accept stay exactly as migrations 1, 6 and 14 defined them.
     #[test]
     fn the_memory_migration_leaves_the_provenance_vocabulary_alone() {
         let mut conn = Connection::open_in_memory().expect("open");
         apply(&mut conn).expect("apply");
 
-        for provenance in ["derived", "authored", "inferred"] {
+        for provenance in crate::Provenance::tokens().iter().copied() {
             conn.execute(
                 "INSERT INTO nodes (key, kind, name, provenance) VALUES (?1, 'fn', 'n', ?2)",
                 [provenance, provenance],
@@ -1586,6 +1727,167 @@ mod tests {
         assert!(
             versions.first().is_some_and(|&v| v >= 1),
             "version 0 is the `nothing applied yet` sentinel and cannot be a migration",
+        );
+    }
+
+    /// Migration 14 rebuilds `nodes` and `edges` to widen the provenance
+    /// vocabulary, and a rebuild is the one migration shape that can **lose**
+    /// data. So this runs it the way a user meets it: against a store that a
+    /// build knowing only 1..=13 already filled.
+    ///
+    /// Row identity is asserted, not just row count. `edges.src`/`dst` are
+    /// `nodes.id` values, so a rebuild that renumbered ids would leave every
+    /// count correct and every edge pointing somewhere else — a silent
+    /// re-wiring of the whole graph, which is exactly the failure a
+    /// count-only assertion cannot see.
+    #[test]
+    fn the_external_provenance_migration_widens_the_vocabulary_without_losing_rows() {
+        let mut conn =
+            store_missing_migration(14, None).expect("a store at every migration below 14");
+
+        // Fill it as the older build would have: the three tokens it knew.
+        for (id, provenance) in [(1, "derived"), (2, "authored"), (3, "inferred")] {
+            conn.execute(
+                "INSERT INTO nodes (id, key, kind, name, provenance) VALUES (?1, ?2, 'fn', 'n', ?3)",
+                rusqlite::params![id, format!("k{id}"), provenance],
+            )
+            .expect("seed node");
+        }
+        conn.execute(
+            "INSERT INTO edges (src, dst, kind, provenance, confidence) VALUES (1, 3, 'calls', 'inferred', 0.5)",
+            [],
+        )
+        .expect("seed edge");
+        conn.execute(
+            "INSERT INTO edges (src, dst, kind, provenance) VALUES (2, 1, 'references', 'authored')",
+            [],
+        )
+        .expect("seed edge");
+
+        apply(&mut conn).expect("apply 14");
+        assert!(recorded_versions(&conn).contains(&14));
+
+        // Every node survived, with its id and its provenance.
+        let nodes: Vec<(i64, String, String)> = {
+            let mut stmt = conn
+                .prepare("SELECT id, key, provenance FROM nodes ORDER BY id")
+                .expect("prepare");
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .expect("query")
+                .collect::<Result<_, _>>()
+                .expect("collect")
+        };
+        assert_eq!(
+            nodes,
+            vec![
+                (1, "k1".to_owned(), "derived".to_owned()),
+                (2, "k2".to_owned(), "authored".to_owned()),
+                (3, "k3".to_owned(), "inferred".to_owned()),
+            ],
+        );
+
+        // And every edge, still joined to the *same* endpoints by key rather
+        // than by id — the assertion a renumbering would fail.
+        let edges: Vec<(String, String, String, String, Option<f64>)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT s.key, d.key, e.kind, e.provenance, e.confidence FROM edges e \
+                     JOIN nodes s ON s.id = e.src JOIN nodes d ON d.id = e.dst ORDER BY e.id",
+                )
+                .expect("prepare");
+            stmt.query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("collect")
+        };
+        assert_eq!(
+            edges,
+            vec![
+                (
+                    "k1".to_owned(),
+                    "k3".to_owned(),
+                    "calls".to_owned(),
+                    "inferred".to_owned(),
+                    Some(0.5),
+                ),
+                (
+                    "k2".to_owned(),
+                    "k1".to_owned(),
+                    "references".to_owned(),
+                    "authored".to_owned(),
+                    None,
+                ),
+            ],
+        );
+
+        the_widened_vocabulary_bites_exactly_where_it_should(&conn);
+    }
+
+    /// The second half of the migration-14 check: the three new tokens are
+    /// accepted, the set is still closed, and the confidence rule was **not**
+    /// widened with the vocabulary.
+    ///
+    /// Split out of the test above rather than inlined, because the two halves
+    /// ask different questions — that a rebuild kept the data, and that the
+    /// rebuild's new constraints say what they were meant to say — and a single
+    /// failure message should not have to mean either.
+    fn the_widened_vocabulary_bites_exactly_where_it_should(conn: &Connection) {
+        // The three new tokens are now accepted on both tables…
+        for provenance in ["external-derived", "external-authored", "external-inferred"] {
+            conn.execute(
+                "INSERT INTO nodes (key, kind, name, provenance) VALUES (?1, 'fn', 'n', ?2)",
+                [provenance, provenance],
+            )
+            .unwrap_or_else(|e| panic!("{provenance} must be a valid node provenance: {e}"));
+            conn.execute(
+                "INSERT INTO edges (src, dst, kind, provenance) VALUES (1, 2, ?1, ?2)",
+                [provenance, provenance],
+            )
+            .unwrap_or_else(|e| panic!("{provenance} must be a valid edge provenance: {e}"));
+        }
+
+        // …and the set is still closed. `external` alone is the shape the
+        // rejected flat variant would have written.
+        for rejected in ["external", "external_authored", "generated", ""] {
+            assert!(
+                conn.execute(
+                    "INSERT INTO nodes (key, kind, name, provenance) VALUES (?1, 'fn', 'n', ?2)",
+                    [&format!("bad-{rejected}"), rejected],
+                )
+                .is_err(),
+                "{rejected:?} must not be an accepted node provenance"
+            );
+            assert!(
+                conn.execute(
+                    "INSERT INTO edges (src, dst, kind, provenance) VALUES (1, 2, 'calls', ?1)",
+                    [rejected],
+                )
+                .is_err(),
+                "{rejected:?} must not be an accepted edge provenance"
+            );
+        }
+
+        // The confidence rule was deliberately *not* widened: only a locally
+        // inferred edge carries a score, because only a local inference
+        // computed one.
+        assert!(
+            conn.execute(
+                "INSERT INTO edges (src, dst, kind, provenance, confidence) \
+                 VALUES (1, 2, 'related', 'external-inferred', 0.9)",
+                [],
+            )
+            .is_err(),
+            "an external-inferred edge must not carry a confidence this graph never computed",
+        );
+        assert!(
+            conn.execute(
+                "INSERT INTO edges (src, dst, kind, provenance) VALUES (2, 3, 'related', 'inferred')",
+                [],
+            )
+            .is_err(),
+            "a locally inferred edge must still be required to carry a confidence",
         );
     }
 

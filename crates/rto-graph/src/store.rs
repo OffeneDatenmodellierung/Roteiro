@@ -1,5 +1,6 @@
 //! SQLite-backed graph store.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -39,14 +40,29 @@ pub enum StoreError {
 ///
 /// # Why this is its own type, and not a `StoreError` variant
 ///
-/// Opening such a store is not an error and reading it is provably sound —
+/// Opening such a store is not an error and reading its *schema* is sound —
 /// migrations are additive in effect, so every column an older build selects is
-/// still there (the one `DROP TABLE` in [`crate::migrations`] is a table rebuild
+/// still there (each `DROP TABLE` in [`crate::migrations`] is a table rebuild
 /// that re-selects every prior column). What is *not* sound is **rewriting** the
 /// graph: this build would re-extract every file with its older extractor and
 /// replace the newer build's content with worse content, silently. So the
 /// refusal belongs on the write paths, and the carrier of that refusal has no
 /// business in the type every `Store` call returns.
+///
+/// # Columns are not the whole story, since migration 14
+///
+/// "Additive in effect" was a claim about *schema*, and every migration up to 13
+/// kept it about values too. Migration 14 does not: it widened the provenance
+/// vocabulary, so an older build reading a row written at `external-authored`
+/// gets [`StoreError::Corrupt`] from `Provenance::from_token`, which knows only
+/// its own six-minus-three. That is a real limit of the read guarantee and is
+/// recorded here rather than left to be discovered.
+///
+/// It is not left silent, either. Such a store necessarily records migration 14,
+/// so this type reports it as written by a newer Roteiro *before* any row is
+/// read, and [`StoreError::Corrupt`]'s message names the same cause. The
+/// alternative — teaching `from_token` a tolerant fallback — was rejected: every
+/// fallback value is one of the six, and each choice silently re-tiers a fact.
 ///
 /// The second reason is semver, and it is the binding one. `StoreError` is a
 /// public enum on a published 1.x crate and is not `#[non_exhaustive]`, so
@@ -129,6 +145,11 @@ pub struct ImportApplied {
     /// that no longer exists), so the edge was dropped from the persisted layer
     /// rather than kept as stale data.
     pub edges_pruned: usize,
+    /// Import **nodes removed**: a node this `src_ref` used to contribute and no
+    /// longer does, which nothing else in the store still refers to. See
+    /// [`Store::apply_import_layer`] for the rule and why a withdrawn concept
+    /// has to go.
+    pub nodes_removed: usize,
 }
 
 /// Qualified node columns for `SELECT`s that alias the `nodes` table as `n`.
@@ -729,6 +750,34 @@ impl Store {
     /// This is the "validate on import" half; [`Store::reapply_imports`] is the
     /// "validate on sync" half, re-checking layers against the rebuilt graph.
     ///
+    /// # Removal propagates, because a re-run that only adds is not idempotent
+    ///
+    /// Re-importing cannot **duplicate**: nodes are `INSERT … ON CONFLICT(key) DO
+    /// UPDATE`, and this ref's edges are deleted before being re-applied. What is
+    /// not free is the other direction. A node the source has since *withdrawn*
+    /// used to survive as an orphan carrying the layer's provenance, because only
+    /// edges were pruned by `src_ref` — so a re-run **looked** idempotent while
+    /// quietly accumulating deleted facts, which is harder to notice than a
+    /// duplicate precisely because nothing appears twice.
+    ///
+    /// So a node this ref previously contributed and no longer does is removed,
+    /// under a rule deliberately narrower than "this ref owned it":
+    ///
+    /// 1. it must not appear in **any other persisted import layer** — two layers
+    ///    can name one node on purpose, and `import:links` and
+    ///    `import:links/authored` both contribute the same `extref:` placeholder;
+    /// 2. **nothing may still be attached to it** — a surviving edge means some
+    ///    other producer still relates it to the graph, and a node's removal must
+    ///    not silently take a relationship it did not own with it.
+    ///
+    /// Both are checked against the live store rather than assumed from the key,
+    /// so this stays correct for a layer whose namespace it knows nothing about.
+    /// The node's cached context row goes with it — a bundle for a node that no
+    /// longer exists can only be served as a stale answer. Episodic
+    /// [`crate::MemoryKind`] records anchored to it do **not**: ADR-0013 makes
+    /// memory the one tier with no generating function, so dropping it is data
+    /// loss, and its anchor already reports the node as gone.
+    ///
     /// # Errors
     /// Returns [`StoreError::Json`] if `facts` cannot be (de)serialized,
     /// [`StoreError::InvalidEdge`] on a malformed edge, or [`StoreError::Sqlite`]
@@ -738,6 +787,9 @@ impl Store {
         src_ref: &str,
         facts: &FactSet,
     ) -> Result<ImportApplied, StoreError> {
+        // Read before the row is overwritten: what this ref contributed last time
+        // is the only record of what it may now be withdrawing.
+        let prior = self.import_layer_node_keys(src_ref)?;
         let tx = self.conn.transaction()?;
         // Authoritative re-import: drop this ref's prior edges from the live graph.
         tx.execute("DELETE FROM edges WHERE src_ref = ?1", [src_ref])?;
@@ -750,12 +802,38 @@ impl Store {
             edges: kept,
         };
         put_import_row(&tx, src_ref, &trimmed)?;
+        // After the edges are gone and the new nodes are in, so the "still
+        // attached" test sees the graph as it will be rather than as it was.
+        let nodes_removed = remove_withdrawn_nodes(&tx, src_ref, &prior, &facts.nodes)?;
         tx.commit()?;
         Ok(ImportApplied {
             layers: 1,
             nodes: facts.nodes.len(),
+            nodes_removed,
             ..applied
         })
+    }
+
+    /// The node keys the persisted layer for `src_ref` currently contributes, or
+    /// an empty set when there is no such layer.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure or [`StoreError::Json`] if
+    /// the stored layer cannot be decoded.
+    fn import_layer_node_keys(&self, src_ref: &str) -> Result<BTreeSet<String>, StoreError> {
+        let json: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT facts FROM imports WHERE src_ref = ?1",
+                [src_ref],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(json) = json else {
+            return Ok(BTreeSet::new());
+        };
+        let facts: FactSet = serde_json::from_str(&json)?;
+        Ok(facts.nodes.into_iter().map(|n| n.key).collect())
     }
 
     /// Remove the persisted import layer for `src_ref`, returning whether one
@@ -1510,6 +1588,83 @@ fn apply_edges_pruning(
     Ok((kept, counts))
 }
 
+/// Delete the nodes `src_ref` has withdrawn since its last apply, returning how
+/// many went.
+///
+/// `prior` is the key set the persisted layer held before this apply; `current`
+/// is what it holds now. The difference is what the source stopped asserting —
+/// and the two guards below are what keep "stopped asserting" from becoming
+/// "deleted somebody else's node".
+///
+/// Both guards read the **live store**, not the key's namespace. A namespace rule
+/// would have to be re-derived for every layer that ever exists, and would be
+/// wrong the first time two producers shared a prefix; a query is right by
+/// construction for a layer this function has never heard of.
+fn remove_withdrawn_nodes(
+    conn: &Connection,
+    src_ref: &str,
+    prior: &BTreeSet<String>,
+    current: &[Node],
+) -> Result<usize, StoreError> {
+    let held: BTreeSet<&str> = current.iter().map(|n| n.key.as_str()).collect();
+    let withdrawn: Vec<&str> = prior
+        .iter()
+        .map(String::as_str)
+        .filter(|k| !held.contains(k))
+        .collect();
+    if withdrawn.is_empty() {
+        return Ok(0);
+    }
+
+    // Guard 1: every other persisted layer's node keys. Two layers naming one
+    // node is a supported arrangement, not an anomaly — `import:links` and
+    // `import:links/authored` share every `extref:` placeholder between them.
+    let mut claimed: BTreeSet<String> = BTreeSet::new();
+    {
+        let mut stmt = conn.prepare("SELECT facts FROM imports WHERE src_ref <> ?1")?;
+        let rows = stmt.query_map([src_ref], |r| r.get::<_, String>(0))?;
+        for row in rows {
+            let facts: FactSet = serde_json::from_str(&row?)?;
+            claimed.extend(facts.nodes.into_iter().map(|n| n.key));
+        }
+    }
+
+    let mut removed = 0usize;
+    for key in withdrawn {
+        if claimed.contains(key) {
+            continue;
+        }
+        // Guard 2: anything still attached. A surviving edge belongs to some
+        // other producer, and removing the node would take that relationship
+        // with it — a deletion nobody asked for, disguised as a cleanup. It
+        // would also violate the foreign key, so this is correctness twice over.
+        //
+        // `EXISTS`, not `COUNT(*) > 0`. The question is "is there one", and a
+        // count says "tally them all, then ask whether the tally was zero" —
+        // which is both a different sentence and more work: with the `OR dst`
+        // arm, a well-connected node in this repository would scan on the order
+        // of 1,600 edge rows where the probe stops at the first hit.
+        let attached: bool = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM edges \
+             WHERE src = (SELECT id FROM nodes WHERE key = ?1) \
+                OR dst = (SELECT id FROM nodes WHERE key = ?1))",
+            [key],
+            |r| r.get(0),
+        )?;
+        if attached {
+            continue;
+        }
+        let gone = conn.execute("DELETE FROM nodes WHERE key = ?1", [key])?;
+        if gone > 0 {
+            // A cached context bundle for a node that no longer exists can only
+            // ever be served as a stale answer, so it goes with it.
+            conn.execute("DELETE FROM node_context WHERE key = ?1", [key])?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
 /// Upsert a persisted import layer row. Free helper so it can run inside the same
 /// transaction as an apply/prune pass.
 fn put_import_row(conn: &Connection, src_ref: &str, facts: &FactSet) -> Result<(), StoreError> {
@@ -1628,7 +1783,7 @@ fn row_to_node(row: &rusqlite::Row) -> Result<Node, StoreError> {
     let meta: String = row.get("meta")?;
     let provenance: String = row.get("provenance")?;
     let provenance = Provenance::from_token(&provenance)
-        .ok_or_else(|| StoreError::Corrupt(format!("unknown node provenance: {provenance}")))?;
+        .ok_or_else(|| StoreError::Corrupt(unknown_provenance("node", &provenance)))?;
     Ok(Node {
         key: row.get("key")?,
         kind: NodeKind::from_token(&kind),
@@ -1646,7 +1801,7 @@ fn row_to_edge(row: &rusqlite::Row) -> Result<Edge, StoreError> {
     let kind: String = row.get("kind")?;
     let provenance: String = row.get("provenance")?;
     let provenance = Provenance::from_token(&provenance)
-        .ok_or_else(|| StoreError::Corrupt(format!("unknown provenance: {provenance}")))?;
+        .ok_or_else(|| StoreError::Corrupt(unknown_provenance("edge", &provenance)))?;
     Ok(Edge {
         src: row.get("src")?,
         dst: row.get("dst")?,
@@ -1661,13 +1816,43 @@ fn to_u32(v: i64) -> Result<u32, StoreError> {
     u32::try_from(v).map_err(|_| StoreError::Corrupt(format!("span offset out of range: {v}")))
 }
 
+/// The message for a stored provenance token this build cannot parse.
+///
+/// It names **both** causes, because until migration 14 there was only one and
+/// the old wording said so: "e.g. a corrupt database row". That migration widened
+/// the vocabulary, so an unrecognised token now most often means the store was
+/// written by a newer Roteiro — [`Store::schema_ahead`] says so first and more
+/// precisely, but a reader who reaches this message deserves not to be sent
+/// looking for corruption that is not there.
+fn unknown_provenance(what: &str, token: &str) -> String {
+    format!(
+        "unknown {what} provenance `{token}`: expected one of {}. Either this row is corrupt, \
+         or this store was written by a newer Roteiro that knows a provenance this build does \
+         not — check `roteiro --version` against the build that last wrote the graph.",
+        Provenance::tokens().join(", ")
+    )
+}
+
 /// The true provenance of an import-layer node, from its key namespace: Graphify
-/// nodes (`graphify:`) are [`Provenance::Inferred`]; every other import node (lat,
-/// …) is [`Provenance::Authored`]. Import-layer nodes are never derived, so this
-/// is used to repair a legacy `Derived` tag on load (see `load_import_layers`).
+/// nodes (`graphify:`) are [`Provenance::Inferred`]; an OKF concept (`okf:`) is
+/// [`Provenance::ExternalInferred`]; every other import node (lat, …) is
+/// [`Provenance::Authored`]. Import-layer nodes are never derived, so this is
+/// used to repair a legacy `Derived` tag on load (see `load_import_layers`).
 fn import_node_provenance(key: &str) -> Provenance {
     if key.starts_with("graphify:") {
         Provenance::Inferred
+    } else if key.starts_with("okf:") {
+        // An OKF concept is a peer's, and this is a *repair* path with no
+        // frontmatter left to consult — so it takes the lowest claim the peer
+        // could have made. Falling through to `Authored` below would assert that
+        // this graph human-authored another repository's concept, which is the
+        // exact laundering the `external-*` tier exists to refuse, and it would
+        // arrive through an error-recovery path where nobody would look for it.
+        //
+        // A **filled placeholder** deliberately does not match: its key is
+        // `extref:`, it is a node this repo created, and its own provenance is
+        // whichever layer wrote it last (see `rto_graph::links`).
+        Provenance::ExternalInferred
     } else {
         Provenance::Authored
     }
@@ -2537,6 +2722,195 @@ mod tests {
                 e.src_ref = Some("import:graphify".to_owned());
                 e
             })
+    }
+
+    /// A **withdrawn** concept goes, and a node another layer also asserts stays.
+    ///
+    /// This is the half of idempotence that was missing. Re-importing could never
+    /// duplicate — nodes upsert by key, edges are deleted by `src_ref` first — so
+    /// a re-run always *looked* idempotent, while a node the source had since
+    /// deleted survived for ever as an orphan carrying the layer's provenance.
+    /// Nothing appeared twice, which is exactly why nobody would notice.
+    ///
+    /// Three nodes, and each one is a different rule:
+    ///
+    /// * `okf:acme/gone.md` — withdrawn, and only this layer's. It must go.
+    /// * `okf:acme/kept.md` — still asserted. Untouched.
+    /// * `extref:acme::shared` — withdrawn *by this layer*, and asserted by
+    ///   another. It must survive, because two layers naming one node is a
+    ///   supported arrangement rather than an anomaly: `import:links` and
+    ///   `import:links/authored` share every placeholder between them.
+    #[test]
+    fn re_importing_a_smaller_bundle_removes_what_was_withdrawn_and_nothing_else() {
+        let mut store = Store::open_in_memory().expect("open");
+
+        let okf_node = |key: &str| {
+            Node::new(key, NodeKind::Doc, key).with_provenance(Provenance::ExternalAuthored)
+        };
+        // Another producer, which also asserts the shared placeholder.
+        let other = FactSet::new().with_node(okf_node("extref:acme::shared"));
+        store
+            .apply_import_layer("import:links", &other)
+            .expect("other layer");
+
+        let first = FactSet::new()
+            .with_node(okf_node("okf:acme/gone.md"))
+            .with_node(okf_node("okf:acme/kept.md"))
+            .with_node(okf_node("extref:acme::shared"));
+        let applied = store
+            .apply_import_layer("import:okf/acme", &first)
+            .expect("first import");
+        assert_eq!(
+            applied.nodes_removed, 0,
+            "nothing is withdrawn on a first run"
+        );
+        assert_eq!(store.node_count().expect("count"), 3);
+
+        // The peer deletes one concept and stops asserting the placeholder.
+        let smaller = FactSet::new().with_node(okf_node("okf:acme/kept.md"));
+        let applied = store
+            .apply_import_layer("import:okf/acme", &smaller)
+            .expect("re-import");
+
+        // Which nodes, before how many. The count alone catches both directions
+        // of failure but names only one of them: removing the shared placeholder
+        // as well would fail a `nodes_removed == 1` assertion with a message
+        // about a concept surviving, which is the opposite of what went wrong.
+        assert!(
+            store
+                .get_node("extref:acme::shared")
+                .expect("get")
+                .is_some(),
+            "a node another layer also asserts must not be removed by this one"
+        );
+        assert!(
+            store.get_node("okf:acme/kept.md").expect("get").is_some(),
+            "a concept still asserted must survive"
+        );
+        assert!(
+            store.get_node("okf:acme/gone.md").expect("get").is_none(),
+            "a concept the peer deleted must not survive a re-import"
+        );
+        assert_eq!(
+            applied.nodes_removed, 1,
+            "the withdrawn concept must be removed, and only it"
+        );
+
+        // And it is genuinely idempotent now: re-running the same smaller
+        // bundle removes nothing further.
+        let again = store
+            .apply_import_layer("import:okf/acme", &smaller)
+            .expect("third run");
+        assert_eq!(again.nodes_removed, 0);
+        assert_eq!(store.node_count().expect("count"), 2);
+    }
+
+    /// A withdrawn node that something is **still attached to** survives, in
+    /// either direction.
+    ///
+    /// The layer stopped asserting the node, but another producer's edge still
+    /// relates it to the graph. Removing it would take that relationship with it
+    /// — a deletion nobody asked for, wearing a cleanup's clothes — and would
+    /// violate the foreign key on the way out.
+    ///
+    /// Both ends are exercised on purpose: the probe is an `OR` over `src` and
+    /// `dst`, so a fixture attaching the node only as a destination leaves the
+    /// other arm free to be deleted with nothing going red.
+    #[test]
+    fn a_withdrawn_node_another_producer_still_points_at_is_kept() {
+        let mut store = Store::open_in_memory().expect("open");
+        let derived = FactSet::new().with_node(Node::new("file:a.rs", NodeKind::File, "a.rs"));
+        store.rebuild(&derived, Some("tree1")).expect("rebuild");
+
+        // Two withdrawn nodes, one for each **direction** an edge can attach.
+        // The probe is an `OR` over `src` and `dst`, and a test that only ever
+        // put the node on one end would leave the other arm unguarded: deleting
+        // `src = …` from the query changed no test until this second node
+        // existed, which is how the gap was found.
+        let inbound = Node::new("okf:acme/pointed-at.md", NodeKind::Doc, "pointed at")
+            .with_provenance(Provenance::ExternalDerived);
+        let outbound = Node::new("okf:acme/points-from.md", NodeKind::Doc, "points from")
+            .with_provenance(Provenance::ExternalDerived);
+        let first = FactSet::new().with_node(inbound).with_node(outbound);
+        store
+            .apply_import_layer("import:okf/acme", &first)
+            .expect("first");
+
+        // A different layer relates the derived file to one imported concept,
+        // and the other imported concept to the derived file.
+        let linking = FactSet::new()
+            .with_edge({
+                let mut e = Edge::inferred(
+                    "file:a.rs",
+                    "okf:acme/pointed-at.md",
+                    EdgeKind::References,
+                    0.9,
+                );
+                e.src_ref = Some("import:links".to_owned());
+                e
+            })
+            .with_edge({
+                let mut e = Edge::inferred(
+                    "okf:acme/points-from.md",
+                    "file:a.rs",
+                    EdgeKind::References,
+                    0.9,
+                );
+                e.src_ref = Some("import:links".to_owned());
+                e
+            });
+        store
+            .apply_import_layer("import:links", &linking)
+            .expect("link layer");
+
+        let applied = store
+            .apply_import_layer("import:okf/acme", &FactSet::new())
+            .expect("withdraw everything");
+        assert!(
+            store
+                .get_node("okf:acme/pointed-at.md")
+                .expect("get")
+                .is_some(),
+            "a node another producer's edge points *at* must not be removed"
+        );
+        assert!(
+            store
+                .get_node("okf:acme/points-from.md")
+                .expect("get")
+                .is_some(),
+            "nor one another producer's edge points *from*"
+        );
+        assert_eq!(applied.nodes_removed, 0);
+    }
+
+    /// Removal takes the node's cached context with it. A bundle assembled for a
+    /// node that no longer exists can only ever be served as a stale answer, and
+    /// `node_context` has no foreign key to clean it up for us.
+    #[test]
+    fn removing_a_withdrawn_node_drops_its_cached_context() {
+        let mut store = Store::open_in_memory().expect("open");
+        let first = FactSet::new().with_node(
+            Node::new("okf:acme/gone.md", NodeKind::Doc, "gone")
+                .with_provenance(Provenance::ExternalInferred),
+        );
+        store
+            .apply_import_layer("import:okf/acme", &first)
+            .expect("first");
+        store
+            .context_cache_put("okf:acme/gone.md", "fp1", "{}")
+            .expect("cache");
+        assert_eq!(
+            store.context_cache_keys().expect("keys"),
+            vec!["okf:acme/gone.md".to_owned()]
+        );
+
+        store
+            .apply_import_layer("import:okf/acme", &FactSet::new())
+            .expect("withdraw");
+        assert!(
+            store.context_cache_keys().expect("keys").is_empty(),
+            "a cached bundle for a deleted node is a stale answer waiting to be served"
+        );
     }
 
     /// A persisted import layer is re-applied after a `rebuild` wipes the graph,

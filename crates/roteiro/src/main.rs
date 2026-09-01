@@ -751,18 +751,40 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
-    /// Import from an external knowledge graph (graphify, lat), or compare
+    /// Import from an external knowledge graph (graphify, lat, okf), or compare
     /// against a codegraph snapshot as a validation oracle.
     Import {
-        /// Source: graphify | lat (imported), or codegraph (compared, oracle-only).
+        /// Source: graphify | lat | okf (imported), or codegraph (compared,
+        /// oracle-only).
         #[arg(long)]
         from: String,
-        /// Path to the source: a Graphify dir/`graph.json`, a `lat.md/` dir, or a
-        /// codegraph `.db` snapshot.
+        /// Path to the source: a Graphify dir/`graph.json`, a `lat.md/` dir, an
+        /// OKF bundle directory, or a codegraph `.db` snapshot.
         path: String,
         /// Emit the migration report as JSON.
         #[arg(long)]
         json: bool,
+        /// `--from okf`: **adopt the peer's confirmations**, importing each
+        /// concept at `external-<their tier>` instead of the default
+        /// `external-inferred`.
+        ///
+        /// Running the command by hand is the consent, and this flag is what
+        /// that consent says. Without it an import is an *acknowledgement*: the
+        /// peer's concepts arrive so cross-repo references resolve to real
+        /// content, but nothing they confirmed is re-asserted as confirmed here.
+        /// With it, their human-reviewed concept stays human-reviewed and
+        /// `render okf` re-emits their verifier by name.
+        #[arg(long)]
+        trust: bool,
+        /// `--from okf`: the peer's name, used for the import layer's `src_ref`
+        /// and the imported concepts' key namespace. Defaults to the bundle
+        /// directory's own name.
+        ///
+        /// One layer per peer is what lets two bundles coexist: the import layer
+        /// is authoritative per `src_ref`, so a shared name would make importing
+        /// the second delete the first.
+        #[arg(long, value_name = "NAME")]
+        peer: Option<String>,
     },
     /// Render the graph: docs site or OKF bundle.
     ///
@@ -2188,7 +2210,13 @@ fn main() -> anyhow::Result<()> {
             debt_ignore,
             workspace_name.as_deref(),
         ),
-        Command::Import { from, path, json } => run_import(ingest, &from, &path, json),
+        Command::Import {
+            from,
+            path,
+            json,
+            trust,
+            peer,
+        } => run_import(ingest, &from, &path, json, trust, peer.as_deref()),
         // The whole `Loaded` config, not only the effective merge: `spec draft`
         // can reach the remote tier, and ADR-0019 §3's consent gate has to read
         // the project and user layers *separately* — a merged `[remote] enabled`
@@ -5528,14 +5556,22 @@ fn run_import(
     from: &str,
     path: &str,
     json: bool,
+    trust: bool,
+    peer: Option<&str>,
 ) -> anyhow::Result<()> {
+    // `--trust` and `--peer` mean nothing to the other sources, and silently
+    // accepting them would let `--from lat --trust` read as though it did.
+    if from != "okf" && (trust || peer.is_some()) {
+        anyhow::bail!("`--trust` and `--peer` apply to `--from okf` only, not `{from}`");
+    }
     match from {
         "graphify" => run_import_graphify(ingest, path, json),
         "lat" => run_import_lat(ingest, path, json),
+        "okf" => run_import_okf(ingest, path, json, trust, peer),
         "codegraph" => run_compare_codegraph(ingest, path, json),
-        other => {
-            anyhow::bail!("unknown import source `{other}` (expected: graphify | lat | codegraph)")
-        }
+        other => anyhow::bail!(
+            "unknown import source `{other}` (expected: graphify | lat | okf | codegraph)"
+        ),
     }
 }
 
@@ -5783,6 +5819,231 @@ fn run_import_graphify(
         );
     }
     Ok(())
+}
+
+/// Import another repository's OKF bundle as **external** knowledge (issue #706,
+/// ADR-0021).
+///
+/// # Trust is a flag here, and defaults to the cautious answer
+///
+/// The interactive prompt ADR-0021 and #706 describe belongs to automatic
+/// discovery, which this command is not: running it by hand *is* the consent to
+/// read the bundle at all. What the flag decides is a narrower and sharper
+/// question — whether the peer's **confirmations** are adopted along with their
+/// information.
+///
+/// The default is *acknowledge*, so every concept lands at `external-inferred`
+/// whatever the bundle claimed. Defaulting to *trust* would mean a hand-run
+/// command silently adopting a stranger's `verified: [{ by: human:… }]` as this
+/// graph's own human-reviewed tier, and re-emitting it outward on the next
+/// `render okf` — which is precisely the consent question the prompt exists to
+/// ask, answered "yes" by nobody. `--trust` is one word and reads as what it is.
+///
+/// Nothing is lost by the caution: what the peer claimed is recorded in the
+/// node's `meta.okf.claimed`, so re-running with `--trust` upgrades the layer
+/// without re-reading anything.
+fn run_import_okf(
+    ingest: rto_graph::IngestConfig,
+    path: &str,
+    json: bool,
+    trust: bool,
+    peer: Option<&str>,
+) -> anyhow::Result<()> {
+    use rto_render::okf::read;
+
+    let root = std::path::Path::new(path);
+    if !root.is_dir() {
+        anyhow::bail!(
+            "OKF bundle not found: {} (expected a directory of concept documents)",
+            root.display()
+        );
+    }
+    // The bundle directory's own name, so re-running the same command lands on
+    // the same layer. A per-invocation default would make every run a new peer
+    // and make removal propagation impossible.
+    let peer = match peer {
+        Some(name) => name.to_owned(),
+        None => root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "cannot derive a peer name from {}; pass --peer <NAME>",
+                    root.display()
+                )
+            })?,
+    };
+    // The peer names the layer and namespaces every imported key, so a blank one
+    // would produce `import:okf/` and `okf:/…` — a layer nobody can name and
+    // keys that collide with the next unnamed import. `.`/`..` are the same
+    // problem arriving from a path like `./`, which is an easy thing to type.
+    if peer.trim().is_empty() || peer == "." || peer == ".." {
+        anyhow::bail!(
+            "`{peer}` is not a usable peer name: it names the import layer and \
+             namespaces every imported concept's key. Pass --peer <NAME>."
+        );
+    }
+
+    let files = read_bundle_files(root)?;
+
+    let (repo, mut store, cache) = open_graph()?;
+    build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
+
+    // The placeholders an imported concept may fill (ADR-0009). Read from the
+    // graph *after* the build, so a link declared in this same commit is already
+    // there to be filled.
+    let extref_keys: Vec<String> = store
+        .nodes_by_kind(&rto_graph::NodeKind::Other(
+            rto_graph::EXTERNAL_REF_KIND.to_owned(),
+        ))?
+        .into_iter()
+        .map(|n| n.key)
+        .collect();
+
+    let mode = if trust {
+        read::Trust::Trust
+    } else {
+        read::Trust::Acknowledge
+    };
+    let imported = read::read_bundle(
+        &root.display().to_string(),
+        &files,
+        &read::ReadOptions {
+            trust: mode,
+            peer: &peer,
+            extref_keys: &extref_keys,
+        },
+    )?;
+
+    let src_ref = read::import_ref(&peer);
+    let applied = store.apply_import_layer(&src_ref, &imported.facts)?;
+
+    let r = &imported.report;
+    if json {
+        let mut report = serde_json::to_value(r)?;
+        report["peer"] = serde_json::json!(peer);
+        report["src_ref"] = serde_json::json!(src_ref);
+        report["trust"] = serde_json::json!(mode.as_str());
+        report["edges_applied"] = serde_json::json!(applied.edges_applied);
+        report["edges_pruned_stale"] = serde_json::json!(applied.edges_pruned);
+        report["nodes_removed"] = serde_json::json!(applied.nodes_removed);
+        report["durable"] = serde_json::json!(true);
+        emit_json(&report)?;
+    } else {
+        print_okf_report(
+            &root.display().to_string(),
+            &peer,
+            &src_ref,
+            mode,
+            r,
+            &applied,
+        );
+    }
+    Ok(())
+}
+
+/// The human-readable half of [`run_import_okf`]'s report.
+///
+/// Split out because it is where the *loudness* lives: everything the reader
+/// declined has to reach the operator here, and a block that keeps growing
+/// inside the command is a block that eventually gets trimmed to fit.
+fn print_okf_report(
+    root: &str,
+    peer: &str,
+    src_ref: &str,
+    mode: rto_render::okf::read::Trust,
+    r: &rto_render::okf::read::OkfReport,
+    applied: &rto_graph::ImportApplied,
+) {
+    println!(
+        "imported okf from {root} as `{peer}` ({}): {} concept(s), {} edge(s) \
+         ({} unresolved, {} reciprocal, {} pruned stale), {} placeholder(s) filled, \
+         {} node(s) removed as withdrawn — persisted under {src_ref} (durable)",
+        mode.as_str(),
+        r.concepts_read,
+        applied.edges_applied,
+        r.links_unresolved,
+        r.links_reciprocal,
+        applied.edges_pruned,
+        r.extrefs_filled.len(),
+        applied.nodes_removed,
+    );
+    // Loud about what it declined. A partly readable bundle that said nothing
+    // would leave the graph missing concepts nobody knows to look for.
+    for skipped in &r.skipped {
+        println!("  skipped {}: {}", skipped.path, skipped.reason);
+    }
+    for stub in &r.extrefs_ambiguous {
+        println!(
+            "  left {stub} unfilled: more than one concept could be it, and a wrong \
+             fill is worse than a stub"
+        );
+    }
+    if r.links_outside_relationships > 0 {
+        println!(
+            "  {} markdown link(s) outside a `## Relationships` heading were read as \
+             citations, not imported as edges",
+            r.links_outside_relationships
+        );
+    }
+    if mode == rto_render::okf::read::Trust::Acknowledge {
+        println!(
+            "  every concept is `external-inferred`: their information without their \
+             confirmation. Re-run with --trust to adopt the tiers they claimed."
+        );
+    }
+}
+
+/// Every markdown file under an OKF bundle root, keyed by its bundle-relative
+/// path with a leading `/` — the form links inside the bundle use (§6).
+fn read_bundle_files(root: &std::path::Path) -> anyhow::Result<Vec<(String, String)>> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)
+            .map_err(|e| anyhow::anyhow!("reading {}: {e}", dir.display()))?
+        {
+            let entry = entry.map_err(|e| anyhow::anyhow!("reading {}: {e}", dir.display()))?;
+            // Symlinks are not followed. A bundle is somebody **else's**
+            // directory, so `is_dir()` — which follows them — would let a link
+            // pointing at an ancestor spin this walk forever, and one pointing
+            // outside the bundle pull in files that are not part of it. Neither
+            // is hypothetical for input a peer produced, and a bundle is a
+            // directory of documents: nothing legitimate is lost by refusing.
+            if entry.file_type().is_ok_and(|t| t.is_symlink()) {
+                continue;
+            }
+            let p = entry.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|e| e == "md") {
+                // Erroring rather than falling back to the full path. With
+                // symlinks skipped above this cannot fail — every path descends
+                // from `root` by construction — but the fallback was the wrong
+                // shape for the case it covered: a path outside the bundle would
+                // have been recorded *as* a bundle path, so `/Users/…/secret.md`
+                // would become an imported concept's key and the node would
+                // claim to be part of the peer's bundle. A refusal names the
+                // problem; a fallback launders it into data.
+                let rel = p.strip_prefix(root).map_err(|_| {
+                    anyhow::anyhow!(
+                        "{} is not inside the bundle root {}",
+                        p.display(),
+                        root.display()
+                    )
+                })?;
+                let rel = rel.to_string_lossy().replace('\\', "/");
+                let text = std::fs::read_to_string(&p)
+                    .map_err(|e| anyhow::anyhow!("reading {}: {e}", p.display()))?;
+                out.push((format!("/{rel}"), text));
+            }
+        }
+    }
+    // Deterministic: the report's skip list and the key assignment both depend on
+    // the order files arrive in, and `read_dir` does not promise one.
+    out.sort();
+    Ok(out)
 }
 
 /// Graph-grounded spec/blueprint authoring (ADR-0004).
@@ -14949,9 +15210,18 @@ fn okf_instant(secs: i64) -> String {
 /// The distinct repository-relative paths of the **authored** nodes in `nodes`.
 ///
 /// The input to one history walk. Restricted to the authored layer because that
-/// is the only provenance a person can confirm — a derived symbol is confirmed by
-/// the tool, and looking up who last touched its file would answer a question
-/// nobody asked. Deduplicated because ~180 `adr_section` nodes share ~20 files.
+/// is the only provenance a person **in this repository** can confirm — a derived
+/// symbol is confirmed by the tool, and looking up who last touched its file
+/// would answer a question nobody asked. Deduplicated because ~180 `adr_section`
+/// nodes share ~20 files.
+///
+/// `external-authored` is excluded on stronger grounds than the others, and the
+/// exact comparison is what excludes it. A peer's concept was confirmed in the
+/// peer's repository by a person who has never touched this one, so resolving it
+/// through *our* commit history would put a local name on a foreign confirmation
+/// — the laundering the tier-carrying provenance exists to prevent, arriving
+/// through the author lookup instead of the enum. Their confirmer is recorded in
+/// `meta.okf.origin` and re-emitted from there (`okf::read::peer_origin`).
 fn authored_paths(nodes: &[rto_graph::Node]) -> std::collections::BTreeSet<String> {
     nodes
         .iter()
@@ -15017,7 +15287,15 @@ fn okf_concept<'a>(
                     )
                 })
                 .flatten(),
-            origin: Some(okf::origin_for(provenance, &at, r.tool, human.as_ref())),
+            // An imported concept re-emits **the peer's own** `generated` /
+            // `verified` block, recovered from the meta the reader wrote. That
+            // is what keeps the round trip honest: their `verified: [{ by:
+            // human:alice }]` leaves here still naming Alice, so the next
+            // consumer learns who confirmed it. Falling through to `origin_for`
+            // would re-tier every external fact to *unverified* on the way out —
+            // the laundering the carried tier exists to prevent, one step later.
+            origin: okf::read::peer_origin(&ex.meta)
+                .or_else(|| Some(okf::origin_for(provenance, &at, r.tool, human.as_ref()))),
             sources: ex.node.path.iter().map(|p| format!("/{p}")).collect(),
         },
         // Only a node that *is* the file carries the file's prose. A symbol

@@ -331,6 +331,16 @@ impl Edge {
     /// Whether this edge is valid for storage: a confidence score is present
     /// exactly when the edge is inferred, and any present score is a finite
     /// value in `0.0..=1.0` (rejecting NaN, infinities, and out-of-range).
+    ///
+    /// # `external-inferred` is **not** inferred for this purpose
+    ///
+    /// The test names [`Provenance::Inferred`] exactly, so an imported edge —
+    /// including one at [`Provenance::ExternalInferred`] — must carry **no**
+    /// confidence. A score is a number *this graph computed*; OKF records none
+    /// for a relationship, so an import has nothing to adopt and putting one
+    /// there would fabricate a precision nobody measured. Reaching for
+    /// `Provenance::tier()` here would quietly require the opposite, and the
+    /// store's own `CHECK` (migration 14) would then reject what this accepts.
     #[must_use]
     pub fn is_valid(&self) -> bool {
         let inferred = matches!(self.provenance, Provenance::Inferred);

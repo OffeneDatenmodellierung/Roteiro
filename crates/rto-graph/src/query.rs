@@ -1398,8 +1398,20 @@ pub fn search(store: &Store, query: &str, limit: usize) -> Result<Vec<SearchHit>
         // Curated intent (ADRs/blueprints — `authored`) is the best answer to a
         // "what/why" question; a README/overview is the natural landing page; and
         // test scaffolding should not outrank the real thing when it shares a name.
-        if node.provenance == Provenance::Authored {
-            relevance += 40;
+        //
+        // A **peer's** curated prose earns half of it. What the boost measures is
+        // "somebody wrote this deliberately", and an imported ADR passes that
+        // test as squarely as a local one — so scoring it like a code symbol
+        // would throw away the tier the import went to the trouble of carrying.
+        // But a question asked in this repository is a question about this
+        // repository, so our own decisions must stay ahead of another repo's when
+        // both match: the boost is halved rather than shared or withheld.
+        if node.provenance.tier() == Provenance::Authored {
+            relevance += if node.provenance.is_external() {
+                20
+            } else {
+                40
+            };
         }
         if is_overview_path(&path) {
             relevance += 30;

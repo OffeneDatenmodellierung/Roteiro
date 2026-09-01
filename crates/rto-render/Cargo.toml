@@ -33,7 +33,17 @@ rmcp = { version = "3.1.2", default-features = false, features = [
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "net"], optional = true }
 axum = { version = "0.8", optional = true }
 schemars = { version = "1", optional = true }
-serde = { workspace = true, optional = true }
+# Ungated for the same reason `serde_json` below is: the OKF **reader**
+# (`okf::read`, issue #706) reports what it imported and what it skipped, and a
+# report is a `Serialize` type in every other importer in this workspace
+# (`rto_spec::ImportReport`). Deriving it costs no new edge in the tree —
+# `rto-graph` depends on serde non-optionally, so every build of this crate
+# already compiles it — and hand-building the same JSON with `serde_json::json!`
+# is the drift the derive exists to prevent.
+serde = { workspace = true }
+# The reader's error type. `rto-graph` and `rto-spec` both already use it for
+# exactly this, and it is likewise already in every build of this crate.
+thiserror = { workspace = true }
 # Ungated because `tool_class::report` is, and it has to be: the class table and
 # the document standing in for a withheld class are shared by BOTH tool surfaces
 # (#664), and `serve` does not imply `mcp` — a serve-only build has no MCP module
@@ -61,7 +71,7 @@ yaml-rust2 = "0.12.0"
 # MCP server support (`roteiro serve`), off by default — CLI-first. Adopts rmcp
 # (ADR-0002) for stdio + streamable-HTTP transports; entirely feature-gated so
 # the default build pulls none of it.
-mcp = ["dep:rmcp", "dep:rto-spec", "dep:tokio", "dep:axum", "dep:schemars", "dep:serde"]
+mcp = ["dep:rmcp", "dep:rto-spec", "dep:tokio", "dep:axum", "dep:schemars"]
 # The `security_list` / `security_status` MCP tools, which need `rto-exec`'s
 # document types. Named `execution` to match the feature that carries the same
 # surface in the `roteiro` binary, and forwarded from there — see that crate's

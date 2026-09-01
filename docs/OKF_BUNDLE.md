@@ -46,11 +46,40 @@ OKF turns that into trust tiers (§5.3), which a consumer derives from `verified
 | authored — ADR and blueprint prose | `verified: [{ by: human:<id> }]` | **human-reviewed** |
 | derived — deterministic extraction | `verified: [{ by: roteiro/<version> }]` | machine-confirmed |
 | inferred — heuristic, carries a confidence | `generated:` alone | unverified |
+| external-authored / external-derived — imported from a peer's bundle | that peer's own `verified:` block, re-emitted verbatim | whatever **they** claimed |
+| external-inferred — imported unverified, or acknowledged rather than trusted | `generated:` alone | unverified |
 
 `Derived` is machine-confirmed rather than unverified deliberately: it is
 reproduced from the AST at a known commit, so a consumer can re-derive it.
 `Inferred` gets no `verified` key at all, because claiming otherwise would
 launder a guess into a confirmation.
+
+## Roteiro reads a bundle too — a *peer's*, never its own output
+
+`roteiro import --from okf <path>` imports another repository's bundle as
+external knowledge. It exists so a cross-repo `[[other-repo#thing]]` reference
+resolves to a real concept instead of a placeholder holding only a key.
+
+**It does not make the directory below an input.** That one is still emptied and
+rebuilt on every render, and there is no round trip through it. What you import
+is a bundle some other repository published.
+
+Imported concepts are tagged `external-*` and can never be mistaken for this
+repository's own work. By default they arrive at `external-inferred` whatever the
+bundle claimed — their information without their confirmation — because a command
+you ran by hand should not silently adopt a stranger's `verified:` block as this
+graph's human-reviewed tier. `--trust` preserves the tiers they claimed, and
+re-emits their verifier by name on the next render.
+
+Re-running the command is safe in both directions: it replaces that peer's layer
+wholesale, so nothing duplicates, and a concept the peer has since deleted is
+removed rather than left behind as an orphan.
+
+A bundle is read liberally — an unrecognised `type` is imported, a document that
+carries no frontmatter or no `type` is skipped and the reason is printed — but a
+directory in which nothing at all parsed is refused rather than imported as
+nothing.
+
 
 ## One place Roteiro guarantees more than the specification asks
 

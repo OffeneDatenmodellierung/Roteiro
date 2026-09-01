@@ -93,25 +93,40 @@ fn build_factset() -> FactSet {
     let n = node_kinds.len();
 
     // Edges: every edge kind × every provenance, wired between existing nodes.
+    //
+    // **Every** provenance, including the three imported tiers. This fixture is
+    // what proves a value survives the store, and the store is where the
+    // `external-*` tokens actually live — a list that named only the local three
+    // would leave the newest half of the vocabulary untested precisely where
+    // it is written to disk.
     let mut e = 0usize;
     for ekind in all_edge_kinds() {
         for prov in [
             Provenance::Derived,
             Provenance::Authored,
             Provenance::Inferred,
+            Provenance::ExternalDerived,
+            Provenance::ExternalAuthored,
+            Provenance::ExternalInferred,
         ] {
             let src = format!("k{}", e % n);
             let dst = format!("k{}", (e + 1) % n);
-            let edge = match prov {
-                Provenance::Derived => Edge::derived(src, dst, ekind.clone()),
-                Provenance::Authored => Edge::authored(src, dst, ekind.clone()),
-                Provenance::Inferred => {
-                    let bump = f64::from(u32::try_from(e).expect("fits")) * 0.01;
-                    let mut ed = Edge::inferred(src, dst, ekind.clone(), 0.25 + bump);
-                    ed.src_ref = Some(format!("blob{e}#0..1"));
-                    ed
-                }
+            let edge = if prov == Provenance::Inferred {
+                let bump = f64::from(u32::try_from(e).expect("fits")) * 0.01;
+                let mut ed = Edge::inferred(src, dst, ekind.clone(), 0.25 + bump);
+                ed.src_ref = Some(format!("blob{e}#0..1"));
+                ed
+            } else {
+                // No confidence on any other class — including the imported
+                // ones, which have no score of their own to carry: OKF records
+                // none for a relationship. `Edge::is_valid` and the store's
+                // `CHECK` both say so, and an edge built otherwise would be
+                // rejected on insert rather than round-tripped.
+                let mut ed = Edge::derived(src, dst, ekind.clone());
+                ed.provenance = prov;
+                ed
             };
+            assert!(edge.is_valid(), "fixture edge {e} is not storable");
             facts = facts.with_edge(edge);
             e += 1;
         }
@@ -147,13 +162,18 @@ fn factset_round_trips_through_store() {
     }
 
     // Provenance partitions the edge set exactly.
-    let counts = [
-        Provenance::Derived,
-        Provenance::Authored,
-        Provenance::Inferred,
-    ]
-    .map(|p| store.edges_by_provenance(p).expect("by prov").len());
-    assert_eq!(counts.iter().sum::<usize>(), facts.edges.len());
+    //
+    // The classes come from `Provenance::tokens()`, not a list written here. A
+    // written-down list makes this assertion silently *weaker* every time the
+    // vocabulary grows — it kept summing three of six and still read as a
+    // partition check — where reading the vocabulary makes it impossible to
+    // widen the enum without widening the partition with it.
+    let total: usize = Provenance::tokens()
+        .iter()
+        .map(|t| Provenance::from_token(t).expect("a listed token must parse"))
+        .map(|p| store.edges_by_provenance(p).expect("by prov").len())
+        .sum();
+    assert_eq!(total, facts.edges.len());
 }
 
 #[test]
