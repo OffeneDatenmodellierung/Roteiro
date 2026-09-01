@@ -849,10 +849,15 @@ fn system_prompt(tools: &[&ToolDef], list: bool, graph: bool) -> String {
     // The `<tool_call>` envelope is stated either way, because it is *this
     // server's* and no chat template supplies it: a model left to its own would
     // use whatever envelope it was trained on — which for a model Roteiro has
-    // never seen is not this one. Since #592 that is an optimisation rather than
-    // the last line of defence: a model whose training beats this instruction is
-    // read anyway if its envelope is a `Dialect`, and refused rather than
-    // published as prose if it is not.
+    // never seen is not this one. #592 narrowed what this sentence has to carry
+    // and did not remove it, so it is still the last line of defence: a model
+    // whose training beats the instruction is now read anyway **if the envelope
+    // it used is a [`Dialect`]** — the call runs, or the refusal says why it
+    // could not. An envelope in no `Dialect` is recognised by nothing: every
+    // dialect answers [`Reading::Absent`], the fold answers [`Markup::None`],
+    // and the generation is published as the model's prose. That is exactly the
+    // outcome this instruction exists to prevent, and the reason it is stated to
+    // a template-carrying engine too.
     //
     // What differs is the body. With no listing here the model has been shown the
     // tools in its own trained shape, so pinning a competing inner form is how
@@ -3039,6 +3044,37 @@ mod tests {
                 "a body that arrived and is not a call is unreadable, not absent: {body}"
             );
         }
+    }
+
+    #[test]
+    fn an_envelope_in_no_dialect_is_still_published_as_prose() {
+        // **The gap #592 does not close**, pinned so the fix is not read as
+        // wider than it is. `Dialect::ALL` is now the whole list of what can be
+        // read — which makes it, equally, the whole list of what can be
+        // *noticed*. A model emitting a fourth envelope is `Absent` to every
+        // dialect, `None` to the fold, and its generation becomes the answer.
+        //
+        // `<|python_tag|>` is Llama 3.1's, chosen because it is real rather than
+        // invented: this is the shape of the next report, not a hypothetical.
+        //
+        // Which is why `system_prompt` states the `<tool_call>` envelope even to
+        // an engine whose template already carried the tools. That instruction
+        // is the only thing standing between an unlearned envelope and #489, and
+        // this test is what says so rather than leaving it to a comment. A fourth
+        // dialect landing in `ALL` should make this fail — that is the signal to
+        // pick a different unlearned envelope, not to delete the test.
+        let unlearned = "<|python_tag|>{\"name\": \"echo\", \"arguments\": {\"key\": \"abc\"}}";
+        assert!(
+            matches!(read_markup(&stopped(unlearned)), Markup::None),
+            "an envelope in no dialect is not recognised, by construction"
+        );
+        let engine = ScriptedEngine::new(&[unlearned]);
+        let out = chat_with_tools(&engine, &EchoRegistry, &ask_request(), 4).expect("completion");
+        assert_eq!(
+            out.content, unlearned,
+            "and so it reaches the user unchanged — the residual risk the tool \
+             system prompt exists to reduce"
+        );
     }
 
     #[test]
