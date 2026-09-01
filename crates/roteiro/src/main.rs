@@ -1305,6 +1305,12 @@ enum OkfAction {
     /// A different question from `validate`: conformance asks whether the bundle
     /// *is* OKF, linting asks whether it is *good* OKF. Two entry points into one
     /// crate, which is why neither could ever have been had without the other.
+    ///
+    /// Gates the same way `validate` does — non-zero on an `error` finding,
+    /// never on a warning. In practice the hygiene rules report warnings and
+    /// info, so this usually exits zero and is read rather than gated; the
+    /// exit status is stated here so a CI script does not have to find out
+    /// by experiment.
     Lint {
         /// The bundle directory.
         path: String,

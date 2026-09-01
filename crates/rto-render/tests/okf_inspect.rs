@@ -40,6 +40,16 @@ fn walk(root: &Path) -> Vec<(String, String)> {
     while let Some(dir) = stack.pop() {
         for entry in std::fs::read_dir(&dir).expect("read fixture dir") {
             let path = entry.expect("fixture dir entry").path();
+            // Symlinks are skipped, matching the production `read_bundle_files`
+            // walker. `is_dir()` follows them, so a cycle would hang the suite
+            // and a link escaping the fixture root would make this test read
+            // whatever happens to be on the host. The vendored fixtures contain
+            // no symlinks today; the point is that the helper must not depend on
+            // that staying true.
+            let link = std::fs::symlink_metadata(&path).expect("fixture entry metadata");
+            if link.file_type().is_symlink() {
+                continue;
+            }
             if path.is_dir() {
                 stack.push(path);
             } else if path.extension().is_some_and(|e| e == "md") {
