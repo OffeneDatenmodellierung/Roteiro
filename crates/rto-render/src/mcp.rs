@@ -1327,8 +1327,7 @@ impl ServerHandler for GraphServer {
 /// `both_surfaces_name_a_shared_tools_arguments_the_same_way` in `roteiro` is the
 /// consumer.
 #[must_use]
-pub fn tool_argument_names()
--> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
+pub fn tool_argument_names() -> std::collections::BTreeMap<String, BTreeSet<String>> {
     GraphServer::routes(&Advertised::All)
         .list_all()
         .into_iter()
