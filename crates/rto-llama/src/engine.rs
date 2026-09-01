@@ -81,11 +81,21 @@ pub struct ChatRequest {
     /// description, parameters}}]` shape — the shape every chat template in the
     /// registry is written against.
     ///
-    /// These reach the model through **its own template's `tools` slot**, which
-    /// is what a model trained on tool use expects. Each template renders them
-    /// in the shape it was trained for — `qwen3-coder-30b-a3b` in XML, the
-    /// others in JSON — and a caller cannot know which, which is precisely why
-    /// the template renders them rather than the caller.
+    /// What the caller **offers**; how they reach the model is the engine's to
+    /// answer, and the engines do not answer alike. A local model gets them
+    /// through its own template's `tools` slot — the shape it was trained for,
+    /// `qwen3-coder-30b-a3b` in XML and the others in JSON, which a caller
+    /// cannot know and so cannot render itself. A model whose template ignores
+    /// `tools`, or which resolves to a builtin template *name* with no such
+    /// slot, gets a plain advertisement spliced into the conversation instead.
+    /// A request routed to the remote tier gets neither: `payload_for` builds an
+    /// ADR-0019 allow-listed body that has no `tools` field at all, so for that
+    /// model the conversation is the only channel there is.
+    ///
+    /// [`Engine::carries_tools`] is how a caller finds out which, and it must be
+    /// asked rather than assumed — it is what decides whether the caller states
+    /// the tools a second time itself, or would be duplicating what the engine
+    /// already said.
     ///
     /// `None` and an empty list are the same to a template (`{% if tools %}` is
     /// false for both); `None` means the caller had none to offer.

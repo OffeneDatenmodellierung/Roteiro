@@ -55,7 +55,7 @@ use minijinja::{Environment, context};
 
 /// A chat message as a template sees it.
 ///
-/// Deliberately not [`crate::engine::ChatMessage`]: a template reads whatever
+/// Deliberately not [`crate::engine::Message`]: a template reads whatever
 /// fields the model was trained to expect — `reasoning_content` and `tool_calls`
 /// among them — and coupling this to the engine's type would mean every new
 /// template field became an engine change.
