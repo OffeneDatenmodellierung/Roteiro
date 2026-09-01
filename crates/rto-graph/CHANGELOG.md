@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.2.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v5.1.0...rto-graph-v5.2.0) - 2026-09-01
+
+### Added
+
+- *(okf)* discover a peer's bundle, ask once, and screen what it says
+
+### Fixed
+
+- *(graph)* a quoted `>` truncated a tag's attributes, hiding the hiding
+- *(graph)* a hidden void element swallowed the rest of the document
+- *(okf)* ordinary markup was an evasion, and two silences told the wrong story
+- *(okf)* a recorded grant is standing, `<div hidden>` conceals, and a bundle must close its frontmatter
+
+### Other
+
+- *(graph)* stop the screen lowercasing once per hidden tag
+
 ## [5.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v5.0.0...rto-graph-v5.1.0) - 2026-09-01
 
 ### Added

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.2.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v5.1.0...rto-render-v5.2.0) - 2026-09-01
+
+### Added
+
+- *(okf)* discover a peer's bundle, ask once, and screen what it says
+
+### Fixed
+
+- *(okf)* the screen report named an outcome that did not happen
+
 ## [5.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v5.0.0...rto-render-v5.1.0) - 2026-09-01
 
 ### Added
