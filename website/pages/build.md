@@ -6,7 +6,7 @@ site-order: 1
 
 # Install & build {#build}
 
-Roteiro is a Rust workspace (MSRV 1.94). Install the lean default build from
+Roteiro is a Rust workspace (MSRV 1.96). Install the lean default build from
 crates.io, or build from source with the feature tiers you want.
 
 <pre><code><span class="c"># Lean default build — pure Rust, no network call of its own,</span>

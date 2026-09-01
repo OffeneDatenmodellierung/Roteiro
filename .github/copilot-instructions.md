@@ -12,7 +12,7 @@ Key points when suggesting or reviewing changes:
 - **Gates** (CI enforces): `cargo fmt --all --check`; `cargo clippy --workspace
   --all-targets --all-features -- -D warnings` (pedantic); `cargo test
   --workspace --all-features`; `cargo run -p roteiro -- check`; `cargo deny
-  --all-features check` + `cargo audit`. MSRV **1.94**, `unsafe_code = "forbid"`.
+  --all-features check` + `cargo audit`. MSRV **1.96**, `unsafe_code = "forbid"`.
 - **Offline by default**: keep heavy deps feature-gated; no un-consented network;
   new dependency licences must be on the `cargo deny` allow-list.
 - **Dependency security** (ADR-0017): a new licence is admitted with its

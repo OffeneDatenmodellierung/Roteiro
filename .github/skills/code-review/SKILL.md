@@ -25,7 +25,7 @@ skill is a pointer, not a duplicate.
   confidence, or non-deterministic `derived` extraction. These break the core
   model.
 - **Broken gates** — clippy pedantic, `cargo fmt`, tests, `roteiro check`,
-  `cargo deny`/`audit`, MSRV 1.94, or `unsafe_code`.
+  `cargo deny`/`audit`, MSRV 1.96, or `unsafe_code`.
 - **Offline-by-default regressions** — a heavy dependency not feature-gated, an
   un-consented network call, or a dependency licence not on the allow-list.
 - **Drift** — a change that dangles an ADR `[[link]]`/`@rto:` annotation, or an

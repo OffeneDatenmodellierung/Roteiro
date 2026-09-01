@@ -15,7 +15,7 @@ members = [
 [workspace.package]
 version = "5.0.0"
 edition = "2024"
-rust-version = "1.94"
+rust-version = "1.96"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/OffeneDatenmodellierung/Roteiro"
 homepage = "https://roteiro.dev"
@@ -32,11 +32,13 @@ rto-render = { path = "crates/rto-render", version = "5.0.0" }
 rto-serve = { path = "crates/rto-serve", version = "5.0.0" }
 anyhow = "1.0"
 clap = { version = "4.6", features = ["derive", "env"] }
-# Pinned to 0.39 (not the latest 0.40.x): libsqlite3-sys's build script from
-# 0.38.0 onward uses the std `cfg_select!` macro, stabilized in Rust 1.95 —
-# newer than our 1.94 MSRV, which breaks the `bundled` feature's build.rs on
-# our MSRV toolchain. Revisit this pin if/when the project MSRV moves to
-# 1.95+ (see ADR-0001 for MSRV policy).
+# Pinned to 0.39 (not the latest 0.40.x). The original reason was an MSRV
+# blocker: libsqlite3-sys's build script from 0.38.0 onward uses the std
+# `cfg_select!` macro, stabilized in Rust 1.95 — newer than the 1.94 MSRV in
+# force at the time, which broke the `bundled` feature's build.rs. That
+# blocker is **gone** as of the 1.96 MSRV. The pin is retained only because
+# lifting it is a deliberate dependency change that has not been made or
+# verified here — it is now unblocked (see ADR-0001 for MSRV policy).
 rusqlite = { version = "0.39", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
