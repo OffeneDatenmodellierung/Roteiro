@@ -103,6 +103,63 @@ The trust consequence was the serious one: all nine concepts of the published
 now parses frontmatter with a real YAML parser, and the counts are cross-checked
 against an independent implementation (below).
 
+### You do not have to remember the command
+
+A workspace member that publishes a bundle at its conventional `okf/` path is
+**found automatically** during the workspace scan, and you are asked about it
+once:
+
+```
+spoke publishes an OKF bundle, and this graph references it.
+
+bundle:   /home/you/GIT/spoke/okf
+asking:   not seen before
+contains: 12 concept(s), 1 quarantined, 0 blocked by the content screen [invisible-characters]
+
+[t] trust       import at `external-<their tier>`, keeping what they claimed
+[a] acknowledge import at `external-inferred`: their information, not their confirmation
+[i] ignore      leave the cross-repo placeholder as it is
+```
+
+The answer is recorded per peer, so it is asked **once, not every sync**. It
+lapses if the bundle moves, or if it starts carrying a class of screening finding
+it did not carry when you answered — an ordinary edit does not re-ask you.
+
+You are only asked about peers this repository already references (it holds an
+`extref:` placeholder for them), because those are the ones importing would
+actually help. `roteiro import --from okf <path>` is still how you read anything
+else, and running it records your answer too.
+
+**When there is nobody to ask — a server, a CI job, a pipe — the bundle is
+ignored, mentioned once, and nothing is recorded.** A graph does not adopt a
+stranger's concepts because nobody was there to object, and a silent run must
+never leave behind an answer a person did not give.
+
+### A peer's prose is screened before it is stored
+
+Imported text ends up in `meta.content`, which search results hand to a language
+model as grounding. So it is screened first, deterministically — no model is
+asked to judge it:
+
+| outcome | what happens |
+|---|---|
+| **pass** | stored unchanged |
+| **quarantine** | the concept is imported; its text is either stripped of invisible characters and hidden regions, or withheld entirely |
+| **block** | the concept is not imported at all |
+
+**Block is reserved for text that is both hidden and directive** — instructions
+to a model inside an HTML comment, behind `display:none`, or spelled with
+zero-width characters. A document that merely *discusses* prompt injection is
+quarantined, not refused: its concept, kind and relationships still arrive, so
+the cross-repo placeholder still resolves. What it loses is the prose.
+
+The screen catches invisible codepoints (zero-width, bidi controls, the tag
+block, C0/C1 controls), content hidden by presentation, and English phrases that
+read as instructions to a model. It deliberately does **not** attempt homoglyph
+detection, decoding of encoded payloads, non-English patterns, or CSS cascade
+resolution — see `crates/rto-graph/src/screen.rs`, which says so at length.
+
+
 ## Why Roteiro does not ship its own OKF validator
 
 The obvious next feature is `roteiro okf validate` — a conformance gate over a
@@ -198,8 +255,6 @@ upstream rather than encoding here:
   `acme_retail`, even though §5 states that *every* timestamp-valued key is an
   ISO 8601 datetime with an explicit UTC offset, and §5.5's own example is
   `2026-09-23T00:00:00Z`. This one is a bug in the tool, not in the spec.
-
-
 ## One place Roteiro guarantees more than the specification asks
 
 §11 says consumers **MUST NOT** reject a bundle for broken cross-links. Roteiro

@@ -11,7 +11,7 @@ architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.1"
+version: "1.2"
 last-modified: 2026-09-01
 confluence-url:
 ---
@@ -20,10 +20,10 @@ confluence-url:
 
 | | |
 |---|---|
-| **Document version** | 1.1 |
+| **Document version** | 1.2 |
 | **Status** | Accepted |
 | **Decision makers** | The Roteiro Project Team |
-| **Related** | [[docs/adr/0009-cross-repo-workspace-links.md]] · [[docs/adr/0012-analyzer-findings-artifact-model.md]] |
+| **Related** | [[docs/adr/0009-cross-repo-workspace-links.md]] · [[docs/adr/0012-analyzer-findings-artifact-model.md]] · [[docs/adr/0019-remote-model-tier.md]] · [[docs/adr/0008-multi-repo-workspace-serve.md]] |
 
 ## Reference
 
@@ -218,11 +218,89 @@ bundle does not contain is dropped and counted. A directory in which **nothing**
 parsed is refused whole, because importing zero concepts while exiting zero
 reports success for having done nothing.
 
-**Automatic discovery and the interactive trust prompt are not implemented.**
-Issue #706 settles both — a workspace scan should find a member's bundle, and
-first contact should ask trust/acknowledge/ignore once and record the answer.
-Neither is here: they live in the workspace scan, and this change deliberately
-stayed out of it. Recorded so the decision is not read as delivered.
+**Discovery is automatic, and consent is not.** A workspace member that
+publishes a bundle at its conventional `okf/` path is found during the workspace
+scan, so nobody has to remember `roteiro import --from okf`. What is *not*
+automatic is reading it: on first contact the operator is asked to **trust**,
+**acknowledge** or **ignore**, once, and the answer is recorded against that
+source. Automation and consent compose here rather than conflicting — the prompt
+is precisely what stops automatic discovery becoming consent-by-installation.
+
+Three things follow, and each was a decision rather than a detail.
+
+**Discovery is scoped to peers this graph already references.** A repo is asked
+about peer *P* only when it holds an `extref:P::…` placeholder. Otherwise an
+*n*-member workspace would ask *n×(n−1)* questions on first run, most of them
+about bundles that would fill nothing — and a prompt nobody can finish reading
+is answered by reflex, which is a worse gate than none.
+
+**Unprompted means `ignore`, and it is said once.** A server, a CI job and a
+piped invocation all lack a human, and the rule is uniform across them rather
+than special-cased. `ignore` is the default because the three answers are not
+symmetric in what they cost when wrong: `ignore` leaves the graph as it is
+today, and the cost of being wrong is a feature that did not happen;
+`acknowledge` writes a stranger's prose into a graph a language model reads as
+grounding, and the cost of being wrong is a payload delivered. Refusing to start
+— [[docs/adr/0019-remote-model-tier.md]]'s answer for an egress call — is wrong
+here, because the bundle is an enhancement rather than the workload, and it
+would let any member wedge another person's server by adding a directory.
+**Nothing is recorded** on that path: a server's silence must never become an
+answer a later interactive run reads back as a decision.
+
+**The recorded answer is a departure from ADR-0019, deliberately.** That ADR
+persists no grant at all — one is scoped to a process and dies with it. The
+questions differ in how often they recur: a remote call is a deliberate act, and
+one prompt per act is proportionate, whereas a workspace scan runs on every
+`links`, every `sync` and every server start. The record lives in the consuming
+repo's `graph.db` (migration 15) rather than in any committed file, for
+ADR-0019's own reason: `roteiro.toml` is shared, so a merged line would be
+consent by pull request. It lapses when the bundle **moves**, and when the
+bundle starts carrying a class of screening finding it did not carry when the
+question was answered. It does **not** lapse on an ordinary edit — a grant is
+over a source, not over bytes, and re-asking on every commit would restore the
+habituation the record exists to avoid. That leaves a real gap, stated rather
+than hidden: a peer can change their visible prose to say something new and the
+grant stands.
+
+### A peer's prose is screened before it becomes node content
+
+Reading a bundle puts a stranger's text into `meta.content`, which
+`content_snippet` returns as a search hit's snippet, which backs the
+model-facing `search`, `explain` and `context` tools. **A stranger's prose is
+therefore stored and then returned verbatim to a language model**, inside a tool
+result that model has been told to ground its answers in. Nothing in the OKF
+ecosystem guards that direction — `okflint` checks conformance, and `okf-guard`
+screens *source documents before generation*, which is the mirror case.
+
+So imported text passes a deterministic screen with **three** outcomes:
+
+- **pass** — admitted unchanged;
+- **quarantine** — the concept is imported, and its text is either neutralised
+  (invisible codepoints and presentation-hidden regions removed) or withheld
+  entirely. The placeholder still resolves to a real node with a kind and its
+  relationships, which is the payoff; what it loses is the prose;
+- **block** — the concept is not imported at all.
+
+**Block requires concealment *and* direction, together.** Instruction-shaped
+text in visible prose is usually a document *about* prompt injection, and
+refusing it would make writing about the attack indistinguishable from mounting
+it; hidden text alone is usually an HTML comment. Text arranged so a human
+reviewing the bundle cannot see it while a model reading the same file can has
+one purpose, and scoping refusal to that is what keeps a refusal rare enough to
+be believed.
+
+**No model judges any of it.** Using a language model to decide whether text is
+attacking a language model is circular, and it would make a workspace scan
+depend on inference. The screen is codepoint classes and phrase patterns, and
+`crates/rto-graph/src/screen.rs` states at length what it does *not* attempt —
+no homoglyphs, no decoding of encoded payloads, English patterns only, no CSS
+cascade — because a screen that claims more than it does is worse than a narrow
+one that is honest.
+
+**Screening composes with the prompt.** The result is shown at the moment the
+question is asked: "this bundle contains 3 concepts with hidden control
+characters — trust / acknowledge / ignore?" is answerable in a way that "trust
+this bundle?" is not.
 
 ## Consequences
 
@@ -269,3 +347,4 @@ renderer nobody maintains.
 |---------|------|-------|
 | 1.0 | 2026-08-29 | Accepted, and implemented in the same change (issue #663). Records the replacement of `render obsidian` by `render okf`, the provenance-to-trust-tier mapping that motivates it, that the `human:` verifier is resolved per document rather than per repository, that links resolve against the placement rather than the key and a cross-repo reference follows through to the other member's concept, that a shallow clone confirms nothing rather than confirming everything, that a scalar cannot forge a frontmatter key, that only the decision carries the decision's `status`, that the bundle is dated by the commit, and the two `_Home` capabilities — the version-pin table and the findings summary — that have no OKF home yet. |
 | 1.1 | 2026-09-01 | **Roteiro reads OKF as well as writing it** (issue #706, phase 1). The v1.0 argument was that a vendor-neutral format beats one application's conventions; consuming is the half that pays for it, and until now the bundle was a standard one-way format rather than a proprietary one. Records four decisions. **Imported facts get `external-derived` / `external-authored` / `external-inferred`**, so [[crates/rto-graph/src/provenance.rs#Provenance]] is six tokens rather than three: the tier is carried because `origin_for` matches exhaustively, and a flat `External` would force one arm and therefore either downgrade a peer's human-reviewed concept or upgrade their similarity guess — and then re-emit the flattened tier outward, laundering by round-trip. Externality flattens to one level; the import layer's `src_ref` names who it came from. **A trusted concept re-emits the peer's own `generated`/`verified` block** from `meta.okf.origin`, so their verifier leaves here by name instead of being re-tiered to unverified. **`roteiro import --from okf` defaults to *acknowledge***, landing everything at `external-inferred` whatever the bundle claimed, because a hand-run command that silently adopted a stranger's confirmations is the thing the consent decision exists to prevent; `--trust` preserves their tiers and what they claimed is recorded in `meta.okf.claimed` either way. **An imported concept fills the `extref:` placeholder it corresponds to** ([[docs/adr/0009-cross-repo-workspace-links.md]]), computed forwards through the writer's own naming rule rather than by inverting a lossy `slug`, and filling nothing when the match is ambiguous. Also: a bundle is read liberally per §11 — an unrecognised `type` is imported, a malformed document is skipped with its reason reported — but a directory in which nothing parsed is refused whole. The schema gains migration 14 to widen the store's provenance `CHECK`, which is also the mechanism that makes an older build report such a store as "written by a newer Roteiro" rather than as corrupt. **Not implemented, and deliberately so:** automatic discovery during the workspace scan, and the interactive trust/acknowledge/ignore prompt with its per-source record. Both live in the workspace scan and are deferred to a later phase; this row exists so the issue's decisions are not read as delivered. |
+| 1.2 | 2026-09-01 | **Discovery became automatic, consent became a prompt, and a peer's prose is now screened before it becomes node content** (issue #706, phase 2). Completes the two things v1.1 recorded as deliberately absent. **A member's bundle at its conventional `okf/` path is found during the workspace scan**, scoped to peers this graph already holds an `extref:` placeholder for — an *n*-member workspace would otherwise ask *n×(n−1)* questions on first run, most about bundles that would fill nothing. **First contact asks trust / acknowledge / ignore once and records the answer** in the consuming repo's `graph.db` (migration 15) rather than in any committed file, on [[docs/adr/0019-remote-model-tier.md]]'s own reasoning that a shared `roteiro.toml` would make it consent by pull request. This **departs from ADR-0019 on persistence**, which stores no grant at all: the questions differ in how often they recur, and a scan that ran on every `links` and every server start would produce the habituated `y` that ADR's §3 refuses to create. The grant lapses when the bundle **moves** and when it starts carrying a **class of screening finding it did not carry when the question was answered**; it does *not* lapse on an ordinary edit, because a grant is over a source rather than over bytes — a real gap, since a peer can rewrite visible prose and the grant stands. **Unprompted means `ignore`, said once, recorded never:** a server, a CI job and a pipe all lack a human, and the three answers are asymmetric — `ignore` costs a feature that did not happen, `acknowledge` costs a payload delivered to a model. Refusing to start would let any member wedge another person's server with a directory. **A peer's prose is screened** before it reaches `meta.content`, which `content_snippet` returns to the model-facing `search`/`explain`/`context` tools: pass / quarantine / block, where quarantine keeps the concept and neutralises or withholds its text, and **block requires concealment *and* direction together** — visible instruction-shaped prose is usually a document *about* prompt injection, and hidden text alone is usually an HTML comment. Deterministic throughout, because using a model to judge text aimed at a model is circular and would make a scan depend on inference. Learned from `okf-guard` (Apache-2.0) and re-aimed: that tool screens *your* sources *before* generation, and closing the consuming side is the inversion — its zero-width set is widened here to cover bidi controls and matched position-independently, and its count-driven score is replaced by a structural rule. What the screen does **not** attempt is stated in `crates/rto-graph/src/screen.rs`: no homoglyphs, no decoding of encoded payloads, English patterns only, no CSS cascade, nothing retroactive. Also fixed: `--from okf <repo>/okf` derived the peer name `okf`, so a hand-run import and automatic discovery named the same bundle differently and produced two layers and two consent records. |
