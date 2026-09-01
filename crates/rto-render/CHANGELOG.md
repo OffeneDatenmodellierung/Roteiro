@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.2.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v4.2.0...rto-render-v4.2.1) - 2026-09-01
+
+### Fixed
+
+- *(tools)* refuse a tool argument key neither surface recognises
+
 ## [4.2.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v4.1.0...rto-render-v4.2.0) - 2026-09-01
 
 ### Fixed
