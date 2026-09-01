@@ -173,6 +173,13 @@ impl ToolRegistry for NoTools {
 /// it forwards to the inner registry but fills in `project` on each tool call
 /// when the model did not name one (an explicit `project` in the call still
 /// wins, allowing a cross-project query).
+///
+/// This inserts a key the model did not send, which is why the unknown-argument
+/// check (`tools::unknown_argument`) runs **before** the registry rather than
+/// inside it: what a route pre-binds is a server-side value, not an argument
+/// submitted to be judged, and a tool that declares no `project` — the
+/// machine-global `sandbox_*` pair — would otherwise be refused on this route
+/// for something nobody typed.
 struct ScopedTools<'a> {
     inner: &'a dyn ToolRegistry,
     project: String,

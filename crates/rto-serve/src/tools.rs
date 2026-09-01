@@ -77,6 +77,11 @@ pub struct ToolDef {
     /// One-line description of what it does and when to use it.
     pub description: String,
     /// JSON Schema (an `object`) describing the tool's arguments.
+    ///
+    /// `"additionalProperties": false` here is **enforced, not decorative**: the
+    /// tool loop refuses a call carrying a key `properties` does not declare
+    /// rather than dropping it. See [`unknown_argument`] for why a dropped key is
+    /// worse than a refused one.
     pub parameters: serde_json::Value,
 }
 
@@ -176,6 +181,73 @@ fn disposition(calls: &[ToolCall], client_names: &HashSet<&str>) -> Disposition 
     } else {
         Disposition::Execute
     }
+}
+
+/// The refusal a call carrying an argument key the tool does not declare gets,
+/// or `None` for one whose arguments the schema admits.
+///
+/// > **An argument key a tool does not declare is refused, never dropped.**
+///
+/// The defect this closes is not a mistyped key; it is what a dropped key leaves
+/// behind. Roteiro's two tool surfaces spell one of `debt`'s arguments
+/// differently — `kind` on MCP, `categories` here — and neither surface used to
+/// reject the other's name, so a model that reached `debt` through one surface
+/// with the other's spelling was handed **every marker in the repository,
+/// presented as the filtered set it asked for**. No error, and nothing in the
+/// answer to tell it apart from a real one. Every mistyped, hallucinated or
+/// cross-surface key has that shape: the model asked a narrower question than the
+/// one it got an answer to, and only the argument object knows.
+///
+/// # The declaration is what enforces it
+///
+/// This reads `additionalProperties: false` off the **composed** schema the
+/// registry advertises — the one the model was shown, `project` spliced in and
+/// all — rather than off a list kept beside it. So a tool that closes its
+/// argument object is enforced by the same words that told the model what it
+/// takes, and the two cannot drift apart; a registry that declares nothing is
+/// untouched, which is what keeps this a property a tool opts into rather than a
+/// rule imposed on every implementor of [`ToolRegistry`].
+///
+/// The message names the keys the tool *does* take, for the reason serde's own
+/// does ("unknown field `categories`, expected one of `kind`, `project`"): a
+/// model that is told only that it was wrong will guess again, and the surface it
+/// guessed from is the one that misled it.
+fn unknown_argument(def: &ToolDef, arguments: &serde_json::Value) -> Option<String> {
+    if def.parameters.get("additionalProperties") != Some(&serde_json::Value::Bool(false)) {
+        return None;
+    }
+    let sent = arguments.as_object()?;
+    let declared = def.parameters.get("properties").and_then(|p| p.as_object());
+    let is_declared = |key: &String| declared.is_some_and(|d| d.contains_key(key));
+    let unknown: Vec<&str> = sent
+        .keys()
+        .filter(|k| !is_declared(k))
+        .map(String::as_str)
+        .collect();
+    if unknown.is_empty() {
+        return None;
+    }
+    let named = |keys: &[&str]| {
+        keys.iter()
+            .map(|k| format!("`{k}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let takes: Vec<&str> = declared.map_or_else(Vec::new, |d| {
+        d.keys().map(String::as_str).collect::<Vec<_>>()
+    });
+    let expected = if takes.is_empty() {
+        "no arguments at all".to_owned()
+    } else {
+        format!("only {}", named(&takes))
+    };
+    Some(format!(
+        "unknown argument {} — `{}` takes {expected}. Nothing was run: an argument this \
+         tool does not declare is refused rather than ignored, because ignoring it would \
+         answer a narrower question than the one you asked and give you no way to tell.",
+        named(&unknown),
+        def.name,
+    ))
 }
 
 /// Why a run of the tool loop ended — the input to [`finish`].
@@ -685,9 +757,24 @@ pub fn chat_with_client_tools(
             content: completion.content.clone(),
         });
         for call in &calls {
-            let result = registry
-                .call(&call.name, &call.arguments)
-                .unwrap_or_else(|e| format!("tool `{}` error: {e}", call.name));
+            // The argument object is checked against the schema the model was
+            // shown, **before** the registry sees it — see [`unknown_argument`].
+            // Here rather than inside each registry because this is the one
+            // execution funnel, so a tool cannot be reached with an argument
+            // nobody read; and before the call rather than after, so a wrapper
+            // that pre-binds an argument of its own (`server::ScopedTools` fills
+            // in `project`) is filling in a server-side value rather than
+            // submitting one to be judged.
+            let refused = graph_tools
+                .iter()
+                .find(|t| t.name == call.name)
+                .and_then(|def| unknown_argument(def, &call.arguments));
+            let result = match refused {
+                Some(why) => format!("tool `{}` error: {why}", call.name),
+                None => registry
+                    .call(&call.name, &call.arguments)
+                    .unwrap_or_else(|e| format!("tool `{}` error: {e}", call.name)),
+            };
             messages.push(Message {
                 role: "user".to_owned(),
                 content: tool_response_turn(&result),
@@ -1690,6 +1777,7 @@ mod tests {
     use super::{
         Dialect, Disposition, Ending, Limits, Markup, REFUSAL, SuppressedTools, TOOL_CALL_OPEN,
         ToolCall, Unfinished, disposition, finish, read_markup, system_prompt, tool_system_prompt,
+        unknown_argument,
     };
     use crate::engine::{
         ChatRequest, Completion, CompletionStats, Engine, EngineError, FinishReason, Message,
@@ -2214,6 +2302,156 @@ mod tests {
         };
         let out = chat_with_tools(&engine, &NoTools, &req, 4).expect("completion");
         assert_eq!(out.content, "direct answer");
+    }
+
+    // ------------------------------------------ unknown tool arguments ---
+    // **An argument key a tool does not declare is refused, never dropped.**
+    // The measured defect: the two surfaces spell `debt`'s filter differently
+    // (`kind` on MCP, `categories` here), and a dropped key returned every
+    // marker in the repository as the filtered set the model asked for.
+
+    /// The served `debt` schema, closed the way `roteiro`'s registry declares it
+    /// — `categories` plus the spliced-in `project` — over a body that **panics
+    /// if executed**.
+    ///
+    /// The refusal is asserted by construction: a call that reaches the tool
+    /// fails the test outright, which is the half that matters. A test that only
+    /// inspected the returned text would still pass if the tool ran and its
+    /// unfiltered answer were thrown away.
+    struct ClosedDebt;
+
+    impl ToolRegistry for ClosedDebt {
+        fn tools(&self) -> Vec<ToolDef> {
+            vec![ToolDef {
+                name: "debt".to_owned(),
+                description: "list intent-debt markers".to_owned(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "categories": { "type": "array", "items": { "type": "string" } },
+                        "project": { "type": "string" },
+                    },
+                    "additionalProperties": false,
+                }),
+            }]
+        }
+        fn call(&self, name: &str, arguments: &serde_json::Value) -> Result<String, String> {
+            assert!(
+                arguments.get("kind").is_none(),
+                "`{name}` was reached with an argument its schema does not declare — \
+                 the refusal is what stops an unfiltered answer being returned as a \
+                 filtered one",
+            );
+            Ok(format!("ran `{name}` with {arguments}"))
+        }
+    }
+
+    /// One `<tool_call>` turn followed by an answer, run against [`ClosedDebt`],
+    /// returning the whole `<tool_response>` the model was handed for it.
+    fn debt_call_response(arguments: &str) -> String {
+        let engine = ScriptedEngine::new(&[
+            format!("<tool_call>{{\"name\":\"debt\",\"arguments\":{arguments}}}</tool_call>"),
+            "here is what I found".to_owned(),
+        ]);
+        let req = ChatRequest {
+            tools: None,
+            model: "scripted".to_owned(),
+            messages: vec![Message {
+                role: "user".to_owned(),
+                content: "what todo markers are there?".to_owned(),
+            }],
+            images: vec![],
+            audio: vec![],
+            temperature: 0.0,
+            max_tokens: 64,
+        };
+        let out = chat_with_tools(&engine, &ClosedDebt, &req, 4).expect("completion");
+        assert_eq!(out.content, "here is what I found");
+        // The second generation's last turn is the tool response fed back.
+        engine
+            .round(1)
+            .last()
+            .expect("a tool response was fed back")
+            .content
+            .clone()
+    }
+
+    /// The defect, end to end: the *other* surface's spelling for the same
+    /// argument, over the surface that does not know it.
+    #[test]
+    fn an_argument_the_tool_does_not_declare_is_refused_not_dropped() {
+        let response = debt_call_response(r#"{"kind":["todo"]}"#);
+        // What the caller actually receives — the model, which is who a tool
+        // error is addressed to on this surface.
+        assert!(
+            response.contains("tool `debt` error: unknown argument `kind`"),
+            "the refusal must name the offending key: {response}",
+        );
+        assert!(
+            response.contains("`debt` takes only `categories`, `project`"),
+            "and the keys that would have worked, as serde's own message does: \
+             {response}",
+        );
+        assert!(
+            response.contains("Nothing was run"),
+            "and must say no answer was produced, so the model does not read the \
+             refusal as an empty result: {response}",
+        );
+    }
+
+    /// The other direction, and the one that stops the rule being satisfied by
+    /// refusing everything: the declared keys still run — including `project`,
+    /// which reaches the schema only through the registry's `with_project`
+    /// wrapper, so this fails if the flag lands on an inner fragment the wrapper
+    /// then extends.
+    #[test]
+    fn the_declared_arguments_still_run() {
+        let response = debt_call_response(r#"{"categories":["todo"],"project":"roteiro"}"#);
+        assert!(
+            response.contains("ran `debt`"),
+            "a call using only declared keys must execute: {response}",
+        );
+        assert!(
+            !response.contains("unknown argument"),
+            "and must not be refused: {response}",
+        );
+    }
+
+    /// A schema that has not closed its argument object is left exactly as it
+    /// was. The rule is one a tool declares, not one imposed on every
+    /// implementor of [`ToolRegistry`] — see [`unknown_argument`].
+    #[test]
+    fn an_open_schema_still_tolerates_extra_keys() {
+        let def = ToolDef {
+            name: "echo".to_owned(),
+            description: "echo".to_owned(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "key": { "type": "string" } },
+            }),
+        };
+        assert_eq!(
+            unknown_argument(&def, &serde_json::json!({ "nonsense": 1 })),
+            None,
+        );
+    }
+
+    /// A tool that declares no arguments at all says so, rather than listing an
+    /// empty set of alternatives.
+    #[test]
+    fn a_tool_taking_no_arguments_says_so() {
+        let def = ToolDef {
+            name: "list_projects".to_owned(),
+            description: "the hosted projects".to_owned(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false,
+            }),
+        };
+        let why =
+            unknown_argument(&def, &serde_json::json!({ "project": "roteiro" })).expect("refused");
+        assert!(why.contains("takes no arguments at all"), "{why}");
     }
 
     // ---------------------------------------------------------------- #485 ---
