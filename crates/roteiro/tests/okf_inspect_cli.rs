@@ -25,11 +25,19 @@ fn roteiro(args: &[&str]) -> std::process::Output {
 
 /// Write a bundle under a fresh temp directory and return its root.
 ///
-/// Keyed by `tag` and process id so two tests running in parallel — and two
-/// `cargo test` runs on one machine — never share a directory.
+/// Keyed by process id, a monotonic counter **and** `tag`. The counter is what
+/// makes this safe rather than the tag: tests run in parallel and each begins by
+/// clearing its directory, so two callers that happened to pass the same `tag`
+/// would race on `remove_dir_all` and flake. Uniqueness must not depend on
+/// everyone remembering to pick a fresh name — the tag is there to make a
+/// failure legible, not to keep it correct.
 fn bundle(tag: &str, files: &[(&str, &str)]) -> PathBuf {
-    let root =
-        std::env::temp_dir().join(format!("roteiro-okf-inspect-{tag}-{}", std::process::id()));
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!(
+        "roteiro-okf-inspect-{}-{seq}-{tag}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&root);
     for (rel, content) in files {
         let path = root.join(rel);

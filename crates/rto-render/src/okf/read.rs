@@ -371,6 +371,12 @@ struct ParsedFrontmatter {
     sources: Vec<String>,
     generated: Option<(String, String)>,
     verified: Vec<(String, String)>,
+    /// The verification event that actually *supports* [`Self::tier`]: the
+    /// latest one carrying a parseable timestamp, as [`okf_core`] picks it.
+    ///
+    /// Not the same as `verified.first()`, and the difference is load-bearing —
+    /// see [`ParsedFrontmatter::effective_origin`].
+    confirmed: Option<(String, String)>,
     /// §5.3's trust tier, as [`okf_core`] derives it from `verified`.
     tier: TrustTier,
 }
@@ -411,12 +417,29 @@ impl ParsedFrontmatter {
     /// untimestamped assertion into a confirmation, which is the exact move the
     /// tier-carrying provenance exists to prevent.
     fn effective_origin(&self, trust: Trust) -> Option<Origin> {
-        let confirmed = self.verified.first();
-        let (by, at) = confirmed.or(self.generated.as_ref())?;
+        let confirms = self.tier != TrustTier::Unverified && trust == Trust::Trust;
+        // When a confirmation is being re-emitted, the attribution must be the
+        // event that **supports** it — the latest timestamped verifier — and not
+        // simply the first one listed. A document verified first by an
+        // untimestamped entry and then by a timestamped one derives its tier
+        // from the second, so attributing the confirmation to the first would
+        // re-emit `confirms: true` beside an empty `at`: an untimestamped
+        // assertion laundered into a confirmation, which is the exact move this
+        // is meant to prevent.
+        //
+        // Without a confirmation to carry, the first `verified` entry is still
+        // the right attribution: it is what the document listed first, and
+        // nothing is being claimed about it.
+        let (by, at) = if confirms {
+            self.confirmed.as_ref().or(self.verified.first())
+        } else {
+            self.verified.first()
+        }
+        .or(self.generated.as_ref())?;
         Some(Origin {
             by: parse_actor(by),
             at: at.clone(),
-            confirms: self.tier != TrustTier::Unverified && trust == Trust::Trust,
+            confirms,
         })
     }
 }
@@ -605,6 +628,11 @@ fn parse_frontmatter(block: &str) -> Result<ParsedFrontmatter, SkipReason> {
             .cloned()
             .filter_map(|v| by_at(v.by, v.at))
             .collect(),
+        // The event that supports the tier, as `okf-core` selects it: the
+        // latest one with a parseable timestamp. Chosen here rather than in
+        // `effective_origin`, because the choice needs the parsed datetimes the
+        // pairs above have already flattened away.
+        confirmed: fm.latest_verification().and_then(|v| by_at(v.by, v.at)),
         // §5.3's tier, derived by `okf-core` from the same `verified` events.
         // Kept beside the pairs above rather than recomputed from them, because
         // the derivation consults more than the pairs preserve — an event needs
@@ -1589,6 +1617,45 @@ mod tests {
         assert_eq!(
             import.facts.nodes[0].provenance,
             Provenance::ExternalDerived
+        );
+    }
+
+    /// A re-emitted confirmation is attributed to the verifier that **supports**
+    /// it, not to whichever entry happened to be listed first.
+    ///
+    /// §5.3 derives the tier only from events carrying a real timestamp, so a
+    /// document verified first by an untimestamped entry and then by a
+    /// timestamped one owes its tier entirely to the second. Attributing the
+    /// confirmation to the first would re-emit `confirms: true` beside an empty
+    /// `at` — an untimestamped assertion laundered into a confirmation, which is
+    /// precisely what the tier-carrying provenance exists to stop, arriving one
+    /// step later in the round trip.
+    #[test]
+    fn a_confirmation_is_attributed_to_the_verifier_that_supports_it() {
+        let doc = "---\ntype: \"file\"\nverified:\n  - by: \"human:alice\"\n  - by: \"human:bob\"\n    at: \"2026-09-01T00:00:00Z\"\n---\n\n# F\n";
+        let import = read(&[("/files/f.md", doc)], Trust::Trust);
+        let node = &import.facts.nodes[0];
+        assert_eq!(
+            node.provenance,
+            Provenance::ExternalAuthored,
+            "bob's timestamped human sign-off is what makes this human-reviewed"
+        );
+        assert_eq!(
+            node.meta["okf"]["origin"],
+            serde_json::json!({
+                "by": "human:bob",
+                "at": "2026-09-01T00:00:00Z",
+                "confirms": true,
+            }),
+            "the confirmation must name bob and carry his timestamp: alice's \
+             entry has no `at`, cannot support the tier, and re-emitting it as a \
+             confirmation would attach `confirms: true` to an empty timestamp"
+        );
+        assert_eq!(
+            node.meta["okf"]["claimed"]["verified"],
+            serde_json::json!(true),
+            "both entries are still recorded as what the bundle claimed; only \
+             the *attribution of the confirmation* is narrowed"
         );
     }
 
