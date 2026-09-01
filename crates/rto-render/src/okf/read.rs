@@ -565,6 +565,11 @@ fn parse_frontmatter(block: &str) -> Result<ParsedFrontmatter, SkipReason> {
         tags.push(bare);
     }
 
+    // Read once and used twice below — for the attribution pairs and for the
+    // tier. Re-reading would be two parses of one key, and an invitation for the
+    // two to be given different inputs later.
+    let verified = fm.verified();
+
     Ok(ParsedFrontmatter {
         type_: fm.type_().unwrap_or_default().into_owned(),
         title: fm.title().map(std::borrow::Cow::into_owned),
@@ -590,9 +595,9 @@ fn parse_frontmatter(block: &str) -> Result<ParsedFrontmatter, SkipReason> {
             .filter_map(|s| s.resource.filter(|r| !r.trim().is_empty()))
             .collect(),
         generated: fm.generated().and_then(|g| by_at(g.by, g.at)),
-        verified: fm
-            .verified()
-            .into_iter()
+        verified: verified
+            .iter()
+            .cloned()
             .filter_map(|v| by_at(v.by, v.at))
             .collect(),
         // §5.3's tier, derived by `okf-core` from the same `verified` events.
@@ -600,7 +605,7 @@ fn parse_frontmatter(block: &str) -> Result<ParsedFrontmatter, SkipReason> {
         // the derivation consults more than the pairs preserve — an event needs
         // a *parseable* `at` to count — and two ways of answering one question
         // is how they drift apart.
-        tier: TrustTier::derive(&fm.verified()),
+        tier: TrustTier::derive(&verified),
     })
 }
 
