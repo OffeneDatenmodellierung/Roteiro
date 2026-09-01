@@ -1182,8 +1182,10 @@ crates (`gix` over libgit2). Keep MCP/inference deps behind features so the
 default build stays lean and the MSRV surface stays small.
 
 **MSRV discipline:** stay on 1.96 until a dependency forces a move; the
-`rusqlite =0.39` pin exists for exactly this reason (documented in
-`Cargo.toml`). Any MSRV bump is an ADR-worthy decision.
+`rusqlite =0.39` pin is one instance of pinning for it (documented in
+`Cargo.toml`, which also records the *second*, non-MSRV constraint now
+holding that pin in place — `boxlite`'s `rusqlite ^0.39` against a
+`links = "sqlite3"` crate). Any MSRV bump is an ADR-worthy decision.
 
 **Error handling:** libraries expose `thiserror` enums; the binary uses
 `anyhow` + process exit codes. `check`/`sync` return structured results so the
