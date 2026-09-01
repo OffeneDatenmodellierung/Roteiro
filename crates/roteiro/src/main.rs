@@ -13322,9 +13322,16 @@ fn sandbox_clear_tool_def() -> rto_serve::ToolDef {
                                     root no image claims. Mutually exclusive with `image`; \
                                     supplying neither is an error.",
                 },
+                // Both halves, matching `rto_render::mcp`'s `SandboxClearArgs`
+                // word for word. #675 removed "`dry_run: true` removes nothing
+                // and `applied` says which happened" from the shared description
+                // because the argument descriptions carry it — and on this
+                // surface only the first half was here, so the cut would have
+                // taken the `applied` half with it. The MCP copy said both.
                 "dry_run": {
                     "type": "boolean",
-                    "description": "Report what would be removed and remove nothing.",
+                    "description": "Report what would be removed and remove nothing. The \
+                                    result's `applied` field says which of the two happened.",
                 },
             },
         }),
