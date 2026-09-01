@@ -143,8 +143,11 @@ But adjudicate before acting, and one rule pays for itself:
       - **Features.** `msrv` and `checks` are `--all-features`;
         `default-features` is the default set. **Neither covers the other** —
         turning features on cannot find a defect in code being cfg'd *out*,
-        which is why that job exists. Nothing builds
-        `--no-default-features`.
+        which is why that job exists. Since #667 a third job,
+        `no-default-features`, builds the floor and two combinations above it
+        (`--no-default-features`, `+ mcp`, `+ execution`), so that axis **is**
+        covered now — but only in those three shapes. Any other feature
+        combination is still built by nothing.
       - **Targets.** `msrv` is `cargo check --workspace --all-features` with **no
         `--all-targets`**, so it never compiles `#[cfg(test)]` modules or
         `tests/` targets. The jobs that do compile test code (`checks`,
