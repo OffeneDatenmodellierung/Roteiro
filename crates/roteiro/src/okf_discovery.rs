@@ -63,6 +63,31 @@
 //! for peers that are actually undecided — a peer whose answer is recorded is
 //! silent. [`Noted`] dedupes within a process so a SIGHUP workspace reload does
 //! not reprint it.
+//!
+//! # What a recorded answer authorises
+//!
+//! A **standing grant**, not one read. "Asked once, not per sync" is about the
+//! *question*, not the import: every later scan that may write re-applies that
+//! peer's layer without re-asking, so their edits arrive and their withdrawals
+//! propagate. [`discovered`] therefore returns decided peers as well as
+//! undecided ones — filtering them out was the original shape, and it silently
+//! opted this path out of phase 1's removal propagation.
+//!
+//! What a grant never authorises is *reading something nobody could see*. A
+//! bundle that does not parse is reported and never decided about
+//! ([`Discovered::is_readable`]), and one that stops parsing under an existing
+//! grant is not re-imported — and its already-imported layer is **left alone**,
+//! because a bundle that stopped parsing is not a peer withdrawing their
+//! concepts.
+//!
+//! # Prompting and writing are separate permissions
+//!
+//! `--json` needs to write without asking: stdout is a document for a program,
+//! and a program is not a person to ask. Gating discovery on `!json` instead
+//! made a flag that selects an **output format** decide whether the graph got
+//! updated, so automation never refreshed a standing grant. `Discovery` in
+//! `main.rs` carries the three levels; every line this module's callers print
+//! goes to **stderr**, so a `--json` document stays one.
 
 use std::collections::BTreeSet;
 use std::path::Path;
