@@ -41,6 +41,44 @@
 //! has to say what it left behind, because the alternative is a graph quietly
 //! missing concepts nobody knows to look for.
 //!
+//! # This reader was checked against an independent implementation
+//!
+//! Reading back one's own output proves a round trip, not interoperability, so
+//! the trust tiers this module derives (§5.3) were compared against a second,
+//! unrelated OKF v0.2 implementation over inputs neither project wrote.
+//!
+//! **What was compared, so the claim can be re-tested rather than believed:**
+//!
+//! - **Oracle:** [`W4G1/okf`](https://github.com/W4G1/okf) `okf-core` /
+//!   `okf-validator` **0.2.6** (2026-08-27), Apache-2.0 — a pure-Rust v0.2
+//!   toolkit. Its `okf trust <bundle>` prints a tier per concept and
+//!   `okf validate <bundle>` reports conformance.
+//! - **Inputs:** all four bundles published in the specification's own
+//!   repository at commit `ad30107` — `acme_retail`, `ga4`, `stackoverflow`,
+//!   `crypto_bitcoin` — plus Roteiro's own `render okf` output for this
+//!   repository.
+//! - **Result, 2026-09-01:** exact agreement on every bundle. Concept counts
+//!   9 / 9 / 26 / 9, and tiers matching one-for-one — `acme_retail` as 8
+//!   human-reviewed + 1 unverified (our `external-authored` / `external-inferred`),
+//!   the other three entirely unverified. Our rendered bundle validated with
+//!   **0 conformance errors across 9,029 concepts**.
+//!
+//! The oracle is **not** a dependency, of this crate or of the test suite: it
+//! was run as a separate binary and the agreement was then frozen into
+//! `tests/okf_interop.rs`, which pins the same expectations against vendored
+//! copies of two of those bundles. That is what survives the oracle's absence —
+//! a foreign bundle in the test suite, which is the thing phase 1 never had.
+//!
+//! To re-run the comparison: `cargo install okf`, then `okf trust <bundle>`
+//! against `crates/rto-render/tests/fixtures/okf-upstream/*` and
+//! `roteiro import --from okf <bundle> --trust --json`.
+//!
+//! Worth knowing if adopting it is ever considered: `okf-core` has **zero
+//! dependencies** — no `serde`, no `serde_yaml`, no `regex`, no `chrono` — and
+//! carries its own YAML-subset parser. `okf-validator` is the heavy one, adding
+//! 94 transitive crates (a JavaScript, Python and SQL parser, plus `syn`) to
+//! syntax-check fenced code blocks.
+//!
 //! # Relationships come from the `## Relationships` section, and nowhere else
 //!
 //! §6 says a plain markdown link asserts a relationship. Read at its widest that
@@ -59,6 +97,7 @@
 use std::collections::BTreeMap;
 
 use rto_graph::{Edge, EdgeKind, FactSet, Node, NodeKind, Provenance};
+use yaml_rust2::Yaml;
 
 use super::{Actor, INDEX_FILE, LOG_FILE, Origin, section_for, short_digest, slug};
 
@@ -138,6 +177,14 @@ pub enum SkipReason {
     NoFrontmatter,
     /// It opens one and never closes it.
     UnterminatedFrontmatter,
+    /// The block is delimited correctly but is not parseable YAML.
+    ///
+    /// Distinct from [`Self::MissingType`] on purpose. Both end with no `type`,
+    /// but they send a producer to different places: one means *add a key*, the
+    /// other means *the block does not parse at all* — and reporting broken YAML
+    /// as a missing field is how someone spends an afternoon staring at a `type`
+    /// that was there all along.
+    UnparsableFrontmatter,
     /// The frontmatter carries no `type`, or an empty one — OKF's only hard
     /// requirement (§4).
     MissingType,
@@ -150,6 +197,7 @@ impl SkipReason {
         match self {
             Self::NoFrontmatter => "no YAML frontmatter block",
             Self::UnterminatedFrontmatter => "frontmatter block is never closed",
+            Self::UnparsableFrontmatter => "frontmatter block is not parseable YAML",
             Self::MissingType => "no non-empty `type` (OKF's one required key)",
         }
     }
@@ -369,146 +417,165 @@ fn split_frontmatter(text: &str) -> Result<(&str, &str), SkipReason> {
     Err(SkipReason::UnterminatedFrontmatter)
 }
 
-/// Unquote one YAML scalar as [`super::yaml_scalar`] wrote it, and tolerate the
-/// bare and single-quoted forms another producer may have used.
+/// Parse a frontmatter block with a real YAML parser.
 ///
-/// The escape set is the writer's exactly — `\\`, `\"`, `\n`, `\r`, `\t` and the
-/// general `\uXXXX` — because the writer escapes *everything else* as `\uXXXX`,
-/// so anything outside this set never appears in a Roteiro bundle. An unknown
-/// escape keeps its own character rather than the backslash, which is what YAML
-/// 1.2 does for an unrecognised sequence in the permissive reading and is the
-/// only choice that cannot turn a title into a different string.
-fn yaml_unquote(raw: &str) -> String {
-    let raw = raw.trim();
-    if let Some(inner) = raw.strip_prefix('\'').and_then(|r| r.strip_suffix('\'')) {
-        return inner.replace("''", "'");
-    }
-    let Some(inner) = raw.strip_prefix('"').and_then(|r| r.strip_suffix('"')) else {
-        return raw.to_owned();
-    };
-    let mut out = String::with_capacity(inner.len());
-    let mut chars = inner.chars();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            out.push(c);
-            continue;
-        }
-        match chars.next() {
-            Some('n') => out.push('\n'),
-            Some('r') => out.push('\r'),
-            Some('t') => out.push('\t'),
-            Some('u') => {
-                let hex: String = chars.by_ref().take(4).collect();
-                if let Some(ch) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
-                    out.push(ch);
-                } else {
-                    // Not a valid escape, so not something the writer emitted.
-                    // Keep the text rather than dropping it: a mangled title is
-                    // recoverable, a vanished one is not.
-                    out.push_str("\\u");
-                    out.push_str(&hex);
-                }
-            }
-            Some(other) => out.push(other),
-            None => out.push('\\'),
-        }
-    }
-    out
-}
-
-/// The indentation depth of a frontmatter line, in leading spaces.
-fn indent(line: &str) -> usize {
-    line.len() - line.trim_start_matches(' ').len()
-}
-
-/// Parse the frontmatter subset this reader understands.
+/// # Why not a line scanner
 ///
-/// Unknown top-level keys are **skipped along with everything nested under
-/// them**, rather than rejected: §11 tells a consumer not to reject a document
-/// for a field it does not know, and a producer with its own extensions is the
-/// case a vendor-neutral format exists to allow.
-fn parse_frontmatter(block: &str) -> ParsedFrontmatter {
+/// This reader originally hand-parsed a line-oriented subset shaped like the
+/// bundles Roteiro itself writes. That is enough for a round trip and wrong for
+/// everybody else's bundles, which is the opposite of what an interchange format
+/// is for. Measured against Google's own published bundles (`bundles/ga4`,
+/// `bundles/acme_retail` in the specification's repository), the subset silently
+/// lost:
+///
+/// - **flow mappings** — `generated: { by: agent/1.0, at: … }`, the form the
+///   specification's own examples use throughout, so `generated` and `verified`
+///   both vanished and every concept read as *unverified*;
+/// - **flow sequences** — `tags: [finance, revenue]`;
+/// - **block sequences whose items sit at the key's own indentation**, which is
+///   what `PyYAML` emits by default, so `tags` and `sources` vanished;
+/// - **multi-line scalars**, where a folded `description:` was silently
+///   *truncated* at its first line rather than dropped.
+///
+/// All four are ordinary YAML, and all four were silent: nothing was skipped and
+/// nothing was reported. The trust loss is the serious one — a concept a human
+/// signed off read as unverified, so `import --from okf --trust` adopted nothing
+/// while reporting success. `a_google_bundle_keeps_its_human_verifiers` is the
+/// guard.
+///
+/// `yaml-rust2` is already a non-optional dependency of `rto-graph`, so this
+/// costs a declared edge and no new crate in the lockfile.
+///
+/// Unknown top-level keys are ignored rather than rejected: §11 tells a consumer
+/// not to reject a document for a field it does not know, and a producer with
+/// its own extensions is the case a vendor-neutral format exists to allow.
+fn parse_frontmatter(block: &str) -> Result<ParsedFrontmatter, SkipReason> {
     let mut fm = ParsedFrontmatter::default();
-    let lines: Vec<&str> = block.lines().map(|l| l.trim_end_matches('\r')).collect();
-    let mut i = 0;
-    while i < lines.len() {
-        let line = lines[i];
-        i += 1;
-        if indent(line) != 0 || line.trim().is_empty() {
-            continue;
-        }
-        let Some((key, value)) = line.split_once(':') else {
-            continue;
-        };
-        let value = value.trim();
-        // The nested block belonging to this key: every following line indented
-        // past column 0, taken whole so an unknown key consumes its own children
-        // instead of leaking them into the next key's.
-        let start = i;
-        while i < lines.len() && (indent(lines[i]) > 0 || lines[i].trim().is_empty()) {
-            i += 1;
-        }
-        let nested = &lines[start..i];
-        match key.trim() {
-            "type" => fm.type_ = yaml_unquote(value),
-            "title" => fm.title = Some(yaml_unquote(value)),
-            "description" => fm.description = Some(yaml_unquote(value)),
-            "resource" => fm.resource = Some(yaml_unquote(value)),
-            "status" => fm.status = Some(yaml_unquote(value)),
-            "tags" => {
-                for item in nested {
-                    if let Some(v) = item.trim().strip_prefix("- ") {
-                        fm.tags.push(yaml_unquote(v));
-                    }
-                }
-            }
-            "sources" => {
-                for item in nested {
-                    let item = item.trim();
-                    let item = item.strip_prefix("- ").unwrap_or(item);
-                    if let Some((k, v)) = item.split_once(':')
-                        && k.trim() == "resource"
-                    {
-                        fm.sources.push(yaml_unquote(v));
-                    }
-                }
-            }
-            "generated" => fm.generated = parse_by_at(nested).into_iter().next(),
-            "verified" => fm.verified = parse_by_at(nested),
-            _ => {}
+    let docs = yaml_rust2::YamlLoader::load_from_str(block)
+        .map_err(|_| SkipReason::UnparsableFrontmatter)?;
+    let Some(first) = docs.first() else {
+        // An empty block parses to no documents. That is well-formed YAML
+        // carrying no keys, so it is a missing `type`, not a parse failure.
+        return Ok(fm);
+    };
+    let Some(map) = first.as_hash() else {
+        // A block that parses to a scalar or a sequence is legal YAML and has
+        // no keys to read, so again: no `type`, rather than unparsable.
+        return Ok(fm);
+    };
+    let get = |key: &str| map.get(&Yaml::String(key.to_owned()));
+
+    if let Some(v) = get("type").and_then(scalar_text) {
+        fm.type_ = v;
+    }
+    fm.title = get("title").and_then(scalar_text);
+    fm.description = get("description").and_then(scalar_text);
+    fm.resource = get("resource").and_then(scalar_text);
+    fm.status = get("status").and_then(scalar_text);
+
+    if let Some(tags) = get("tags") {
+        match tags {
+            Yaml::Array(items) => fm.tags.extend(items.iter().filter_map(scalar_text)),
+            // §4.1 asks for a list, and a bare string is not one — but it is a
+            // shape that really occurs: Google's published `stackoverflow`
+            // bundle writes `tags: stackoverflow, posts, deprecated` in seven
+            // documents.
+            //
+            // Kept **whole**, not split on commas. Splitting would recover the
+            // intent in this bundle and invent a convention the specification
+            // does not have, which is how a reader starts disagreeing with
+            // every other reader about what a document says. Keeping the string
+            // loses nothing and lets a consumer see exactly what was written —
+            // the alternative, dropping it, is the silent loss this whole
+            // parser was rewritten to stop.
+            other => fm.tags.extend(scalar_text(other)),
         }
     }
-    fm
+
+    // §5.1 shapes `sources` as a list of entries. A producer who wrote a single
+    // entry without the list dash is tolerated, mirroring the shorthand §5.2
+    // *does* sanction for `verified` — the shapes are analogous and the slip is
+    // the same one.
+    //
+    // A bare scalar is deliberately **not** tolerated here, unlike for `tags`
+    // above. `tags: a, b` is attested — Google's own `stackoverflow` bundle
+    // writes it in seven documents — whereas no published bundle writes a
+    // scalar `sources`, and there would be no way to tell `sources: foo` from a
+    // typo that happened to land on a key. Accepting it would invent a
+    // provenance record rather than read one, and provenance is the one field
+    // where guessing is worse than reporting nothing.
+    match get("sources") {
+        Some(Yaml::Array(items)) => {
+            for item in items {
+                fm.sources.extend(source_resource(item));
+            }
+        }
+        Some(single @ Yaml::Hash(_)) => fm.sources.extend(source_resource(single)),
+        _ => {}
+    }
+
+    fm.generated = get("generated").and_then(by_at);
+    fm.verified = get("verified").map(verified_entries).unwrap_or_default();
+    Ok(fm)
 }
 
-/// Collect `by`/`at` pairs from a nested block, whether it is a mapping
-/// (`generated`) or a sequence of them (`verified`).
+/// One `sources` entry's `resource` (§5.1), which is REQUIRED within an entry.
 ///
-/// A `- ` item starts a new pair; a bare `by:`/`at:` extends the current one. A
-/// pair with no `at` keeps an empty timestamp rather than being dropped: **who**
-/// confirmed something is the load-bearing half, and §7 is about the actor.
-fn parse_by_at(nested: &[&str]) -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = Vec::new();
-    for line in nested {
-        let trimmed = line.trim();
-        let starts_item = trimmed.starts_with("- ");
-        let trimmed = trimmed.strip_prefix("- ").unwrap_or(trimmed);
-        let Some((key, value)) = trimmed.split_once(':') else {
-            continue;
-        };
-        let (key, value) = (key.trim(), yaml_unquote(value));
-        if starts_item || (key == "by" && out.is_empty()) {
-            out.push((String::new(), String::new()));
-        }
-        let Some(last) = out.last_mut() else { continue };
-        match key {
-            "by" => last.0 = value,
-            "at" => last.1 = value,
-            _ => {}
-        }
+/// An entry carrying no `resource` names nothing a consumer could follow, so it
+/// yields `None` rather than an empty string: a source that resolves to `""` is
+/// worse than one that is absent, because it looks like a record.
+fn source_resource(entry: &Yaml) -> Option<String> {
+    entry
+        .as_hash()?
+        .get(&Yaml::String("resource".to_owned()))
+        .and_then(scalar_text)
+        .filter(|r| !r.trim().is_empty())
+}
+
+/// A YAML scalar as a plain string; containers yield `None`.
+///
+/// `Real` keeps its own source text, so a timestamp survives unretyped rather
+/// than being reformatted through a float.
+fn scalar_text(v: &Yaml) -> Option<String> {
+    match v {
+        Yaml::String(s) | Yaml::Real(s) => Some(s.clone()),
+        Yaml::Integer(i) => Some(i.to_string()),
+        Yaml::Boolean(b) => Some(b.to_string()),
+        _ => None,
     }
-    out.retain(|(by, _)| !by.is_empty());
-    out
+}
+
+/// One `{ by, at }` mapping (§5.2).
+///
+/// A pair with no `at` keeps an empty timestamp rather than being dropped:
+/// **who** confirmed something is the load-bearing half, and §7 is about the
+/// actor. A mapping with no `by` names nobody, and is dropped.
+fn by_at(node: &Yaml) -> Option<(String, String)> {
+    let map = node.as_hash()?;
+    let by = map
+        .get(&Yaml::String("by".to_owned()))
+        .and_then(scalar_text)?;
+    if by.trim().is_empty() {
+        return None;
+    }
+    let at = map
+        .get(&Yaml::String("at".to_owned()))
+        .and_then(scalar_text)
+        .unwrap_or_default();
+    Some((by, at))
+}
+
+/// The `verified` field as a list of verification events (§5.2).
+///
+/// §5.2 is explicit that *"a single verifier MAY be written as one `{ by, at }`
+/// mapping without the list dash"* and that consumers **MUST** treat a bare
+/// mapping as a one-element list. That MUST is discharged here, in the one place
+/// that can tell the two shapes apart.
+fn verified_entries(node: &Yaml) -> Vec<(String, String)> {
+    match node {
+        Yaml::Array(items) => items.iter().filter_map(by_at).collect(),
+        other => by_at(other).into_iter().collect(),
+    }
 }
 
 /// One link found in a concept's relationships section.
@@ -770,7 +837,13 @@ fn collect_concepts(
         match split_frontmatter(content) {
             Err(reason) => skipped.push(Skipped { path, reason }),
             Ok((block, body)) => {
-                let fm = parse_frontmatter(block);
+                let fm = match parse_frontmatter(block) {
+                    Ok(fm) => fm,
+                    Err(reason) => {
+                        skipped.push(Skipped { path, reason });
+                        continue;
+                    }
+                };
                 if fm.type_.trim().is_empty() {
                     skipped.push(Skipped {
                         path,
@@ -868,11 +941,13 @@ fn push_concept(
 /// The `okf_version` a bundle root's `index.md` declares (§10).
 fn root_okf_version(content: &str) -> Option<String> {
     let (block, _) = split_frontmatter(content).ok()?;
-    block.lines().find_map(|line| {
-        line.split_once(':')
-            .filter(|(k, _)| k.trim() == "okf_version")
-            .map(|(_, v)| yaml_unquote(v))
-    })
+    yaml_rust2::YamlLoader::load_from_str(block)
+        .ok()?
+        .first()?
+        .as_hash()?
+        .get(&Yaml::String("okf_version".to_owned()))
+        .and_then(scalar_text)
+        .map(|v| v.trim().to_owned())
 }
 
 /// The `meta` an imported concept carries.
@@ -1305,6 +1380,9 @@ mod tests {
                 ("/decisions/plain.md", "# Just markdown\n"),
                 ("/decisions/open.md", "---\ntype: \"adr\"\nnever closed\n"),
                 ("/decisions/typeless.md", "---\ntitle: \"x\"\n---\n\nBody\n"),
+                // Delimited correctly, `type` plainly present, and still not
+                // YAML: the flow sequence is never closed.
+                ("/decisions/broken.md", "---\ntype: [adr\n---\n\nBody\n"),
             ],
             Trust::Trust,
         );
@@ -1322,13 +1400,78 @@ mod tests {
         assert_eq!(
             rows,
             vec![
+                (
+                    "/decisions/broken.md",
+                    "frontmatter block is not parseable YAML"
+                ),
                 ("/decisions/open.md", "frontmatter block is never closed"),
                 ("/decisions/plain.md", "no YAML frontmatter block"),
                 (
                     "/decisions/typeless.md",
                     "no non-empty `type` (OKF's one required key)"
                 ),
-            ]
+            ],
+            "unparseable YAML and a missing `type` are separate reasons: both end \
+             with no type, but one means *add a key* and the other means *the \
+             block does not parse*"
+        );
+    }
+
+    /// The shapes a real producer writes that §4.1 and §5.1 do not describe.
+    ///
+    /// Each choice here is a judgement about *liberality*, and they deliberately
+    /// do not all go the same way — so they are asserted together, where the
+    /// asymmetry is visible and has to be defended rather than drifted into.
+    #[test]
+    fn an_off_spec_shape_is_read_where_a_real_producer_writes_one() {
+        // Attested: Google's `stackoverflow` bundle writes exactly this in seven
+        // documents. Kept whole rather than split on commas, because splitting
+        // invents a convention no other reader would share.
+        let bare_tags = "---\ntype: \"adr\"\ntags: stackoverflow, posts, deprecated\n---\n\nB\n";
+        // Not attested anywhere, but analogous to the single-mapping shorthand
+        // §5.2 explicitly sanctions for `verified`.
+        let one_source =
+            "---\ntype: \"adr\"\nsources:\n  resource: \"/tables/orders.md\"\n---\n\nB\n";
+        // Refused: a scalar `sources` is indistinguishable from a typo, and a
+        // guessed provenance record is worse than none.
+        let scalar_source = "---\ntype: \"adr\"\nsources: \"/tables/orders.md\"\n---\n\nB\n";
+        // Refused: §5.1 makes `resource` REQUIRED within an entry, so an entry
+        // without one names nothing to follow.
+        let no_resource =
+            "---\ntype: \"adr\"\nsources:\n  - id: \"x\"\n    title: \"T\"\n---\n\nB\n";
+
+        let tags_of = |doc: &str| {
+            let (block, _) = split_frontmatter(doc).expect("split");
+            parse_frontmatter(block).expect("parse").tags
+        };
+        let sources_of = |doc: &str| {
+            let (block, _) = split_frontmatter(doc).expect("split");
+            parse_frontmatter(block).expect("parse").sources
+        };
+
+        assert_eq!(
+            tags_of(bare_tags),
+            vec!["stackoverflow, posts, deprecated".to_owned()],
+            "a bare `tags` string is kept verbatim as one tag: nothing is lost, \
+             and no comma convention is invented"
+        );
+        assert_eq!(
+            sources_of(one_source),
+            vec!["/tables/orders.md".to_owned()],
+            "a single `sources` entry written without the list dash is read, \
+             mirroring the shorthand §5.2 sanctions for `verified`"
+        );
+        assert_eq!(
+            sources_of(scalar_source),
+            Vec::<String>::new(),
+            "a scalar `sources` is not read: it cannot be told from a typo, and \
+             provenance is the one field where a guess is worse than silence"
+        );
+        assert_eq!(
+            sources_of(no_resource),
+            Vec::<String>::new(),
+            "§5.1 makes `resource` REQUIRED within an entry; an entry without \
+             one names nothing a consumer could follow"
         );
     }
 
@@ -1417,7 +1560,8 @@ mod tests {
         };
         let doc = format!("{}\n# x\n", fm.render());
         let (block, _) = split_frontmatter(&doc).expect("split");
-        assert_eq!(parse_frontmatter(block).title.as_deref(), Some(hostile));
+        let fm = parse_frontmatter(block).expect("the writer emits parseable YAML");
+        assert_eq!(fm.title.as_deref(), Some(hostile));
     }
 
     #[test]
@@ -1621,7 +1765,7 @@ mod tests {
     #[test]
     fn an_unknown_frontmatter_key_takes_its_children_with_it() {
         let block = "type: \"doc\"\nvendor_thing:\n  by: \"not-an-actor\"\n  nested:\n    - x\ntitle: \"kept\"\n";
-        let fm = parse_frontmatter(block);
+        let fm = parse_frontmatter(block).expect("parseable YAML");
         assert_eq!(fm.type_, "doc");
         assert_eq!(fm.title.as_deref(), Some("kept"));
         assert_eq!(
