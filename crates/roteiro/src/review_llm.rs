@@ -996,10 +996,14 @@ fn print_verdict(
     never_reviewed: usize,
 ) {
     let Some(verdict) = verdict else {
+        // Deliberately does **not** name a cause. `None` arrives from a reply that
+        // carried no verdict, from one that stopped inside a reasoning block, and
+        // from an engine that refused — and naming a cause a reader can check and
+        // find false is worse than naming none. The engine's own error, when there
+        // was one, has already gone to stderr where it belongs.
         println!(
-            "\nno whole-change verdict: the model's reply carried none in the \
-             required form, so there is no summary here rather than an assumed \
-             clean one."
+            "\nno whole-change verdict: none was produced in the required form, so \
+             there is no summary here rather than an assumed clean one."
         );
         return;
     };
@@ -1418,10 +1422,16 @@ pub fn run_llm(
     let sha = files
         .first()
         .map_or_else(|| "HEAD".to_owned(), |f| f.reviewed_sha.clone());
-    print_verdict(
-        verdict_on(&engine, model, &sha, &files, &reported)?.as_ref(),
-        never_reviewed.len(),
-    );
+    // **Not `?`.** An engine refusal here would otherwise throw away a whole
+    // completed review at its last step — the same argument `run_replay` makes
+    // for stepping over a refused file, and worse in this direction, because
+    // every per-file finding above has already been earned and printed. The
+    // failure is reported on stderr and the verdict is recorded as absent.
+    let verdict = verdict_on(&engine, model, &sha, &files, &reported).unwrap_or_else(|e| {
+        eprintln!("warning: the whole-change verdict could not be generated: {e}");
+        None
+    });
+    print_verdict(verdict.as_ref(), never_reviewed.len());
 
     println!(
         "These are one model's opinions, unadjudicated. `docs/REVIEW_CHECKLIST.md` \

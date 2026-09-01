@@ -64,9 +64,9 @@
 //!
 //! Hence exact identity or silence. [`identity_tokens`] absorbs the spelling
 //! differences that are certainly not identity differences — case, the separators
-//! between a family and its size, and a parenthesised qualifier like
-//! `(1M context)`, which describes how a model was *configured* rather than which
-//! model it is — and nothing else.
+//! between a family and its size, and a bracketed qualifier like `(1M context)`,
+//! which describes how a model was *configured* rather than which model it is —
+//! and nothing else.
 
 /// One `Co-Authored-By` trailer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,14 +126,15 @@ pub fn co_authors(message: &str) -> Vec<CoAuthor> {
 
 /// Normalise a model or trailer name to the tokens that identify it.
 ///
-/// Lowercased, with `-`, `_`, `.` and `/` treated as spaces so `claude-opus-5`
-/// and `Claude Opus 5` reach the same answer, and with any parenthesised span
-/// dropped: `(1M context)` says how a model was *configured*, not which model it
-/// is, and two runs of one model at two context sizes are the same weights with
-/// the same blind spot.
+/// Lowercased and split on **every non-alphanumeric character**, so
+/// `claude-opus-5`, `claude_opus_5`, `claude.opus.5` and `Claude Opus 5` all
+/// reach the same answer; and with any bracketed span dropped — `(…)` **and**
+/// `[…]` alike, since a qualifier is written both ways. `(1M context)` says how a
+/// model was *configured*, not which model it is, and two runs of one model at
+/// two context sizes are the same weights with the same blind spot.
 ///
-/// Everything else is left alone. This absorbs spelling, never meaning — see the
-/// module docs for why the rule stops here.
+/// Nothing else is removed, and nothing is added. This absorbs spelling, never
+/// meaning — see the module docs for why the rule stops here.
 #[must_use]
 pub fn identity_tokens(name: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -294,8 +295,15 @@ mod tests {
     /// The context qualifier is dropped **because it is a configuration, not an
     /// identity**: the same weights at two window sizes carry the same blind spot,
     /// which is the whole reason the warning exists.
+    ///
+    /// Both bracket forms, and every separator — the doc comment claims all of
+    /// this, and a claim about normalisation that nothing checks is the
+    /// contract-drift class this reviewer exists to find. Caught as a suppressed
+    /// finding in review of #649, where the docs said "parenthesised" and
+    /// "`-`, `_`, `.` and `/`" while the code took `[…]` and every
+    /// non-alphanumeric character.
     #[test]
-    fn a_context_qualifier_does_not_make_it_a_different_model() {
+    fn a_bracketed_qualifier_does_not_make_it_a_different_model() {
         assert!(names_same_model(
             "Claude Opus 5 (1M context)",
             "Claude Opus 5"
@@ -304,6 +312,30 @@ mod tests {
             "Claude Opus 5 (200K context)",
             "claude opus 5"
         ));
+        assert!(
+            names_same_model("Claude Opus 5 [1M context]", "claude-opus-5"),
+            "square brackets are dropped too, exactly as the doc comment says"
+        );
+        assert_eq!(
+            identity_tokens("Claude Opus 5 [1M context]"),
+            ["claude", "opus", "5"]
+        );
+        // Every non-alphanumeric character separates, not only the four the doc
+        // comment used to list.
+        for spelling in [
+            "claude-opus-5",
+            "claude_opus_5",
+            "claude.opus.5",
+            "claude/opus/5",
+            "claude:opus:5",
+            "claude+opus+5",
+        ] {
+            assert_eq!(
+                identity_tokens(spelling),
+                ["claude", "opus", "5"],
+                "{spelling} must normalise like every other spelling"
+            );
+        }
     }
 
     /// A harness name normalises onto no model name, so it does not match, so

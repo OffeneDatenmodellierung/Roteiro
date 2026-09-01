@@ -468,9 +468,7 @@ pub fn build_verdict_prompt(files: &[FileUnderReview], findings: &[&str], budget
     );
 
     let _ = writeln!(head, "\nFiles in this change ({}):", files.len());
-    for file in files {
-        let _ = writeln!(head, "  {}", file.path);
-    }
+    list_capped(&mut head, files.iter().map(|f| f.path.as_str()), "file");
     if findings.is_empty() {
         head.push_str(
             "\nThe per-file pass reported no findings. That is not by itself a \
@@ -482,9 +480,7 @@ pub fn build_verdict_prompt(files: &[FileUnderReview], findings: &[&str], budget
             "\nWhat the per-file pass already reported ({}):",
             findings.len()
         );
-        for finding in findings {
-            let _ = writeln!(head, "  {finding}");
-        }
+        list_capped(&mut head, findings.iter().copied(), "finding");
     }
 
     let mut body = String::from("\nThe change:\n");
@@ -753,6 +749,40 @@ fn parse_hunk_new_start(header: &str) -> Option<u32> {
     let plus = header.split('+').nth(1)?;
     let digits: String = plus.chars().take_while(char::is_ascii_digit).collect();
     digits.parse().ok()
+}
+
+/// How many paths or findings the whole-change prompt lists before eliding the
+/// rest.
+///
+/// The lists sit in the prompt's *head*, which [`build_verdict_prompt`] does not
+/// truncate — only the diffs below it are cut to fit. Unbounded, a repo-wide
+/// change would push the head past the whole budget on its own, leave no room for
+/// the change itself, and eventually exceed the engine's context window, so the
+/// verdict would fail on exactly the changes most worth summarising. A hundred
+/// entries is ~1.2k estimated tokens against a 30k budget.
+const VERDICT_LIST_CAP: usize = 100;
+
+/// Write at most [`VERDICT_LIST_CAP`] of `items`, then say how many were left
+/// out.
+///
+/// The elision is **stated**, never silent. A model shown 100 of 900 paths and
+/// told nothing would judge a change it believes it has seen the whole of, and
+/// its "clean" would be about a change that does not exist — the same failure
+/// mode as a truncated diff whose marker is missing.
+fn list_capped<'a>(out: &mut String, items: impl Iterator<Item = &'a str>, noun: &str) {
+    let mut shown = 0usize;
+    let mut elided = 0usize;
+    for item in items {
+        if shown < VERDICT_LIST_CAP {
+            let _ = writeln!(out, "  {item}");
+            shown += 1;
+        } else {
+            elided += 1;
+        }
+    }
+    if elided > 0 {
+        let _ = writeln!(out, "  ... and {elided} more {noun}(s) NOT listed here");
+    }
 }
 
 /// The truncation notice left in a prompt, naming **what** was cut short.
@@ -1873,6 +1903,62 @@ FINDING | **line**=42 | class=**contract-drift** | **compile**=YES | the **remot
              reader is told"
         );
         assert_eq!(prompt.dropped_tokens, 0, "nothing dropped at this size");
+    }
+
+    /// **The prompt's head is bounded, and its elision is stated.**
+    ///
+    /// The lists sit above the truncation point, so an unbounded one would push
+    /// the head past the whole budget on a repo-wide change and the verdict would
+    /// fail on exactly the changes most worth summarising. Capping silently would
+    /// be worse than failing: a model shown 100 of 900 paths and told nothing
+    /// would judge a change it believes it has seen the whole of.
+    #[test]
+    fn a_very_wide_change_lists_a_bounded_head_and_says_what_it_left_out() {
+        let files: Vec<FileUnderReview> = (0..900)
+            .map(|i| FileUnderReview {
+                reviewed_sha: SHA.to_owned(),
+                path: format!("src/generated/file_{i:04}.rs"),
+                diff: "@@ -1,1 +1,1 @@\n-a\n+b\n".to_owned(),
+            })
+            .collect();
+        let findings: Vec<String> = (0..300).map(|i| format!("src/a.rs:{i} [x] y")).collect();
+        let refs: Vec<&str> = findings.iter().map(String::as_str).collect();
+        let prompt = build_verdict_prompt(&files, &refs, SINGLE_CALL_BUDGET_TOKENS);
+
+        // The cap is on the prompt's **head**, which is the part never truncated.
+        // The body below names each file as it shows that file's diff, and those
+        // are cut by the ordinary budget rule instead — so the two are asserted
+        // apart rather than over the whole text.
+        let head = prompt
+            .text
+            .split("\nThe change:\n")
+            .next()
+            .expect("a head before the diffs");
+        assert!(
+            head.contains("Files in this change (900)"),
+            "the true total is always stated: {head}"
+        );
+        assert!(
+            head.contains("  src/generated/file_0099.rs\n"),
+            "the first 100 are listed"
+        );
+        assert!(
+            !head.contains("  src/generated/file_0100.rs\n"),
+            "and the rest are not: {head}"
+        );
+        assert!(
+            head.contains("and 800 more file(s) NOT listed here"),
+            "the elision is stated, never silent: {head}"
+        );
+        assert!(
+            head.contains("and 200 more finding(s) NOT listed here"),
+            "and the finding list is bounded the same way"
+        );
+        assert!(
+            prompt.tokens <= SINGLE_CALL_BUDGET_TOKENS,
+            "the whole prompt still fits its budget: {} tokens",
+            prompt.tokens
+        );
     }
 
     /// "The per-file pass found nothing" is said in words rather than left as an
