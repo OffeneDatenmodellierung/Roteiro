@@ -249,6 +249,69 @@ fn a_recorded_answer_stops_the_scan_raising_that_peer() {
     std::fs::remove_dir_all(&base).ok();
 }
 
+/// A read-only `links` run from a terminal is silent for a *different* reason
+/// than a server is, and must say so.
+///
+/// Both are `ignore`, but "this run is not interactive" told at a terminal sends
+/// the reader hunting a TTY problem they do not have — reported by Copilot on
+/// #711. The test drives the non-TTY path (a test harness has no terminal), so
+/// what it pins is that the two reasons are *distinguished at all*: without
+/// `--write` the note names the missing flag, with it the missing terminal.
+#[test]
+fn the_note_names_which_silence_this_is() {
+    let (base, hub, spoke, home) = workspace("silence", "Ordinary prose.\n");
+    sync_all(&hub, &spoke);
+
+    // `--write` first: the `extref:` placeholder discovery scopes itself to is
+    // what that run creates, so a read-only run on a fresh graph finds nothing
+    // to talk about.
+    let out = in_workspace(&hub, &home, &["links", "--write", "--workspace-name", "ws"]);
+    assert!(out.status.success(), "links failed: {out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("This run is not interactive"),
+        "a writing run with no terminal must name the terminal: {stderr}"
+    );
+
+    let out = in_workspace(&hub, &home, &["links", "--workspace-name", "ws"]);
+    assert!(out.status.success(), "links failed: {out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("This run does not write (`links` without `--write`)"),
+        "a read-only run must name the missing flag, not a missing terminal: {stderr}"
+    );
+
+    let _ = spoke;
+    std::fs::remove_dir_all(&base).ok();
+}
+
+/// A bundle that does not read is **reported and never decided**. There is
+/// nothing to consent to in a directory that does not parse, and a grant stored
+/// against it would apply to whatever it later became — the ambiguity Copilot
+/// found in `screen_classes`, removed at its source rather than papered over.
+#[test]
+fn an_unreadable_bundle_is_reported_and_never_recorded() {
+    let (base, hub, spoke, home) = workspace("unreadable", "Ordinary prose.\n");
+    // A bundle root that declares itself, holding nothing that parses.
+    std::fs::remove_file(spoke.join("okf/docs/cache.md")).expect("rm");
+    write(&spoke.join("okf/docs/cache.md"), "no frontmatter at all\n");
+    sync_all(&hub, &spoke);
+
+    let out = in_workspace(&hub, &home, &["links", "--write", "--workspace-name", "ws"]);
+    assert!(out.status.success(), "links failed: {out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("The bundle could not be read, so there is nothing to decide"),
+        "an unreadable bundle must say so rather than blame the terminal: {stderr}"
+    );
+    assert!(
+        stderr.contains("unreadable:"),
+        "and the summary must carry the reader's own reason: {stderr}"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
 /// A recorded answer is a **standing grant**, not permission to read once.
 ///
 /// A later `links --write` re-applies the peer's layer without re-asking, so an

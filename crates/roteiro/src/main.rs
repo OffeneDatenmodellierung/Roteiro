@@ -8569,13 +8569,34 @@ fn discover_okf_in_workspace(
                 // A recorded `ignore`, or a grant on a non-mutating run. Nothing
                 // to do and nothing to say — being asked once is the whole point.
                 Some(_) => {}
+                // A bundle that did not read is reported and never decided:
+                // there is nothing to consent to in a directory that does not
+                // parse, and a grant stored against it would apply to whatever
+                // it later became.
+                None if !d.is_readable() => {
+                    if noted.should_note(&d.bundle.peer) {
+                        eprintln!(
+                            "{}",
+                            okf_discovery::note_text(&d, okf_discovery::Unasked::Unreadable)
+                        );
+                    }
+                }
                 None if interactive => {
                     let decision = okf_discovery::ask(&d)?;
                     apply_okf_decision(workspace, &project, &d, decision, Record::Write)?;
                 }
                 None => {
                     if noted.should_note(&d.bundle.peer) {
-                        eprintln!("{}", okf_discovery::note_text(&d));
+                        // Which of the two silences this is — no terminal, or a
+                        // terminal on a command that does not write. Telling a
+                        // user at a terminal that their run "is not interactive"
+                        // sends them hunting a TTY problem they do not have.
+                        let because = if decide {
+                            okf_discovery::Unasked::NoTerminal
+                        } else {
+                            okf_discovery::Unasked::NotWriting
+                        };
+                        eprintln!("{}", okf_discovery::note_text(&d, because));
                     }
                 }
             }

@@ -88,7 +88,28 @@ impl Discovered {
         crate::okf_root_key(&self.bundle.bundle)
     }
 
+    /// Whether the bundle read at all. A bundle that did not is **never
+    /// decided about** — see [`Discovered::screen_classes`].
+    #[must_use]
+    pub fn is_readable(&self) -> bool {
+        self.screened.is_ok()
+    }
+
     /// The screening fingerprint for this bundle right now.
+    ///
+    /// # An unreadable bundle has no fingerprint, so it is never recorded
+    ///
+    /// The `Err` arm returns the same empty string that `screen_fingerprint(&[])`
+    /// produces for a bundle that screened **clean**, and the two mean opposite
+    /// things. An earlier comment here claimed the distinction was made; it was
+    /// not, and Copilot was right to call that out on #711.
+    ///
+    /// Rather than invent a sentinel, the ambiguity is removed at the source:
+    /// [`Discovered::is_readable`] gates the decision, so an unreadable bundle
+    /// is reported to the operator and **never prompted about and never
+    /// recorded**. There is nothing to consent to in a directory that does not
+    /// parse, and a grant stored against it would apply to whatever it became.
+    /// This value is therefore only ever read for a bundle that read.
     #[must_use]
     pub fn screen_classes(&self) -> String {
         match &self.screened {
@@ -96,8 +117,6 @@ impl Discovered {
                 let borrowed: Vec<&str> = r.screen_classes.iter().map(String::as_str).collect();
                 rto_graph::screen_fingerprint(&borrowed)
             }
-            // A bundle that would not read has no screening classes, and must not
-            // be recorded as having screened clean.
             Err(_) => String::new(),
         }
     }
@@ -256,13 +275,13 @@ pub fn prompt_text(d: &Discovered) -> String {
 /// leave the reader unable to tell "never asked" from "you answered, and it has
 /// since changed", which are different problems with different fixes.
 #[must_use]
-pub fn note_text(d: &Discovered) -> String {
+pub fn note_text(d: &Discovered, silent_because: Unasked) -> String {
     format!(
         "roteiro: {peer} publishes an OKF bundle at {path} ({summary}), and it is \
-         undecided: {why}. This run is not interactive, so it was **ignored** and nothing \
-         was recorded — a graph does not adopt a stranger's concepts because nobody was \
-         there to object. Decide it with `roteiro import --from okf {path}` (add --trust \
-         to keep their tiers).",
+         undecided: {why}. {because}, so it was **ignored** and nothing was recorded — a \
+         graph does not adopt a stranger's concepts because nobody was there to object. \
+         Decide it with `roteiro import --from okf {path}` (add --trust to keep their \
+         tiers).",
         peer = d.bundle.peer,
         path = d.bundle.bundle.display(),
         summary = d.summary(),
@@ -270,7 +289,38 @@ pub fn note_text(d: &Discovered) -> String {
             .state
             .why_asking()
             .unwrap_or_else(|| "not seen before".to_owned()),
+        because = silent_because.as_str(),
     )
+}
+
+/// Why nothing was asked. Three different situations, and telling a user "this
+/// run is not interactive" when they are sitting at a terminal sends them
+/// looking for a TTY problem they do not have — reported by Copilot on #711.
+///
+/// Deliberately **not `#[non_exhaustive]`**: it enumerates the reasons the
+/// prompt was skipped, and a fourth would mean a new way of skipping it that
+/// somebody must write a sentence for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unasked {
+    /// No terminal on stdin: a server, a CI job, a pipe.
+    NoTerminal,
+    /// A terminal, but a read-only command. `roteiro links` verifies; only
+    /// `--write` may change the graph, so only `--write` may ask.
+    NotWriting,
+    /// The bundle did not read, so there is nothing to consent to.
+    Unreadable,
+}
+
+impl Unasked {
+    /// The clause naming the reason, as it appears mid-sentence in the note.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NoTerminal => "This run is not interactive",
+            Self::NotWriting => "This run does not write (`links` without `--write`)",
+            Self::Unreadable => "The bundle could not be read, so there is nothing to decide",
+        }
+    }
 }
 
 /// Ask, and return the answer. `None` when the reader declined to answer at all
