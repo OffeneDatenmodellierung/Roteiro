@@ -492,7 +492,7 @@ pub fn build_verdict_prompt(files: &[FileUnderReview], findings: &[&str], budget
         let _ = writeln!(body, "\n--- {}\n{}", file.path, file.diff.trim_end());
     }
     let room = budget.saturating_sub(estimate_tokens(&head));
-    let (body, dropped_tokens) = truncate_to_tokens(&body, room);
+    let (body, dropped_tokens) = truncate_to_tokens(&body, room, TruncatedSubject::Change);
 
     let text = format!("{head}{body}");
     Prompt {
@@ -658,7 +658,7 @@ pub fn build_prompt(file: &FileUnderReview, context: &GraphContext, budget: usiz
     let fixed =
         estimate_tokens(&head) + estimate_tokens(&context_block) + estimate_tokens(&tail_header);
     let room = budget.saturating_sub(fixed);
-    let (body, dropped_tokens) = truncate_to_tokens(&annotated, room);
+    let (body, dropped_tokens) = truncate_to_tokens(&annotated, room, TruncatedSubject::File);
 
     let text = format!("{head}{context_block}{tail_header}{body}");
     Prompt {
@@ -755,24 +755,57 @@ fn parse_hunk_new_start(header: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
+/// The truncation notice left in a prompt, naming **what** was cut short.
+///
+/// A parameter rather than one constant, because the two prompts truncate
+/// different things and the marker is read by the model. The per-file prompt cuts
+/// one file's diff; the whole-change prompt cuts the combined diff of several
+/// files, and telling that model it is seeing "part of the file" describes a
+/// scope it was never given — it would be left to guess whether one file was
+/// clipped or the change was. Caught in review of #649.
+///
+/// `marker_for` is a function rather than two constants so the budget arithmetic
+/// in [`truncate_to_tokens`] charges for the marker it will actually insert.
+fn marker_for(subject: TruncatedSubject) -> &'static str {
+    match subject {
+        TruncatedSubject::File => {
+            "\n[... truncated to fit the context budget: this is PART of the file ...]\n"
+        }
+        TruncatedSubject::Change => {
+            "\n[... truncated to fit the context budget: this is PART of the change, \
+             and whole files may be missing below ...]\n"
+        }
+    }
+}
+
+/// What a truncated prompt was showing — see [`marker_for`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TruncatedSubject {
+    /// One file's diff, as [`build_prompt`] sends it.
+    File,
+    /// Several files' diffs concatenated, as [`build_verdict_prompt`] sends them.
+    /// A cut here can drop *whole files*, not merely the tail of one.
+    Change,
+}
+
 /// Truncate `text` to `budget` tokens at a line boundary, returning the kept text
 /// and the number of tokens dropped.
 ///
 /// The head is kept rather than the tail: a diff's first hunks are the ones a
 /// reviewer can still anchor, and a review of the first half of a file is a
 /// partial review, while a review of the second half with no idea what preceded it
-/// is a confused one. The marker is left in the text so the *model* also knows it
-/// is seeing part of a file.
-fn truncate_to_tokens(text: &str, budget: usize) -> (String, usize) {
-    /// Charged against the budget before cutting, so adding it cannot push the
-    /// result back over the budget it was just cut to.
-    const MARKER: &str =
-        "\n[... truncated to fit the context budget: this is PART of the file ...]\n";
+/// is a confused one. The marker is left in the text so the *model* also knows
+/// what it is seeing part of — `subject` decides which, since a whole-change
+/// prompt can lose entire files where a per-file prompt loses only hunks.
+fn truncate_to_tokens(text: &str, budget: usize, subject: TruncatedSubject) -> (String, usize) {
+    // Charged against the budget before cutting, so adding it cannot push the
+    // result back over the budget it was just cut to.
+    let marker = marker_for(subject);
 
     if estimate_tokens(text) <= budget {
         return (text.to_owned(), 0);
     }
-    let room = budget.saturating_sub(estimate_tokens(MARKER)) * 4;
+    let room = budget.saturating_sub(estimate_tokens(marker)) * 4;
     let mut kept = 0usize;
     for line in text.split_inclusive('\n') {
         if kept + line.len() > room {
@@ -781,7 +814,7 @@ fn truncate_to_tokens(text: &str, budget: usize) -> (String, usize) {
         kept += line.len();
     }
     let dropped = estimate_tokens(&text[kept..]);
-    (format!("{}{MARKER}", &text[..kept]), dropped)
+    (format!("{}{marker}", &text[..kept]), dropped)
 }
 
 /// What [`parse_findings`] made of a model's reply.
@@ -1857,23 +1890,51 @@ FINDING | **line**=42 | class=**contract-drift** | **compile**=YES | the **remot
         );
     }
 
-    /// A verdict over part of a change must read as one, so the truncation is
-    /// reported exactly as the per-file prompt reports it.
+    /// A verdict over part of a change must read as one — and the marker has to
+    /// name **what** was cut short.
+    ///
+    /// Found in review of #649: the whole-change prompt reused the per-file
+    /// marker, so a model handed a clipped multi-file change was told it was
+    /// seeing "PART of the file". That describes a scope it was never given, and
+    /// it hides the consequence that matters here — a cut in this prompt can drop
+    /// **whole files**, not merely the tail of one — so the two markers are
+    /// asserted apart rather than on their shared stem.
     #[test]
-    fn an_oversized_change_is_truncated_and_says_so() {
+    fn an_oversized_change_says_a_change_was_cut_not_a_file() {
         let big = format!(
             "@@ -1,1 +1,1 @@\n{}",
             "+line of a very long diff\n".repeat(400)
         );
         let files = vec![file(&big)];
-        let prompt = build_verdict_prompt(&files, &[], 200);
+
+        let verdict = build_verdict_prompt(&files, &[], 200);
         assert!(
-            prompt.dropped_tokens > 0,
+            verdict.dropped_tokens > 0,
             "the drop is reported rather than absorbed"
         );
         assert!(
-            prompt.text.contains("truncated to fit the context budget"),
-            "and the model is told it is seeing part of the change"
+            verdict.text.contains("PART of the change"),
+            "the whole-change prompt names the change: {}",
+            verdict.text
         );
+        assert!(
+            verdict.text.contains("whole files may be missing"),
+            "and says what a cut here can lose, which a per-file cut cannot"
+        );
+        assert!(
+            !verdict.text.contains("PART of the file"),
+            "and never claims a single file was clipped: {}",
+            verdict.text
+        );
+
+        // The per-file prompt is unchanged: it really does clip one file.
+        let per_file = build_prompt(&files[0], &GraphContext::none(), 200);
+        assert!(per_file.dropped_tokens > 0);
+        assert!(
+            per_file.text.contains("PART of the file"),
+            "{}",
+            per_file.text
+        );
+        assert!(!per_file.text.contains("PART of the change"));
     }
 }

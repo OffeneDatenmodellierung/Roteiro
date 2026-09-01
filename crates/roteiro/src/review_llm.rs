@@ -1160,6 +1160,33 @@ fn read_checks(path: &str) -> anyhow::Result<Vec<CheckRun>> {
 /// Split out of [`run_llm`] because collecting a diff and reviewing one are
 /// separate jobs, and only the second needs a model — which is what lets the
 /// interesting half of `run_llm` stay short enough to read.
+/// Resolve `--base` for the LLM arm the way the graph arm resolves it, and
+/// return the **commit** everything downstream should key off (issue #649).
+///
+/// The graph arm learned this in part 4 and the `--llm` arm had the identical
+/// blind spot one layer down: `changed_files` shells out to `git diff
+/// --name-only <base> HEAD`, so a bare `main` binds to the **local** branch, and
+/// a stale one reviews a superset of the change — silently, because a superset
+/// still contains everything of yours. Rebasing does not help; rebasing the
+/// branch does not move the local ref.
+///
+/// Returning the resolved commit rather than the spec means the file set, the
+/// diffs sent to the model and the trailer range are all one answer to one
+/// question, and [`crate::warn_about_stale_base`] says so on stderr in the same
+/// words `review` already uses.
+///
+/// # Errors
+/// If the repository cannot be opened or the spec names no single commit.
+#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+fn resolve_llm_base(repo: &Path, base: Option<&str>) -> anyhow::Result<Option<String>> {
+    let Some(spec) = base else {
+        return Ok(None);
+    };
+    let resolved = rto_graph::Repo::discover(repo)?.resolve_base(spec)?;
+    crate::warn_about_stale_base(&resolved);
+    Ok(Some(resolved.commit))
+}
+
 /// Say on **stderr** when the model about to review the change is also the model
 /// named in its `Co-Authored-By` trailers (issue #649, part 3).
 ///
@@ -1285,6 +1312,10 @@ pub fn run_llm(
         Some(p) => read_checks(p)?,
         None => Vec::new(),
     };
+    // Resolved once, before anything reads it, so the file set, the diffs and the
+    // trailer range below all name the same commit.
+    let base = resolve_llm_base(repo, base)?;
+    let base = base.as_deref();
     let ReviewSet { files, skipped } = changed_files(repo, base);
 
     if files.is_empty() && skipped.is_empty() {
