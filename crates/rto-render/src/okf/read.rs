@@ -1,0 +1,1490 @@
+//! Read an Open Knowledge Format bundle back into graph facts (issue #706).
+//!
+//! # Why the reader lives beside the writer
+//!
+//! `rto-render` is the renderer, and a parser is the other direction — so this
+//! module is here on purpose rather than in `rto-spec`, which already hosts
+//! `import_graphify` and `import_lat` and would be the obvious home.
+//!
+//! The reason is the naming rule. A concept's *identity in a bundle is its
+//! path*, and [`super::slug`], [`super::section_for`] and the collision digest
+//! are what turn a graph key into one. A reader in another crate would need all
+//! three, so either they become public API or the rule is written down twice —
+//! and [`super::assemble`]'s own documentation already says why a second copy is
+//! wrong: "any rule that turns a key into a path on its own is guessing". The
+//! writer is the specification of what this reads, and a specification and its
+//! parser drift the moment they are in different crates.
+//!
+//! So: OKF read and OKF write move together. If `rto-render` is ever split, they
+//! go to the same place.
+//!
+//! # What this reads, and what it refuses
+//!
+//! A Roteiro bundle round-trips, and that is the floor rather than the goal —
+//! ADR-0021 adopted OKF because it is **vendor-neutral**, so a bundle written by
+//! something else has to be readable too. OKF v0.2's only hard requirement is a
+//! non-empty `type`, and §11 tells consumers not to reject a document for a
+//! missing or unrecognised optional field. The rules that follow are chosen
+//! against that, one at a time:
+//!
+//! | situation | what happens | why |
+//! | --- | --- | --- |
+//! | unrecognised `type` | **imported**, as [`NodeKind::Other`] | the spec leaves `type` open; refusing would reject conformant bundles |
+//! | missing or empty `type` | file **skipped**, reason reported | the one thing the spec does require |
+//! | no frontmatter, or an unterminated block | file **skipped**, reason reported | a document with no frontmatter is not a concept |
+//! | no `verified` key | imported as `external-inferred` | absence of `verified` **is** the unverified tier (§5.3), not missing data |
+//! | link to a concept the bundle does not contain | edge dropped, counted | the store requires both endpoints; a dangling edge would be pruned anyway |
+//! | *every* concept file skipped | the whole read **fails** | a directory in which nothing parsed is not a bundle we read badly, it is not a bundle |
+//!
+//! Nothing is dropped silently. Every skip carries a path and a reason into
+//! [`OkfReport`], and the CLI prints them: a bundle that is *partly* readable
+//! has to say what it left behind, because the alternative is a graph quietly
+//! missing concepts nobody knows to look for.
+//!
+//! # Relationships come from the `## Relationships` section, and nowhere else
+//!
+//! §6 says a plain markdown link asserts a relationship. Read at its widest that
+//! would make every link in every sentence an edge, so a paragraph citing a
+//! neighbouring concept would manufacture one. Roteiro's own writer puts
+//! relationships under a `## Relationships` heading and prose everywhere else,
+//! and that is the line taken here: links under that heading are edges, links
+//! outside it are citations and are counted rather than imported
+//! ([`OkfReport::links_outside_relationships`]).
+//!
+//! A `←` link is the *same* edge seen from its other end — [`super::render_concept`]
+//! writes both directions into both documents — so only `→` (and unmarked) links
+//! become edges. Taking both would not duplicate anything (edges are a set), but
+//! it would reverse half of them.
+
+use std::collections::BTreeMap;
+
+use rto_graph::{Edge, EdgeKind, FactSet, Node, NodeKind, Provenance};
+
+use super::{Actor, INDEX_FILE, LOG_FILE, Origin, section_for, short_digest, slug};
+
+/// The `src_ref` prefix every OKF import layer is persisted under.
+///
+/// One ref **per bundle**, not one for all of them: `apply_import_layer` is
+/// authoritative per ref, so a single shared ref would make importing a second
+/// peer's bundle delete the first peer's concepts. The same reasoning that gave
+/// `import:links` and `import:links/authored` separate refs.
+pub const OKF_REF_PREFIX: &str = "import:okf/";
+
+/// The node-key namespace for an imported concept that does not fill an
+/// [`rto_graph::external_ref_key`] stub.
+pub const OKF_KEY_PREFIX: &str = "okf:";
+
+/// The `src_ref` an import from `peer` is persisted under.
+#[must_use]
+pub fn import_ref(peer: &str) -> String {
+    format!("{OKF_REF_PREFIX}{peer}")
+}
+
+/// How much of a peer's claim is adopted on import.
+///
+/// The set is closed by the decision in issue #706 rather than by us, and is
+/// deliberately **not `#[non_exhaustive]`**: it enumerates the answers to a
+/// consent question — adopt their confirmations, or take their information
+/// without them — and *ignore*, the third answer, is not a mode of importing but
+/// the decision not to. A fourth would be a new answer to that question, and a
+/// caller matching on this enum should stop compiling until someone has looked
+/// at what it means, rather than absorbing it into a wildcard arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trust {
+    /// Import at `external-<the peer's tier>`, preserving what they claimed.
+    Trust,
+    /// Import at `external-inferred` **regardless** of the peer's claimed tier:
+    /// their information without their confirmation.
+    Acknowledge,
+}
+
+impl Trust {
+    /// The stable CLI/report token.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Trust => "trust",
+            Self::Acknowledge => "acknowledge",
+        }
+    }
+}
+
+/// Why a file in the bundle directory did not become a concept.
+///
+/// `#[non_exhaustive]` because this names ways a *document* can be malformed,
+/// and unlike [`Trust`] that set is open: it grows with every real bundle that
+/// arrives shaped in a way nobody predicted. A caller should be able to report a
+/// new one without this becoming a breaking change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SkipReason {
+    /// The file does not open with a `---` frontmatter fence.
+    NoFrontmatter,
+    /// It opens one and never closes it.
+    UnterminatedFrontmatter,
+    /// The frontmatter carries no `type`, or an empty one — OKF's only hard
+    /// requirement (§4).
+    MissingType,
+}
+
+impl SkipReason {
+    /// A one-line explanation, for the report and the CLI.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NoFrontmatter => "no YAML frontmatter block",
+            Self::UnterminatedFrontmatter => "frontmatter block is never closed",
+            Self::MissingType => "no non-empty `type` (OKF's one required key)",
+        }
+    }
+}
+
+/// A file the reader declined, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Skipped {
+    /// The bundle-relative path, as given.
+    pub path: String,
+    /// Why it was not imported.
+    pub reason: SkipReason,
+}
+
+/// An auditable summary of reading a bundle.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct OkfReport {
+    /// The bundle's declared `okf_version`, when its root index carried one.
+    pub okf_version: Option<String>,
+    /// Markdown files offered to the reader.
+    pub files_total: usize,
+    /// Reserved files (`index.md`, `log.md`) passed over, per §8/§9.
+    pub reserved_skipped: usize,
+    /// Concepts imported.
+    pub concepts_read: usize,
+    /// Imported concepts by their declared `type`.
+    pub concepts_by_type: BTreeMap<String, usize>,
+    /// Imported concepts by the provenance they landed at.
+    pub concepts_by_provenance: BTreeMap<String, usize>,
+    /// Files that were not concepts, each with its reason.
+    pub skipped: Vec<SkippedRow>,
+    /// Links found under a `## Relationships` heading.
+    pub links_total: usize,
+    /// Relationship links that became edges.
+    pub edges_read: usize,
+    /// `←` links: the same edge seen from its other end, captured there.
+    pub links_reciprocal: usize,
+    /// Relationship links whose target is not a concept in this bundle.
+    pub links_unresolved: usize,
+    /// Markdown links outside the relationships section — citations, not
+    /// asserted relationships. Counted so the choice is visible rather than
+    /// silent.
+    pub links_outside_relationships: usize,
+    /// `extref:` placeholders this import filled, as `(stub key, bundle path)`.
+    pub extrefs_filled: Vec<(String, String)>,
+    /// Placeholders left alone because the correspondence was not one-to-one.
+    /// A wrong fill attaches a peer's content to the wrong node, which is worse
+    /// than an unfilled stub, so an ambiguous match fills nothing.
+    pub extrefs_ambiguous: Vec<String>,
+}
+
+/// A [`Skipped`] flattened for JSON output.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SkippedRow {
+    /// The bundle-relative path.
+    pub path: String,
+    /// The reason, as its stable token.
+    pub reason: String,
+}
+
+/// The facts to apply, and what was read to produce them.
+#[derive(Debug, Clone)]
+pub struct OkfImport {
+    /// Nodes and `external-*` edges to apply to the store.
+    pub facts: FactSet,
+    /// A summary of what was imported and what was not.
+    pub report: OkfReport,
+}
+
+/// Errors raised while reading a bundle.
+///
+/// `#[non_exhaustive]`, on [`SkipReason`]'s reasoning and for the same subject:
+/// these name ways a *directory somebody else produced* fails to be a bundle,
+/// and that set is open by construction — OKF is a vendor-neutral format, so the
+/// producers are not ours to enumerate. A caller wants the message, not an
+/// exhaustive match; adding a way to fail should not be a breaking change.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum OkfError {
+    /// The directory holds no markdown at all.
+    #[error("no markdown files under {0}: an OKF bundle is a directory of concept documents")]
+    Empty(String),
+    /// Markdown was found, and none of it was a concept.
+    ///
+    /// Deliberately fatal where a *single* bad document is only skipped: one
+    /// unreadable file in a readable bundle is the case §11 asks consumers to
+    /// tolerate, but a directory in which **nothing** parsed is not a bundle
+    /// read badly — it is not a bundle, and importing zero concepts while
+    /// exiting zero would report success for having done nothing.
+    #[error(
+        "{path} holds {files} markdown file(s) and no readable concept among them, so it is \
+         not an OKF bundle. First failures: {detail}"
+    )]
+    NoConcepts {
+        /// The bundle root, as given.
+        path: String,
+        /// How many markdown files were considered.
+        files: usize,
+        /// Up to three `path: reason` pairs.
+        detail: String,
+    },
+}
+
+/// A concept document's parsed frontmatter, in the subset this reads.
+///
+/// Separate from [`super::Frontmatter`], which is a *render* input: that one
+/// holds an [`Origin`] the renderer will split into `generated`/`verified`, and
+/// this one holds what those two keys actually said, which is not the same
+/// question. Notably a document may carry `verified` and no `generated`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ParsedFrontmatter {
+    type_: String,
+    title: Option<String>,
+    description: Option<String>,
+    resource: Option<String>,
+    status: Option<String>,
+    tags: Vec<String>,
+    sources: Vec<String>,
+    generated: Option<(String, String)>,
+    verified: Vec<(String, String)>,
+}
+
+impl ParsedFrontmatter {
+    /// The trust tier this document claims, as the *local* provenance that
+    /// would have produced it — the exact inverse of ADR-0021's mapping table.
+    ///
+    /// **The absence of `verified` is a claim, not a gap.** §5.3 derives the
+    /// unverified tier from exactly that absence, and ADR-0021's table renders
+    /// `Inferred` as "`generated:` alone" for the same reason: a producer that
+    /// confirmed something says so. So a concept with no `verified` key is
+    /// `Inferred`, not "unknown, assume the best".
+    ///
+    /// §7 makes the `human:` prefix the only thing separating human-reviewed
+    /// from machine-confirmed, so it is the only thing consulted here.
+    fn claimed_tier(&self) -> Provenance {
+        match self.verified.first() {
+            None => Provenance::Inferred,
+            Some((by, _)) if by.starts_with("human:") => Provenance::Authored,
+            Some(_) => Provenance::Derived,
+        }
+    }
+
+    /// The origin to re-emit for this concept: whoever the bundle named, with
+    /// the timestamp it gave. `confirms` is the *effective* confirmation, which
+    /// [`Trust::Acknowledge`] clears — under acknowledge we deliberately did not
+    /// adopt the peer's confirmation, so re-emitting it would put it back.
+    fn effective_origin(&self, trust: Trust) -> Option<Origin> {
+        let confirmed = self.verified.first();
+        let (by, at) = confirmed.or(self.generated.as_ref())?;
+        Some(Origin {
+            by: parse_actor(by),
+            at: at.clone(),
+            confirms: confirmed.is_some() && trust == Trust::Trust,
+        })
+    }
+}
+
+/// An OKF actor token (§7) as an [`Actor`].
+///
+/// The inverse of [`Actor::as_token`], and lossy in one direction on purpose: a
+/// token that is none of the three forms becomes [`Actor::Process`], because §7
+/// names exactly three and an unrecognised one is a producer this graph has not
+/// met rather than a reason to drop the attribution. Losing *who* confirmed
+/// something is the one thing a trust model must not do.
+fn parse_actor(token: &str) -> Actor {
+    if let Some(id) = token.strip_prefix("human:") {
+        return Actor::Human(id.to_owned());
+    }
+    if let Some(id) = token.strip_prefix("process:") {
+        return Actor::Process(id.to_owned());
+    }
+    match token.split_once('/') {
+        Some((producer, version)) => Actor::Tool(producer.to_owned(), version.to_owned()),
+        None => Actor::Process(token.to_owned()),
+    }
+}
+
+/// The [`Origin`] recorded on an imported node by [`read_bundle`], or `None` for
+/// a node this graph produced itself.
+///
+/// `render okf` prefers this over [`super::origin_for`] so an imported concept
+/// leaves carrying the attribution it arrived with. Without it the round trip
+/// re-tiers every external fact to *unverified* on the way out — the laundering
+/// the tier-carrying provenance exists to prevent, arriving one step later.
+#[must_use]
+pub fn peer_origin(meta: &serde_json::Value) -> Option<Origin> {
+    let origin = meta.get("okf")?.get("origin")?;
+    Some(Origin {
+        by: parse_actor(origin.get("by")?.as_str()?),
+        at: origin.get("at")?.as_str()?.to_owned(),
+        confirms: origin
+            .get("confirms")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+/// Split a document into its frontmatter block and its body.
+///
+/// The opening fence must be the **first** bytes of the file, per §4. A `---`
+/// further down is a horizontal rule, and a reader that went looking for one
+/// would turn an ordinary markdown document into a concept whose "frontmatter"
+/// is its opening prose.
+fn split_frontmatter(text: &str) -> Result<(&str, &str), SkipReason> {
+    let rest = text
+        .strip_prefix("---\n")
+        .or_else(|| text.strip_prefix("---\r\n"))
+        .ok_or(SkipReason::NoFrontmatter)?;
+    let mut offset = 0usize;
+    for line in rest.split_inclusive('\n') {
+        if line.trim_end_matches(['\r', '\n']) == "---" {
+            let body = rest[offset + line.len()..].trim_start_matches(['\r', '\n']);
+            return Ok((&rest[..offset], body));
+        }
+        offset += line.len();
+    }
+    Err(SkipReason::UnterminatedFrontmatter)
+}
+
+/// Unquote one YAML scalar as [`super::yaml_scalar`] wrote it, and tolerate the
+/// bare and single-quoted forms another producer may have used.
+///
+/// The escape set is the writer's exactly — `\\`, `\"`, `\n`, `\r`, `\t` and the
+/// general `\uXXXX` — because the writer escapes *everything else* as `\uXXXX`,
+/// so anything outside this set never appears in a Roteiro bundle. An unknown
+/// escape keeps its own character rather than the backslash, which is what YAML
+/// 1.2 does for an unrecognised sequence in the permissive reading and is the
+/// only choice that cannot turn a title into a different string.
+fn yaml_unquote(raw: &str) -> String {
+    let raw = raw.trim();
+    if let Some(inner) = raw.strip_prefix('\'').and_then(|r| r.strip_suffix('\'')) {
+        return inner.replace("''", "'");
+    }
+    let Some(inner) = raw.strip_prefix('"').and_then(|r| r.strip_suffix('"')) else {
+        return raw.to_owned();
+    };
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some('u') => {
+                let hex: String = chars.by_ref().take(4).collect();
+                if let Some(ch) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                    out.push(ch);
+                } else {
+                    // Not a valid escape, so not something the writer emitted.
+                    // Keep the text rather than dropping it: a mangled title is
+                    // recoverable, a vanished one is not.
+                    out.push_str("\\u");
+                    out.push_str(&hex);
+                }
+            }
+            Some(other) => out.push(other),
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+/// The indentation depth of a frontmatter line, in leading spaces.
+fn indent(line: &str) -> usize {
+    line.len() - line.trim_start_matches(' ').len()
+}
+
+/// Parse the frontmatter subset this reader understands.
+///
+/// Unknown top-level keys are **skipped along with everything nested under
+/// them**, rather than rejected: §11 tells a consumer not to reject a document
+/// for a field it does not know, and a producer with its own extensions is the
+/// case a vendor-neutral format exists to allow.
+fn parse_frontmatter(block: &str) -> ParsedFrontmatter {
+    let mut fm = ParsedFrontmatter::default();
+    let lines: Vec<&str> = block.lines().map(|l| l.trim_end_matches('\r')).collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        i += 1;
+        if indent(line) != 0 || line.trim().is_empty() {
+            continue;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        // The nested block belonging to this key: every following line indented
+        // past column 0, taken whole so an unknown key consumes its own children
+        // instead of leaking them into the next key's.
+        let start = i;
+        while i < lines.len() && (indent(lines[i]) > 0 || lines[i].trim().is_empty()) {
+            i += 1;
+        }
+        let nested = &lines[start..i];
+        match key.trim() {
+            "type" => fm.type_ = yaml_unquote(value),
+            "title" => fm.title = Some(yaml_unquote(value)),
+            "description" => fm.description = Some(yaml_unquote(value)),
+            "resource" => fm.resource = Some(yaml_unquote(value)),
+            "status" => fm.status = Some(yaml_unquote(value)),
+            "tags" => {
+                for item in nested {
+                    if let Some(v) = item.trim().strip_prefix("- ") {
+                        fm.tags.push(yaml_unquote(v));
+                    }
+                }
+            }
+            "sources" => {
+                for item in nested {
+                    let item = item.trim();
+                    let item = item.strip_prefix("- ").unwrap_or(item);
+                    if let Some((k, v)) = item.split_once(':')
+                        && k.trim() == "resource"
+                    {
+                        fm.sources.push(yaml_unquote(v));
+                    }
+                }
+            }
+            "generated" => fm.generated = parse_by_at(nested).into_iter().next(),
+            "verified" => fm.verified = parse_by_at(nested),
+            _ => {}
+        }
+    }
+    fm
+}
+
+/// Collect `by`/`at` pairs from a nested block, whether it is a mapping
+/// (`generated`) or a sequence of them (`verified`).
+///
+/// A `- ` item starts a new pair; a bare `by:`/`at:` extends the current one. A
+/// pair with no `at` keeps an empty timestamp rather than being dropped: **who**
+/// confirmed something is the load-bearing half, and §7 is about the actor.
+fn parse_by_at(nested: &[&str]) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for line in nested {
+        let trimmed = line.trim();
+        let starts_item = trimmed.starts_with("- ");
+        let trimmed = trimmed.strip_prefix("- ").unwrap_or(trimmed);
+        let Some((key, value)) = trimmed.split_once(':') else {
+            continue;
+        };
+        let (key, value) = (key.trim(), yaml_unquote(value));
+        if starts_item || (key == "by" && out.is_empty()) {
+            out.push((String::new(), String::new()));
+        }
+        let Some(last) = out.last_mut() else { continue };
+        match key {
+            "by" => last.0 = value,
+            "at" => last.1 = value,
+            _ => {}
+        }
+    }
+    out.retain(|(by, _)| !by.is_empty());
+    out
+}
+
+/// One link found in a concept's relationships section.
+struct RelLink {
+    kind: String,
+    target: String,
+    reciprocal: bool,
+}
+
+/// The relationship links in a concept body, plus how many markdown links sat
+/// outside the relationships section.
+fn parse_relationships(body: &str) -> (Vec<RelLink>, usize) {
+    let mut links = Vec::new();
+    let mut outside = 0usize;
+    let mut in_section = false;
+    let mut kind = EdgeKind::Related.as_str().to_owned();
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if let Some(heading) = trimmed.strip_prefix("## ") {
+            in_section = heading.trim().eq_ignore_ascii_case("relationships");
+            EdgeKind::Related.as_str().clone_into(&mut kind);
+            continue;
+        }
+        if trimmed.starts_with("# ") {
+            in_section = false;
+            continue;
+        }
+        if let Some(heading) = trimmed.strip_prefix("### ")
+            && in_section
+        {
+            heading.trim().clone_into(&mut kind);
+            continue;
+        }
+        for target in markdown_link_targets(trimmed) {
+            if in_section {
+                links.push(RelLink {
+                    kind: kind.clone(),
+                    // `→` and `←` are what `render_concept` writes; an unmarked
+                    // link (another producer's) reads as outgoing.
+                    reciprocal: trimmed.contains('\u{2190}'),
+                    target,
+                });
+            } else {
+                outside += 1;
+            }
+        }
+    }
+    (links, outside)
+}
+
+/// Every `[text](target)` target on one line.
+///
+/// Hand-rolled rather than run through the markdown parser this crate already
+/// has: `pulldown-cmark` would give the same answer for a well-formed line and a
+/// *different* one for a malformed bundle, because it recovers. Here a link that
+/// does not close is not a link, which is the reading that cannot invent an edge
+/// out of stray punctuation.
+fn markdown_link_targets(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'[' {
+            i += 1;
+            continue;
+        }
+        let Some(close) = line[i..].find("](") else {
+            break;
+        };
+        let after = i + close + 2;
+        let Some(end) = line[after..].find(')') else {
+            break;
+        };
+        let target = line[after..after + end].trim();
+        if !target.is_empty() {
+            out.push(target.to_owned());
+        }
+        i = after + end + 1;
+    }
+    out
+}
+
+/// Resolve a link target to a bundle-relative path, as §6's absolute form or as
+/// a path relative to `from`'s own directory.
+fn resolve_target(from: &str, target: &str) -> Option<String> {
+    // A URL or an anchor is not a concept in this bundle.
+    if target.contains("://") || target.starts_with('#') {
+        return None;
+    }
+    let target = target.split('#').next().unwrap_or(target);
+    if target.is_empty() {
+        return None;
+    }
+    if target.starts_with('/') {
+        return Some(normalise(target));
+    }
+    let dir = from.rsplit_once('/').map_or("", |(d, _)| d);
+    Some(normalise(&format!("{dir}/{target}")))
+}
+
+/// Collapse `.`/`..` segments and guarantee a single leading `/`.
+fn normalise(path: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for seg in path.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    format!("/{}", parts.join("/"))
+}
+
+/// The bundle-relative path of a file, always `/`-separated and leading-slashed.
+fn bundle_path(raw: &str) -> String {
+    normalise(&raw.replace('\\', "/"))
+}
+
+/// Whether a bundle path is one of the reserved index/log files (§8, §9).
+fn is_reserved(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    name == INDEX_FILE || name == LOG_FILE
+}
+
+/// A concept read out of the bundle, before keys are assigned.
+struct Concept {
+    path: String,
+    fm: ParsedFrontmatter,
+    body: String,
+    links: Vec<RelLink>,
+}
+
+/// Options for [`read_bundle`].
+pub struct ReadOptions<'a> {
+    /// How much of the peer's claim to adopt.
+    pub trust: Trust,
+    /// The peer's name, used for the node-key namespace and the `src_ref`.
+    pub peer: &'a str,
+    /// Keys of `extref:` placeholders already in this graph, which an imported
+    /// concept may fill (ADR-0009). Pass an empty slice to fill none.
+    pub extref_keys: &'a [String],
+}
+
+/// Read an OKF bundle from `(path, content)` pairs into graph facts.
+///
+/// `files` is every markdown file under the bundle root, each keyed by its
+/// bundle-relative path. Taking the file set rather than a directory keeps the
+/// whole rule testable without a filesystem, on `import_lat`'s precedent.
+///
+/// # Errors
+/// Returns [`OkfError::Empty`] when there is no markdown at all, and
+/// [`OkfError::NoConcepts`] when there is markdown and none of it parsed — see
+/// that variant for why one bad document is tolerated and a bundle of them is
+/// not.
+pub fn read_bundle(
+    root: &str,
+    files: &[(String, String)],
+    opts: &ReadOptions<'_>,
+) -> Result<OkfImport, OkfError> {
+    let mut report = OkfReport {
+        files_total: files.len(),
+        ..OkfReport::default()
+    };
+    if files.is_empty() {
+        return Err(OkfError::Empty(root.to_owned()));
+    }
+
+    let (concepts, skipped) = collect_concepts(files, &mut report);
+
+    if concepts.is_empty() {
+        let considered = files.len() - report.reserved_skipped;
+        if considered == 0 {
+            return Err(OkfError::Empty(root.to_owned()));
+        }
+        let detail = skipped
+            .iter()
+            .take(3)
+            .map(|s| format!("{} ({})", s.path, s.reason.as_str()))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(OkfError::NoConcepts {
+            path: root.to_owned(),
+            files: considered,
+            detail,
+        });
+    }
+
+    report.skipped = skipped
+        .into_iter()
+        .map(|s| SkippedRow {
+            path: s.path,
+            reason: s.reason.as_str().to_owned(),
+        })
+        .collect();
+
+    // Assign a key to every concept, filling an `extref:` stub where exactly one
+    // corresponds. `stub_for` is `bundle path -> stub key`.
+    let (stub_for, ambiguous) = extref_fills(&concepts, opts.extref_keys);
+    report.extrefs_ambiguous = ambiguous;
+    let keys: BTreeMap<&str, String> = concepts
+        .iter()
+        .map(|c| {
+            let key = stub_for.get(c.path.as_str()).cloned().unwrap_or_else(|| {
+                format!(
+                    "{OKF_KEY_PREFIX}{peer}{path}",
+                    peer = opts.peer,
+                    path = c.path
+                )
+            });
+            (c.path.as_str(), key)
+        })
+        .collect();
+    for (path, key) in &stub_for {
+        report
+            .extrefs_filled
+            .push((key.clone(), (*path).to_owned()));
+    }
+    report.extrefs_filled.sort();
+
+    let src_ref = import_ref(opts.peer);
+    let mut facts = FactSet::new();
+    for c in &concepts {
+        push_concept(c, opts, &src_ref, &keys, &stub_for, &mut facts, &mut report);
+    }
+
+    Ok(OkfImport { facts, report })
+}
+
+/// Read every markdown file into a concept, or into a reason it is not one.
+fn collect_concepts(
+    files: &[(String, String)],
+    report: &mut OkfReport,
+) -> (Vec<Concept>, Vec<Skipped>) {
+    let mut concepts: Vec<Concept> = Vec::new();
+    let mut skipped: Vec<Skipped> = Vec::new();
+    for (raw_path, content) in files {
+        let path = bundle_path(raw_path);
+        if is_reserved(&path) {
+            report.reserved_skipped += 1;
+            if path == format!("/{INDEX_FILE}") {
+                report.okf_version = root_okf_version(content);
+            }
+            continue;
+        }
+        match split_frontmatter(content) {
+            Err(reason) => skipped.push(Skipped { path, reason }),
+            Ok((block, body)) => {
+                let fm = parse_frontmatter(block);
+                if fm.type_.trim().is_empty() {
+                    skipped.push(Skipped {
+                        path,
+                        reason: SkipReason::MissingType,
+                    });
+                    continue;
+                }
+                let (links, outside) = parse_relationships(body);
+                report.links_outside_relationships += outside;
+                concepts.push(Concept {
+                    path,
+                    fm,
+                    body: body.to_owned(),
+                    links,
+                });
+            }
+        }
+    }
+    (concepts, skipped)
+}
+
+/// Turn one concept into a node and its outgoing edges.
+fn push_concept(
+    c: &Concept,
+    opts: &ReadOptions<'_>,
+    src_ref: &str,
+    keys: &BTreeMap<&str, String>,
+    stub_for: &BTreeMap<&str, String>,
+    facts: &mut FactSet,
+    report: &mut OkfReport,
+) {
+    let key = &keys[c.path.as_str()];
+    let provenance = match opts.trust {
+        Trust::Trust => c.fm.claimed_tier().externalise(),
+        // Their information without their confirmation. `externalise` is
+        // deliberately **not** used here: the tier is *replaced*, not carried.
+        Trust::Acknowledge => Provenance::ExternalInferred,
+    };
+    let name =
+        c.fm.title
+            .clone()
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| {
+                c.path
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&c.path)
+                    .trim_end_matches(".md")
+                    .to_owned()
+            });
+    let mut node =
+        Node::new(key.clone(), NodeKind::from_token(&c.fm.type_), name).with_provenance(provenance);
+    node.meta = concept_meta(
+        c,
+        opts,
+        src_ref,
+        stub_for.get(c.path.as_str()).map(String::as_str),
+    );
+    facts.nodes.push(node);
+    *report
+        .concepts_by_type
+        .entry(c.fm.type_.clone())
+        .or_default() += 1;
+    *report
+        .concepts_by_provenance
+        .entry(provenance.as_str().to_owned())
+        .or_default() += 1;
+    report.concepts_read += 1;
+
+    for link in &c.links {
+        report.links_total += 1;
+        if link.reciprocal {
+            report.links_reciprocal += 1;
+            continue;
+        }
+        let target =
+            resolve_target(&c.path, &link.target).and_then(|t| keys.get(t.as_str()).cloned());
+        let Some(dst) = target else {
+            report.links_unresolved += 1;
+            continue;
+        };
+        let mut edge = Edge::derived(key.clone(), dst, EdgeKind::from_token(&link.kind));
+        // No confidence, ever: OKF carries none for a relationship, so there is
+        // no number to adopt and inventing one would fabricate precision. The
+        // store's `CHECK` and `Edge::is_valid` both say the same thing.
+        edge.provenance = provenance;
+        edge.src_ref = Some(src_ref.to_owned());
+        facts.edges.push(edge);
+        report.edges_read += 1;
+    }
+}
+
+/// The `okf_version` a bundle root's `index.md` declares (§10).
+fn root_okf_version(content: &str) -> Option<String> {
+    let (block, _) = split_frontmatter(content).ok()?;
+    block.lines().find_map(|line| {
+        line.split_once(':')
+            .filter(|(k, _)| k.trim() == "okf_version")
+            .map(|(_, v)| yaml_unquote(v))
+    })
+}
+
+/// The `meta` an imported concept carries.
+///
+/// `okf.origin` is what `render okf` re-emits (see [`peer_origin`]);
+/// `okf.claimed` records what the bundle actually said, so an *acknowledge*
+/// import still knows what it declined to adopt and can be re-run as *trust*
+/// without re-reading the bundle. Keeping the peer's claim as data while the
+/// provenance carries only what we accepted is the whole distinction between
+/// the two modes.
+fn concept_meta(
+    c: &Concept,
+    opts: &ReadOptions<'_>,
+    src_ref: &str,
+    fills: Option<&str>,
+) -> serde_json::Value {
+    let mut meta = serde_json::json!({
+        "okf": {
+            "source": src_ref,
+            "peer": opts.peer,
+            "path": c.path,
+            "type": c.fm.type_,
+            "trust": opts.trust.as_str(),
+            "claimed": {
+                "tier": c.fm.claimed_tier().as_str(),
+                "verified": !c.fm.verified.is_empty(),
+            },
+            "resource": c.fm.resource,
+            "status": c.fm.status,
+            "tags": c.fm.tags,
+            "sources": c.fm.sources,
+        },
+    });
+    if let Some(origin) = c.fm.effective_origin(opts.trust) {
+        meta["okf"]["origin"] = serde_json::json!({
+            "by": origin.by.as_token(),
+            "at": origin.at,
+            "confirms": origin.confirms,
+        });
+    }
+    if let Some(desc) = &c.fm.description {
+        meta["okf"]["description"] = serde_json::Value::from(desc.clone());
+    }
+    // The prose, on the same budget the derived and authored layers use — a
+    // second cap here would let the store grow by whichever number was written
+    // down last.
+    let content = rto_graph::cap_content(&c.body);
+    if !content.is_empty() {
+        meta["content"] = serde_json::Value::from(content);
+    }
+    // A filled placeholder keeps `qualified` at the top level, because that is
+    // where `rto_graph::external_ref_target` reads it and the workspace resolver
+    // follows it across repos (ADR-0009). Filling a stub adds content to it; it
+    // must not stop it being a stub, or the cross-repo link this whole import
+    // exists to improve stops resolving at all.
+    if let Some(qualified) = fills.and_then(|stub| stub.strip_prefix("extref:")) {
+        meta["qualified"] = serde_json::Value::from(qualified);
+    }
+    meta
+}
+
+/// Which `extref:` placeholder each imported concept fills, and which
+/// placeholders were left alone because the correspondence was ambiguous.
+///
+/// # The correspondence is computed forwards, because it cannot be inverted
+///
+/// A bundle does **not** carry the producer's node key. The only trace of it is
+/// the filename, and [`super::slug`] is lossy: it lowercases, collapses every
+/// run of non-alphanumerics to one `-`, and truncates past 200 characters. So
+/// `file:src/a.rs` and `file:src-a.rs` both slug to `file-src-a-rs`, and no
+/// inverse exists. Inverting it is the natural-looking route and it is wrong.
+///
+/// What *is* sound is the forward direction: this graph knows its own
+/// placeholder keys, so it can compute the filename each one **would** have had
+/// in the peer's bundle — `slug(bare)`, or `slug(bare)-<digest>` when
+/// [`super::assemble`] had to disambiguate — and compare. That is the writer's
+/// own rule applied to our keys, not a guess about theirs.
+///
+/// It can still be ambiguous, because two of *our* placeholder keys can slug
+/// alike even though the peer's bundle contained no collision. A concept
+/// matching more than one placeholder, or a placeholder matching more than one
+/// concept, fills **nothing** and is reported: a wrong fill attaches a peer's
+/// content to the wrong node, which is strictly worse than a stub that stayed a
+/// stub.
+///
+/// A bundle from another producer simply does not match, because its filenames
+/// were not produced by this rule. That is the honest outcome — the concepts are
+/// still imported, they just do not resolve a placeholder — and it is why this
+/// is an enhancement rather than the import's purpose.
+fn extref_fills<'a>(
+    concepts: &'a [Concept],
+    extref_keys: &[String],
+) -> (BTreeMap<&'a str, String>, Vec<String>) {
+    // stub key -> the concept paths it could name.
+    let mut by_stub: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    // concept path -> the stub keys that could name it.
+    let mut by_path: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+
+    for stub in extref_keys {
+        let Some(qualified) = stub.strip_prefix("extref:") else {
+            continue;
+        };
+        let Some((_project, bare)) = rto_graph::parse_qualified(qualified) else {
+            continue;
+        };
+        let bare_slug = slug(bare);
+        let with_digest = format!("{bare_slug}-{}", short_digest(bare));
+        for c in concepts {
+            let (dir, file) = c.path.rsplit_once('/').unwrap_or(("", &c.path));
+            let name = file.trim_end_matches(".md");
+            let section = dir.rsplit('/').next().unwrap_or("");
+            if section != section_for(&c.fm.type_) {
+                continue;
+            }
+            if name == bare_slug || name == with_digest {
+                by_stub.entry(stub).or_default().push(&c.path);
+                by_path.entry(&c.path).or_default().push(stub);
+            }
+        }
+    }
+
+    let mut fills = BTreeMap::new();
+    let mut ambiguous: Vec<String> = Vec::new();
+    for (stub, paths) in &by_stub {
+        match paths.as_slice() {
+            [only] if by_path.get(*only).is_some_and(|s| s.len() == 1) => {
+                fills.insert(*only, (*stub).to_owned());
+            }
+            _ => ambiguous.push((*stub).to_owned()),
+        }
+    }
+    ambiguous.sort();
+    ambiguous.dedup();
+    (fills, ambiguous)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::okf::{Concept as RenderConcept, Frontmatter, OKF_VERSION, assemble, origin_for};
+    use rto_graph::{EdgeRef, Explanation, NodeSummary};
+
+    fn opts(trust: Trust, extref_keys: &[String]) -> ReadOptions<'_> {
+        ReadOptions {
+            trust,
+            peer: "acme",
+            extref_keys,
+        }
+    }
+
+    fn read(files: &[(&str, &str)], trust: Trust) -> OkfImport {
+        let owned: Vec<(String, String)> = files
+            .iter()
+            .map(|(p, c)| ((*p).to_owned(), (*c).to_owned()))
+            .collect();
+        read_bundle("okf/", &owned, &opts(trust, &[])).expect("read")
+    }
+
+    fn node_named<'a>(import: &'a OkfImport, key: &str) -> &'a rto_graph::Node {
+        import
+            .facts
+            .nodes
+            .iter()
+            .find(|n| n.key == key)
+            .unwrap_or_else(|| panic!("no node {key} in {:?}", keys(import)))
+    }
+
+    fn keys(import: &OkfImport) -> Vec<&str> {
+        import.facts.nodes.iter().map(|n| n.key.as_str()).collect()
+    }
+
+    fn summary(key: &str, kind: &str, name: &str) -> NodeSummary {
+        NodeSummary {
+            key: key.to_owned(),
+            kind: kind.to_owned(),
+            name: name.to_owned(),
+            path: None,
+            lang: None,
+        }
+    }
+
+    fn explanation(
+        key: &str,
+        kind: &str,
+        name: &str,
+        out: Vec<EdgeRef>,
+        inc: Vec<EdgeRef>,
+    ) -> Explanation {
+        Explanation {
+            schema: rto_graph::SCHEMA,
+            node: summary(key, kind, name),
+            meta: serde_json::Value::Null,
+            outgoing: out,
+            incoming: inc,
+        }
+    }
+
+    fn edge_ref(to: &str) -> EdgeRef {
+        EdgeRef {
+            kind: "references".to_owned(),
+            provenance: "authored",
+            confidence: None,
+            node: to.to_owned(),
+        }
+    }
+
+    /// A Roteiro bundle round-trips: what [`assemble`] wrote, this reads, and
+    /// each concept comes back at the **external** tier matching the one it went
+    /// out at.
+    ///
+    /// The write side is the specification, so the fixture is produced by
+    /// rendering rather than written by hand: a hand-written fixture keeps
+    /// passing after the renderer changes shape, which is the one failure a
+    /// round-trip test exists to catch.
+    #[test]
+    fn a_roteiro_bundle_round_trips_at_the_external_tier() {
+        let at = "2026-09-01T10:00:00Z";
+        let tool = Actor::Tool("roteiro".to_owned(), "5.0.0".to_owned());
+        let alice = Actor::Human("alice".to_owned());
+
+        // One relationship, written into **both** documents by the renderer:
+        // outgoing from the ADR, incoming on the file. Reading both would
+        // reverse half the graph, so the fixture has to contain both halves.
+        let adr = explanation(
+            "adr:0021",
+            "adr",
+            "OKF bundle",
+            vec![edge_ref("file:src/lib.rs")],
+            Vec::new(),
+        );
+        let file = explanation(
+            "file:src/lib.rs",
+            "file",
+            "lib.rs",
+            Vec::new(),
+            vec![edge_ref("adr:0021")],
+        );
+        let guess = explanation("sym:rust:src/lib.rs#f", "fn", "f", Vec::new(), Vec::new());
+
+        let rendered = assemble(
+            vec![
+                RenderConcept {
+                    explanation: &adr,
+                    frontmatter: Frontmatter {
+                        type_: "adr".to_owned(),
+                        title: Some("OKF bundle".to_owned()),
+                        origin: Some(origin_for(Provenance::Authored, at, &tool, Some(&alice))),
+                        ..Frontmatter::default()
+                    },
+                    body: Some("The decision text.".to_owned()),
+                    member: None,
+                },
+                RenderConcept {
+                    explanation: &file,
+                    frontmatter: Frontmatter {
+                        type_: "file".to_owned(),
+                        title: Some("lib.rs".to_owned()),
+                        origin: Some(origin_for(Provenance::Derived, at, &tool, None)),
+                        ..Frontmatter::default()
+                    },
+                    body: None,
+                    member: None,
+                },
+                RenderConcept {
+                    explanation: &guess,
+                    frontmatter: Frontmatter {
+                        type_: "fn".to_owned(),
+                        title: Some("f".to_owned()),
+                        origin: Some(origin_for(Provenance::Inferred, at, &tool, None)),
+                        ..Frontmatter::default()
+                    },
+                    body: None,
+                    member: None,
+                },
+            ],
+            "acme",
+            &[],
+        );
+
+        let files: Vec<(String, String)> = rendered
+            .iter()
+            .map(|f| (f.path.clone(), f.content.clone()))
+            .collect();
+        let import = read_bundle("okf/", &files, &opts(Trust::Trust, &[])).expect("read");
+        assert_round_trip(&import, at);
+    }
+
+    /// The assertions of [`a_roteiro_bundle_round_trips_at_the_external_tier`],
+    /// split out so the fixture that renders the bundle and the claims made
+    /// about reading it back stay separately readable.
+    fn assert_round_trip(import: &OkfImport, at: &str) {
+        assert_eq!(import.report.concepts_read, 3, "{:?}", keys(import));
+        assert_eq!(import.report.okf_version.as_deref(), Some(OKF_VERSION));
+
+        // Each tier survived the round trip, carried rather than flattened.
+        let by_prov: BTreeMap<&str, &str> = import
+            .facts
+            .nodes
+            .iter()
+            .map(|n| (n.key.as_str(), n.provenance.as_str()))
+            .collect();
+        assert_eq!(
+            by_prov,
+            BTreeMap::from([
+                ("okf:acme/decisions/adr-0021.md", "external-authored"),
+                ("okf:acme/files/file-src-lib-rs.md", "external-derived"),
+                (
+                    "okf:acme/symbols/sym-rust-src-lib-rs-f.md",
+                    "external-inferred"
+                ),
+            ]),
+            "a flat `External` would collapse these three into one"
+        );
+
+        // The relationship came back, once, pointing the same way.
+        assert_eq!(import.facts.edges.len(), 1);
+        let e = &import.facts.edges[0];
+        assert_eq!(e.src, "okf:acme/decisions/adr-0021.md");
+        assert_eq!(e.dst, "okf:acme/files/file-src-lib-rs.md");
+        assert_eq!(e.kind.as_str(), "references");
+        assert_eq!(e.provenance, Provenance::ExternalAuthored);
+        assert_eq!(
+            e.confidence, None,
+            "an imported edge carries no confidence this graph never computed"
+        );
+        assert!(e.is_valid(), "and must still satisfy the store's invariant");
+        assert_eq!(
+            import.report.links_reciprocal, 1,
+            "the `left-arrow` half of the same edge is skipped, not reversed"
+        );
+
+        // Title, body and the peer's own attribution came with it.
+        let adr_node = node_named(import, "okf:acme/decisions/adr-0021.md");
+        assert_eq!(adr_node.name, "OKF bundle");
+        assert_eq!(adr_node.kind.as_str(), "adr");
+        assert!(
+            adr_node.meta["content"]
+                .as_str()
+                .expect("content")
+                .contains("The decision text."),
+            "{:?}",
+            adr_node.meta["content"]
+        );
+        assert_eq!(
+            peer_origin(&adr_node.meta),
+            Some(Origin {
+                by: Actor::Human("alice".to_owned()),
+                at: at.to_owned(),
+                confirms: true,
+            }),
+            "Alice's confirmation is re-emitted naming Alice, not re-tiered"
+        );
+    }
+
+    const AUTHORED: &str = "---\ntype: \"adr\"\ntitle: \"A decision\"\ngenerated:\n  by: \"human:alice\"\n  at: \"2026-09-01T10:00:00Z\"\nverified:\n  - by: \"human:alice\"\n    at: \"2026-09-01T10:00:00Z\"\n---\n\n# A decision\n\nBody.\n";
+
+    #[test]
+    fn trust_preserves_the_peers_tier_and_acknowledge_replaces_it() {
+        let trusted = read(&[("/decisions/a.md", AUTHORED)], Trust::Trust);
+        let node = &trusted.facts.nodes[0];
+        assert_eq!(node.provenance, Provenance::ExternalAuthored);
+        assert!(peer_origin(&node.meta).expect("origin").confirms);
+
+        let acked = read(&[("/decisions/a.md", AUTHORED)], Trust::Acknowledge);
+        let node = &acked.facts.nodes[0];
+        assert_eq!(
+            node.provenance,
+            Provenance::ExternalInferred,
+            "acknowledge takes their information without their confirmation"
+        );
+        // What they claimed is still recorded — as data, not as provenance — so
+        // the import can be re-run as `trust` without re-reading the bundle.
+        assert_eq!(node.meta["okf"]["claimed"]["tier"], "authored");
+        assert_eq!(node.meta["okf"]["trust"], "acknowledge");
+        assert!(
+            !peer_origin(&node.meta).expect("origin").confirms,
+            "and re-rendering must not put the confirmation back"
+        );
+    }
+
+    /// Section 5.3 derives *unverified* from the absence of `verified`. So the
+    /// absence is a claim, not missing data, and a concept without one is
+    /// `external-inferred` even under **trust** — the mode that preserves what
+    /// the peer said.
+    #[test]
+    fn a_concept_with_no_verified_key_is_unverified_not_unknown() {
+        let doc = "---\ntype: \"doc\"\ngenerated:\n  by: \"roteiro/5.0.0\"\n  at: \"2026-09-01T00:00:00Z\"\n---\n\n# D\n";
+        let import = read(&[("/docs/d.md", doc)], Trust::Trust);
+        assert_eq!(
+            import.facts.nodes[0].provenance,
+            Provenance::ExternalInferred
+        );
+    }
+
+    /// A non-`human:` verifier is machine-confirmed, per section 7 — the
+    /// `human:` prefix is the only thing separating the two tiers.
+    #[test]
+    fn a_tool_verifier_is_machine_confirmed() {
+        let doc = "---\ntype: \"file\"\nverified:\n  - by: \"roteiro/5.0.0\"\n    at: \"2026-09-01T00:00:00Z\"\n---\n\n# F\n";
+        let import = read(&[("/files/f.md", doc)], Trust::Trust);
+        assert_eq!(
+            import.facts.nodes[0].provenance,
+            Provenance::ExternalDerived
+        );
+    }
+
+    /// The spec's only hard requirement is a non-empty `type`, and it leaves the
+    /// *value* open. So an unknown one is imported rather than refused —
+    /// refusing would reject conformant bundles from the very producers a
+    /// vendor-neutral format exists to interoperate with.
+    #[test]
+    fn an_unrecognised_type_is_imported_as_an_other_kind() {
+        let doc = "---\ntype: \"dataset\"\ntitle: \"Sales\"\n---\n\n# Sales\n";
+        let import = read(&[("/things/s.md", doc)], Trust::Trust);
+        assert_eq!(
+            import.facts.nodes[0].kind,
+            NodeKind::Other("dataset".to_owned())
+        );
+        assert_eq!(import.report.concepts_by_type["dataset"], 1);
+    }
+
+    /// A bad document is skipped **with a reason**, and the readable ones still
+    /// arrive: section 11 asks a consumer to be liberal, and a silent drop would
+    /// leave a graph missing concepts nobody knows to look for.
+    #[test]
+    fn a_partly_readable_bundle_reports_what_it_skipped() {
+        let import = read(
+            &[
+                ("/decisions/good.md", AUTHORED),
+                ("/decisions/plain.md", "# Just markdown\n"),
+                ("/decisions/open.md", "---\ntype: \"adr\"\nnever closed\n"),
+                ("/decisions/typeless.md", "---\ntitle: \"x\"\n---\n\nBody\n"),
+            ],
+            Trust::Trust,
+        );
+        assert_eq!(import.report.concepts_read, 1);
+        let rows: Vec<(&str, &str)> = import
+            .report
+            .skipped
+            .iter()
+            .map(|s| (s.path.as_str(), s.reason.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("/decisions/plain.md", "no YAML frontmatter block"),
+                ("/decisions/open.md", "frontmatter block is never closed"),
+                (
+                    "/decisions/typeless.md",
+                    "no non-empty `type` (OKF's one required key)"
+                ),
+            ]
+        );
+    }
+
+    /// One unreadable document is tolerated; a directory of them is not a bundle
+    /// read badly, it is not a bundle — and importing zero concepts while
+    /// exiting zero would report success for having done nothing.
+    #[test]
+    fn a_directory_with_no_readable_concept_is_refused_whole() {
+        let files = vec![
+            ("okf/a.md".to_owned(), "# no frontmatter\n".to_owned()),
+            ("okf/b.md".to_owned(), "plain text\n".to_owned()),
+        ];
+        let err = read_bundle("okf/", &files, &opts(Trust::Trust, &[])).expect_err("refuse");
+        assert_eq!(
+            err.to_string(),
+            "okf/ holds 2 markdown file(s) and no readable concept among them, so it is not \
+             an OKF bundle. First failures: /okf/a.md (no YAML frontmatter block); \
+             /okf/b.md (no YAML frontmatter block)",
+        );
+    }
+
+    #[test]
+    fn an_empty_directory_is_refused_by_name() {
+        let err = read_bundle("okf/", &[], &opts(Trust::Trust, &[])).expect_err("refuse");
+        assert_eq!(
+            err.to_string(),
+            "no markdown files under okf/: an OKF bundle is a directory of concept documents",
+        );
+    }
+
+    /// A bundle of nothing but reserved files is *empty*, not unreadable: there
+    /// were no concept documents to fail on, so the message must not accuse the
+    /// index of being malformed.
+    #[test]
+    fn a_bundle_of_only_reserved_files_is_empty_rather_than_unreadable() {
+        let files = vec![
+            (
+                format!("/{INDEX_FILE}"),
+                format!("---\nokf_version: \"{OKF_VERSION}\"\n---\n\n# Index\n"),
+            ),
+            (format!("/{LOG_FILE}"), "# Log\n".to_owned()),
+        ];
+        let err = read_bundle("okf/", &files, &opts(Trust::Trust, &[])).expect_err("refuse");
+        assert_eq!(
+            err.to_string(),
+            "no markdown files under okf/: an OKF bundle is a directory of concept documents",
+        );
+    }
+
+    const A_DOC: &str = "---\ntype: \"doc\"\n---\n\n# A\n\nSee [B](/docs/b.md) in prose.\n\n## Relationships\n\n### references\n\n* \u{2192} [b](/docs/b.md)\n* \u{2192} [gone](/docs/gone.md)\n* \u{2190} [c](/docs/c.md)\n";
+
+    #[test]
+    fn only_links_under_relationships_become_edges() {
+        let import = read(
+            &[
+                ("/docs/a.md", A_DOC),
+                ("/docs/b.md", "---\ntype: \"doc\"\n---\n\n# B\n"),
+                ("/docs/c.md", "---\ntype: \"doc\"\n---\n\n# C\n"),
+            ],
+            Trust::Trust,
+        );
+        assert_eq!(import.facts.edges.len(), 1, "{:?}", import.facts.edges);
+        assert_eq!(import.facts.edges[0].dst, "okf:acme/docs/b.md");
+        assert_eq!(
+            import.report.links_outside_relationships, 1,
+            "the prose citation is counted, not imported as a relationship"
+        );
+        assert_eq!(
+            import.report.links_unresolved, 1,
+            "an edge to a concept the bundle does not contain is dropped and said so"
+        );
+        assert_eq!(import.report.links_reciprocal, 1);
+    }
+
+    /// `yaml_scalar` escapes a newline, a quote and every control character, and
+    /// a reader that did not undo exactly that would hand back a different
+    /// string while looking fine. The fixture is produced by the writer, so the
+    /// two cannot drift apart.
+    #[test]
+    fn a_scalar_round_trips_through_the_writers_escaper() {
+        let hostile = "line one\nkey: forged\t\"quoted\" \\ back \u{1}";
+        let fm = Frontmatter {
+            type_: "doc".to_owned(),
+            title: Some(hostile.to_owned()),
+            ..Frontmatter::default()
+        };
+        let doc = format!("{}\n# x\n", fm.render());
+        let (block, _) = split_frontmatter(&doc).expect("split");
+        assert_eq!(parse_frontmatter(block).title.as_deref(), Some(hostile));
+    }
+
+    #[test]
+    fn an_imported_concept_fills_the_matching_placeholder() {
+        let stub = rto_graph::external_ref_key("acme::adr:0021");
+        let stubs = vec![stub.clone()];
+        let files = vec![("/decisions/adr-0021.md".to_owned(), AUTHORED.to_owned())];
+        let import = read_bundle("okf/", &files, &opts(Trust::Trust, &stubs)).expect("read");
+
+        assert_eq!(keys(&import), vec![stub.as_str()]);
+        let node = node_named(&import, &stub);
+        assert_eq!(node.name, "A decision");
+        assert_eq!(node.provenance, Provenance::ExternalAuthored);
+        assert!(node.meta.get("content").is_some(), "a stub gained content");
+        // Filling it must not stop it being a placeholder: the workspace
+        // resolver follows `meta.qualified` across repos (ADR-0009).
+        assert_eq!(node.meta["qualified"], "acme::adr:0021");
+        assert_eq!(
+            import.report.extrefs_filled,
+            vec![(stub, "/decisions/adr-0021.md".to_owned())]
+        );
+    }
+
+    /// `slug` is **not invertible**: it lowercases and collapses every run of
+    /// non-alphanumerics, so two different keys can produce one filename. When
+    /// they do, nothing is filled — a wrong fill attaches a peer's content to
+    /// the wrong node, which is worse than a stub that stayed a stub.
+    #[test]
+    fn an_ambiguous_correspondence_fills_nothing_and_says_so() {
+        // Both slug to `adr-0021`, which is the whole point of the fixture.
+        assert_eq!(slug("adr:0021"), slug("adr/0021"));
+        let a = rto_graph::external_ref_key("acme::adr:0021");
+        let b = rto_graph::external_ref_key("acme::adr/0021");
+        let stubs = vec![a.clone(), b.clone()];
+        let files = vec![("/decisions/adr-0021.md".to_owned(), AUTHORED.to_owned())];
+        let import = read_bundle("okf/", &files, &opts(Trust::Trust, &stubs)).expect("read");
+
+        assert_eq!(
+            keys(&import),
+            vec!["okf:acme/decisions/adr-0021.md"],
+            "the concept is still imported, just not attached to a placeholder"
+        );
+        assert!(import.report.extrefs_filled.is_empty());
+        assert_eq!(import.report.extrefs_ambiguous, vec![b, a]);
+    }
+
+    /// The section check is what establishes that the **bundle was written by
+    /// the placement rule the filename comparison assumes**, and it is not
+    /// decoration: a concept sitting somewhere `section_for` would never have
+    /// put it came from a producer with its own layout, so its filename was not
+    /// produced by [`slug`] either and a name that happens to match means
+    /// nothing.
+    ///
+    /// Here the filename is exactly right and the directory is not, which is
+    /// precisely the case a filename-only comparison would fill wrongly.
+    #[test]
+    fn a_concept_outside_the_layout_the_naming_rule_assumes_is_not_a_match() {
+        let stubs = vec![rto_graph::external_ref_key("acme::adr:0021")];
+        assert_eq!(section_for("adr"), "decisions");
+        let files = vec![(
+            "/notes/adr-0021.md".to_owned(),
+            "---\ntype: \"adr\"\n---\n\n# x\n".to_owned(),
+        )];
+        let import = read_bundle("okf/", &files, &opts(Trust::Trust, &stubs)).expect("read");
+        assert!(import.report.extrefs_filled.is_empty());
+        assert!(import.report.extrefs_ambiguous.is_empty());
+        assert_eq!(keys(&import), vec!["okf:acme/notes/adr-0021.md"]);
+    }
+
+    #[test]
+    fn a_relative_link_resolves_against_its_own_directory() {
+        assert_eq!(
+            resolve_target("/a/b/c.md", "../d/e.md").as_deref(),
+            Some("/a/d/e.md")
+        );
+        assert_eq!(
+            resolve_target("/a/b/c.md", "/x/y.md").as_deref(),
+            Some("/x/y.md")
+        );
+        assert_eq!(resolve_target("/a/b/c.md", "https://x/y").as_deref(), None);
+        assert_eq!(resolve_target("/a/b/c.md", "#anchor").as_deref(), None);
+    }
+
+    #[test]
+    fn an_actor_token_round_trips_and_never_loses_the_attribution() {
+        for token in ["human:alice", "roteiro/5.0.0", "process:sync"] {
+            assert_eq!(parse_actor(token).as_token(), token);
+        }
+        // An unrecognised form keeps the attribution rather than dropping it.
+        assert_eq!(parse_actor("mystery").as_token(), "process:mystery");
+    }
+
+    #[test]
+    fn an_unknown_frontmatter_key_takes_its_children_with_it() {
+        let block = "type: \"doc\"\nvendor_thing:\n  by: \"not-an-actor\"\n  nested:\n    - x\ntitle: \"kept\"\n";
+        let fm = parse_frontmatter(block);
+        assert_eq!(fm.type_, "doc");
+        assert_eq!(fm.title.as_deref(), Some("kept"));
+        assert_eq!(
+            fm.generated, None,
+            "a `by:` nested under an unknown key is not the document's origin"
+        );
+    }
+}

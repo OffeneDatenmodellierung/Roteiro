@@ -55,6 +55,8 @@
 //! producer that guarantees more than it must. A Roteiro bundle should not
 //! contain a broken link, and `roteiro check` is the reason.
 
+pub mod read;
+
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
@@ -346,6 +348,23 @@ pub fn concept_path(node: &NodeSummary) -> String {
 /// not. `tool` is the producing tool's actor, used for everything a machine
 /// produced; `human` is the authored content's confirmer, which the caller
 /// resolves from the commit that introduced it.
+///
+/// # An imported concept re-emits the peer's own origin and does not come here
+///
+/// A fact imported from another repository's bundle (`external-*`, issue #706)
+/// keeps the `generated`/`verified` block **that bundle carried**, recovered by
+/// [`read::peer_origin`] and preferred by the caller. That is what stops the
+/// round trip from re-tiering it: the peer's `verified: [{ by: human:alice }]`
+/// goes back out naming Alice, so the next consumer learns who confirmed it
+/// instead of being told this graph did.
+///
+/// The external arms below are the **fallback** for a concept whose bundle
+/// recorded no origin at all. They confirm only when the caller supplies an
+/// actor, on exactly `Authored`'s existing rule — an unknown confirmer yields no
+/// confirmation rather than the wrong one. Naming `tool` as the confirmer would
+/// be this graph vouching for a peer's fact on the strength of having read it.
+/// The cost is honest and one-directional: an unattributed external concept
+/// renders *unverified*, understating a claim rather than inventing one.
 #[must_use]
 pub fn origin_for(prov: Provenance, at: &str, tool: &Actor, human: Option<&Actor>) -> Origin {
     match prov {
@@ -353,18 +372,31 @@ pub fn origin_for(prov: Provenance, at: &str, tool: &Actor, human: Option<&Actor
         // the tool when the author is unknown would move the concept from
         // human-reviewed to machine-confirmed, so an unknown author yields no
         // confirmation at all rather than the wrong one.
-        Provenance::Authored => match human {
-            Some(actor) => Origin {
-                by: actor.clone(),
-                at: at.to_owned(),
-                confirms: true,
-            },
-            None => Origin {
-                by: tool.clone(),
-                at: at.to_owned(),
-                confirms: false,
-            },
-        },
+        //
+        // Both **external** confirming tiers join this arm, including
+        // `ExternalDerived` — which is the one place the imported tiers do not
+        // simply follow their local namesake, and the difference is the reason
+        // the tier is carried rather than the variant flattened. `Derived`
+        // confirms below because *a consumer can re-derive it from the same
+        // commit*; a consumer of **our** bundle cannot re-derive a peer's fact,
+        // having neither their tree nor their extractor. What survives an import
+        // is the peer's claim, and a claim needs a claimant's name on it to
+        // confirm anything — which is exactly `Authored`'s rule, so it is
+        // `Authored`'s arm.
+        Provenance::Authored | Provenance::ExternalDerived | Provenance::ExternalAuthored => {
+            match human {
+                Some(actor) => Origin {
+                    by: actor.clone(),
+                    at: at.to_owned(),
+                    confirms: true,
+                },
+                None => Origin {
+                    by: tool.clone(),
+                    at: at.to_owned(),
+                    confirms: false,
+                },
+            }
+        }
         // Deterministic extraction: a consumer can re-derive it from the same
         // commit and get the same answer, which is what machine-confirmed means.
         Provenance::Derived => Origin {
@@ -372,8 +404,10 @@ pub fn origin_for(prov: Provenance, at: &str, tool: &Actor, human: Option<&Actor
             at: at.to_owned(),
             confirms: true,
         },
-        // A similarity judgement carrying a confidence. Unverified, and honestly so.
-        Provenance::Inferred => Origin {
+        // A similarity judgement carrying a confidence. Unverified, and honestly
+        // so — and a peer's guess, or anything taken at *acknowledge* rather than
+        // *trust*, is unverified for the same reason.
+        Provenance::Inferred | Provenance::ExternalInferred => Origin {
             by: tool.clone(),
             at: at.to_owned(),
             confirms: false,

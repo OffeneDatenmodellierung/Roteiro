@@ -11,8 +11,8 @@ architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.0"
-last-modified: 2026-08-29
+version: "1.1"
+last-modified: 2026-09-01
 confluence-url:
 ---
 
@@ -20,7 +20,7 @@ confluence-url:
 
 | | |
 |---|---|
-| **Document version** | 1.0 |
+| **Document version** | 1.1 |
 | **Status** | Accepted |
 | **Decision makers** | The Roteiro Project Team |
 | **Related** | [[docs/adr/0009-cross-repo-workspace-links.md]] · [[docs/adr/0012-analyzer-findings-artifact-model.md]] |
@@ -67,6 +67,8 @@ than an invention:
 | `Authored` — ADR and blueprint prose | `verified: [{ by: human:<id> }]` | **human-reviewed** |
 | `Derived` — deterministic tree-sitter extraction | `verified: [{ by: roteiro/<version> }]` | machine-confirmed |
 | `Inferred` — heuristic, carries a confidence | `generated:` alone | unverified |
+| `ExternalAuthored` / `ExternalDerived` — imported (v1.1) | the peer's own `verified:` block, re-emitted verbatim | whatever **they** claimed |
+| `ExternalInferred` — imported, unverified or acknowledged | `generated:` alone | unverified |
 
 `Derived` is **machine-confirmed rather than unverified** deliberately: it is
 reproduced from the AST at a known commit, so a consumer can re-derive it and get
@@ -158,6 +160,70 @@ user loses the `_Home` note (the bundle root and every section directory carry
 an `index.md`) and
 `[[wikilinks]]` (Obsidian resolves markdown links too).
 
+### Reading a peer's bundle is the half that makes vendor-neutral pay (v1.1)
+
+The criticism this ADR levelled at the vault was that it was **one-way**: Roteiro
+wrote it, nothing read it back. Adopting a specification with other producers and
+then reading none of them would swap a proprietary one-way format for a standard
+one-way format. So a repository may now import **another repository's** bundle
+(issue #706, `roteiro import --from okf <path>`).
+
+**This does not make Roteiro's own output an input.** `render okf` still empties
+and rebuilds its output directory on every render, and nothing put inside it
+survives — see [[docs/OKF_BUNDLE.md]]. The reader consumes a *peer's* bundle; the
+render target remains a build output with no round trip through it.
+
+**Imported facts are `external-*`, and the tier is carried rather than
+collapsed.** A foreign bundle's `verified: [{ by: human:alice }]` means Alice
+confirmed it *in her repository*. Importing that as `Authored` would assert that
+this graph human-authored it — laundering someone else's confirmation, the exact
+failure this document names when it says a similarity judgement claiming
+confirmation "would launder a guess into a fact".
+
+The variant carries the peer's tier because `origin_for` matches provenance
+exhaustively. A flat `External` would force one arm and therefore one answer for
+everything imported: mapping to *unverified* downgrades a peer's human-reviewed
+concept, mapping to *machine-confirmed* upgrades their similarity guess — and
+`render okf` then re-emits the flattened tier outward to the next consumer.
+Laundering by round-trip, in the one format chosen because it can express the
+difference. **Externality flattens to one level**: a fact imported from B that B
+imported from C is `external-*`, not doubly so; which repository it came from is
+the import layer's `src_ref`.
+
+**A trusted concept re-emits the peer's own `generated`/`verified` block**,
+recovered from the node's `meta.okf.origin`. That is what makes the round trip
+honest — Alice's confirmation leaves here still naming Alice — rather than being
+re-tiered to unverified on the way out.
+
+**Trust is asked for, never assumed.** The manual command defaults to
+*acknowledge*: concepts arrive at `external-inferred` whatever the bundle
+claimed, so cross-repo references resolve to real content without this graph
+adopting a stranger's confirmations. `--trust` preserves the tiers they claimed
+and is a deliberate act. What they claimed is recorded in `meta.okf.claimed`
+either way, so the decision is reversible without re-reading anything.
+
+**An imported concept fills the `extref:` placeholder it corresponds to**
+([[docs/adr/0009-cross-repo-workspace-links.md]]), which is the payoff: a
+cross-repo reference stops resolving to a stub whose whole content is that it is
+not the document you wanted. The correspondence is computed **forwards** — this
+graph's own placeholder key through the writer's `slug`/`section_for` rule — and
+never by inverting a filename, because `slug` is lossy and two keys can produce
+one name. An ambiguous match fills **nothing**: a wrong fill attaches a peer's
+content to the wrong node, which is worse than an unfilled stub.
+
+**A bundle is read liberally and refused loudly.** An unrecognised `type` is
+imported (the specification leaves `type` open), a document with no frontmatter
+or no `type` is skipped *with its reason reported*, and an edge to a concept the
+bundle does not contain is dropped and counted. A directory in which **nothing**
+parsed is refused whole, because importing zero concepts while exiting zero
+reports success for having done nothing.
+
+**Automatic discovery and the interactive trust prompt are not implemented.**
+Issue #706 settles both — a workspace scan should find a member's bundle, and
+first contact should ask trust/acknowledge/ignore once and record the answer.
+Neither is here: they live in the workspace scan, and this change deliberately
+stayed out of it. Recorded so the decision is not read as delivered.
+
 ## Consequences
 
 **This is a breaking change**, hence 4.0.0: `Target::ObsidianVault` is removed
@@ -202,3 +268,4 @@ renderer nobody maintains.
 | Version | Date | Notes |
 |---------|------|-------|
 | 1.0 | 2026-08-29 | Accepted, and implemented in the same change (issue #663). Records the replacement of `render obsidian` by `render okf`, the provenance-to-trust-tier mapping that motivates it, that the `human:` verifier is resolved per document rather than per repository, that links resolve against the placement rather than the key and a cross-repo reference follows through to the other member's concept, that a shallow clone confirms nothing rather than confirming everything, that a scalar cannot forge a frontmatter key, that only the decision carries the decision's `status`, that the bundle is dated by the commit, and the two `_Home` capabilities — the version-pin table and the findings summary — that have no OKF home yet. |
+| 1.1 | 2026-09-01 | **Roteiro reads OKF as well as writing it** (issue #706, phase 1). The v1.0 argument was that a vendor-neutral format beats one application's conventions; consuming is the half that pays for it, and until now the bundle was a standard one-way format rather than a proprietary one. Records four decisions. **Imported facts get `external-derived` / `external-authored` / `external-inferred`**, so [[crates/rto-graph/src/provenance.rs#Provenance]] is six tokens rather than three: the tier is carried because `origin_for` matches exhaustively, and a flat `External` would force one arm and therefore either downgrade a peer's human-reviewed concept or upgrade their similarity guess — and then re-emit the flattened tier outward, laundering by round-trip. Externality flattens to one level; the import layer's `src_ref` names who it came from. **A trusted concept re-emits the peer's own `generated`/`verified` block** from `meta.okf.origin`, so their verifier leaves here by name instead of being re-tiered to unverified. **`roteiro import --from okf` defaults to *acknowledge***, landing everything at `external-inferred` whatever the bundle claimed, because a hand-run command that silently adopted a stranger's confirmations is the thing the consent decision exists to prevent; `--trust` preserves their tiers and what they claimed is recorded in `meta.okf.claimed` either way. **An imported concept fills the `extref:` placeholder it corresponds to** ([[docs/adr/0009-cross-repo-workspace-links.md]]), computed forwards through the writer's own naming rule rather than by inverting a lossy `slug`, and filling nothing when the match is ambiguous. Also: a bundle is read liberally per §11 — an unrecognised `type` is imported, a malformed document is skipped with its reason reported — but a directory in which nothing parsed is refused whole. The schema gains migration 14 to widen the store's provenance `CHECK`, which is also the mechanism that makes an older build report such a store as "written by a newer Roteiro" rather than as corrupt. **Not implemented, and deliberately so:** automatic discovery during the workspace scan, and the interactive trust/acknowledge/ignore prompt with its per-source record. Both live in the workspace scan and are deferred to a later phase; this row exists so the issue's decisions are not read as delivered. |

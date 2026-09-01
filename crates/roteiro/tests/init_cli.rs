@@ -98,7 +98,13 @@ fn init_installs_hooks_and_checkout_refreshes_graph() {
         "src/main.rs",
         "fn main() { helper(); }\nfn helper() {}\nfn added() {}\n",
     );
-    git(&dir, None, &["commit", "-q", "-am", "add fn"]);
+    // `bindir`, not `None`. `roteiro init` above installed a **pre-commit** hook,
+    // so this commit runs one — and with the ambient PATH it runs whichever
+    // `roteiro` the developer happens to have installed, not the binary under
+    // test. On a machine with none it silently runs nothing, which is how the
+    // hole stayed open; on a machine with an older one it fails on a schema this
+    // build wrote, naming a binary the test never meant to involve.
+    git(&dir, Some(bindir), &["commit", "-q", "-am", "add fn"]);
 
     std::fs::remove_dir_all(dir.join(".git/roteiro")).expect("wipe graph");
     git(&dir, Some(bindir), &["checkout", "-q", "main"]);
