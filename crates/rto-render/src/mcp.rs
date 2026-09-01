@@ -218,8 +218,8 @@ type SharedWorkspace = Arc<Workspace>;
 // is a property of the surface rather than a preference about strictness.**
 //
 // An argument key nothing recognises used to be dropped, which is not a
-// harmless leniency: this surface spells `debt`'s category filter `kind` while
-// the served `/v1` registry spells it `categories`, so a model reaching `debt`
+// harmless leniency: this surface spelled `debt`'s category filter `kind` while
+// the served `/v1` registry spelled it `categories`, so a model reaching `debt`
 // here with the other surface's spelling was handed **every marker in the
 // repository, presented as the filtered set it asked for** — a wrong answer
 // wearing a correct answer's clothes, with nothing in it to tell them apart.
@@ -228,7 +228,7 @@ type SharedWorkspace = Arc<Workspace>;
 //
 // Refusing closes the class rather than that one instance, and serde's own
 // message is close to ideal for it because it names the keys that *are*
-// accepted ("unknown field `categories`, expected one of `kind`, `project`").
+// accepted ("unknown field `kind`, expected one of `categories`, `project`").
 // rmcp reaches the caller with it as a JSON-RPC `invalid_params` error —
 // `Parameters<P>` deserialises the call's `arguments` object and nothing else,
 // so this is safe against the protocol: `_meta`, `input_responses` and
@@ -242,10 +242,14 @@ type SharedWorkspace = Arc<Workspace>;
 // arriving without it. The `/v1` surface states and enforces the same rule
 // through `rto_serve::tools::unknown_argument`.
 //
-// The two surfaces still spell that one argument differently. Unifying them is
-// a separate decision, and it was unsafe to take *before* this: while unknown
-// keys were dropped, a rename would have changed existing callers' results
-// silently instead of telling them.
+// The two surfaces now spell that argument the same way — `categories`, on both
+// — and the refusal above is what made the rename safe to take. While unknown
+// keys were dropped, renaming `kind` here would have left every existing caller
+// parsing fine and quietly receiving *unfiltered* results, which is the worst
+// available migration. Refusing first turns the same call into a message that
+// names the new key, so the break is loud and self-explaining rather than
+// silent. `both_surfaces_name_a_shared_tools_arguments_the_same_way` in
+// `roteiro` is what keeps them from drifting apart again.
 
 /// Arguments for the `explain` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -326,26 +330,38 @@ struct CheckArgs {
 }
 
 /// Arguments for the `debt` tool.
+///
+/// `categories`, not `kind`: the served `/v1` registry already spelled it that
+/// way, the values are marker *categories* rather than node kinds, and `kind` is
+/// taken on this very surface for something else — [`ListKindArgs::kind`] is a
+/// node-kind token (`fn`, `struct`, `adr`, `file`). One word meaning two things
+/// across neighbouring tools is a real ambiguity for a model choosing arguments,
+/// and this doc comment used to say "categories" directly above a field called
+/// `kind`.
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct DebtArgs {
     /// Restrict to these categories (empty = all): todo, fixme, hack, stub,
     /// deferred.
     #[serde(default)]
-    kind: Vec<String>,
+    categories: Vec<String>,
     /// Which hosted project to query (see `list_projects`); omit if single.
     #[serde(default)]
     project: Option<String>,
 }
 
 /// Arguments for the `debt_density` tool.
+///
+/// `categories` for the reason [`DebtArgs`] gives — it is the same filter, and
+/// it reaches the same `rto_graph` parameter, which has always been called
+/// `categories` there.
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct DensityArgs {
     /// Restrict to these categories (empty = all): todo, fixme, hack, stub,
     /// deferred.
     #[serde(default)]
-    kind: Vec<String>,
+    categories: Vec<String>,
     /// Rank by `density` (default), `markers` (the raw count) or `lines`.
     #[serde(default)]
     order: Option<String>,
@@ -817,7 +833,7 @@ impl GraphServer {
         // apply. Every surface that *can* reach the config does — the
         // enumeration is on `debt_density` below.
         query_result(self.with_project(args.project.as_deref(), |store| {
-            debt(store, &args.kind, &[])
+            debt(store, &args.categories, &[])
         }))
     }
 
@@ -853,7 +869,7 @@ impl GraphServer {
         // settled (#409). Adding a surface means adding it here. An MCP client
         // sees the unfiltered inventory.
         query_result(self.with_project(args.project.as_deref(), |store| {
-            rto_graph::debt_density(store, &args.kind, &[], order, limit, min_lines)
+            rto_graph::debt_density(store, &args.categories, &[], order, limit, min_lines)
         }))
     }
 
@@ -1292,6 +1308,41 @@ impl ServerHandler for GraphServer {
     }
 }
 
+/// Each advertised tool's **argument names**, by tool name.
+///
+/// Read off the `inputSchema` a client is actually handed — the one `schemars`
+/// derives from the argument structs — rather than off the source text, so it
+/// cannot be satisfied by a comment and cannot drift from what is advertised.
+///
+/// Exists for the same reason [`tool_names`] does, one level down. The two tool
+/// surfaces declare their schemas from separate definitions — this one from the
+/// `#[derive(JsonSchema)]` structs above, the served-chat `GraphToolRegistry`
+/// from hand-written `json!` literals — so nothing but a test holds their
+/// *argument* names level, and the names are what a model has to get right to
+/// ask the question it means. Offering the same tools under different argument
+/// spellings is the failure this exposes: `debt`'s category filter was `kind`
+/// here and `categories` there, one word that also means *node kind* in
+/// `list_kind`, and a model that guessed from the wrong surface got every marker
+/// in the repository back as the filtered set it asked for.
+/// `both_surfaces_name_a_shared_tools_arguments_the_same_way` in `roteiro` is the
+/// consumer.
+#[must_use]
+pub fn tool_argument_names() -> std::collections::BTreeMap<String, BTreeSet<String>> {
+    GraphServer::routes(&Advertised::All)
+        .list_all()
+        .into_iter()
+        .map(|t| {
+            let names = t
+                .input_schema
+                .get("properties")
+                .and_then(serde_json::Value::as_object)
+                .map(|props| props.keys().cloned().collect())
+                .unwrap_or_default();
+            (t.name.to_string(), names)
+        })
+        .collect()
+}
+
 /// Each advertised tool's **description**, by name.
 ///
 /// Exists so the copy `rmcp` forces can be compared against its source. The macro
@@ -1725,15 +1776,21 @@ mod tests {
             .collect()
     }
 
-    /// **The instance the rule was written for**: `categories` is the *served*
-    /// surface's name for `debt`'s filter, and this surface calls it `kind`.
+    /// **The migration this rename was sequenced to buy.** `kind` was this
+    /// surface's old name for `debt`'s filter; a client still sending it must be
+    /// *told*, by name, rather than quietly answered.
+    ///
+    /// This is the whole reason the refusal landed first. While an unrecognised
+    /// key was dropped, the same call would have deserialised to `categories:
+    /// []` — and an empty filter means *every* category — so a caller that had
+    /// been asking for `todo` since before the rename would have gone on parsing
+    /// fine and started receiving the entire repository's debt, presented as the
+    /// filtered set it asked for. Refusing converts that into a message naming
+    /// the key that replaced it, which a model can act on in one turn.
     ///
     /// It has to be exercised through deserialisation rather than by building a
-    /// `DebtArgs`, because that is where the key was dropped: the typed struct
-    /// every other test here constructs cannot express the defect. Sent as JSON
-    /// it used to arrive as `kind: []`, and an empty `kind` means *every*
-    /// category — so the model that asked for `todo` was handed the whole
-    /// repository's debt and told nothing.
+    /// `DebtArgs`, because that is where the key would be dropped: the typed
+    /// struct every other test here constructs cannot express the defect.
     ///
     /// This is what rmcp deserialises: `Parameters<DebtArgs>` runs
     /// `serde_json::from_value` over the call's `arguments` object and reports a
@@ -1741,40 +1798,47 @@ mod tests {
     /// parameters: …"), so the message asserted here is the one that reaches the
     /// client.
     #[test]
-    fn an_argument_key_this_surface_does_not_know_is_refused() {
-        let sent = serde_json::json!({ "categories": ["todo"] });
+    fn the_old_argument_name_is_refused_rather_than_silently_dropped() {
+        let sent = serde_json::json!({ "kind": ["todo"] });
         let err = serde_json::from_value::<DebtArgs>(sent).expect_err("refused");
         let message = err.to_string();
         assert!(
-            message.contains("unknown field `categories`"),
+            message.contains("unknown field `kind`"),
             "the refusal must name the key that was sent: {message}",
         );
         assert!(
-            message.contains("`kind`") && message.contains("`project`"),
-            "and the keys that would have worked, or the model guesses again from \
-             the same wrong surface: {message}",
+            message.contains("`categories`") && message.contains("`project`"),
+            "and the keys that would have worked — this is the entire migration \
+             path for a caller written against the old name, so the replacement \
+             has to be *in the message*: {message}",
         );
 
-        // The same for `debt_density`, whose filter carries both spellings too.
+        // The same for `debt_density`, which carried the same filter under the
+        // same old name.
         let err = serde_json::from_value::<DensityArgs>(
-            serde_json::json!({ "categories": ["todo"], "order": "markers" }),
+            serde_json::json!({ "kind": ["todo"], "order": "markers" }),
         )
         .expect_err("refused");
-        assert!(err.to_string().contains("unknown field `categories`"));
+        let message = err.to_string();
+        assert!(
+            message.contains("unknown field `kind`") && message.contains("`categories`"),
+            "{message}",
+        );
     }
 
     /// The other direction, so the rule is not satisfied by refusing everything:
-    /// this surface's own spelling still parses, and still filters.
+    /// the shared spelling parses on this surface, and still filters.
     #[test]
     fn this_surfaces_own_argument_names_still_parse() {
-        let args: DebtArgs =
-            serde_json::from_value(serde_json::json!({ "kind": ["todo"], "project": "roteiro" }))
-                .expect("accepted");
-        assert_eq!(args.kind, ["todo"]);
+        let args: DebtArgs = serde_json::from_value(
+            serde_json::json!({ "categories": ["todo"], "project": "roteiro" }),
+        )
+        .expect("accepted");
+        assert_eq!(args.categories, ["todo"]);
         assert_eq!(args.project.as_deref(), Some("roteiro"));
         // And an omitted argument is still omitted rather than required.
         let bare: DebtArgs = serde_json::from_value(serde_json::json!({})).expect("accepted");
-        assert!(bare.kind.is_empty() && bare.project.is_none());
+        assert!(bare.categories.is_empty() && bare.project.is_none());
     }
 
     /// The class, not the instance: **every** advertised tool's argument object
@@ -1891,7 +1955,7 @@ mod tests {
         let none = text_of(
             &server
                 .debt(Parameters(DebtArgs {
-                    kind: vec!["stub".into()],
+                    categories: vec!["stub".into()],
                     project: None,
                 }))
                 .await,

@@ -17447,7 +17447,7 @@ mod workspace_scoped_tools {
     /// `additionalProperties: false` is what `rto_serve::tools` enforces, so a
     /// definition arriving without it is a tool that silently drops a key nobody
     /// reads — which is how a model asking `debt` for one category with the MCP
-    /// surface's `kind` spelling received every marker in the repository,
+    /// surface's then-`kind` spelling received every marker in the repository,
     /// presented as the filtered set it asked for. The flag has to sit on the **composed**
     /// schema rather than inside `with_project`'s properties fragment, and this
     /// reads `parameters` exactly where the tool loop reads it, so a flag placed
@@ -17479,13 +17479,11 @@ mod workspace_scoped_tools {
     /// The rule, exercised where a model meets it: a key this surface does not
     /// declare is refused by name, and the tool is not run.
     ///
-    /// `roteiro`'s registry is the one that actually carries the divergent
-    /// spelling — `categories` here, `kind` on MCP — so the case is stated
-    /// against the real definitions rather than against a fixture that merely has
-    /// the same shape. `rto_serve::tools` owns the end-to-end assertion about
-    /// what reaches the model.
+    /// Stated against `roteiro`'s real registry rather than against a fixture
+    /// that merely has the same shape. `rto_serve::tools` owns the end-to-end
+    /// assertion about what reaches the model.
     #[test]
-    fn the_other_surfaces_spelling_is_refused_rather_than_dropped() {
+    fn an_undeclared_argument_is_refused_rather_than_dropped() {
         use rto_serve::ToolRegistry as _;
 
         let registry = called_registry();
@@ -17501,14 +17499,82 @@ mod workspace_scoped_tools {
             .map(String::as_str)
             .collect();
         assert!(
-            declared.contains(&"categories") && !declared.contains(&"kind"),
-            "this surface's `debt` filter is spelled `categories`: {declared:?}",
+            declared.contains(&"categories"),
+            "`debt`'s filter is spelled `categories` on both surfaces: {declared:?}",
         );
         assert_eq!(
             debt.parameters.get("additionalProperties"),
             Some(&serde_json::Value::Bool(false)),
-            "so `kind` must be refused rather than dropped — an empty filter means \
-             EVERY category, which is the wrong answer wearing a right one's clothes",
+            "so anything else must be refused rather than dropped — an empty filter \
+             means EVERY category, which is the wrong answer wearing a right one's clothes",
+        );
+    }
+
+    /// **The two surfaces must name a shared tool's arguments identically**, not
+    /// merely offer the same tools and describe them the same way.
+    ///
+    /// This is the argument-level twin of
+    /// `both_tool_surfaces_describe_a_tool_the_same_way`, and it exists because
+    /// the gap between those two tests is where a real defect lived. `debt` and
+    /// `debt_density` were advertised on both surfaces, under the same names,
+    /// with byte-identical descriptions — and their category filter was called
+    /// `kind` on MCP and `categories` here. Every name-level and prose-level
+    /// check passed throughout. A model that had read one surface and reached the
+    /// other sent a key that surface did not declare, and while unknown keys were
+    /// dropped it was handed **every marker in the repository as the filtered set
+    /// it asked for**. `kind` was doubly wrong: it is this tool surface's word
+    /// for a *node* kind in `list_kind`, so one token meant two things across
+    /// neighbouring tools.
+    ///
+    /// Asserting that `debt` declares `categories` would not close that — it
+    /// passes just as well on a tree where MCP has drifted to something else
+    /// again. So this is driven from **both** sets of definitions and compares
+    /// them to each other: `rto_render::mcp::tool_argument_names` reads the
+    /// `inputSchema` `schemars` derives from the argument structs, this registry
+    /// yields the hand-written `json!` properties, and every tool present on both
+    /// must agree. Neither side is privileged, so renaming *either* one alone
+    /// fails, naming both spellings.
+    ///
+    /// Tools on only one surface are `both_tool_surfaces_offer_the_same_tools`'s
+    /// finding, not this one's — `list_kind` is MCP-only by record — so they are
+    /// skipped here rather than reported twice.
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn both_surfaces_name_a_shared_tools_arguments_the_same_way() {
+        use rto_serve::ToolRegistry as _;
+        use std::collections::BTreeSet;
+
+        let mcp = rto_render::mcp::tool_argument_names();
+        let differ: Vec<String> = called_registry()
+            .tools()
+            .into_iter()
+            .filter_map(|t| {
+                // A name on one surface and not the other is the *other* test's
+                // finding; this one is only about what the shared ones take.
+                let mcp_args = mcp.get(&t.name)?;
+                let served: BTreeSet<String> = t
+                    .parameters
+                    .get("properties")
+                    .and_then(serde_json::Value::as_object)
+                    .map(|props| props.keys().cloned().collect())
+                    .unwrap_or_default();
+                (&served != mcp_args).then(|| {
+                    let only_served: Vec<&String> = served.difference(mcp_args).collect();
+                    let only_mcp: Vec<&String> = mcp_args.difference(&served).collect();
+                    format!(
+                        "{}: only on the served surface {only_served:?}, only on MCP {only_mcp:?}",
+                        t.name,
+                    )
+                })
+            })
+            .collect();
+        assert!(
+            differ.is_empty(),
+            "these tools take differently-named arguments on the two surfaces, so a \
+             model that read one and called the other asks a question neither \
+             answers — and every key it gets wrong is a filter it silently did not \
+             get. Pick one spelling and use it on both:\n  {}",
+            differ.join("\n  "),
         );
     }
 
