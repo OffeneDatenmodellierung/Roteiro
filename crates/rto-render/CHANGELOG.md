@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.2.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v4.1.0...rto-render-v4.2.0) - 2026-09-01
+
+### Fixed
+
+- *(render)* the space guard's own diagnostic could panic on a multi-byte character
+- *(mcp)* give the MCP surface the read-the-content rule the served turn has
+
+### Other
+
+- *(render)* pin that no advertised description carries a run of spaces
+- *(render)* cut 1,709 bytes of advertised tool prose ([#675](https://github.com/OffeneDatenmodellierung/Roteiro/pull/675))
+
 ## [4.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v4.0.0...rto-render-v4.1.0) - 2026-09-01
 
 ### Fixed
