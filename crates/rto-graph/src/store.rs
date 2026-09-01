@@ -1638,14 +1638,20 @@ fn remove_withdrawn_nodes(
         // other producer, and removing the node would take that relationship
         // with it — a deletion nobody asked for, disguised as a cleanup. It
         // would also violate the foreign key, so this is correctness twice over.
-        let attached: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM edges \
+        //
+        // `EXISTS`, not `COUNT(*) > 0`. The question is "is there one", and a
+        // count says "tally them all, then ask whether the tally was zero" —
+        // which is both a different sentence and more work: with the `OR dst`
+        // arm, a well-connected node in this repository would scan on the order
+        // of 1,600 edge rows where the probe stops at the first hit.
+        let attached: bool = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM edges \
              WHERE src = (SELECT id FROM nodes WHERE key = ?1) \
-                OR dst = (SELECT id FROM nodes WHERE key = ?1)",
+                OR dst = (SELECT id FROM nodes WHERE key = ?1))",
             [key],
             |r| r.get(0),
         )?;
-        if attached > 0 {
+        if attached {
             continue;
         }
         let gone = conn.execute("DELETE FROM nodes WHERE key = ?1", [key])?;
@@ -2799,32 +2805,60 @@ mod tests {
         assert_eq!(store.node_count().expect("count"), 2);
     }
 
-    /// A withdrawn node that something is **still attached to** survives.
+    /// A withdrawn node that something is **still attached to** survives, in
+    /// either direction.
     ///
     /// The layer stopped asserting the node, but another producer's edge still
     /// relates it to the graph. Removing it would take that relationship with it
     /// — a deletion nobody asked for, wearing a cleanup's clothes — and would
     /// violate the foreign key on the way out.
+    ///
+    /// Both ends are exercised on purpose: the probe is an `OR` over `src` and
+    /// `dst`, so a fixture attaching the node only as a destination leaves the
+    /// other arm free to be deleted with nothing going red.
     #[test]
     fn a_withdrawn_node_another_producer_still_points_at_is_kept() {
         let mut store = Store::open_in_memory().expect("open");
         let derived = FactSet::new().with_node(Node::new("file:a.rs", NodeKind::File, "a.rs"));
         store.rebuild(&derived, Some("tree1")).expect("rebuild");
 
-        let target = Node::new("okf:acme/shared.md", NodeKind::Doc, "shared")
+        // Two withdrawn nodes, one for each **direction** an edge can attach.
+        // The probe is an `OR` over `src` and `dst`, and a test that only ever
+        // put the node on one end would leave the other arm unguarded: deleting
+        // `src = …` from the query changed no test until this second node
+        // existed, which is how the gap was found.
+        let inbound = Node::new("okf:acme/pointed-at.md", NodeKind::Doc, "pointed at")
             .with_provenance(Provenance::ExternalDerived);
-        let first = FactSet::new().with_node(target);
+        let outbound = Node::new("okf:acme/points-from.md", NodeKind::Doc, "points from")
+            .with_provenance(Provenance::ExternalDerived);
+        let first = FactSet::new().with_node(inbound).with_node(outbound);
         store
             .apply_import_layer("import:okf/acme", &first)
             .expect("first");
 
-        // A different layer relates the derived file to the imported concept.
-        let linking = FactSet::new().with_edge({
-            let mut e =
-                Edge::inferred("file:a.rs", "okf:acme/shared.md", EdgeKind::References, 0.9);
-            e.src_ref = Some("import:links".to_owned());
-            e
-        });
+        // A different layer relates the derived file to one imported concept,
+        // and the other imported concept to the derived file.
+        let linking = FactSet::new()
+            .with_edge({
+                let mut e = Edge::inferred(
+                    "file:a.rs",
+                    "okf:acme/pointed-at.md",
+                    EdgeKind::References,
+                    0.9,
+                );
+                e.src_ref = Some("import:links".to_owned());
+                e
+            })
+            .with_edge({
+                let mut e = Edge::inferred(
+                    "okf:acme/points-from.md",
+                    "file:a.rs",
+                    EdgeKind::References,
+                    0.9,
+                );
+                e.src_ref = Some("import:links".to_owned());
+                e
+            });
         store
             .apply_import_layer("import:links", &linking)
             .expect("link layer");
@@ -2832,11 +2866,21 @@ mod tests {
         let applied = store
             .apply_import_layer("import:okf/acme", &FactSet::new())
             .expect("withdraw everything");
-        assert_eq!(applied.nodes_removed, 0);
         assert!(
-            store.get_node("okf:acme/shared.md").expect("get").is_some(),
-            "a node with a surviving edge must not be removed"
+            store
+                .get_node("okf:acme/pointed-at.md")
+                .expect("get")
+                .is_some(),
+            "a node another producer's edge points *at* must not be removed"
         );
+        assert!(
+            store
+                .get_node("okf:acme/points-from.md")
+                .expect("get")
+                .is_some(),
+            "nor one another producer's edge points *from*"
+        );
+        assert_eq!(applied.nodes_removed, 0);
     }
 
     /// Removal takes the node's cached context with it. A bundle assembled for a
