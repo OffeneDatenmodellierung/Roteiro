@@ -7,7 +7,10 @@
 //! backs the tools with the actual graph store. llama.cpp/`llama-cpp-2` provides
 //! no native tool support, so the protocol is hand-rolled and model-agnostic:
 //! any instruction-following model that emits the documented `<tool_call>` form
-//! works, without a model-specific template.
+//! works, without a model-specific template. A model that emits its *own* form
+//! instead works too, provided that form is a [`Dialect`] — the envelope is a
+//! property of the dialect (#592), so `Dialect::ALL` is the whole list of what
+//! can be read and nothing sits above it deciding what is worth reading.
 //!
 //! # Two kinds of tool, and the boundary between them
 //!
@@ -222,17 +225,18 @@ enum Ending {
 /// forward.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Unfinished {
-    /// `</tool_call>` never arrived and generation stopped at the token cap.
+    /// The call's own dialect could not prove it whole ([`Envelope`]), and
+    /// generation stopped at the token cap.
     ///
     /// This is **evidence, not inference**: [`FinishReason::Length`] is set by
     /// the decode loop only when `max_tokens` was reached before an end-of-
     /// generation token, so the engine is reporting the truncation rather than
     /// the parser guessing at it.
     CutAtTokenCap,
-    /// `</tool_call>` never arrived, but the model chose to stop: it emitted
-    /// end-of-generation part-way through writing a call.
+    /// The same unproven call, but the model chose to stop: it emitted
+    /// end-of-generation part-way through writing one.
     CutShort,
-    /// The call was closed and no [`Dialect`] understood its body — the shape
+    /// The call arrived whole and no [`Dialect`] understood its body — the shape
     /// #489 opened on, still reachable by a dialect Roteiro has not learned.
     Unreadable,
 }
@@ -428,12 +432,17 @@ fn unfinished_refusal(why: Unfinished, limits: Limits) -> String {
         // has, written wrongly. Observed live on `qwen3-coder-30b-a3b`, the
         // common one is the second — valid-looking JSON with a brace too many —
         // so the message does not claim to know which.
+        //
+        // The dialects are deliberately *not* enumerated here. The sentence used
+        // to say "neither the JSON nor the XML dialect", which was a list that
+        // went stale the moment `Dialect::ALL` grew a third entry (#592) — and
+        // went stale silently, because prose is not driven from the array.
         Unfinished::Unreadable => format!(
-            "{REFUSAL}the model wrote a tool call Roteiro could not read: it parses as \
-             neither the JSON nor the XML dialect, so it is either malformed or a form \
-             Roteiro has not learned. Either way this reply is a call rather than an \
-             answer. Nothing was executed. Retry the question; if it keeps happening, \
-             report the model and the call it wrote at \
+            "{REFUSAL}the model wrote a tool call Roteiro could not read: it parses in none \
+             of the call forms Roteiro knows, so it is either malformed or a form Roteiro \
+             has not learned. Either way this reply is a call rather than an answer. \
+             Nothing was executed. Retry the question; if it keeps happening, report the \
+             model and the call it wrote at \
              https://github.com/OffeneDatenmodellierung/Roteiro/issues."
         ),
     }
@@ -828,9 +837,12 @@ fn tool_system_prompt(tools: &[&ToolDef], graph: bool) -> String {
 /// is how #489's dialect problem starts.
 fn system_prompt(tools: &[&ToolDef], list: bool, graph: bool) -> String {
     // The `<tool_call>` envelope is stated either way, because it is *this
-    // server's* and no chat template supplies it: `read_markup` keys on that
-    // wrapper, and a model left to its own would use whatever wrapper it was
-    // trained on — which for a model Roteiro has never seen is not this one.
+    // server's* and no chat template supplies it: a model left to its own would
+    // use whatever envelope it was trained on — which for a model Roteiro has
+    // never seen is not this one. Since #592 that is an optimisation rather than
+    // the last line of defence: a model whose training beats this instruction is
+    // read anyway if its envelope is a `Dialect`, and refused rather than
+    // published as prose if it is not.
     //
     // What differs is the body. With no listing here the model has been shown the
     // tools in its own trained shape, so pinning a competing inner form is how
@@ -1163,7 +1175,8 @@ fn shared_notes(advertised: &[Advertisement]) -> Vec<(String, String)> {
 /// Three of them are three different situations and only one of them is an
 /// answer, so the type says three things.
 enum Markup {
-    /// No `<tool_call>` at all: whatever the model wrote is its own text.
+    /// No [`Dialect`]'s opening marker at all: whatever the model wrote is its
+    /// own text.
     None,
     /// A complete call, in one of the [`Dialect`]s.
     ///
@@ -1174,120 +1187,308 @@ enum Markup {
     /// mixed-turn rule is expressible and testable before the parser can produce
     /// a mixed turn.
     Call(ToolCall),
-    /// `<tool_call>` markup that is not a runnable call.
+    /// Tool-call markup, in some dialect, that is not a runnable call.
     Unfinished(Unfinished),
 }
 
-/// The `<tool_call>` wrapper in `text` — read once here for every [`Dialect`],
-/// because both forms nest inside it and a change to the wrapper must not reach
-/// one dialect and miss the other.
-enum Wrapper<'a> {
-    /// No `<tool_call>` in the text.
-    Absent,
-    /// `<tool_call>…</tool_call>`, with this body between them.
-    Closed(&'a str),
-    /// `<tool_call>` was opened and never closed.
-    Open,
+/// Where a [`Dialect`]'s calls begin and end in a generation, and — the half
+/// that carries the weight — **what proves one arrived whole**.
+///
+/// This is what makes a dialect *reachable* (#592). The `<tool_call>` wrapper
+/// used to be searched for one layer *above* [`Dialect`], and a dialect was
+/// consulted only inside a wrapper that had already been found. So
+/// [`Dialect::ALL`] guaranteed that every dialect was handled *consistently* —
+/// parser and parity test drive from the same array — and guaranteed nothing
+/// about any of them being reachable: a model whose call form does not nest
+/// inside `<tool_call>` never reached a dialect at all. That is not
+/// hypothetical. `voxtral-mini-3b`'s own chat template renders a call as
+/// `[TOOL_CALLS]name[ARGS]{…}` and contains no `<tool_call>` anywhere, so once
+/// `rto_llama` renders that template rather than assuming the `ChatML` shape
+/// (#492), the model emits a well-formed call the parser cannot see, and the raw
+/// markup goes to the user as prose — #489's failure mode by a new route.
+///
+/// Widening the old search to a longer list of literals was the fix not taken:
+/// it rebuilds the same layering one literal taller, and the next form Roteiro
+/// has not met is unreachable again. The envelope is a property of the dialect
+/// instead, so `ALL` now means reachable as well as consistent.
+///
+/// # The completeness rule, restated so that it covers both shapes
+///
+/// [`read_markup`] used to own this rule, and owned it in the only vocabulary a
+/// wrapper has: *without `</tool_call>` the call did not arrive*. That sentence
+/// cannot even be spoken about a form with no closing marker, so the rule is
+/// stated one level up, where it says the same thing about both:
+///
+/// > **A call arrived only when its own dialect can prove it whole.**
+///
+/// The two variants are the two proofs, and the difference between them is not
+/// a matter of taste:
+///
+/// * [`Self::Delimited`] proves arrival with the **closing marker, never with
+///   the body**. A JSON body does prove itself — `serde_json` rejects an
+///   unclosed object — but an XML one does not: [`parse_xml_body`] deliberately
+///   tolerates a missing `</function>` and a missing `</parameter>`, so
+///   `…<parameter=query>\nwin` parses happily into `search(query="win")`, a
+///   *different question, silently answered*. Trusting the body here would hold
+///   for one dialect and not the other, which is precisely the drift
+///   [`Dialect::ALL`] exists to prevent.
+/// * [`Self::SelfClosing`] has no closing marker to wait for — Mistral's form is
+///   terminated by its own JSON — so the proof must come from the body's
+///   grammar. That is legitimate **only** for a grammar that rejects a truncated
+///   body, which is the condition the XML dialect fails and JSON meets.
+///
+/// The condition is not left to a reader of this comment:
+/// `no_dialect_reads_a_truncated_call_as_a_whole_one` drives every dialect in
+/// `ALL`, feeds each one every proper prefix of a call it renders itself, and
+/// requires that none of them yields a call. Declaring a lenient grammar
+/// self-closing fails it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Envelope {
+    /// A call runs from `open` to `close`, and the closing marker is the whole
+    /// proof that it arrived: `<tool_call>`…`</tool_call>`.
+    Delimited {
+        /// The marker that says a call started.
+        open: &'static str,
+        /// The marker that proves it finished.
+        close: &'static str,
+    },
+    /// A call starts at `open` and ends where its own body ends, so the body's
+    /// grammar is the proof: `[TOOL_CALLS]name[ARGS]{…}` ends with its JSON.
+    SelfClosing {
+        /// The marker that says a call started.
+        open: &'static str,
+    },
 }
 
 /// The wrapper tags, named because each is matched in two places.
 const TOOL_CALL_OPEN: &str = "<tool_call>";
 const TOOL_CALL_CLOSE: &str = "</tool_call>";
 
-/// Find the first `<tool_call>` wrapper in `text` and report what state it is in.
-fn wrapper(text: &str) -> Wrapper<'_> {
-    let Some(open) = text.find(TOOL_CALL_OPEN) else {
-        return Wrapper::Absent;
-    };
-    let rest = &text[open + TOOL_CALL_OPEN.len()..];
-    match rest.find(TOOL_CALL_CLOSE) {
-        Some(end) => Wrapper::Closed(rest[..end].trim()),
-        None => Wrapper::Open,
+/// The Mistral envelope's markers, as `voxtral-mini-3b`'s template writes them:
+/// `"[TOOL_CALLS]" + name + "[ARGS]" + arguments`.
+const TOOL_CALLS_OPEN: &str = "[TOOL_CALLS]";
+const ARGS_OPEN: &str = "[ARGS]";
+
+impl Envelope {
+    /// The marker that says a call *started* — the only thing every envelope
+    /// has, and so the only thing a generic caller may key on.
+    ///
+    /// Used by `no_refusal_contains_any_dialects_opening_marker`: Roteiro's own
+    /// refusals are assistant-slot text that can be carried into a following
+    /// turn, so a refusal containing one of these would be read back as a call
+    /// by the very function that wrote it.
+    const fn opening(self) -> &'static str {
+        match self {
+            Self::Delimited { open, .. } | Self::SelfClosing { open } => open,
+        }
+    }
+
+    /// Frame the first call in `text` under this envelope.
+    fn frame(self, text: &str) -> Framing<'_> {
+        let open = self.opening();
+        let Some(at) = text.find(open) else {
+            return Framing::Absent;
+        };
+        let rest = &text[at + open.len()..];
+        match self {
+            Self::Delimited { close, .. } => match rest.find(close) {
+                Some(end) => Framing::Body(rest[..end].trim()),
+                None => Framing::Opened,
+            },
+            // Nothing here can say whether the call finished; the dialect's body
+            // grammar is what decides, and is required to be able to.
+            Self::SelfClosing { .. } => Framing::Body(rest.trim()),
+        }
     }
 }
 
-/// Read a generation as tool-call markup, using the engine's own account of why
-/// generation stopped to say what an unclosed wrapper means.
+/// What an [`Envelope`] found in a generation.
+enum Framing<'a> {
+    /// The envelope's opening marker is not in the text: this dialect has
+    /// nothing to say about this generation.
+    Absent,
+    /// A call started and the envelope's own proof of arrival never came. Only
+    /// [`Envelope::Delimited`] can report this — [`Envelope::SelfClosing`] has
+    /// no such proof to wait for and defers the whole question to the body.
+    Opened,
+    /// The call's text. Under [`Envelope::Delimited`] arrival is already proven
+    /// and the body only has to be *readable*; under [`Envelope::SelfClosing`]
+    /// the body still has to prove arrival as well.
+    Body(&'a str),
+}
+
+/// One dialect's reading of a whole generation — "is a call here, and did it
+/// arrive?", which is the question a dialect owns now that it owns its
+/// envelope.
 ///
-/// # An unclosed `<tool_call>` is not parsed leniently
+/// [`read_markup`] folds these across [`Dialect::ALL`]; the fold is where the
+/// per-dialect readings become the one [`Markup`] the loop acts on.
+#[derive(Debug, PartialEq, Eq)]
+enum Reading {
+    /// Not this dialect's form at all.
+    Absent,
+    /// This dialect's form, and nothing proves the call arrived whole.
+    Unarrived,
+    /// A call that arrived whole and that this dialect could not read.
+    Unreadable,
+    /// A call, whole and read.
+    Call(ToolCall),
+}
+
+/// Read a generation as tool-call markup: ask every [`Dialect`] what it sees,
+/// and use the engine's own account of why generation stopped to say what a call
+/// that did not arrive means.
 ///
-/// The tempting reading is "the body is probably complete and only the tag is
-/// missing, so parse the remainder". It is not taken, and the reason is that it
-/// is only checkable in one of the two dialects. A JSON body proves its own
-/// completeness — `serde_json` rejects an unclosed object, so a body that parses
-/// is a body that arrived whole. An **XML** body proves nothing:
-/// [`parse_xml_body`] deliberately tolerates a missing `</function>` and a
-/// missing `</parameter>`, so `…<parameter=query>\nwin` parses happily into
-/// `search(query="win")` — a *different question, silently answered*, which is
-/// the exact failure class #489 is about. A rule that holds for one dialect and
-/// not the other is the drift [`Dialect::ALL`] exists to prevent, so the rule is
-/// the uniform one: **without `</tool_call>` the call did not arrive.**
+/// # Nothing is parsed leniently, in any dialect
 ///
-/// The cost of that choice is a refusal where a complete-but-untagged JSON call
-/// could have been run — one retry. The cost of the other choice is a truncated
-/// query answered as if it were the real one, and nothing downstream can tell.
+/// The tempting reading is "the body is probably complete and only the marker is
+/// missing, so parse the remainder". It is not taken, and [`Envelope`] carries
+/// the reason in full: leniency is *unverifiable* in the XML dialect, because
+/// [`parse_xml_body`] tolerates a missing `</function>` and a missing
+/// `</parameter>` and so reads a truncated call as a whole one — a different
+/// question, silently answered, which is the failure class #489 is about. The
+/// rule that follows is uniform over dialects because a rule that held for one
+/// and not the other is the drift [`Dialect::ALL`] exists to prevent:
 ///
-/// `finish_reason` then distinguishes *why* it did not arrive, which is what the
-/// refusal needs in order to name a way forward. It is engine evidence rather
-/// than parser inference: `rto_llama`'s decode loop starts at
-/// [`FinishReason::Length`] and reaches [`FinishReason::Stop`] only on an
-/// end-of-generation token, so `Length` means precisely "`max_tokens` was
-/// reached first".
+/// > **A call arrived only when its own dialect can prove it whole.**
+///
+/// The cost of that choice is a refusal where a complete-but-unterminated JSON
+/// call could have been run — one retry. The cost of the other choice is a
+/// truncated query answered as if it were the real one, and nothing downstream
+/// can tell.
+///
+/// # Folding the readings
+///
+/// Each dialect answers about the whole generation, so several may answer at
+/// once, and the fold ranks them by how much each one establishes:
+///
+/// 1. **A call that arrived beats one that did not**, so a [`Reading::Call`]
+///    returns immediately — in `ALL` order, which is the order a body was tried
+///    in before.
+/// 2. **[`Reading::Unarrived`] beats [`Reading::Unreadable`]**, because it is
+///    the reading backed by evidence: `finish_reason` then distinguishes *why*
+///    the call did not arrive, and that is engine evidence rather than parser
+///    inference — `rto_llama`'s decode loop starts at [`FinishReason::Length`]
+///    and reaches [`FinishReason::Stop`] only on an end-of-generation token, so
+///    `Length` means precisely "`max_tokens` was reached first". The
+///    `Unreadable` refusal asks for a bug report, and a truncated generation is
+///    not a bug worth reporting.
+///
+/// Today's dialects cannot exercise that ranking: [`Dialect::Json`] and
+/// [`Dialect::Xml`] share one envelope, so they always agree on whether a call
+/// arrived and differ only in whether they can read it. The order is written
+/// down because a mixed generation becomes possible the moment a third envelope
+/// exists, and rare is where silent corruption lives.
 fn read_markup(completion: &Completion) -> Markup {
-    match wrapper(&completion.content) {
-        Wrapper::Absent => Markup::None,
-        Wrapper::Open => Markup::Unfinished(match completion.finish_reason {
+    let mut unarrived = false;
+    let mut unreadable = false;
+    for dialect in Dialect::ALL {
+        match dialect.read(&completion.content) {
+            Reading::Call(call) => return Markup::Call(call),
+            Reading::Unarrived => unarrived = true,
+            Reading::Unreadable => unreadable = true,
+            Reading::Absent => {}
+        }
+    }
+    if unarrived {
+        return Markup::Unfinished(match completion.finish_reason {
             FinishReason::Length => Unfinished::CutAtTokenCap,
             FinishReason::Stop => Unfinished::CutShort,
-        }),
-        Wrapper::Closed(body) => Dialect::ALL
-            .into_iter()
-            .find_map(|d| d.parse(body))
-            .map_or(Markup::Unfinished(Unfinished::Unreadable), Markup::Call),
+        });
     }
+    if unreadable {
+        return Markup::Unfinished(Unfinished::Unreadable);
+    }
+    Markup::None
 }
 
-/// A call syntax a model may emit inside `<tool_call>…</tool_call>`.
+/// A call form a model may emit — its [`Envelope`] and the body grammar inside
+/// it, together, because a form is both.
 ///
-/// [`tool_system_prompt`] instructs the JSON form and most models comply — but it
-/// is sent only to a model whose engine cannot carry tools, and in any case a
-/// model's *training* can beat an instruction: the chat templates shipped in
-/// `qwen3-coder-30b-a3b` and `qwen3.8-27b` tell them that "an inner
-/// `<function=...></function>` block must be nested within `<tool_call>` XML
-/// tags", and they sometimes revert to it. A body the parser did not understand
-/// used to make the whole call invisible — [`chat_with_client_tools`] then read
-/// the generation as the model's final answer and handed the raw markup to the
-/// user as prose (#489).
+/// [`tool_system_prompt`] instructs the JSON form inside `<tool_call>` and most
+/// models comply — but it is sent only to a model whose engine cannot carry
+/// tools, and in any case a model's *training* can beat an instruction. That is
+/// this type's whole subject, and it has now been measured twice:
+///
+/// * The chat templates shipped in `qwen3-coder-30b-a3b` and `qwen3.8-27b` tell
+///   them that "an inner `<function=...></function>` block must be nested within
+///   `<tool_call>` XML tags", and they sometimes revert to it. A body the parser
+///   did not understand used to make the whole call invisible —
+///   [`chat_with_client_tools`] then read the generation as the model's final
+///   answer and handed the raw markup to the user as prose (#489).
+/// * `voxtral-mini-3b`'s template does not mention `<tool_call>` at all and
+///   renders a call as `[TOOL_CALLS]name[ARGS]{…}` (#592). Its *envelope*
+///   differs, not just its body, which is why the envelope had to become a
+///   property of the dialect rather than a gate above it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Dialect {
-    /// `{"name": "search", "arguments": {"query": "x"}}` — the instructed form,
-    /// and what three of the five registry models emit.
+    /// `<tool_call>{"name": "search", "arguments": {"query": "x"}}</tool_call>`
+    /// — the instructed form, and what three of the five registry models emit.
     Json,
-    /// `<function=search><parameter=query>x</parameter></function>` — the form
-    /// the two Qwen XML templates train.
+    /// `<tool_call><function=search><parameter=query>x</parameter></function></tool_call>`
+    /// — the form the two Qwen XML templates train.
     Xml,
+    /// `[TOOL_CALLS]search[ARGS]{"query": "x"}` — the form Mistral-family
+    /// templates train, `voxtral-mini-3b`'s among them. The dialect that proves
+    /// [`Envelope`] is not `<tool_call>` with extra steps: it has a second
+    /// envelope shape, and no closing marker at all.
+    Mistral,
 }
 
 impl Dialect {
-    /// Every dialect, in the order a body is tried against them.
+    /// Every dialect, in the order a generation is read against them.
     ///
-    /// **This list is the only thing that makes a dialect reachable.** Nothing
-    /// else dispatches on [`Dialect`]: [`parse_tool_call`] drives from `ALL`, and
-    /// so does `every_dialect_parses_to_the_same_call`, which renders one call in
-    /// each dialect and asserts they arrive identical. So a third dialect either
-    /// lands here — parsed *and* held to the same output shape as the other two —
-    /// or it is inert. There is no arrangement in which one of them sees it and
-    /// the other does not.
-    const ALL: [Self; 2] = [Self::Json, Self::Xml];
+    /// **This list is the only thing that makes a dialect reachable, and since
+    /// #592 that is true rather than merely intended.** Nothing else dispatches
+    /// on [`Dialect`]: [`read_markup`] drives from `ALL`, and so do
+    /// `every_dialect_parses_to_the_same_call`, which renders one call in each
+    /// dialect and asserts they arrive identical, and
+    /// `no_dialect_reads_a_truncated_call_as_a_whole_one`, which holds each of
+    /// them to the completeness rule. So a fourth dialect either lands here —
+    /// reached, held to the same output shape, and held to the same rule about
+    /// truncation — or it is inert. There is no arrangement in which one of them
+    /// sees it and the others do not.
+    const ALL: [Self; 3] = [Self::Json, Self::Xml, Self::Mistral];
 
-    /// Parse `body` as this dialect, or `None` when it is not this dialect (or is
-    /// malformed in it). Each dialect judges only its own syntax and neither
-    /// guesses: a body that is neither JSON nor XML stays `None` for both, which
-    /// is what keeps "understand a second dialect" from becoming "accept garbage".
-    fn parse(self, body: &str) -> Option<ToolCall> {
+    /// How this dialect's calls are delimited, and what proves one arrived.
+    const fn envelope(self) -> Envelope {
         match self {
-            Self::Json => parse_json_body(body),
-            Self::Xml => parse_xml_body(body),
+            // One envelope, named once, shared by both bodies that nest in it: a
+            // change to the wrapper must not reach one dialect and miss the
+            // other.
+            Self::Json | Self::Xml => Envelope::Delimited {
+                open: TOOL_CALL_OPEN,
+                close: TOOL_CALL_CLOSE,
+            },
+            Self::Mistral => Envelope::SelfClosing {
+                open: TOOL_CALLS_OPEN,
+            },
+        }
+    }
+
+    /// Read a whole generation as this dialect.
+    fn read(self, text: &str) -> Reading {
+        match self.envelope().frame(text) {
+            Framing::Absent => Reading::Absent,
+            Framing::Opened => Reading::Unarrived,
+            Framing::Body(body) => self.parse(body),
+        }
+    }
+
+    /// Read this dialect's `body`. Each dialect judges only its own syntax and
+    /// none guesses: a body in no dialect stays unread in all of them, which is
+    /// what keeps "understand another dialect" from becoming "accept garbage".
+    ///
+    /// [`Reading::Absent`] is not reachable from here — the envelope already
+    /// said this is the dialect's form — and [`Reading::Unarrived`] is reachable
+    /// only under [`Envelope::SelfClosing`], where arrival is the body grammar's
+    /// to establish. A [`Envelope::Delimited`] dialect has had arrival proven by
+    /// its closing marker before this is called.
+    fn parse(self, body: &str) -> Reading {
+        match self {
+            Self::Json => parse_json_body(body).map_or(Reading::Unreadable, Reading::Call),
+            Self::Xml => parse_xml_body(body).map_or(Reading::Unreadable, Reading::Call),
+            Self::Mistral => parse_mistral_body(body),
         }
     }
 }
@@ -1318,6 +1519,59 @@ fn parse_json_body(body: &str) -> Option<ToolCall> {
         .cloned()
         .unwrap_or_else(|| serde_json::json!({}));
     Some(ToolCall { name, arguments })
+}
+
+/// [`Dialect::Mistral`]: `name[ARGS]{…}`, the text after `[TOOL_CALLS]`.
+///
+/// # This is the dialect that proves its own completeness
+///
+/// It has no closing marker, so under [`Envelope::SelfClosing`] the grammar here
+/// is the whole proof that a call arrived — see [`Envelope`] for why that is
+/// allowed of this body and not of [`parse_xml_body`]. Two things follow, and
+/// both are the reason this returns a [`Reading`] rather than an `Option`:
+///
+/// * **`[ARGS]` missing is truncation, not garbage.** The template writes it
+///   immediately after the name, so a body without it is a call cut off while
+///   still writing that name. [`Reading::Unarrived`] then gets the refusal that
+///   names `max_tokens`, rather than the one that asks for a bug report.
+/// * **A JSON error that is end-of-input is truncation too.** `serde_json`
+///   classifies it, so `{"query":"win` is `Unarrived` while `{"query":,}` is
+///   [`Reading::Unreadable`]. Neither is ever a call: a truncated object does
+///   not parse, which is exactly the property the XML body lacks.
+///
+/// The **first** JSON value is taken, and trailing text after it is ignored
+/// rather than fatal. The template loops over `tool_calls`, so a two-call turn
+/// arrives as two `[TOOL_CALLS]…[ARGS]…` runs with no separator; one call per
+/// turn is the divergence declared on [`Markup::Call`], and the second run is
+/// left where a grammar-based parser (#485 PR 2) will find it.
+fn parse_mistral_body(body: &str) -> Reading {
+    let Some(split) = body.find(ARGS_OPEN) else {
+        return Reading::Unarrived;
+    };
+    let name = body[..split].trim();
+    if name.is_empty() {
+        return Reading::Unreadable;
+    }
+    let arguments = &body[split + ARGS_OPEN.len()..];
+    let mut values = serde_json::Deserializer::from_str(arguments).into_iter::<serde_json::Value>();
+    match values.next() {
+        // Nothing after `[ARGS]` yet: the call stopped on the marker itself.
+        None => Reading::Unarrived,
+        Some(Err(e)) if e.classify() == serde_json::error::Category::Eof => Reading::Unarrived,
+        // Anything else is a body that arrived and is not a call — a syntax
+        // error, or a value that is not an object. `arguments` is an object in
+        // every dialect, so that a tool sees the same shape whichever form its
+        // caller wrote; a bare scalar or array is not one, and is not guessed at.
+        Some(parsed) => parsed.ok().filter(serde_json::Value::is_object).map_or(
+            Reading::Unreadable,
+            |arguments| {
+                Reading::Call(ToolCall {
+                    name: name.to_owned(),
+                    arguments,
+                })
+            },
+        ),
+    }
 }
 
 /// [`Dialect::Xml`]: `<function=name>` wrapping `<parameter=key>value</parameter>`.
@@ -1403,13 +1657,14 @@ fn xml_argument(raw: &str) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        Dialect, Disposition, Ending, Limits, Markup, SuppressedTools, ToolCall, Unfinished,
-        disposition, finish, read_markup, system_prompt, tool_system_prompt,
+        Dialect, Disposition, Ending, Limits, Markup, REFUSAL, SuppressedTools, TOOL_CALL_OPEN,
+        ToolCall, Unfinished, disposition, finish, read_markup, system_prompt, tool_system_prompt,
     };
     use crate::engine::{
         ChatRequest, Completion, CompletionStats, Engine, EngineError, FinishReason, Message,
         ModelInfo,
     };
+    use crate::thinking::Unterminated;
     use crate::tools::{ToolDef, ToolRegistry, chat_with_client_tools, chat_with_tools};
     use std::collections::HashSet;
     use std::fmt::Write as _;
@@ -2128,12 +2383,12 @@ mod tests {
 
     /// Both variants name the `<tool_call>` envelope.
     ///
-    /// It is the one thing that cannot be delegated to a chat template:
-    /// `read_markup` keys on that wrapper, and a template is free to have trained
-    /// the model on a different one. Dropping the tool *list* for a
-    /// template-carrying engine must not drop the envelope with it, or the
-    /// model's call comes back in a wrapper this server does not read and is
-    /// handed to the user as prose — which is #489 exactly.
+    /// It is the one thing that cannot be delegated to a chat template: a
+    /// template is free to have trained the model on a different envelope, and
+    /// `Dialect::ALL` can only read the envelopes Roteiro has met. Dropping the
+    /// tool *list* for a template-carrying engine must not drop the envelope with
+    /// it, or the model's call comes back in an envelope this server does not
+    /// know and is handed to the user as prose — which is #489 exactly.
     #[test]
     fn every_variant_states_the_envelope_this_server_parses() {
         let tools = [client_tool("echo")];
@@ -2518,15 +2773,28 @@ mod tests {
             arguments: serde_json::json!({"query": "window", "limit": 5}),
         };
         for dialect in Dialect::ALL {
-            let markup = match dialect {
-                Dialect::Json => call_markup("search", "{\"query\":\"window\",\"limit\":5}"),
-                Dialect::Xml => xml_markup("search", &[("query", "window"), ("limit", "5")]),
-            };
             assert_eq!(
-                call_in(&markup),
+                call_in(&rendered_call(dialect)),
                 Some(expected.clone()),
                 "{dialect:?} produced a different call"
             );
+        }
+    }
+
+    /// The one call `search(query="window", limit=5)`, written in `dialect`'s own
+    /// wire form — envelope included, because since #592 the envelope is part of
+    /// the form.
+    ///
+    /// The single place a dialect's wire form is spelled out for the tests driven
+    /// from `Dialect::ALL`, so a fourth dialect supplies one arm and is then held
+    /// to all of them at once: it must arrive as the same `ToolCall` as the
+    /// others (`every_dialect_parses_to_the_same_call`), and no prefix of it may
+    /// be read as a whole call (`no_dialect_reads_a_truncated_call_as_a_whole_one`).
+    fn rendered_call(dialect: Dialect) -> String {
+        match dialect {
+            Dialect::Json => call_markup("search", "{\"query\":\"window\",\"limit\":5}"),
+            Dialect::Xml => xml_markup("search", &[("query", "window"), ("limit", "5")]),
+            Dialect::Mistral => mistral_markup("search", "{\"query\":\"window\",\"limit\":5}"),
         }
     }
 
@@ -2592,6 +2860,232 @@ mod tests {
             out.client_tool_calls[0].arguments,
             serde_json::json!({"city": "Berlin"})
         );
+    }
+
+    // ---------------------------------------------------------------- #592 ---
+    // Reachability. `Dialect::ALL` used to guarantee that every dialect was
+    // handled *consistently* and nothing about any of them being reachable: the
+    // `<tool_call>` wrapper was searched for one layer above `Dialect`, so a
+    // model whose call form does not nest inside it never reached a dialect at
+    // all. `voxtral-mini-3b`'s template is that model — measured on the real
+    // embedded template, it renders `[TOOL_CALLS]name[ARGS]{…}` and contains no
+    // `<tool_call>` anywhere — so once its template is rendered (#492) it emits
+    // a well-formed call the parser could not see, and the loop hands the raw
+    // markup to the user as prose. That is #489's failure mode by a new route.
+
+    /// The wire form `voxtral-mini-3b`'s template renders, built from the
+    /// template's own concatenation: `"[TOOL_CALLS]" + name + "[ARGS]" +
+    /// arguments`. No wrapper, and no closing marker of any kind — the call ends
+    /// where its JSON ends.
+    fn mistral_markup(name: &str, arguments: &str) -> String {
+        format!("[TOOL_CALLS]{name}[ARGS]{arguments}")
+    }
+
+    #[test]
+    fn a_call_in_no_wrapper_at_all_still_reaches_a_dialect() {
+        // The reachability miss itself, at the smallest scale that shows it.
+        // Before the fix this markup returned `Wrapper::Absent`, which the loop
+        // read as "no call, this is the final answer".
+        let markup = mistral_markup("explain", "{\"key\":\"fn:foo\"}");
+        assert!(
+            !markup.contains(TOOL_CALL_OPEN),
+            "the point of this case is that there is no wrapper: {markup}"
+        );
+        assert_eq!(
+            call_in(&markup),
+            Some(ToolCall {
+                name: "explain".to_owned(),
+                arguments: serde_json::json!({"key": "fn:foo"}),
+            }),
+            "the same `ToolCall` the wrapped dialects yield for the same call"
+        );
+    }
+
+    #[test]
+    fn no_dialect_reads_a_truncated_call_as_a_whole_one() {
+        // The completeness rule, held over every dialect at once — which is what
+        // makes it *uniform* rather than a promise in a comment. A dialect owns
+        // its envelope now, so it also owns "did this call arrive?", and a
+        // dialect that answered that question leniently would run a truncated
+        // call as if it were whole: a different question, silently answered,
+        // which is the failure class #489 is about.
+        //
+        // Every proper prefix, because truncation happens wherever the token cap
+        // falls. `Envelope::Delimited` survives this because its closing marker
+        // is missing from every prefix; `Envelope::SelfClosing` survives it
+        // because the only body grammar allowed to be self-closing is one that
+        // rejects a truncated body. Declare `Dialect::Xml` self-closing —
+        // `parse_xml_body` tolerates a missing `</function>` and a missing
+        // `</parameter>` — and this fails on the prefix that drops them.
+        for dialect in Dialect::ALL {
+            let whole = rendered_call(dialect);
+            assert!(
+                matches!(read_markup(&stopped(&whole)), Markup::Call(_)),
+                "{dialect:?} cannot read its own rendering, so the prefixes prove nothing"
+            );
+            for cut in 0..whole.len() {
+                if !whole.is_char_boundary(cut) {
+                    continue;
+                }
+                let prefix = &whole[..cut];
+                assert!(
+                    !matches!(read_markup(&stopped(prefix)), Markup::Call(_)),
+                    "{dialect:?} read a truncated call as a whole one: {prefix:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_loop_runs_a_wrapperless_dialect_call_instead_of_answering_with_it() {
+        // The parser tests above cannot see the defect that matters: an unparsed
+        // call is not an error, it is *absence*, so the loop reads the generation
+        // as the model's final answer and returns the raw markup to the user.
+        let engine = ScriptedEngine::new(&[
+            mistral_markup("echo", "{\"key\":\"abc\"}"),
+            "the node abc is a function".to_owned(),
+        ]);
+        let out = chat_with_tools(&engine, &EchoRegistry, &user_request(), 4).expect("completion");
+        assert_eq!(
+            out.content, "the node abc is a function",
+            "the answer, not the tool call rendered as prose"
+        );
+        let fed_back = engine
+            .round(1)
+            .into_iter()
+            .find(|m| m.role == "user" && m.content.starts_with("<tool_response>"))
+            .expect("a tool result was fed back");
+        assert!(
+            fed_back.content.contains("echoed:abc"),
+            "the wrapperless call's argument reached the tool: {fed_back:?}"
+        );
+    }
+
+    #[test]
+    fn a_wrapperless_call_cut_off_in_its_arguments_is_not_an_answer() {
+        // The half of #592 that is easy to lose: making a form reachable also
+        // makes its *truncations* reachable, and a form with no closing marker
+        // has no marker to notice missing. The JSON body is the proof instead —
+        // `serde_json` reports end-of-input, which is truncation and not
+        // malformation — so this is refused rather than published as prose, and
+        // refused with the sentence for a model that stopped mid-call.
+        let engine = ScriptedEngine::new(&["[TOOL_CALLS]echo[ARGS]{\"key\":\"ab"]);
+        let out = chat_with_tools(&engine, &EchoRegistry, &ask_request(), 4).expect("completion");
+        assert_refusal(&out.content);
+        assert!(out.content.contains("never closed it"), "{}", out.content);
+    }
+
+    #[test]
+    fn a_wrapperless_call_cut_off_before_its_arguments_is_not_an_answer() {
+        // Cut earlier: the template writes `[ARGS]` immediately after the name,
+        // so a body without it is a call still writing its name rather than a
+        // body Roteiro cannot read. Naming it a truncation is what puts
+        // `max_tokens` in the refusal instead of a request to file a bug.
+        let engine = ScriptedEngine::truncating(&["[TOOL_CALLS]ech"]);
+        let out = chat_with_tools(&engine, &EchoRegistry, &ask_request(), 4).expect("completion");
+        assert_refusal(&out.content);
+        assert!(out.content.contains("`max_tokens` = 64"), "{}", out.content);
+    }
+
+    #[test]
+    fn a_wrapperless_body_in_no_dialect_is_still_no_call() {
+        // Reaching a second envelope must not slide into accepting anything. A
+        // body that arrived and is not a call is `Unreadable` — refused, and
+        // never run — which is the same answer the wrapped dialects give.
+        for body in [
+            "[TOOL_CALLS][ARGS]{\"key\":\"fn:foo\"}",
+            "[TOOL_CALLS]echo[ARGS]\"just a string\"",
+            "[TOOL_CALLS]echo[ARGS][{\"key\":\"fn:foo\"}]",
+            "[TOOL_CALLS]echo[ARGS]{\"key\":,}",
+        ] {
+            assert!(
+                call_in(body).is_none(),
+                "accepted a body in no dialect: {body}"
+            );
+            assert!(
+                matches!(
+                    read_markup(&stopped(body)),
+                    Markup::Unfinished(Unfinished::Unreadable)
+                ),
+                "a body that arrived and is not a call is unreadable, not absent: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_call_that_did_not_arrive_outranks_one_that_could_not_be_read() {
+        // Several dialects can answer about one generation now, so the fold in
+        // `read_markup` has an order — and an order nothing exercises is an order
+        // that drifts. This generation is `Unarrived` to the wrapped dialects (no
+        // `</tool_call>`) and `Unreadable` to the wrapperless one (a call with no
+        // name). Both refuse, so the safety property is not at stake; what is at
+        // stake is which sentence the user gets, and the truncation reading is the
+        // one backed by `finish_reason` rather than the one asking for a bug
+        // report about a generation that was merely cut off.
+        let mixed = "<tool_call>{\"name\":\"echo\"[TOOL_CALLS][ARGS]{}";
+        assert!(matches!(
+            read_markup(&stopped(mixed)),
+            Markup::Unfinished(Unfinished::CutShort)
+        ));
+        assert!(matches!(
+            read_markup(&truncated(mixed)),
+            Markup::Unfinished(Unfinished::CutAtTokenCap)
+        ));
+    }
+
+    #[test]
+    fn no_refusal_contains_any_dialects_opening_marker() {
+        // Roteiro's refusals are assistant-slot text: they are shown to the user
+        // *and* can be carried back into a following turn, so a refusal
+        // containing a dialect's opening marker would be read as a call by the
+        // very function that wrote it. That rule used to be a comment naming one
+        // literal; it is now driven from `Dialect::ALL`, so a dialect added later
+        // is checked against every refusal without anyone remembering to.
+        let markup = call_markup("echo", "{}");
+        let refusals = [
+            finish(stopped(&markup), Ending::Answer, limits()),
+            finish(
+                stopped(&markup),
+                Ending::Unfinished(Unfinished::CutAtTokenCap),
+                limits(),
+            ),
+            finish(
+                stopped(&markup),
+                Ending::Unfinished(Unfinished::CutShort),
+                limits(),
+            ),
+            finish(
+                stopped(&markup),
+                Ending::Unfinished(Unfinished::Unreadable),
+                limits(),
+            ),
+            finish(stopped(&markup), Ending::Exhausted, limits()),
+            finish(
+                stopped(&markup),
+                Ending::Unanswered(Unterminated::CutAtTokenCap),
+                limits(),
+            ),
+            finish(
+                stopped(&markup),
+                Ending::Unanswered(Unterminated::CutShort),
+                limits(),
+            ),
+        ];
+        for out in refusals {
+            let content = out.completion.content;
+            assert!(
+                content.starts_with(REFUSAL),
+                "not a refusal, so this proves nothing: {content}"
+            );
+            for dialect in Dialect::ALL {
+                let marker = dialect.envelope().opening();
+                assert!(
+                    !content.contains(marker),
+                    "a refusal carries {dialect:?}'s opening marker `{marker}`, so the next \
+                     turn reads Roteiro's own words as a call: {content}"
+                );
+            }
+        }
     }
 
     // ------------------------------------------------------- #489, the rest ---
