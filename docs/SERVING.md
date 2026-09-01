@@ -237,12 +237,19 @@ Everything above is about the **request envelope**, and none of it extends to th
 The two cases look alike and are not. A stray `user` on the request is a field
 Roteiro has no use for, and dropping it costs nobody anything. A stray key inside
 a tool call's `arguments` is a filter the model asked for and did not get.
-Roteiro's two tool surfaces spell one of `debt`'s arguments differently — `kind`
-on the MCP surface, `categories` here — and while unknown keys were dropped,
-`{"categories":["todo"]}` sent to the MCP `debt` deserialised to an empty filter,
-which means *every* category. The model asked for one kind of marker, received the
-whole repository's debt presented as the filtered set, and had nothing in the
-result to tell the two apart.
+Roteiro's two tool surfaces used to spell one of `debt`'s arguments differently —
+`kind` on the MCP surface, `categories` here — and while unknown keys were
+dropped, `{"categories":["todo"]}` sent to the MCP `debt` deserialised to an empty
+filter, which means *every* category. The model asked for one kind of marker,
+received the whole repository's debt presented as the filtered set, and had
+nothing in the result to tell the two apart.
+
+Both surfaces now spell it **`categories`**, and a test drives that comparison
+from the two sets of definitions rather than from a hard-coded pair, so a future
+divergence in any shared tool's argument names fails the build. Making unknown
+keys an error is what allowed that rename: while they were dropped, renaming the
+MCP argument would have left every existing caller parsing fine and silently
+receiving *unfiltered* results. Refused, the same caller is told the new name.
 
 So a tool that declares `"additionalProperties": false` has it enforced: a call
 carrying a key the schema does not list is refused **by name**, with the keys that

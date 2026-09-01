@@ -189,14 +189,19 @@ fn disposition(calls: &[ToolCall], client_names: &HashSet<&str>) -> Disposition 
 /// > **An argument key a tool does not declare is refused, never dropped.**
 ///
 /// The defect this closes is not a mistyped key; it is what a dropped key leaves
-/// behind. Roteiro's two tool surfaces spell one of `debt`'s arguments
-/// differently — `kind` on MCP, `categories` here — and neither surface used to
-/// reject the other's name, so a model that reached `debt` through one surface
-/// with the other's spelling was handed **every marker in the repository,
-/// presented as the filtered set it asked for**. No error, and nothing in the
-/// answer to tell it apart from a real one. Every mistyped, hallucinated or
-/// cross-surface key has that shape: the model asked a narrower question than the
-/// one it got an answer to, and only the argument object knows.
+/// behind. Roteiro's two tool surfaces used to spell one of `debt`'s arguments
+/// differently — `kind` on MCP, `categories` here — and neither surface rejected
+/// the other's name, so a model that reached `debt` through one surface with the
+/// other's spelling was handed **every marker in the repository, presented as the
+/// filtered set it asked for**. No error, and nothing in the answer to tell it
+/// apart from a real one. Every mistyped, hallucinated or stale key has that
+/// shape: the model asked a narrower question than the one it got an answer to,
+/// and only the argument object knows.
+///
+/// That particular divergence is gone — both surfaces now say `categories`, and
+/// `both_surfaces_name_a_shared_tools_arguments_the_same_way` holds them there —
+/// but this rule is what made resolving it safe, and it is what a caller written
+/// against the old name meets instead of silence.
 ///
 /// # The declaration is what enforces it
 ///
@@ -209,9 +214,10 @@ fn disposition(calls: &[ToolCall], client_names: &HashSet<&str>) -> Disposition 
 /// rule imposed on every implementor of [`ToolRegistry`].
 ///
 /// The message names the keys the tool *does* take, for the reason serde's own
-/// does ("unknown field `categories`, expected one of `kind`, `project`"): a
-/// model that is told only that it was wrong will guess again, and the surface it
-/// guessed from is the one that misled it.
+/// does ("unknown field `kind`, expected one of `categories`, `project`"): a
+/// model that is told only that it was wrong will guess again, from whatever
+/// misled it the first time. Naming the replacement is what turns a rename into a
+/// one-round correction instead of a loop.
 fn unknown_argument(def: &ToolDef, arguments: &serde_json::Value) -> Option<String> {
     if def.parameters.get("additionalProperties") != Some(&serde_json::Value::Bool(false)) {
         return None;
@@ -2313,9 +2319,11 @@ mod tests {
 
     // ------------------------------------------ unknown tool arguments ---
     // **An argument key a tool does not declare is refused, never dropped.**
-    // The measured defect: the two surfaces spell `debt`'s filter differently
+    // The measured defect: the two surfaces spelled `debt`'s filter differently
     // (`kind` on MCP, `categories` here), and a dropped key returned every
-    // marker in the repository as the filtered set the model asked for.
+    // marker in the repository as the filtered set the model asked for. Both now
+    // say `categories`; `kind` is kept as this fixture's undeclared key because
+    // it is the one a caller written before the rename actually sends.
 
     /// The served `debt` schema, closed the way `roteiro`'s registry declares it
     /// — `categories` plus the spliced-in `project` — over a body that **panics
