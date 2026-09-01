@@ -52,24 +52,67 @@ thiserror = { workspace = true }
 # `rto-graph` depends on serde_json non-optionally, so every build of this crate
 # already compiles it.
 serde_json = { workspace = true }
-# The OKF **reader**'s frontmatter parser. It was a dev-dependency while the
-# reader hand-parsed a line-oriented subset; that subset was shaped like the
-# bundles this crate itself writes and silently lost flow mappings, flow
-# sequences, unindented block sequences and multi-line scalars — all ordinary
-# YAML, and all present in Google's published bundles. See `okf::read`'s
-# `parse_frontmatter` for what that cost.
+# The OKF format itself (ADR-0021), as somebody else's implementation.
 #
-# Still **not** used to emit: `YamlEmitter` dumps a whole document with its own
+# This replaces a hand-rolled YAML-subset reader *and* the general-purpose YAML
+# parser that briefly stood in for it. The hand-rolled subset was shaped like
+# the bundles this crate itself writes, and silently lost flow mappings, flow
+# sequences, unindented block sequences and multi-line scalars — all ordinary
+# YAML, all present in Google's published bundles. A general parser fixed the
+# YAML and left the *format* still ours to re-derive: trust tiers, the actor
+# convention, the bare-mapping shorthand §5.2 mandates. Those are the parts an
+# interchange format exists to standardise, and re-deriving them is how two
+# readers of one spec end up disagreeing.
+#
+# `okf-core` is a pure-Rust OKF v0.2 implementation by an author who is not us,
+# which is the point: it is an independent reading of the same specification.
+# It carries **zero dependencies** (verified against the crates.io index), so
+# adopting it costs one crate in the lockfile and removes another
+# (`yaml-rust2`, still non-optional in `rto-graph` and untouched there).
+#
+# Still **not** used to emit. Its emitter dumps a whole document with its own
 # layout and cannot write one scalar into a hand-built block, so emitting
 # through it would rewrite every note's frontmatter and break #442's
-# byte-identity promise. The writer keeps its own escaper, and `okf.rs`'s tests
-# keep using this crate to prove that escaper round-trips.
+# byte-identity promise. The writer keeps its own escaper, and
+# `a_scalar_round_trips_through_the_writers_escaper` now proves that escaper
+# against *this* parser — a stronger proof than before, since this is the
+# parser a peer would actually read our bundles with.
+okf-core = "0.2.6"
+# `okf-validate`-only: independent conformance checking and hygiene linting of a
+# bundle (`roteiro okf validate` / `roteiro okf lint`).
 #
-# No new crate in the lockfile: `rto-graph` already depends on it
-# non-optionally. Keep the version in step with `crates/rto-graph/Cargo.toml`.
-yaml-rust2 = "0.12.0"
+# Gated because it is expensive and, unlike `okf-core`, its cost is not
+# separable. Measured with `cargo tree -p rto-render -e normal`: the default
+# tree is 161 crates and this feature takes it to 234, so the gate is worth
+# **73 crates** — against **one** for `okf-core`, which is the whole reason the
+# two are treated differently.
+#
+# They are a *parallel* stack rather than reuse. It syntax-checks fenced code
+# blocks, parsing JavaScript/TypeScript with `oxc_parser` (15 `oxc_*` crates),
+# Python with `rustpython-parser` and SQL with `sqlparser` — all three languages
+# this workspace already parses, with tree-sitter. What overlap there is is
+# generic plumbing (serde, syn, anyhow); nothing language-specific is shared.
+#
+# None of its dependencies is optional, so its conformance checking cannot be
+# taken without its syntax checking. That is a property of the dependency, not a
+# choice available to us.
+okf-validator = { version = "0.2.6", optional = true }
 
 [features]
+# Independent validation of an OKF bundle: `roteiro okf validate` (conformance,
+# against the specification) and `roteiro okf lint` (the L1..L12 hygiene rules).
+# Off by default, for the dependency cost recorded on `okf-validator` above.
+#
+# **Named for the capability, not the crate**, matching `mcp` (which gates
+# `rmcp`) and `execution` (which gates `rto-exec`). `validate` is the primary
+# subcommand and the one worth naming; `lint` rides along because the two live
+# in one crate with no feature separating them, so gating them apart would be a
+# promise the dependency cannot keep — the same reasoning ADR-0017 §5 applies to
+# a feature-scoped advisory ignore.
+#
+# Everything OKF that does **not** need this crate stays ungated: `roteiro okf
+# trust`, `okf links` and `okf diff` are all `okf-core`, which costs nothing.
+okf-validate = ["dep:okf-validator"]
 # MCP server support (`roteiro serve`), off by default — CLI-first. Adopts rmcp
 # (ADR-0002) for stdio + streamable-HTTP transports; entirely feature-gated so
 # the default build pulls none of it.

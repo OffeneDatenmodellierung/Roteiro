@@ -96,8 +96,9 @@
 
 use std::collections::BTreeMap;
 
+use okf_core::yaml::Value;
+use okf_core::{ActorKind, Frontmatter as OkfFrontmatter, TrustTier};
 use rto_graph::{Edge, EdgeKind, FactSet, Node, NodeKind, Provenance};
-use yaml_rust2::Yaml;
 
 use super::{Actor, INDEX_FILE, LOG_FILE, Origin, section_for, short_digest, slug};
 
@@ -370,6 +371,8 @@ struct ParsedFrontmatter {
     sources: Vec<String>,
     generated: Option<(String, String)>,
     verified: Vec<(String, String)>,
+    /// §5.3's trust tier, as [`okf_core`] derives it from `verified`.
+    tier: TrustTier,
 }
 
 impl ParsedFrontmatter {
@@ -383,12 +386,16 @@ impl ParsedFrontmatter {
     /// `Inferred`, not "unknown, assume the best".
     ///
     /// §7 makes the `human:` prefix the only thing separating human-reviewed
-    /// from machine-confirmed, so it is the only thing consulted here.
+    /// from machine-confirmed. **That reading is `okf-core`'s now, not ours**:
+    /// the tier arrives already derived, and this is only the mapping onto the
+    /// local provenance that would have produced it. Deriving it here as well
+    /// would be a second answer to the one question ADR-0021 adopted OKF to stop
+    /// answering privately.
     fn claimed_tier(&self) -> Provenance {
-        match self.verified.first() {
-            None => Provenance::Inferred,
-            Some((by, _)) if by.starts_with("human:") => Provenance::Authored,
-            Some(_) => Provenance::Derived,
+        match self.tier {
+            TrustTier::Unverified => Provenance::Inferred,
+            TrustTier::MachineConfirmed => Provenance::Derived,
+            TrustTier::HumanReviewed => Provenance::Authored,
         }
     }
 
@@ -396,34 +403,49 @@ impl ParsedFrontmatter {
     /// the timestamp it gave. `confirms` is the *effective* confirmation, which
     /// [`Trust::Acknowledge`] clears — under acknowledge we deliberately did not
     /// adopt the peer's confirmation, so re-emitting it would put it back.
+    ///
+    /// `confirms` is keyed to the **derived tier**, not merely to the presence of
+    /// a `verified` entry. The two can disagree: an event whose `at` is missing
+    /// or unparseable is still recorded as attribution but cannot support §5.3's
+    /// confirmation claim. Re-emitting `confirms: true` for one would launder an
+    /// untimestamped assertion into a confirmation, which is the exact move the
+    /// tier-carrying provenance exists to prevent.
     fn effective_origin(&self, trust: Trust) -> Option<Origin> {
         let confirmed = self.verified.first();
         let (by, at) = confirmed.or(self.generated.as_ref())?;
         Some(Origin {
             by: parse_actor(by),
             at: at.clone(),
-            confirms: confirmed.is_some() && trust == Trust::Trust,
+            confirms: self.tier != TrustTier::Unverified && trust == Trust::Trust,
         })
     }
 }
 
 /// An OKF actor token (§7) as an [`Actor`].
 ///
-/// The inverse of [`Actor::as_token`], and lossy in one direction on purpose: a
-/// token that is none of the three forms becomes [`Actor::Process`], because §7
-/// names exactly three and an unrecognised one is a producer this graph has not
-/// met rather than a reason to drop the attribution. Losing *who* confirmed
-/// something is the one thing a trust model must not do.
+/// The inverse of [`Actor::as_token`]. **Classification is `okf-core`'s**, not
+/// ours: §7's three forms and the `human:` prefix that separates the two
+/// confirmed tiers are exactly the kind of decision an interchange format
+/// exists to settle once, and a reader that re-derives them is a reader that
+/// will eventually disagree with every other one. Only the mapping into this
+/// graph's own [`Actor`] is ours.
+///
+/// Lossy in one direction on purpose: `okf-core` recognises a fourth,
+/// open-ended [`ActorKind::Other`] — the specification itself writes
+/// `author: team:ga4-docs` — and this graph has three forms to put it in, so an
+/// unrecognised token becomes [`Actor::Process`] carrying its text verbatim.
+/// Losing *who* confirmed something is the one thing a trust model must not do,
+/// so the attribution survives even when the category does not.
 fn parse_actor(token: &str) -> Actor {
-    if let Some(id) = token.strip_prefix("human:") {
-        return Actor::Human(id.to_owned());
-    }
-    if let Some(id) = token.strip_prefix("process:") {
-        return Actor::Process(id.to_owned());
-    }
-    match token.split_once('/') {
-        Some((producer, version)) => Actor::Tool(producer.to_owned(), version.to_owned()),
-        None => Actor::Process(token.to_owned()),
+    let actor = okf_core::Actor::parse(token);
+    let id = actor.id().to_owned();
+    match actor.kind() {
+        ActorKind::Human => Actor::Human(id),
+        ActorKind::Agent => Actor::Tool(
+            actor.producer().unwrap_or_default().to_owned(),
+            actor.version().unwrap_or_default().to_owned(),
+        ),
+        ActorKind::Process | ActorKind::Other => Actor::Process(id),
     }
 }
 
@@ -495,139 +517,115 @@ fn split_frontmatter(text: &str) -> Result<(&str, &str), SkipReason> {
 /// while reporting success. `a_google_bundle_keeps_its_human_verifiers` is the
 /// guard.
 ///
-/// `yaml-rust2` is already a non-optional dependency of `rto-graph`, so this
-/// costs a declared edge and no new crate in the lockfile.
+/// `okf-core` carries **zero dependencies**, so this costs exactly one crate in
+/// the lockfile — and removes `yaml-rust2` from this crate's tree in the same
+/// move. Measured with `cargo tree -p rto-render -e normal`.
+///
+/// # Why somebody else's OKF, and not just somebody else's YAML
+///
+/// A general-purpose YAML parser fixes the YAML and leaves the *format* ours to
+/// re-derive: which shapes `verified` may take, what the `human:` prefix means,
+/// how a tier falls out of an absence. Those are the parts an interchange format
+/// exists to standardise, and re-deriving them from prose is how two readers of
+/// one specification end up disagreeing about what a document says. `okf-core`
+/// is an independent implementation of that specification by an author who is
+/// not us, which is precisely what makes it worth depending on: agreement with
+/// it is evidence, where agreement with our own re-reading is not.
 ///
 /// Unknown top-level keys are ignored rather than rejected: §11 tells a consumer
 /// not to reject a document for a field it does not know, and a producer with
 /// its own extensions is the case a vendor-neutral format exists to allow.
 fn parse_frontmatter(block: &str) -> Result<ParsedFrontmatter, SkipReason> {
-    let mut fm = ParsedFrontmatter::default();
-    let docs = yaml_rust2::YamlLoader::load_from_str(block)
-        .map_err(|_| SkipReason::UnparsableFrontmatter)?;
-    let Some(first) = docs.first() else {
-        // An empty block parses to no documents. That is well-formed YAML
-        // carrying no keys, so it is a missing `type`, not a parse failure.
-        return Ok(fm);
+    let value = Value::parse(block).map_err(|_| SkipReason::UnparsableFrontmatter)?;
+    let Value::Mapping(map) = value else {
+        // A block that parses to a scalar, a sequence or nothing at all is legal
+        // YAML with no keys to read, so it is a missing `type` rather than a
+        // parse failure. An empty block lands here as `Value::Null`.
+        return Ok(ParsedFrontmatter::default());
     };
-    let Some(map) = first.as_hash() else {
-        // A block that parses to a scalar or a sequence is legal YAML and has
-        // no keys to read, so again: no `type`, rather than unparsable.
-        return Ok(fm);
-    };
-    let get = |key: &str| map.get(&Yaml::String(key.to_owned()));
+    let fm = OkfFrontmatter::from_mapping(map);
 
-    if let Some(v) = get("type").and_then(scalar_text) {
-        fm.type_ = v;
-    }
-    fm.title = get("title").and_then(scalar_text);
-    fm.description = get("description").and_then(scalar_text);
-    fm.resource = get("resource").and_then(scalar_text);
-    fm.status = get("status").and_then(scalar_text);
-
-    if let Some(tags) = get("tags") {
-        match tags {
-            Yaml::Array(items) => fm.tags.extend(items.iter().filter_map(scalar_text)),
-            // §4.1 asks for a list, and a bare string is not one — but it is a
-            // shape that really occurs: Google's published `stackoverflow`
-            // bundle writes `tags: stackoverflow, posts, deprecated` in seven
-            // documents.
-            //
-            // Kept **whole**, not split on commas. Splitting would recover the
-            // intent in this bundle and invent a convention the specification
-            // does not have, which is how a reader starts disagreeing with
-            // every other reader about what a document says. Keeping the string
-            // loses nothing and lets a consumer see exactly what was written —
-            // the alternative, dropping it, is the silent loss this whole
-            // parser was rewritten to stop.
-            other => fm.tags.extend(scalar_text(other)),
-        }
-    }
-
-    // §5.1 shapes `sources` as a list of entries. A producer who wrote a single
-    // entry without the list dash is tolerated, mirroring the shorthand §5.2
-    // *does* sanction for `verified` — the shapes are analogous and the slip is
-    // the same one.
+    // §4.1 asks for a list, and `okf-core` reads only a list. A bare string is
+    // not one — but it is a shape that really occurs: Google's published
+    // `stackoverflow` bundle writes `tags: stackoverflow, posts, deprecated` in
+    // seven documents, and dropping it is the silent loss this reader was
+    // rewritten to stop (§11 asks a consumer to be liberal).
     //
-    // A bare scalar is deliberately **not** tolerated here, unlike for `tags`
-    // above. `tags: a, b` is attested — Google's own `stackoverflow` bundle
-    // writes it in seven documents — whereas no published bundle writes a
-    // scalar `sources`, and there would be no way to tell `sources: foo` from a
-    // typo that happened to land on a key. Accepting it would invent a
-    // provenance record rather than read one, and provenance is the one field
-    // where guessing is worse than reporting nothing.
-    match get("sources") {
-        Some(Yaml::Array(items)) => {
-            for item in items {
-                fm.sources.extend(source_resource(item));
-            }
-        }
-        Some(single @ Yaml::Hash(_)) => fm.sources.extend(source_resource(single)),
-        _ => {}
+    // Kept **whole**, not split on commas. Splitting would recover the intent in
+    // that one bundle and invent a convention the specification does not have,
+    // which is how a reader starts disagreeing with every other reader about
+    // what a document says.
+    //
+    // This is the one place this reader is deliberately more permissive than
+    // `okf-core`. Reported upstream rather than kept as a private divergence.
+    let mut tags = fm.tags();
+    if tags.is_empty()
+        && let Some(bare) = fm.get("tags").and_then(Value::as_display_string)
+    {
+        tags.push(bare);
     }
 
-    fm.generated = get("generated").and_then(by_at);
-    fm.verified = get("verified").map(verified_entries).unwrap_or_default();
-    Ok(fm)
+    Ok(ParsedFrontmatter {
+        type_: fm.type_().unwrap_or_default().into_owned(),
+        title: fm.title().map(std::borrow::Cow::into_owned),
+        description: fm.description().map(std::borrow::Cow::into_owned),
+        resource: fm.resource().map(std::borrow::Cow::into_owned),
+        // Read from the raw key rather than through `Frontmatter::status`, which
+        // resolves an absent `status` to the specification's `stable` default.
+        // That default is right for a *consumer asking about lifecycle* and
+        // wrong here: this field is echoed verbatim into the imported node's
+        // `meta`, where inventing a status the bundle never wrote would put a
+        // claim in the peer's mouth.
+        status: fm.get("status").and_then(Value::as_display_string),
+        tags,
+        // §5.1 makes `resource` REQUIRED within an entry, so an entry without a
+        // usable one names nothing a consumer could follow and is dropped: a
+        // source that resolves to `""` is worse than one that is absent, because
+        // it looks like a record. `okf-core` supplies the shapes — a list, or
+        // the single bare mapping §5.2's analogous shorthand sanctions — and
+        // refuses a scalar, which cannot be told from a typo.
+        sources: fm
+            .sources()
+            .into_iter()
+            .filter_map(|s| s.resource.filter(|r| !r.trim().is_empty()))
+            .collect(),
+        generated: fm.generated().and_then(|g| by_at(g.by, g.at)),
+        verified: fm
+            .verified()
+            .into_iter()
+            .filter_map(|v| by_at(v.by, v.at))
+            .collect(),
+        // §5.3's tier, derived by `okf-core` from the same `verified` events.
+        // Kept beside the pairs above rather than recomputed from them, because
+        // the derivation consults more than the pairs preserve — an event needs
+        // a *parseable* `at` to count — and two ways of answering one question
+        // is how they drift apart.
+        tier: TrustTier::derive(&fm.verified()),
+    })
 }
 
-/// One `sources` entry's `resource` (§5.1), which is REQUIRED within an entry.
-///
-/// An entry carrying no `resource` names nothing a consumer could follow, so it
-/// yields `None` rather than an empty string: a source that resolves to `""` is
-/// worse than one that is absent, because it looks like a record.
-fn source_resource(entry: &Yaml) -> Option<String> {
-    entry
-        .as_hash()?
-        .get(&Yaml::String("resource".to_owned()))
-        .and_then(scalar_text)
-        .filter(|r| !r.trim().is_empty())
-}
-
-/// A YAML scalar as a plain string; containers yield `None`.
-///
-/// `Real` keeps its own source text, so a timestamp survives unretyped rather
-/// than being reformatted through a float.
-fn scalar_text(v: &Yaml) -> Option<String> {
-    match v {
-        Yaml::String(s) | Yaml::Real(s) => Some(s.clone()),
-        Yaml::Integer(i) => Some(i.to_string()),
-        Yaml::Boolean(b) => Some(b.to_string()),
-        _ => None,
-    }
-}
-
-/// One `{ by, at }` mapping (§5.2).
+/// One `{ by, at }` mapping (§5.2) as the pair this reader carries.
 ///
 /// A pair with no `at` keeps an empty timestamp rather than being dropped:
 /// **who** confirmed something is the load-bearing half, and §7 is about the
 /// actor. A mapping with no `by` names nobody, and is dropped.
-fn by_at(node: &Yaml) -> Option<(String, String)> {
-    let map = node.as_hash()?;
-    let by = map
-        .get(&Yaml::String("by".to_owned()))
-        .and_then(scalar_text)?;
-    if by.trim().is_empty() {
+///
+/// Note this is deliberately *not* the same test as the one behind the trust
+/// tier. A verifier with a missing or unparseable `at` still deserves to be
+/// recorded and re-emitted — dropping the attribution would lose information
+/// the bundle actually carried — while §5.3's tier is a claim about confirmation
+/// that an untimestamped event cannot support. So the attribution survives and
+/// the tier does not, which is the honest reading of both.
+fn by_at(
+    by: Option<okf_core::Actor>,
+    at: Option<okf_core::DateTimeField>,
+) -> Option<(String, String)> {
+    let by = by?;
+    let by = by.as_str().trim();
+    if by.is_empty() {
         return None;
     }
-    let at = map
-        .get(&Yaml::String("at".to_owned()))
-        .and_then(scalar_text)
-        .unwrap_or_default();
-    Some((by, at))
-}
-
-/// The `verified` field as a list of verification events (§5.2).
-///
-/// §5.2 is explicit that *"a single verifier MAY be written as one `{ by, at }`
-/// mapping without the list dash"* and that consumers **MUST** treat a bare
-/// mapping as a one-element list. That MUST is discharged here, in the one place
-/// that can tell the two shapes apart.
-fn verified_entries(node: &Yaml) -> Vec<(String, String)> {
-    match node {
-        Yaml::Array(items) => items.iter().filter_map(by_at).collect(),
-        other => by_at(other).into_iter().collect(),
-    }
+    Some((by.to_owned(), at.map(|a| a.raw).unwrap_or_default()))
 }
 
 /// One link found in a concept's relationships section.
@@ -1158,12 +1156,11 @@ fn push_concept(
 /// The `okf_version` a bundle root's `index.md` declares (§10).
 fn root_okf_version(content: &str) -> Option<String> {
     let (block, _) = split_frontmatter(content).ok()?;
-    yaml_rust2::YamlLoader::load_from_str(block)
+    Value::parse(block)
         .ok()?
-        .first()?
-        .as_hash()?
-        .get(&Yaml::String("okf_version".to_owned()))
-        .and_then(scalar_text)
+        .as_mapping()?
+        .get("okf_version")
+        .and_then(Value::as_display_string)
         .map(|v| v.trim().to_owned())
 }
 
