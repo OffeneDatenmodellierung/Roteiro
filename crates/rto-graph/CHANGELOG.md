@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v5.0.0...rto-graph-v5.1.0) - 2026-09-01
+
+### Added
+
+- *(okf)* read a peer's OKF bundle as external knowledge
+- *(serve)* handle SIGHUP on every server, and reload the whole server
+
+### Other
+
+- *(graph)* probe for an attached edge with EXISTS, and guard both arms
+- *(graph)* reattach import_node_provenance's doc comment, and guard the meta
+
 ## [4.2.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v4.1.0...rto-graph-v4.2.0) - 2026-09-01
 
 ### Added

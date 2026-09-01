@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.0.0...roteiro-v5.1.0) - 2026-09-01
+
+### Added
+
+- *(okf)* read a peer's OKF bundle as external knowledge
+- *(serve)* handle SIGHUP on every server, and reload the whole server
+
+### Fixed
+
+- *(okf)* harden the bundle walk and pin the reader's output order
+
+### Other
+
+- *(okf)* pin that a filled placeholder survives a rebuild
+
 ## [5.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v4.2.0...roteiro-v5.0.0) - 2026-09-01
 
 ### Added

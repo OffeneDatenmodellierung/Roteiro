@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v5.0.0...rto-render-v5.1.0) - 2026-09-01
+
+### Added
+
+- *(okf)* read a peer's OKF bundle as external knowledge
+
+### Fixed
+
+- *(okf)* tolerate a single `sources` mapping, and say why not a scalar
+- *(okf)* report unparseable frontmatter as its own skip reason
+- *(okf)* read foreign bundles with a real YAML parser
+- *(okf)* harden the bundle walk and pin the reader's output order
+
+### Other
+
+- *(graph)* reattach import_node_provenance's doc comment, and guard the meta
+- *(okf)* pin that a filled placeholder survives a rebuild
+
 ## [5.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v4.2.0...rto-render-v5.0.0) - 2026-09-01
 
 ### Added
