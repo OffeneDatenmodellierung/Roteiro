@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.1.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v4.1.0...rto-graph-v4.1.1) - 2026-09-01
+
+### Fixed
+
+- *(review)* say what `--base` compared against, and warn when it is stale
+
 ## [4.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v4.0.0...rto-graph-v4.1.0) - 2026-09-01
 
 ### Added
