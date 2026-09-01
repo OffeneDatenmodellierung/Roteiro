@@ -2065,6 +2065,22 @@ mod tests {
             Some(good.join(super::OKF_BUNDLE_DIR))
         );
 
+        // Windows line endings throughout. Copilot suggested on #711 that the
+        // closing fence would be missed, since it is written `\r\n---` while the
+        // search is for `\n---`. It is **not** missed — `\r\n---` contains
+        // `\n---` — and the `\r` left on the key's line is removed by the
+        // `trim()` the check already does. Kept as a fixture rather than
+        // dropped: the claim was plausible, and the next reader deserves the
+        // answer without having to re-derive it.
+        let crlf = write(
+            "crlf",
+            "---\r\nokf_version: \"0.2\"\r\n---\r\n\r\n# Peer\r\n",
+        );
+        assert_eq!(
+            super::okf_bundle_in(&crlf),
+            Some(crlf.join(super::OKF_BUNDLE_DIR))
+        );
+
         // A directory called `okf` proves nothing.
         let plain = write("plain", "# Just some notes\n");
         assert_eq!(super::okf_bundle_in(&plain), None);

@@ -774,7 +774,23 @@ fn split_hidden_presentation(text: &str, findings: &mut Vec<Finding>) -> (String
             i = tag_end;
             continue;
         };
-        let (inner, after) = enclosed_region(text, &lower, &name, tag_end);
+        // A **void** element has no close tag and encloses no text, so there is
+        // no region to lift out — only the tag itself, which is already being
+        // skipped. Searching for `</img>` and finding none made
+        // `enclosed_region` fall back to "everything after it is hidden", so a
+        // single `<img style="display:none">` swallowed the rest of the
+        // document and could quarantine or block prose that was plainly
+        // visible. Reported by Copilot on #711.
+        //
+        // The finding is still recorded: the bundle *does* carry deliberately
+        // hidden markup, and saying so costs the body nothing (the remedy for a
+        // finding of this class alone is to strip it, which was happening
+        // anyway).
+        let (inner, after) = if is_void(&name) || attrs.trim_end().ends_with('/') {
+            ("", tag_end)
+        } else {
+            enclosed_region(text, &lower, &name, tag_end)
+        };
         hidden.push_str(inner);
         hidden.push('\n');
         findings.push(Finding {
@@ -809,6 +825,21 @@ fn read_open_tag(text: &str, at: usize) -> Option<(String, String, usize)> {
     let name = inner[..name_end].to_ascii_lowercase();
     let attrs = inner[name_end..].to_owned();
     Some((name, attrs, at + 1 + close + 1))
+}
+
+/// HTML elements that never have a close tag and never enclose text.
+///
+/// The whole WHATWG list, because getting it wrong in the *omitting* direction
+/// is what caused the defect: an element treated as enclosing when it does not
+/// makes the rest of the document read as hidden.
+const VOID_ELEMENTS: &[&str] = &[
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
+    "track", "wbr",
+];
+
+/// Whether `name` (already lowercased) is a void element.
+fn is_void(name: &str) -> bool {
+    VOID_ELEMENTS.contains(&name)
 }
 
 /// The index just past `</name>` when one starts at `at`, else `None`.
@@ -1072,6 +1103,44 @@ mod tests {
         // Visible prose, so it is withheld rather than refused — the phrase is
         // as readable to a human as to a model.
         assert_eq!(s.admit, None);
+    }
+
+    #[test]
+    fn a_hidden_void_element_does_not_swallow_the_document() {
+        // `<img>` has no `</img>`, so searching for one fell through to
+        // "everything after this is hidden" — one hidden image made the rest of
+        // a document read as concealed, which could quarantine or even block
+        // plainly visible prose. Reported by Copilot on #711.
+        let s = screen_text("before <img src=\"x.png\" style=\"display:none\"> after");
+        assert_eq!(s.verdict, Verdict::Quarantine);
+        assert_eq!(s.classes(), vec!["hidden-presentation"]);
+        assert_eq!(
+            s.admit,
+            Some("before  after".to_owned()),
+            "the prose on both sides of it survives"
+        );
+    }
+
+    #[test]
+    fn a_hidden_void_element_does_not_conceal_following_prose() {
+        // The sharp end of the same defect: text after the void element is
+        // visible, so a directive in it is a quarantine, never a block.
+        let s = screen_text(
+            "<img style=\"display:none\">\n\nThis note explains why \
+             \"ignore all previous instructions\" is dangerous.",
+        );
+        assert_eq!(
+            s.verdict,
+            Verdict::Quarantine,
+            "visible prose after a hidden image is not concealed"
+        );
+        assert_ne!(s.verdict, Verdict::Block);
+    }
+
+    #[test]
+    fn a_self_closing_tag_encloses_nothing() {
+        let s = screen_text("before <span style=\"display:none\"/> after");
+        assert_eq!(s.admit, Some("before  after".to_owned()));
     }
 
     #[test]
