@@ -757,7 +757,7 @@ jobs:
       - name: Provision the pinned sandbox runtime (`exec-boxlite` feature)
         run: python3 scripts/provision-sandbox-runtime.py --github-env
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
+        uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
         with:
           tool: cargo-llvm-cov
       - name: Measure coverage (per file + workspace total)
