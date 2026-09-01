@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.2.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v4.1.0...rto-graph-v4.2.0) - 2026-09-01
+
+### Added
+
+- *(review)* a whole-change verdict, and a warning when the reviewer wrote it
+
+### Fixed
+
+- *(score)* refuse a run that judges one commit twice
+- *(review)* bound the verdict prompt's head, and correct what normalisation claims
+- *(review)* name what a truncated prompt cut, and resolve the `--llm` base
+- *(review)* say what `--base` compared against, and warn when it is stale
+
 ## [4.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v4.0.0...rto-graph-v4.1.0) - 2026-09-01
 
 ### Added
