@@ -76,6 +76,83 @@ fn the_file_pins_were_derived_from_the_archives_that_are_pinned_now() {
     );
 }
 
+/// The pins describe the `boxlite` release the lockfile actually resolves.
+///
+/// # Why the digests do not already cover this
+///
+/// They cover it on one path and not the other, and the one they miss is the
+/// one CI takes. With `BOXLITE_RUNTIME_URL` unset, `boxlite` fetches the archive
+/// for *its own* version and `build.rs` compares the extracted files against
+/// these pins, so a skew is a digest mismatch. But the strict path provisions
+/// the archive **from this file** and points `boxlite`'s `curl` at it — so a
+/// bump that moved `boxlite` and forgot the pins would hand the old runtime to
+/// the new library and check it against the digests it was provisioned from.
+/// Every one would match. The build would be green, the archive genuine, and
+/// the pairing wrong: a v0.10.0 library driving a v0.9.7 shim and guest.
+///
+/// `runtime_pins.rs` claimed this was checked against `boxlite`'s
+/// `CARGO_PKG_VERSION` in `build.rs`. Nothing did — and nothing there can, since
+/// cargo passes a `links` dependency's metadata keys and not its version. This
+/// is the check the comment was describing.
+///
+/// # Why the lockfile
+///
+/// It is what `--locked` builds resolve and what a dependency bump edits, so it
+/// is the version that will actually be compiled. Reading `Cargo.toml`'s
+/// requirement instead would assert against a range rather than a release.
+#[test]
+fn the_pins_are_for_the_boxlite_release_the_lockfile_resolves() {
+    let lockfile = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("rto-exec lives two directories below the workspace root")
+        .join("Cargo.lock");
+    let source = std::fs::read_to_string(&lockfile)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", lockfile.display()));
+
+    // Every `[[package]]` block whose name is boxlite, by its version line. A
+    // scan rather than a TOML parse keeps this test free of a dependency for one
+    // field; the shape it assumes is asserted below rather than assumed, because
+    // finding nothing must fail loudly and not pass as "no skew found".
+    let versions: Vec<&str> = source
+        .split("[[package]]")
+        .filter_map(|block| {
+            let mut name = None;
+            let mut version = None;
+            for line in block.lines() {
+                if let Some(rest) = line.strip_prefix("name = \"") {
+                    name = rest.strip_suffix('"');
+                } else if let Some(rest) = line.strip_prefix("version = \"") {
+                    version = rest.strip_suffix('"');
+                }
+            }
+            (name == Some("boxlite")).then_some(version).flatten()
+        })
+        .collect();
+
+    assert_eq!(
+        versions.len(),
+        1,
+        "expected exactly one `boxlite` package in {}, found {versions:?}. Zero means this \
+         test is looking at nothing and would pass however far the pins drifted; more than \
+         one means the graph carries two boxlite releases and the pins can only describe \
+         one of them.",
+        lockfile.display()
+    );
+
+    assert_eq!(
+        versions[0],
+        rto_exec::RUNTIME_VERSION,
+        "the lockfile resolves boxlite {} but the sandbox-runtime pins are for {}. Bump \
+         crates/rto-exec/src/runtime_pins.rs to the matching release and re-run \
+         scripts/derive-runtime-file-pins.py — never the other way round, and never by \
+         editing RUNTIME_VERSION alone, which would leave a new library paired with an old \
+         shim and guest that the digests cannot tell apart.",
+        versions[0],
+        rto_exec::RUNTIME_VERSION
+    );
+}
+
 /// The pins are well formed: unique flat names, real digests, real sizes.
 ///
 /// `build.rs` matches extracted files by name and refuses anything unpinned, so

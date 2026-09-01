@@ -848,11 +848,22 @@ impl BoxliteRunner {
             network: NetworkSpec::Disabled,
             volumes: vec![
                 VolumeSpec {
+                    // A mount has exactly one origin, and every origin here is a
+                    // host path this process named. `managed_volume` is the
+                    // other one: a volume resolved by a **remote** boxlite
+                    // server from an id or name. It is not a default being
+                    // filled in — ADR-0020 puts the inputs on the host side and
+                    // denies the guest egress, so a mount whose contents are
+                    // decided elsewhere is the boundary being handed over.
+                    // boxlite's local runtime refuses one before boot anyway;
+                    // stating it here is what makes that a build-time fact.
+                    managed_volume: None,
                     host_path: request.worktree.path.to_string_lossy().into_owned(),
                     guest_path: GUEST_WORKTREE.to_owned(),
                     read_only: true,
                 },
                 VolumeSpec {
+                    managed_volume: None,
                     host_path: self.assets_root.to_string_lossy().into_owned(),
                     guest_path: GUEST_ASSETS.to_owned(),
                     read_only: true,
@@ -867,7 +878,16 @@ impl BoxliteRunner {
             cmd: Some(Vec::new()),
             // Nothing survives the scan. A box left behind would be a second
             // copy of the worktree's mount configuration lying around.
-            auto_remove: true,
+            //
+            // `auto_delete` rather than the deprecated `auto_remove` it
+            // replaced, and `Some(1)` rather than a larger delay: the seconds
+            // are a *REST* runtime's sweeper interval, and this runtime is
+            // local, where boxlite documents any `Some(n > 0)` as removal
+            // immediately on stop. So the number is not a grace period here —
+            // it is the smallest value that means "yes". `Some(0)` is the
+            // opposite instruction (keep the box) and `None` would defer to the
+            // deprecated field, which is how this stops being stated at all.
+            auto_delete: Some(1),
             detach: false,
             ..Default::default()
         };
@@ -879,6 +899,17 @@ impl BoxliteRunner {
                 stage: "create",
                 message: e.to_string(),
             })?;
+
+        // Boot it, in as many words. boxlite ≤0.9.7 started a box as a side
+        // effect of the first `exec`; 0.10.0 refuses to, for any box whose init
+        // the caller chose — and this one's is chosen, `GUEST_INIT` above. Its
+        // reasoning is that booting re-runs that command, which must not happen
+        // because someone asked to exec or copy a file. Here it is exactly what
+        // is wanted, and saying so is a line of code rather than an argument.
+        boxed.start().await.map_err(|e| SandboxError::Runtime {
+            stage: "start",
+            message: e.to_string(),
+        })?;
 
         let result = self.exec_in(&boxed, invocation).await;
 

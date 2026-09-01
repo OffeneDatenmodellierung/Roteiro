@@ -7,7 +7,7 @@ to it.
 ## What is embedded, and how
 
 `exec-boxlite` depends on [`boxlite`](https://github.com/boxlite-ai/boxlite)
-v0.9.7 (Apache-2.0). When `boxlite` is compiled from crates.io it does not build
+v0.10.0 (Apache-2.0). When `boxlite` is compiled from crates.io it does not build
 a hypervisor from source; instead its build script takes a prebuilt runtime
 archive, embeds the files with `include_bytes!`, and extracts them at first use
 to a per-user cache, where they are executed as **separate processes**.
@@ -26,12 +26,22 @@ distributed with it:
 | `boxlite-guest` | boxlite | Apache-2.0 | <https://github.com/boxlite-ai/boxlite> |
 | `libkrunfw.so.5` / `libkrunfw.5.dylib` | libkrunfw (a packaged Linux kernel) | **GPL-2.0** | <https://github.com/containers/libkrunfw>, <https://www.kernel.org/> |
 | `mke2fs` | e2fsprogs | **GPL-2.0** | <https://github.com/tytso/e2fsprogs> |
+| `guest-mke2fs` | e2fsprogs | **GPL-2.0** | <https://github.com/tytso/e2fsprogs> |
+| `guest-resize2fs` | e2fsprogs | **GPL-2.0** | <https://github.com/tytso/e2fsprogs> |
 | `debugfs` | e2fsprogs | **GPL-2.0** | <https://github.com/tytso/e2fsprogs> |
 | `bwrap` (Linux only) | bubblewrap | **LGPL-2.0-or-later** | <https://github.com/containers/bubblewrap> |
 
+The `guest-` pair arrived with v0.10.0: the same e2fsprogs tools built for the
+guest, embedded under distinct names so they do not shadow the host `mke2fs` in
+the same directory. They are two more GPL-2.0 programs in the artifact, not a
+renaming of one already listed, so they carry the same duties as the rest of the
+table. The authoritative list of what a given platform's archive contributes is
+`crates/rto-exec/src/runtime_file_pins.rs`, which is generated from the archives
+themselves — seven files on `darwin-arm64`, eight on each Linux target.
+
 The archives themselves are published at
-<https://github.com/boxlite-ai/boxlite/releases/tag/v0.9.7> as
-`boxlite-runtime-v0.9.7-<platform>.tar.gz`.
+<https://github.com/boxlite-ai/boxlite/releases/tag/v0.10.0> as
+`boxlite-runtime-v0.10.0-<platform>.tar.gz`.
 
 ## What this does and does not mean
 
@@ -46,8 +56,10 @@ the artifact:
 
 * **GPL-2.0 §3 — source availability.** Anyone who receives a `roteiro` binary
   built with `exec-boxlite` is entitled to the complete corresponding source of
-  `libkrunfw`, `mke2fs` and `debugfs`. The upstream URLs above are the standing
-  offer; the exact revisions are those of the pinned release artifacts.
+  `libkrunfw`, `mke2fs`, `resize2fs` and `debugfs` — the last three being
+  e2fsprogs, whether they appear under their own names or the `guest-` ones. The
+  upstream URLs above are the standing offer; the exact revisions are those of
+  the pinned release artifacts.
 * **LGPL-2.0-or-later — relinking.** `bwrap` is distributed unmodified and is
   executed, never linked, so the relinking obligation is satisfied by the
   availability of its unmodified source at the URL above.

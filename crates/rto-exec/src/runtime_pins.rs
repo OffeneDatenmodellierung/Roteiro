@@ -27,14 +27,16 @@
 // same crate version can therefore embed different bytes, undetectably.
 //
 // Roteiro will not ship that. The digests below were computed from the real
-// v0.9.7 release assets, and are what makes the embedded runtime reproducible:
+// v0.10.0 release assets, and are what makes the embedded runtime reproducible:
 // `roteiro security prefetch --allow-download` fetches and verifies the archive
 // against them, and `build.rs` then refuses to build unless `BOXLITE_RUNTIME_URL`
 // points at a local file whose bytes match. `boxlite`'s `curl` never reaches the
 // network, because the `file://` URL it is given is already on disk.
 //
 // Bump these together with the `boxlite` pin in `Cargo.toml`; a version skew is
-// caught by `build.rs` rather than discovered at run time.
+// caught before the build runs rather than discovered at run time — see
+// [`RUNTIME_VERSION`] for which check catches it and why `build.rs` is not the
+// one that can.
 
 /// One platform's prebuilt sandbox-runtime archive.
 ///
@@ -58,10 +60,19 @@ pub struct PinnedArchive {
 
 /// The `boxlite` release these archives belong to.
 ///
-/// Checked against `boxlite`'s own `CARGO_PKG_VERSION` at build time, so a
-/// dependency bump that forgets these pins fails the build instead of silently
-/// pairing a new library with an old runtime.
-pub const RUNTIME_VERSION: &str = "0.9.7";
+/// Held equal to the `boxlite` the lockfile resolves, by
+/// `tests/runtime_pin_integrity.rs`. That is a test rather than a build-script
+/// check because nothing reaches this script from `boxlite`'s own manifest:
+/// cargo passes `DEP_BOXLITE_*` for the keys boxlite's build script emits, and
+/// its version is not one of them.
+///
+/// The check is not redundant with the digests. On the strict path — the one CI
+/// takes and the one `build.rs` recommends — `BOXLITE_RUNTIME_URL` names an
+/// archive provisioned *from these very pins*, so a bump that moved `boxlite`
+/// and left the pins alone would hand the old archive to the new library,
+/// verify it against the old digests it was provisioned from, and agree with
+/// itself. Every digest here would match and the pairing would still be wrong.
+pub const RUNTIME_VERSION: &str = "0.10.0";
 
 /// The asset id the archive is provisioned under.
 pub const RUNTIME_ASSET: &str = "boxlite-runtime";
@@ -76,21 +87,21 @@ pub const RUNTIME_FILE: &str = "boxlite-runtime.tar.gz";
 pub const RUNTIME_ARCHIVES: &[PinnedArchive] = &[
     PinnedArchive {
         target: "darwin-arm64",
-        url: "https://github.com/boxlite-ai/boxlite/releases/download/v0.9.7/boxlite-runtime-v0.9.7-darwin-arm64.tar.gz",
-        sha256: "7f64529978cd2af420411ddfd4cc3b5799ca20234d90346c887cb596d52f8d4e",
-        bytes: 26_520_984,
+        url: "https://github.com/boxlite-ai/boxlite/releases/download/v0.10.0/boxlite-runtime-v0.10.0-darwin-arm64.tar.gz",
+        sha256: "8867bb02687c02a8ab6975c1dd8ef85d549dba9e5e94087cb7fb61838b56d979",
+        bytes: 29_415_066,
     },
     PinnedArchive {
         target: "linux-x64-gnu",
-        url: "https://github.com/boxlite-ai/boxlite/releases/download/v0.9.7/boxlite-runtime-v0.9.7-linux-x64-gnu.tar.gz",
-        sha256: "9ae495f55d363e6af04640ab55025ac80b4bf4762e38fa0b8ac80c7604e3148c",
-        bytes: 24_957_005,
+        url: "https://github.com/boxlite-ai/boxlite/releases/download/v0.10.0/boxlite-runtime-v0.10.0-linux-x64-gnu.tar.gz",
+        sha256: "3de43b2ca1620f7d73b71630be7f9e26f13f28497a4a692617a663dde0c8400f",
+        bytes: 27_941_945,
     },
     PinnedArchive {
         target: "linux-arm64-gnu",
-        url: "https://github.com/boxlite-ai/boxlite/releases/download/v0.9.7/boxlite-runtime-v0.9.7-linux-arm64-gnu.tar.gz",
-        sha256: "78e978d6398d5a78dc76d675941cb05287e8c70b1b647e98a479058a9652be28",
-        bytes: 28_737_386,
+        url: "https://github.com/boxlite-ai/boxlite/releases/download/v0.10.0/boxlite-runtime-v0.10.0-linux-arm64-gnu.tar.gz",
+        sha256: "e67786ba493430bed70e992fcd7248f4a71e1eaf562ddbbb016f478d044ca4cf",
+        bytes: 31_627_264,
     },
 ];
 

@@ -46,109 +46,139 @@ pub struct PinnedRuntimeFiles {
 }
 
 /// The `boxlite` release these were derived from.
-pub const RUNTIME_FILES_VERSION: &str = "0.9.7";
+pub const RUNTIME_FILES_VERSION: &str = "0.10.0";
 
 /// Every pinned platform's extracted runtime files.
 pub const RUNTIME_FILES: &[PinnedRuntimeFiles] = &[
     PinnedRuntimeFiles {
         target: "darwin-arm64",
-        archive_sha256: "7f64529978cd2af420411ddfd4cc3b5799ca20234d90346c887cb596d52f8d4e",
+        archive_sha256: "8867bb02687c02a8ab6975c1dd8ef85d549dba9e5e94087cb7fb61838b56d979",
         files: &[
             PinnedFile {
                 name: "boxlite-guest",
-                sha256: "f09abc03fd2d233b1e6fa31327cb30c14698d7c60ee21be241096620767ae261",
-                bytes: 14_074_296,
+                sha256: "b9d7905916ee8b46ef4a4e18b22623aca05ce9a6683e453bc2d5835d5106595f",
+                bytes: 20_526_368,
             },
             PinnedFile {
                 name: "boxlite-shim",
-                sha256: "741ced072011ee62ef3861908e4573bd2bb13c21bc0c40bca42eabea3de65a93",
-                bytes: 22_991_696,
+                sha256: "c1e8bfb8c81aa17bcc905fcf20e4c4df2935b32c5365b9a22ef92d8728f0876f",
+                bytes: 23_338_128,
             },
             PinnedFile {
                 name: "debugfs",
-                sha256: "6bf2f08e5cb6ce2d2c9c445ed4d4b2ac12721d61ad2592b0e958c4db0e2d6f87",
+                sha256: "d65b062b98f7cc712e076cc9074897fa5bc808273fd3e7543b6067aefde42be2",
                 bytes: 661_800,
             },
             PinnedFile {
+                name: "guest-mke2fs",
+                sha256: "f2db9033e783447cdb36aefb5e64d60cffa68d3eef155cce2d9b49b501e5a3b4",
+                bytes: 737_312,
+            },
+            PinnedFile {
+                name: "guest-resize2fs",
+                sha256: "0ec5291f557eff335dc6dc4f0edcd1adac21a5f44cc15a1193fba8c1612f3524",
+                bytes: 563_872,
+            },
+            PinnedFile {
                 name: "libkrunfw.5.dylib",
-                sha256: "454efb5b04045c1b89eaa4d28e90afe92bad1b125b059168f164971a7189cf18",
-                bytes: 22_970_192,
+                sha256: "4735ad1eb68b8ae82222f0085fbab213ba25952d75f91f83fd7078c5c6913cd3",
+                bytes: 23_762_768,
             },
             PinnedFile {
                 name: "mke2fs",
-                sha256: "d82d5b85dd86ee8fc8d6d1e72b59b331cd4bd288e485f9c9fb0da81170eb5854",
+                sha256: "c1e314367f92ec668ca02644a1d7d07bf738d48b5782f3422f0629c11295f47d",
                 bytes: 577_560,
             },
         ],
     },
     PinnedRuntimeFiles {
         target: "linux-arm64-gnu",
-        archive_sha256: "78e978d6398d5a78dc76d675941cb05287e8c70b1b647e98a479058a9652be28",
+        archive_sha256: "e67786ba493430bed70e992fcd7248f4a71e1eaf562ddbbb016f478d044ca4cf",
         files: &[
             PinnedFile {
                 name: "boxlite-guest",
-                sha256: "e641807883c0c2d427e93d1fd18313fdd806593b89dbb1fafff48293e3bf8aa6",
-                bytes: 14_079_928,
+                sha256: "34982642a3a2afe7dad8f3a97dbcc951b4d94515c0dc8c35e854d2383a36a35d",
+                bytes: 20_523_288,
             },
             PinnedFile {
                 name: "boxlite-shim",
-                sha256: "2ce896d88569c9164a33b4b4c36221988076d78aab02a3c97d100fef4f49c87a",
-                bytes: 26_652_536,
+                sha256: "3bc4b2182c52d36089523d1d098cec3fe88a7dbf633fbc3ed8f470cb404f8550",
+                bytes: 27_033_936,
             },
             PinnedFile {
                 name: "bwrap",
-                sha256: "3e599fc36c39f220d9f0b05956c5c57720b6a83c819cc3114e3ed7e6175dbefa",
+                sha256: "e36661910bbb5933b42a1403b8409066471570bc99d129fb67f3399da01d03e1",
                 bytes: 307_120,
             },
             PinnedFile {
                 name: "debugfs",
-                sha256: "ae190ef38146ffe20cdc12a419a86d9fd7fd55316356ffd6a995e9d9391acef4",
+                sha256: "f581b714e1e282481e6521b88108ac6562edad8940e0052d5b081c8aa77f6365",
                 bytes: 3_593_336,
             },
             PinnedFile {
+                name: "guest-mke2fs",
+                sha256: "205fdbb6efb8234ba13967ece6c9a4098a74ca955fd784824cb004c87b02976c",
+                bytes: 645_720,
+            },
+            PinnedFile {
+                name: "guest-resize2fs",
+                sha256: "47e2659d5577bedc109de8f3427d42a26af1234669c563e50cc099961a9d0aca",
+                bytes: 472_048,
+            },
+            PinnedFile {
                 name: "libkrunfw.so.5",
-                sha256: "f30112748a09cefccb9b3d98098fe2b770e785debfafea5dc9e0523f17b8d74a",
-                bytes: 22_939_240,
+                sha256: "a47fad6c557420899b7e079c63227b4660c365bbb1c7def0428bf6352786a321",
+                bytes: 23_791_889,
             },
             PinnedFile {
                 name: "mke2fs",
-                sha256: "c5b92faf507b95db98b78234c7c12580e7a9fd141d4ad5bdeb212e0b4b2537d0",
+                sha256: "ac74dac5f83abc2bf0629e25ba39d56b8806a808b21e260ec25a527b5df55baf",
                 bytes: 3_052_784,
             },
         ],
     },
     PinnedRuntimeFiles {
         target: "linux-x64-gnu",
-        archive_sha256: "9ae495f55d363e6af04640ab55025ac80b4bf4762e38fa0b8ac80c7604e3148c",
+        archive_sha256: "3de43b2ca1620f7d73b71630be7f9e26f13f28497a4a692617a663dde0c8400f",
         files: &[
             PinnedFile {
                 name: "boxlite-guest",
-                sha256: "8d090705ae2fe424a5d2a501733029a9cadb58f158691957abecc823c638ae40",
-                bytes: 14_480_904,
+                sha256: "7eb2088aa3a5ffe51186a16bae214568e513edb4684034da0180bbed4986a479",
+                bytes: 21_145_160,
             },
             PinnedFile {
                 name: "boxlite-shim",
-                sha256: "ee1572b212f9041b7de208540c68e6bee608386064eedf2aabbc9a1f7b058677",
-                bytes: 29_320_000,
+                sha256: "27735820133cfae77056150b91c56fdcb912a62536383ba2fd1bc7025051c5d6",
+                bytes: 29_756_096,
             },
             PinnedFile {
                 name: "bwrap",
-                sha256: "3312ccace553fd083a00f4706c5658880113ed79f3fc1ec7bb486ec0797a7523",
+                sha256: "697ad1697342ecd415addbfc91d4dfee73a4d543239e03ed854e559f137d680c",
                 bytes: 187_376,
             },
             PinnedFile {
                 name: "debugfs",
-                sha256: "cf3e94ba478311991c4dd461a983365529b612293ff82a76ed4b1c1d6adfaf89",
+                sha256: "35f189fd3a715e0bfa94e92ffb12c539a09c7b0a5b760fef902452e5e129ae57",
                 bytes: 3_374_856,
             },
             PinnedFile {
+                name: "guest-mke2fs",
+                sha256: "a5dfe7496d2a56da6f5060557846f9f3752e07064fcdb0ecde3906f876011aca",
+                bytes: 560_048,
+            },
+            PinnedFile {
+                name: "guest-resize2fs",
+                sha256: "0a2c15cb20fa3e369a02e9712c611037a89236bc52ad109daf02c3d33a19ee97",
+                bytes: 399_448,
+            },
+            PinnedFile {
                 name: "libkrunfw.so.5",
-                sha256: "c29492267947a7f40218a9a181fe5aa3e9bcb96efbd0e3fab3d1839f5a0a9eff",
-                bytes: 19_203_768,
+                sha256: "953201c0c367070946a2f99695cb50dbb8980d97e416964bfa3fb1e9d1f15f69",
+                bytes: 21_431_992,
             },
             PinnedFile {
                 name: "mke2fs",
-                sha256: "c3bedf42c320212abeb1c6325bd2663d7507a46d0ba06c2a76af1a9222c8ebb1",
+                sha256: "76bfb9a5de67275f5275f1b65fd99d8a30d8e02c58d3532d9b96d6c99634b867",
                 bytes: 2_831_648,
             },
         ],

@@ -157,7 +157,7 @@ struct Reviewed {
 const REVIEWED: &[Reviewed] = &[
     Reviewed {
         name: "boxlite",
-        version: "0.9.7",
+        version: "0.10.0",
         reason: "Downloads the prebuilt sandbox runtime with an unverified `curl` and embeds \
                  the extracted files with include_bytes!. Governed at the point the bytes \
                  enter the artifact: `crates/rto-exec/src/runtime_file_pins.rs` pins the \
@@ -170,17 +170,30 @@ const REVIEWED: &[Reviewed] = &[
                  prefetch --analyzer sandbox --allow-download` additionally verifies the \
                  archive *before* extraction and keeps the curl off the network entirely; \
                  without it the fetch does happen, over TLS to the pinned release URL, and \
-                 the build says so on its own output. See NOTICE-boxlite-runtime.md for what \
-                 the archive contains and the licence duties it creates.",
+                 the build says so on its own output. Re-reviewed for 0.10.0: the fetching \
+                 code is byte-identical to 0.9.7's, and the three v0.10.0 archive pins were \
+                 re-derived from the release assets rather than carried over — the runtime \
+                 now contributes two more files per platform (`guest-mke2fs`, \
+                 `guest-resize2fs`), which the per-file pins cover and \
+                 NOTICE-boxlite-runtime.md now lists. See that file for what the archive \
+                 contains and the licence duties it creates.",
     },
     Reviewed {
         name: "libkrun-sys",
-        version: "0.9.7",
+        version: "0.10.0",
         reason: "Would download libkrunfw and build vendored libkrun, but the published package \
-                 excludes those sources and its build script detects a crates.io package and \
-                 returns before fetching anything (stub mode). It is inert here; the runtime \
-                 that actually executes comes through `boxlite` above. Re-review if the crate \
-                 ever ships its `vendor/` directory.",
+                 excludes those sources (`exclude = [\"vendor\"]`) and its build script detects \
+                 a crates.io package by the `.cargo_vcs_info.json` cargo injects, sets \
+                 BOXLITE_DEPS_STUB=1 and returns before `build()` is reached (stub mode). \
+                 Nothing here enables its `krun`/`krunfw` features either, which is a second, \
+                 independent early return. It is inert; the runtime that actually executes \
+                 comes through `boxlite` above. What would pin it if it ever ran: the \
+                 libkrunfw tarball URL and its expected SHA-256 are both `const`s in that \
+                 build script, and `Fetcher::fetch` verifies the digest before extracting — \
+                 0.10.0 tightened this, verifying a *cached* tarball too where 0.9.7 checked \
+                 only a freshly downloaded one. Re-review if the crate ever ships its \
+                 `vendor/` directory, if a feature that reaches `build()` is enabled, or if \
+                 the digest constants stop guarding the extract.",
     },
 ];
 

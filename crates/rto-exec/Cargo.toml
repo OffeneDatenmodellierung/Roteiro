@@ -22,7 +22,7 @@ rto-graph = { workspace = true }
 # undefined symbols. What actually executes is the prebuilt runtime — see
 # `src/runtime_pins.rs` — which `build.rs` refuses to build against unless it has
 # been provisioned and verified against a pinned digest.
-boxlite = { version = "=0.9.7", optional = true }
+boxlite = { version = "=0.10.0", optional = true }
 # `exec-boxlite` only: `AnalyzerRunner::run` is synchronous and boxlite's API is
 # async, so the runner drives a current-thread runtime it owns. No reactor is
 # shared with the CLI, and nothing here spawns a background thread.

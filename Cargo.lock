@@ -425,9 +425,9 @@ dependencies = [
 
 [[package]]
 name = "boxlite"
-version = "0.9.7"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ebe9cfe1b53620718a0356357aafd49e0039ee68384741d46f43e72af63e8ba"
+checksum = "af61fd3e7918844e0439883b49a2aa4cb295b155f28fa855969803ea2263d71b"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -436,6 +436,7 @@ dependencies = [
  "bincode 2.0.1",
  "boxlite-shared",
  "bubblewrap-sys",
+ "bytes",
  "caps",
  "cc",
  "chrono",
@@ -448,6 +449,8 @@ dependencies = [
  "fuse-backend-rs",
  "futures",
  "hex",
+ "http-body-util",
+ "hyper",
  "hyper-util",
  "inventory",
  "landlock",
@@ -456,7 +459,7 @@ dependencies = [
  "nanoid",
  "nix 0.30.1",
  "oci-client",
- "oci-spec",
+ "oci-spec 0.9.0",
  "parking_lot",
  "pathrs",
  "pkg-config",
@@ -470,7 +473,7 @@ dependencies = [
  "seccompiler",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "signal-hook",
  "sysinfo",
  "tar",
@@ -495,9 +498,9 @@ dependencies = [
 
 [[package]]
 name = "boxlite-shared"
-version = "0.9.7"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f1f86041a55608dc65c940070100f3baf4500a56c05dac04eac7c9dd40de652"
+checksum = "e1845902bae06edecb3fc714b197085f9e87f9cf3a2b132fbbaa7e69c900d816"
 dependencies = [
  "prost",
  "serde",
@@ -522,9 +525,9 @@ dependencies = [
 
 [[package]]
 name = "bubblewrap-sys"
-version = "0.9.7"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f8a2a9c8394860071a7d9c74e68d7a1856adffa3572f4d156fd1d575b4ddd72"
+checksum = "f0f650ed99dfd6770c18d30b313a1774c92a8de7c0a6250905100ed891b8afc8"
 dependencies = [
  "num_cpus",
 ]
@@ -1067,9 +1070,9 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "e2fsprogs-sys"
-version = "0.9.7"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b608ac2c23540e31f58f7db0926695968dbc0f0a90c2d0263023b702611836d2"
+checksum = "635006f11ea19a8d335292d8dcf49288818db076c2273407e78a07f3d6107cd9"
 dependencies = [
  "num_cpus",
 ]
@@ -2917,9 +2920,9 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "libkrun-sys"
-version = "0.9.7"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9607d41f54e9d6a01380bd2d9cd2405b9d1d8af1504a55c7b23f77c904d60ac0"
+checksum = "115552df45c2a64ff6398ffff9ee11ade4b81e00c7737769e0d61f7dadf48179"
 dependencies = [
  "libc",
  "num_cpus",
@@ -3350,7 +3353,7 @@ dependencies = [
  "http-auth",
  "jwt",
  "lazy_static",
- "oci-spec",
+ "oci-spec 0.8.4",
  "olpc-cjson",
  "regex",
  "reqwest",
@@ -3368,6 +3371,23 @@ name = "oci-spec"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc3da52b83ce3258fbf29f66ac784b279453c2ac3c22c5805371b921ede0d308"
+dependencies = [
+ "const_format",
+ "derive_builder",
+ "getset",
+ "regex",
+ "serde",
+ "serde_json",
+ "strum",
+ "strum_macros",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "oci-spec"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8445a2631507cec628a15fdd6154b54a3ab3f20ed4fe9d73a3b8b7a4e1ba03a"
 dependencies = [
  "const_format",
  "derive_builder",
