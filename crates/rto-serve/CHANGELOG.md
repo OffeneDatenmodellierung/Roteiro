@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v4.2.0...rto-serve-v5.0.0) - 2026-09-01
+
+### Added
+
+- *(mcp)* [**breaking**] spell `debt`'s category filter `categories` on both surfaces
+
+### Fixed
+
+- *(tools)* refuse a tool argument key neither surface recognises
+
+### Other
+
+- Merge pull request #703 from OffeneDatenmodellierung/feat/mcp-debt-categories-arg
+- *(tools)* say what a non-object `arguments` means here, and add no debt
+
 ## [4.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v4.0.0...rto-serve-v4.1.0) - 2026-09-01
 
 ### Added
