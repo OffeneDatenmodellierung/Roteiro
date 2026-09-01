@@ -229,6 +229,36 @@ table against the request type and against this document in both directions —
 so a parameter added to the code without a row here, or a row here without the
 code behind it, fails the build rather than the reader.
 
+### Tool arguments are the other way round
+
+Everything above is about the **request envelope**, and none of it extends to the
+**arguments of a tool call**. There, an unrecognised key *is* refused.
+
+The two cases look alike and are not. A stray `user` on the request is a field
+Roteiro has no use for, and dropping it costs nobody anything. A stray key inside
+a tool call's `arguments` is a filter the model asked for and did not get.
+Roteiro's two tool surfaces spell one of `debt`'s arguments differently — `kind`
+on the MCP surface, `categories` here — and while unknown keys were dropped,
+`{"categories":["todo"]}` sent to the MCP `debt` deserialised to an empty filter,
+which means *every* category. The model asked for one kind of marker, received the
+whole repository's debt presented as the filtered set, and had nothing in the
+result to tell the two apart.
+
+So a tool that declares `"additionalProperties": false` has it enforced: a call
+carrying a key the schema does not list is refused **by name**, with the keys that
+would have worked, and the tool is not run.
+
+```text
+tool `debt` error: unknown argument `kind` — `debt` takes only `categories`,
+`project`. Nothing was run: an argument this tool does not declare is refused
+rather than ignored, because ignoring it would answer a narrower question than
+the one you asked and give you no way to tell.
+```
+
+This is about Roteiro's own graph tools. A tool **you** supplied is unaffected in
+either direction — Roteiro never executes one (see above), so it never inspects
+its arguments, and the call comes back to you exactly as the model wrote it.
+
 ## Why the `tools` array is bounded
 
 The limits are a **security bound, not a tidiness rule**. Roteiro sizes the model's
