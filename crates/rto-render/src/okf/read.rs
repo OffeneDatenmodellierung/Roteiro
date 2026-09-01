@@ -68,6 +68,22 @@ use super::{Actor, INDEX_FILE, LOG_FILE, Origin, section_for, short_digest, slug
 /// authoritative per ref, so a single shared ref would make importing a second
 /// peer's bundle delete the first peer's concepts. The same reasoning that gave
 /// `import:links` and `import:links/authored` separate refs.
+///
+/// # It sorts after `import:links`, and that is load-bearing
+///
+/// `Store::reapply_imports` re-upserts every layer's nodes in **`src_ref`
+/// order**, so when two layers name one node the last one wins. A filled
+/// `extref:` placeholder is exactly that case: `import:links` contributes the
+/// bare stub, and this layer contributes the same key with the peer's content.
+/// `"import:okf/…"` sorting after `"import:links…"` is what stops a rebuild from
+/// resetting the fill back to an empty placeholder.
+///
+/// **Every rebuild**, not only an explicit `sync`: a read command refreshes the
+/// graph before answering, so renaming this prefix to anything sorting earlier
+/// would undo the fill before the very next `roteiro query` — verified by
+/// injection, which is how the reach of it was established rather than guessed.
+/// A real dependency on the string, then, and not a coincidence worth leaving
+/// unstated. `an_imported_concept_fills_a_cross_repo_placeholder` is the guard.
 pub const OKF_REF_PREFIX: &str = "import:okf/";
 
 /// The node-key namespace for an imported concept that does not fill an

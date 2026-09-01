@@ -221,13 +221,14 @@ fn re_importing_a_smaller_bundle_removes_the_withdrawn_concept() {
     std::fs::remove_dir_all(bundle.parent().expect("base")).ok();
 }
 
-/// The payoff (ADR-0009): an `extref:` placeholder holds a key and nothing else,
-/// so a cross-repo reference resolves to a document whose whole content is that
-/// it is not the document you wanted. An imported concept that corresponds to
-/// one **fills it** — and stays a placeholder, because the workspace resolver
-/// still follows `meta.qualified` across repos.
-#[test]
-fn an_imported_concept_fills_a_cross_repo_placeholder() {
+/// A two-repo workspace where `chart` declares a `[[links]]` reference into
+/// `app`, written through so the `extref:` placeholder is really in the store —
+/// plus the (empty) directory `app`'s bundle will be written into.
+///
+/// Returns `(workspace base, chart repo, bundle dir)`. Mirrors `links_cli.rs`'s
+/// fixture of the same name, because the placeholder this test fills is the one
+/// that test's mechanism creates.
+fn declared_link_workspace() -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
     let base = std::env::temp_dir().join(format!("roteiro-okf-extref-{}", std::process::id()));
     std::fs::remove_dir_all(&base).ok();
     let app = base.join("app");
@@ -256,6 +257,18 @@ fn an_imported_concept_fills_a_cross_repo_placeholder() {
     let base_s = base.to_str().unwrap();
     let wrote = roteiro(&base, &["links", "--workspace", base_s, "--write"]);
     assert!(wrote.status.success(), "links --write failed: {wrote:?}");
+
+    (base, chart, bundle)
+}
+
+/// The payoff (ADR-0009): an `extref:` placeholder holds a key and nothing else,
+/// so a cross-repo reference resolves to a document whose whole content is that
+/// it is not the document you wanted. An imported concept that corresponds to
+/// one **fills it** — and stays a placeholder, because the workspace resolver
+/// still follows `meta.qualified` across repos.
+#[test]
+fn an_imported_concept_fills_a_cross_repo_placeholder() {
+    let (base, chart, bundle) = declared_link_workspace();
 
     // The placeholder exists, and is exactly as empty as ADR-0009 leaves it.
     let stub = "extref:app::cfgkey:config.toml#batch.max_bytes";
@@ -314,8 +327,7 @@ fn an_imported_concept_fills_a_cross_repo_placeholder() {
     assert!(
         after["meta"]["content"]
             .as_str()
-            .expect("content")
-            .contains("The write batch ceiling"),
+            .is_some_and(|c| c.contains("The write batch ceiling")),
         "the stub now carries the peer's real content: {after}"
     );
     assert_eq!(
@@ -330,6 +342,29 @@ fn an_imported_concept_fills_a_cross_repo_placeholder() {
     assert!(
         incoming.iter().any(|e| e["provenance"] == "authored"),
         "the declared cross-repo link must still point at it: {after}"
+    );
+
+    // And the fill survives a rebuild. `reapply_imports` re-upserts every
+    // layer's nodes in `src_ref` order, and `import:links` contributes the *bare*
+    // stub under the same key — so a sync would reset the fill to an empty
+    // placeholder if the OKF layer did not sort after it. That ordering is a
+    // dependency on the ref's spelling, not a coincidence, and this is what
+    // notices if it is ever renamed.
+    write(&chart.join("values.yaml"), "batch:\n  max_bytes: 4194304\n");
+    git(&chart, &["commit", "-qam", "raise the ceiling"]);
+    assert!(roteiro(&chart, &["sync"]).status.success(), "resync");
+
+    let synced: serde_json::Value =
+        serde_json::from_slice(&roteiro(&chart, &["query", stub, "--json"]).stdout).expect("JSON");
+    assert!(
+        synced["meta"]["content"]
+            .as_str()
+            .is_some_and(|c| c.contains("The write batch ceiling")),
+        "the fill must survive a rebuild, not be reset to a bare stub: {synced}"
+    );
+    assert_eq!(
+        synced["meta"]["qualified"], "app::cfgkey:config.toml#batch.max_bytes",
+        "and still resolve across repos afterwards"
     );
 
     std::fs::remove_dir_all(&base).ok();
