@@ -13296,7 +13296,7 @@ fn sandbox_status_tool_def() -> rto_serve::ToolDef {
     rto_serve::ToolDef {
         name: "sandbox_status".to_owned(),
         description: rto_render::tool_text::SANDBOX_STATUS.to_owned(),
-        parameters: json!({ "type": "object", "properties": {} }),
+        parameters: json!({ "type": "object", "properties": {}, "additionalProperties": false }),
     }
 }
 
@@ -13337,6 +13337,7 @@ fn sandbox_clear_tool_def() -> rto_serve::ToolDef {
                                     result's `applied` field says which of the two happened.",
                 },
             },
+            "additionalProperties": false,
         }),
     }
 }
@@ -13368,6 +13369,7 @@ fn debt_density_tool_def(
                 "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
                 "min_lines": { "type": "integer", "minimum": 0 },
             })),
+            "additionalProperties": false,
         }),
     }
 }
@@ -13395,6 +13397,7 @@ fn config_secrets_tool_def(
             "properties": with_project(json!({
                 "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
             })),
+            "additionalProperties": false,
         }),
     }
 }
@@ -13428,6 +13431,7 @@ fn security_list_tool_def(
                 },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
             })),
+            "additionalProperties": false,
         }),
     }
 }
@@ -13459,6 +13463,7 @@ fn security_status_tool_def(
                     "enum": rto_exec::known_analyzers(),
                 },
             })),
+            "additionalProperties": false,
         }),
     }
 }
@@ -13588,6 +13593,7 @@ fn context_tool_def(
             "type": "object",
             "properties": with_project(json!({ "key": { "type": "string" } })),
             "required": ["key"],
+            "additionalProperties": false,
         }),
     }
 }
@@ -13613,6 +13619,7 @@ fn check_tool_def(
         parameters: json!({
             "type": "object",
             "properties": with_project(json!({})),
+            "additionalProperties": false,
         }),
     }
 }
@@ -13639,6 +13646,7 @@ fn coupling_tool_def(
                 },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
             })),
+            "additionalProperties": false,
         }),
     }
 }
@@ -13761,6 +13769,7 @@ fn served_tool_defs() -> Vec<rto_serve::ToolDef> {
                     "type": "object",
                     "properties": with_project(json!({ "key": { "type": "string" } })),
                     "required": ["key"],
+                    "additionalProperties": false,
                 }),
             },
             rto_serve::ToolDef {
@@ -13773,6 +13782,7 @@ fn served_tool_defs() -> Vec<rto_serve::ToolDef> {
                         "limit": { "type": "integer", "minimum": 1, "maximum": 25 },
                     })),
                     "required": ["query"],
+                    "additionalProperties": false,
                 }),
             },
             rto_serve::ToolDef {
@@ -13785,6 +13795,7 @@ fn served_tool_defs() -> Vec<rto_serve::ToolDef> {
                         "to": { "type": "string" },
                     })),
                     "required": ["from", "to"],
+                    "additionalProperties": false,
                 }),
             },
             rto_serve::ToolDef {
@@ -13795,6 +13806,7 @@ fn served_tool_defs() -> Vec<rto_serve::ToolDef> {
                     "properties": with_project(json!({
                         "categories": { "type": "array", "items": { "type": "string" } },
                     })),
+                    "additionalProperties": false,
                 }),
             },
             context_tool_def(&with_project),
@@ -13830,7 +13842,11 @@ fn served_tool_defs() -> Vec<rto_serve::ToolDef> {
         tools.push(rto_serve::ToolDef {
             name: "list_projects".to_owned(),
             description: rto_render::tool_text::LIST_PROJECTS.to_owned(),
-            parameters: json!({ "type": "object", "properties": {} }),
+            parameters: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false,
+            }),
         });
         tools
     }
@@ -13854,7 +13870,11 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
         tools.push(rto_serve::ToolDef {
             name: rto_render::tool_class::CLASS_INDEX_TOOL.to_owned(),
             description: rto_render::tool_text::LIST_TOOL_CLASSES.to_owned(),
-            parameters: serde_json::json!({ "type": "object", "properties": {} }),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false,
+            }),
         });
         tools
     }
@@ -17419,6 +17439,77 @@ mod workspace_scoped_tools {
         GraphToolRegistry::new(std::sync::Arc::new(rto_graph::Workspace::single(
             "api", store,
         )))
+    }
+
+    /// **Every advertised tool's argument object is closed**, class index
+    /// included.
+    ///
+    /// `additionalProperties: false` is what `rto_serve::tools` enforces, so a
+    /// definition arriving without it is a tool that silently drops a key nobody
+    /// reads — which is how a model asking `debt` for one category with the MCP
+    /// surface's `kind` spelling received every marker in the repository,
+    /// presented as the filtered set it asked for. The flag has to sit on the **composed**
+    /// schema rather than inside `with_project`'s properties fragment, and this
+    /// reads `parameters` exactly where the tool loop reads it, so a flag placed
+    /// one level too deep fails here rather than doing nothing in production.
+    ///
+    /// The MCP half of the same rule is `rto_render::mcp`'s
+    /// `every_tool_closes_its_argument_object`; the surfaces declare their
+    /// schemas separately, so neither test can cover the other.
+    #[test]
+    fn every_served_tool_closes_its_argument_object() {
+        use rto_serve::ToolRegistry as _;
+
+        let open: Vec<String> = called_registry()
+            .tools()
+            .into_iter()
+            .filter(|t| {
+                t.parameters.get("additionalProperties") != Some(&serde_json::Value::Bool(false))
+            })
+            .map(|t| t.name)
+            .collect();
+        assert!(
+            open.is_empty(),
+            "these tools accept an argument key nobody reads, so a model sending one \
+             gets an answer to a question it did not ask: {open:?}. Add \
+             `\"additionalProperties\": false` to the tool definition's `parameters`.",
+        );
+    }
+
+    /// The rule, exercised where a model meets it: a key this surface does not
+    /// declare is refused by name, and the tool is not run.
+    ///
+    /// `roteiro`'s registry is the one that actually carries the divergent
+    /// spelling — `categories` here, `kind` on MCP — so the case is stated
+    /// against the real definitions rather than against a fixture that merely has
+    /// the same shape. `rto_serve::tools` owns the end-to-end assertion about
+    /// what reaches the model.
+    #[test]
+    fn the_other_surfaces_spelling_is_refused_rather_than_dropped() {
+        use rto_serve::ToolRegistry as _;
+
+        let registry = called_registry();
+        let debt = registry
+            .tools()
+            .into_iter()
+            .find(|t| t.name == "debt")
+            .expect("`debt` is advertised");
+        let declared: Vec<&str> = debt.parameters["properties"]
+            .as_object()
+            .expect("an object schema")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert!(
+            declared.contains(&"categories") && !declared.contains(&"kind"),
+            "this surface's `debt` filter is spelled `categories`: {declared:?}",
+        );
+        assert_eq!(
+            debt.parameters.get("additionalProperties"),
+            Some(&serde_json::Value::Bool(false)),
+            "so `kind` must be refused rather than dropped — an empty filter means \
+             EVERY category, which is the wrong answer wearing a right one's clothes",
+        );
     }
 
     /// The served-chat registry is a **separate** registry from the MCP server's,

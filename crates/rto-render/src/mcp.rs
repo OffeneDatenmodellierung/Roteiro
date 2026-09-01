@@ -213,8 +213,43 @@ type McpError = Box<dyn std::error::Error + Send + Sync>;
 /// stdio session or HTTP connection queries the same registry.
 type SharedWorkspace = Arc<Workspace>;
 
+// ------------------------------------------------- tool arguments ---
+// **Every argument struct below is `#[serde(deny_unknown_fields)]`, and that
+// is a property of the surface rather than a preference about strictness.**
+//
+// An argument key nothing recognises used to be dropped, which is not a
+// harmless leniency: this surface spells `debt`'s category filter `kind` while
+// the served `/v1` registry spells it `categories`, so a model reaching `debt`
+// here with the other surface's spelling was handed **every marker in the
+// repository, presented as the filtered set it asked for** — a wrong answer
+// wearing a correct answer's clothes, with nothing in it to tell them apart.
+// The same is true of any typo or invented key: the model asked a narrower
+// question than the one it got an answer to.
+//
+// Refusing closes the class rather than that one instance, and serde's own
+// message is close to ideal for it because it names the keys that *are*
+// accepted ("unknown field `categories`, expected one of `kind`, `project`").
+// rmcp reaches the caller with it as a JSON-RPC `invalid_params` error —
+// `Parameters<P>` deserialises the call's `arguments` object and nothing else,
+// so this is safe against the protocol: `_meta`, `input_responses` and
+// `request_state` are siblings of `arguments` in `CallToolRequestParams`, never
+// members of it, and rmcp inserts nothing of its own into the object it hands
+// over.
+//
+// schemars renders the attribute as `"additionalProperties": false` in each
+// advertised `inputSchema`, so a client sees the same rule the server enforces;
+// `every_tool_closes_its_argument_object` is what keeps a new struct from
+// arriving without it. The `/v1` surface states and enforces the same rule
+// through `rto_serve::tools::unknown_argument`.
+//
+// The two surfaces still spell that one argument differently. Unifying them is
+// a separate decision, and it was unsafe to take *before* this: while unknown
+// keys were dropped, a rename would have changed existing callers' results
+// silently instead of telling them.
+
 /// Arguments for the `explain` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ExplainArgs {
     /// Node key, e.g. `sym:rust:<path>#<Name>`, `file:<path>`, or `adr:<id>`.
     key: String,
@@ -225,6 +260,7 @@ struct ExplainArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct SearchArgs {
     /// Free-text query; matches node names, keys, paths, and captured content.
     query: String,
@@ -240,6 +276,7 @@ struct SearchArgs {
 
 /// Arguments for the `list_kind` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ListKindArgs {
     /// Node kind token, e.g. `fn`, `struct`, `adr`, `file`.
     kind: String,
@@ -250,6 +287,7 @@ struct ListKindArgs {
 
 /// Arguments for the `path` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct PathArgs {
     /// Start node key.
     from: String,
@@ -269,6 +307,7 @@ struct PathArgs {
 /// There is no `limit` either; the bound is fixed, and `every_context_tool_states_its_fixed_bound`
 /// is what keeps the description honest about it.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ContextArgs {
     /// Node key, e.g. `sym:rust:<path>#<Name>`, `file:<path>`, or `adr:<id>`.
     key: String,
@@ -279,6 +318,7 @@ struct ContextArgs {
 
 /// Arguments for the `check` tool.
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct CheckArgs {
     /// Which hosted project to check (see `list_projects`); omit if single.
     #[serde(default)]
@@ -287,6 +327,7 @@ struct CheckArgs {
 
 /// Arguments for the `debt` tool.
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct DebtArgs {
     /// Restrict to these categories (empty = all): todo, fixme, hack, stub,
     /// deferred.
@@ -299,6 +340,7 @@ struct DebtArgs {
 
 /// Arguments for the `debt_density` tool.
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct DensityArgs {
     /// Restrict to these categories (empty = all): todo, fixme, hack, stub,
     /// deferred.
@@ -322,6 +364,7 @@ struct DensityArgs {
 
 /// Arguments for the `config_secrets` tool.
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ConfigSecretArgs {
     /// Max keys to return (default 50, clamped to 1..=200 — this surface has no
     /// "unlimited": see `model_limit`).
@@ -335,6 +378,7 @@ struct ConfigSecretArgs {
 
 /// Arguments for the `coupling` tool.
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct CouplingArgs {
     /// Rank by `total` (default), `fan_in` (most depended-on) or `fan_out`
     /// (reaches furthest).
@@ -353,6 +397,7 @@ struct CouplingArgs {
 /// Arguments for the `security_list` tool.
 #[cfg(feature = "execution")]
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct SecurityListArgs {
     /// Restrict to one analyzer's layer (`cargo-audit`, `osv-scanner`,
     /// `semgrep`). An unknown name is an error, not an empty listing.
@@ -380,6 +425,7 @@ struct SecurityListArgs {
 /// `context`.
 #[cfg(feature = "execution")]
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct SecurityStatusArgs {
     /// Restrict both halves to one analyzer (`cargo-audit`, `osv-scanner`,
     /// `semgrep`). An unknown name is an error.
@@ -392,6 +438,31 @@ struct SecurityStatusArgs {
     project: Option<String>,
 }
 
+/// Arguments for the `list_projects` tool: none.
+///
+/// Declared rather than left implicit. A `#[tool]` handler that takes no
+/// [`Parameters`] gets rmcp's `schema_for_empty_input`, which says `properties:
+/// {}` and stops there — an argument object with nothing in it and nothing
+/// forbidden — so a call carrying a key would have been read as a bare one. That
+/// is the same silent drop the rest of this surface now refuses, and this is
+/// what puts the tool under the rule: no argument means the empty set, not any
+/// set. `every_tool_closes_its_argument_object` found both of these.
+///
+/// No `project`, in particular: this **is** the tool that answers what the
+/// project names are, so a selector would be circular.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ListProjectsArgs {}
+
+/// Arguments for the `list_tool_classes` tool: none. Declared for the reason
+/// [`ListProjectsArgs`] gives.
+///
+/// No `project` either: a class index is a property of how this **server** was
+/// started, and is the same document whichever hosted project is asked about.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ListToolClassesArgs {}
+
 /// Arguments for the `sandbox_status` tool: none.
 ///
 /// No `project`, because the sandbox image store is machine-global — one per
@@ -401,6 +472,7 @@ struct SecurityStatusArgs {
 /// rather than by how much was found.
 #[cfg(feature = "execution")]
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct SandboxStatusArgs {}
 
 /// Arguments for the `sandbox_clear` tool: **two selectors, and neither has a
@@ -414,6 +486,7 @@ struct SandboxStatusArgs {}
 /// refusal behind them rather than a `bool` that reads `false` as "the other one".
 #[cfg(feature = "execution")]
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct SandboxClearArgs {
     /// Drop this image, by the `reference` `sandbox_status` lists it under.
     #[serde(default)]
@@ -821,7 +894,10 @@ impl GraphServer {
 
     /// List the projects this server hosts (ADR-0008).
     #[tool]
-    async fn list_projects(&self) -> CallToolResult {
+    async fn list_projects(
+        &self,
+        Parameters(_args): Parameters<ListProjectsArgs>,
+    ) -> CallToolResult {
         json_result(&serde_json::json!({ "projects": self.workspace.names() }))
     }
 
@@ -839,7 +915,10 @@ impl GraphServer {
     /// remove a tool a build does have, so the announcement and the listing have
     /// to be two views of one object.
     #[tool]
-    async fn list_tool_classes(&self) -> CallToolResult {
+    async fn list_tool_classes(
+        &self,
+        Parameters(_args): Parameters<ListToolClassesArgs>,
+    ) -> CallToolResult {
         // Resolved once. `tool_names` builds an unrestricted router to answer, and
         // the predicate is asked once per tool row — calling it inside the closure
         // would rebuild that router fifteen times to learn something that cannot
@@ -1644,6 +1723,84 @@ mod tests {
             .iter()
             .filter_map(|c| c.as_text().map(|t| t.text.clone()))
             .collect()
+    }
+
+    /// **The instance the rule was written for**: `categories` is the *served*
+    /// surface's name for `debt`'s filter, and this surface calls it `kind`.
+    ///
+    /// It has to be exercised through deserialisation rather than by building a
+    /// `DebtArgs`, because that is where the key was dropped: the typed struct
+    /// every other test here constructs cannot express the defect. Sent as JSON
+    /// it used to arrive as `kind: []`, and an empty `kind` means *every*
+    /// category — so the model that asked for `todo` was handed the whole
+    /// repository's debt and told nothing.
+    ///
+    /// This is what rmcp deserialises: `Parameters<DebtArgs>` runs
+    /// `serde_json::from_value` over the call's `arguments` object and reports a
+    /// failure as a JSON-RPC `invalid_params` error ("failed to deserialize
+    /// parameters: …"), so the message asserted here is the one that reaches the
+    /// client.
+    #[test]
+    fn an_argument_key_this_surface_does_not_know_is_refused() {
+        let sent = serde_json::json!({ "categories": ["todo"] });
+        let err = serde_json::from_value::<DebtArgs>(sent).expect_err("refused");
+        let message = err.to_string();
+        assert!(
+            message.contains("unknown field `categories`"),
+            "the refusal must name the key that was sent: {message}",
+        );
+        assert!(
+            message.contains("`kind`") && message.contains("`project`"),
+            "and the keys that would have worked, or the model guesses again from \
+             the same wrong surface: {message}",
+        );
+
+        // The same for `debt_density`, whose filter carries both spellings too.
+        let err = serde_json::from_value::<DensityArgs>(
+            serde_json::json!({ "categories": ["todo"], "order": "markers" }),
+        )
+        .expect_err("refused");
+        assert!(err.to_string().contains("unknown field `categories`"));
+    }
+
+    /// The other direction, so the rule is not satisfied by refusing everything:
+    /// this surface's own spelling still parses, and still filters.
+    #[test]
+    fn this_surfaces_own_argument_names_still_parse() {
+        let args: DebtArgs =
+            serde_json::from_value(serde_json::json!({ "kind": ["todo"], "project": "roteiro" }))
+                .expect("accepted");
+        assert_eq!(args.kind, ["todo"]);
+        assert_eq!(args.project.as_deref(), Some("roteiro"));
+        // And an omitted argument is still omitted rather than required.
+        let bare: DebtArgs = serde_json::from_value(serde_json::json!({})).expect("accepted");
+        assert!(bare.kind.is_empty() && bare.project.is_none());
+    }
+
+    /// The class, not the instance: **every** advertised tool's argument object
+    /// is closed, in whatever feature configuration this test runs under.
+    ///
+    /// `deny_unknown_fields` is what schemars renders as `additionalProperties:
+    /// false`, so this fails for an argument struct that arrives without the
+    /// attribute — which is the drift that would let a second `kind`/`categories`
+    /// in. It reads the schema a client is actually handed rather than the source
+    /// text, so it cannot be satisfied by a comment.
+    #[test]
+    fn every_tool_closes_its_argument_object() {
+        let open: Vec<String> = GraphServer::routes(&Advertised::All)
+            .list_all()
+            .into_iter()
+            .filter(|t| {
+                t.input_schema.get("additionalProperties") != Some(&serde_json::Value::Bool(false))
+            })
+            .map(|t| t.name.to_string())
+            .collect();
+        assert!(
+            open.is_empty(),
+            "these tools accept an argument key nobody reads, so a model sending one \
+             gets an answer to a question it did not ask: {open:?}. Add \
+             `#[serde(deny_unknown_fields)]` to the argument struct.",
+        );
     }
 
     #[tokio::test]
