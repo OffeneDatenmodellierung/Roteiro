@@ -139,6 +139,14 @@ pub enum SkipReason {
     NoFrontmatter,
     /// It opens one and never closes it.
     UnterminatedFrontmatter,
+    /// The block is delimited correctly but is not parseable YAML.
+    ///
+    /// Distinct from [`Self::MissingType`] on purpose. Both end with no `type`,
+    /// but they send a producer to different places: one means *add a key*, the
+    /// other means *the block does not parse at all* — and reporting broken YAML
+    /// as a missing field is how someone spends an afternoon staring at a `type`
+    /// that was there all along.
+    UnparsableFrontmatter,
     /// The frontmatter carries no `type`, or an empty one — OKF's only hard
     /// requirement (§4).
     MissingType,
@@ -151,6 +159,7 @@ impl SkipReason {
         match self {
             Self::NoFrontmatter => "no YAML frontmatter block",
             Self::UnterminatedFrontmatter => "frontmatter block is never closed",
+            Self::UnparsableFrontmatter => "frontmatter block is not parseable YAML",
             Self::MissingType => "no non-empty `type` (OKF's one required key)",
         }
     }
@@ -402,13 +411,19 @@ fn split_frontmatter(text: &str) -> Result<(&str, &str), SkipReason> {
 /// Unknown top-level keys are ignored rather than rejected: §11 tells a consumer
 /// not to reject a document for a field it does not know, and a producer with
 /// its own extensions is the case a vendor-neutral format exists to allow.
-fn parse_frontmatter(block: &str) -> ParsedFrontmatter {
+fn parse_frontmatter(block: &str) -> Result<ParsedFrontmatter, SkipReason> {
     let mut fm = ParsedFrontmatter::default();
-    let Ok(docs) = yaml_rust2::YamlLoader::load_from_str(block) else {
-        return fm;
+    let docs = yaml_rust2::YamlLoader::load_from_str(block)
+        .map_err(|_| SkipReason::UnparsableFrontmatter)?;
+    let Some(first) = docs.first() else {
+        // An empty block parses to no documents. That is well-formed YAML
+        // carrying no keys, so it is a missing `type`, not a parse failure.
+        return Ok(fm);
     };
-    let Some(map) = docs.first().and_then(Yaml::as_hash) else {
-        return fm;
+    let Some(map) = first.as_hash() else {
+        // A block that parses to a scalar or a sequence is legal YAML and has
+        // no keys to read, so again: no `type`, rather than unparsable.
+        return Ok(fm);
     };
     let get = |key: &str| map.get(&Yaml::String(key.to_owned()));
 
@@ -444,7 +459,7 @@ fn parse_frontmatter(block: &str) -> ParsedFrontmatter {
 
     fm.generated = get("generated").and_then(by_at);
     fm.verified = get("verified").map(verified_entries).unwrap_or_default();
-    fm
+    Ok(fm)
 }
 
 /// A YAML scalar as a plain string; containers yield `None`.
@@ -752,7 +767,13 @@ fn collect_concepts(
         match split_frontmatter(content) {
             Err(reason) => skipped.push(Skipped { path, reason }),
             Ok((block, body)) => {
-                let fm = parse_frontmatter(block);
+                let fm = match parse_frontmatter(block) {
+                    Ok(fm) => fm,
+                    Err(reason) => {
+                        skipped.push(Skipped { path, reason });
+                        continue;
+                    }
+                };
                 if fm.type_.trim().is_empty() {
                     skipped.push(Skipped {
                         path,
@@ -1289,6 +1310,9 @@ mod tests {
                 ("/decisions/plain.md", "# Just markdown\n"),
                 ("/decisions/open.md", "---\ntype: \"adr\"\nnever closed\n"),
                 ("/decisions/typeless.md", "---\ntitle: \"x\"\n---\n\nBody\n"),
+                // Delimited correctly, `type` plainly present, and still not
+                // YAML: the flow sequence is never closed.
+                ("/decisions/broken.md", "---\ntype: [adr\n---\n\nBody\n"),
             ],
             Trust::Trust,
         );
@@ -1306,13 +1330,20 @@ mod tests {
         assert_eq!(
             rows,
             vec![
+                (
+                    "/decisions/broken.md",
+                    "frontmatter block is not parseable YAML"
+                ),
                 ("/decisions/open.md", "frontmatter block is never closed"),
                 ("/decisions/plain.md", "no YAML frontmatter block"),
                 (
                     "/decisions/typeless.md",
                     "no non-empty `type` (OKF's one required key)"
                 ),
-            ]
+            ],
+            "unparseable YAML and a missing `type` are separate reasons: both end \
+             with no type, but one means *add a key* and the other means *the \
+             block does not parse*"
         );
     }
 
@@ -1401,7 +1432,8 @@ mod tests {
         };
         let doc = format!("{}\n# x\n", fm.render());
         let (block, _) = split_frontmatter(&doc).expect("split");
-        assert_eq!(parse_frontmatter(block).title.as_deref(), Some(hostile));
+        let fm = parse_frontmatter(block).expect("the writer emits parseable YAML");
+        assert_eq!(fm.title.as_deref(), Some(hostile));
     }
 
     #[test]
@@ -1605,7 +1637,7 @@ mod tests {
     #[test]
     fn an_unknown_frontmatter_key_takes_its_children_with_it() {
         let block = "type: \"doc\"\nvendor_thing:\n  by: \"not-an-actor\"\n  nested:\n    - x\ntitle: \"kept\"\n";
-        let fm = parse_frontmatter(block);
+        let fm = parse_frontmatter(block).expect("parseable YAML");
         assert_eq!(fm.type_, "doc");
         assert_eq!(fm.title.as_deref(), Some("kept"));
         assert_eq!(
