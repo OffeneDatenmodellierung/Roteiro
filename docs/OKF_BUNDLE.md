@@ -138,10 +138,35 @@ So the standing position is:
   convenience, and ADR-0017 exists because this project takes that seriously.
   `okf-core` alone (zero dependencies) is a much better candidate and is worth
   revisiting for the reader itself.
-- **Use it as a differential oracle.** The upstream fixtures' expected trust
-  tiers in `tests/okf_interop.rs` were confirmed against `okf trust`: it reads
-  `acme_retail` as 8 human-reviewed + 1 unverified, and Roteiro's reader now
-  reads exactly the same split.
+- **Use it as a differential oracle, then let it go.** It was run as a separate
+  binary — never a dependency, of this workspace or of its test suite — and the
+  agreement it established was frozen into `tests/okf_interop.rs`.
+
+The comparison, against `okf-core` / `okf-validator` **0.2.6** (2026-08-27) on
+2026-09-01, over every bundle published in the specification's repository at
+commit `ad30107`:
+
+| Bundle | Concepts | `okf trust` | Roteiro's reader | |
+|---|---|---|---|---|
+| `acme_retail` | 9 | 8 human-reviewed, 1 unverified | 8 `external-authored`, 1 `external-inferred` | agree |
+| `ga4` | 9 | 9 unverified | 9 `external-inferred` | agree |
+| `stackoverflow` | 26 | 26 unverified | 26 `external-inferred` | agree |
+| `crypto_bitcoin` | 9 | 9 unverified | 9 `external-inferred` | agree |
+
+Nothing was skipped by either side in any bundle. Roteiro's own `render okf`
+output for this repository also validates clean: **0 conformance errors across
+9,029 concepts**, judged by a validator that has never seen our output — a
+stronger statement than `every_emitted_bundle_is_conformant` can make, since that
+test encodes our own reading of §11.
+
+**What removing the oracle costs, and what covers it.** A check that runs once
+proves the code was right that day. Two of the four bundles are therefore
+vendored as fixtures, so the suite permanently exercises a *foreign* bundle — the
+thing phase 1 never did. What the fixtures cannot catch is a divergence in a
+shape no vendored bundle contains; `okf-validator` reading a fifth bundle
+differently would still be news. Re-running the comparison is one command
+(`cargo install okf`), and `okf::read`'s module documentation records exactly
+what to run.
 
 ### What the four published bundles say about the spec
 

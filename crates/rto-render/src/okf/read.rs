@@ -41,6 +41,44 @@
 //! has to say what it left behind, because the alternative is a graph quietly
 //! missing concepts nobody knows to look for.
 //!
+//! # This reader was checked against an independent implementation
+//!
+//! Reading back one's own output proves a round trip, not interoperability, so
+//! the trust tiers this module derives (§5.3) were compared against a second,
+//! unrelated OKF v0.2 implementation over inputs neither project wrote.
+//!
+//! **What was compared, so the claim can be re-tested rather than believed:**
+//!
+//! - **Oracle:** [`W4G1/okf`](https://github.com/W4G1/okf) `okf-core` /
+//!   `okf-validator` **0.2.6** (2026-08-27), Apache-2.0 — a pure-Rust v0.2
+//!   toolkit. Its `okf trust <bundle>` prints a tier per concept and
+//!   `okf validate <bundle>` reports conformance.
+//! - **Inputs:** all four bundles published in the specification's own
+//!   repository at commit `ad30107` — `acme_retail`, `ga4`, `stackoverflow`,
+//!   `crypto_bitcoin` — plus Roteiro's own `render okf` output for this
+//!   repository.
+//! - **Result, 2026-09-01:** exact agreement on every bundle. Concept counts
+//!   9 / 9 / 26 / 9, and tiers matching one-for-one — `acme_retail` as 8
+//!   human-reviewed + 1 unverified (our `external-authored` / `external-inferred`),
+//!   the other three entirely unverified. Our rendered bundle validated with
+//!   **0 conformance errors across 9,029 concepts**.
+//!
+//! The oracle is **not** a dependency, of this crate or of the test suite: it
+//! was run as a separate binary and the agreement was then frozen into
+//! `tests/okf_interop.rs`, which pins the same expectations against vendored
+//! copies of two of those bundles. That is what survives the oracle's absence —
+//! a foreign bundle in the test suite, which is the thing phase 1 never had.
+//!
+//! To re-run the comparison: `cargo install okf`, then `okf trust <bundle>`
+//! against `crates/rto-render/tests/fixtures/okf-upstream/*` and
+//! `roteiro import --from okf <bundle> --trust --json`.
+//!
+//! Worth knowing if adopting it is ever considered: `okf-core` has **zero
+//! dependencies** — no `serde`, no `serde_yaml`, no `regex`, no `chrono` — and
+//! carries its own YAML-subset parser. `okf-validator` is the heavy one, adding
+//! 94 transitive crates (a JavaScript, Python and SQL parser, plus `syn`) to
+//! syntax-check fenced code blocks.
+//!
 //! # Relationships come from the `## Relationships` section, and nowhere else
 //!
 //! §6 says a plain markdown link asserts a relationship. Read at its widest that
@@ -438,28 +476,60 @@ fn parse_frontmatter(block: &str) -> Result<ParsedFrontmatter, SkipReason> {
     if let Some(tags) = get("tags") {
         match tags {
             Yaml::Array(items) => fm.tags.extend(items.iter().filter_map(scalar_text)),
-            // §4.1 asks for a list, but a producer who wrote one bare string
-            // meant one tag. Keeping it beats dropping it, and §11 forbids
-            // rejecting the document over the shape.
+            // §4.1 asks for a list, and a bare string is not one — but it is a
+            // shape that really occurs: Google's published `stackoverflow`
+            // bundle writes `tags: stackoverflow, posts, deprecated` in seven
+            // documents.
+            //
+            // Kept **whole**, not split on commas. Splitting would recover the
+            // intent in this bundle and invent a convention the specification
+            // does not have, which is how a reader starts disagreeing with
+            // every other reader about what a document says. Keeping the string
+            // loses nothing and lets a consumer see exactly what was written —
+            // the alternative, dropping it, is the silent loss this whole
+            // parser was rewritten to stop.
             other => fm.tags.extend(scalar_text(other)),
         }
     }
 
-    if let Some(Yaml::Array(items)) = get("sources") {
-        for item in items {
-            if let Some(resource) = item
-                .as_hash()
-                .and_then(|h| h.get(&Yaml::String("resource".to_owned())))
-                .and_then(scalar_text)
-            {
-                fm.sources.push(resource);
+    // §5.1 shapes `sources` as a list of entries. A producer who wrote a single
+    // entry without the list dash is tolerated, mirroring the shorthand §5.2
+    // *does* sanction for `verified` — the shapes are analogous and the slip is
+    // the same one.
+    //
+    // A bare scalar is deliberately **not** tolerated here, unlike for `tags`
+    // above. `tags: a, b` is attested — Google's own `stackoverflow` bundle
+    // writes it in seven documents — whereas no published bundle writes a
+    // scalar `sources`, and there would be no way to tell `sources: foo` from a
+    // typo that happened to land on a key. Accepting it would invent a
+    // provenance record rather than read one, and provenance is the one field
+    // where guessing is worse than reporting nothing.
+    match get("sources") {
+        Some(Yaml::Array(items)) => {
+            for item in items {
+                fm.sources.extend(source_resource(item));
             }
         }
+        Some(single @ Yaml::Hash(_)) => fm.sources.extend(source_resource(single)),
+        _ => {}
     }
 
     fm.generated = get("generated").and_then(by_at);
     fm.verified = get("verified").map(verified_entries).unwrap_or_default();
     Ok(fm)
+}
+
+/// One `sources` entry's `resource` (§5.1), which is REQUIRED within an entry.
+///
+/// An entry carrying no `resource` names nothing a consumer could follow, so it
+/// yields `None` rather than an empty string: a source that resolves to `""` is
+/// worse than one that is absent, because it looks like a record.
+fn source_resource(entry: &Yaml) -> Option<String> {
+    entry
+        .as_hash()?
+        .get(&Yaml::String("resource".to_owned()))
+        .and_then(scalar_text)
+        .filter(|r| !r.trim().is_empty())
 }
 
 /// A YAML scalar as a plain string; containers yield `None`.
@@ -1344,6 +1414,64 @@ mod tests {
             "unparseable YAML and a missing `type` are separate reasons: both end \
              with no type, but one means *add a key* and the other means *the \
              block does not parse*"
+        );
+    }
+
+    /// The shapes a real producer writes that §4.1 and §5.1 do not describe.
+    ///
+    /// Each choice here is a judgement about *liberality*, and they deliberately
+    /// do not all go the same way — so they are asserted together, where the
+    /// asymmetry is visible and has to be defended rather than drifted into.
+    #[test]
+    fn an_off_spec_shape_is_read_where_a_real_producer_writes_one() {
+        // Attested: Google's `stackoverflow` bundle writes exactly this in seven
+        // documents. Kept whole rather than split on commas, because splitting
+        // invents a convention no other reader would share.
+        let bare_tags = "---\ntype: \"adr\"\ntags: stackoverflow, posts, deprecated\n---\n\nB\n";
+        // Not attested anywhere, but analogous to the single-mapping shorthand
+        // §5.2 explicitly sanctions for `verified`.
+        let one_source =
+            "---\ntype: \"adr\"\nsources:\n  resource: \"/tables/orders.md\"\n---\n\nB\n";
+        // Refused: a scalar `sources` is indistinguishable from a typo, and a
+        // guessed provenance record is worse than none.
+        let scalar_source = "---\ntype: \"adr\"\nsources: \"/tables/orders.md\"\n---\n\nB\n";
+        // Refused: §5.1 makes `resource` REQUIRED within an entry, so an entry
+        // without one names nothing to follow.
+        let no_resource =
+            "---\ntype: \"adr\"\nsources:\n  - id: \"x\"\n    title: \"T\"\n---\n\nB\n";
+
+        let tags_of = |doc: &str| {
+            let (block, _) = split_frontmatter(doc).expect("split");
+            parse_frontmatter(block).expect("parse").tags
+        };
+        let sources_of = |doc: &str| {
+            let (block, _) = split_frontmatter(doc).expect("split");
+            parse_frontmatter(block).expect("parse").sources
+        };
+
+        assert_eq!(
+            tags_of(bare_tags),
+            vec!["stackoverflow, posts, deprecated".to_owned()],
+            "a bare `tags` string is kept verbatim as one tag: nothing is lost, \
+             and no comma convention is invented"
+        );
+        assert_eq!(
+            sources_of(one_source),
+            vec!["/tables/orders.md".to_owned()],
+            "a single `sources` entry written without the list dash is read, \
+             mirroring the shorthand §5.2 sanctions for `verified`"
+        );
+        assert_eq!(
+            sources_of(scalar_source),
+            Vec::<String>::new(),
+            "a scalar `sources` is not read: it cannot be told from a typo, and \
+             provenance is the one field where a guess is worse than silence"
+        );
+        assert_eq!(
+            sources_of(no_resource),
+            Vec::<String>::new(),
+            "§5.1 makes `resource` REQUIRED within an entry; an entry without \
+             one names nothing a consumer could follow"
         );
     }
 
