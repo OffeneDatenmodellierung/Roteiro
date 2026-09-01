@@ -1564,9 +1564,20 @@ fn parse_mistral_body(body: &str) -> Reading {
         None => Reading::Unarrived,
         Some(Err(e)) if e.classify() == serde_json::error::Category::Eof => Reading::Unarrived,
         // Anything else is a body that arrived and is not a call — a syntax
-        // error, or a value that is not an object. `arguments` is an object in
-        // every dialect, so that a tool sees the same shape whichever form its
-        // caller wrote; a bare scalar or array is not one, and is not guessed at.
+        // error, or a value that is not an arguments object.
+        //
+        // **Stricter than [`parse_json_body`], and deliberately so**, which is
+        // the one place the dialects differ on what they accept rather than on
+        // how they are spelled. There, a non-object `arguments` is carried
+        // through: the body is an object with a `name`, and *that* is what says
+        // a call is here, so an odd field inside a structure already recognised
+        // as a call reaches the registry, whose error is fed back and gives the
+        // model a round to correct itself. Here the JSON is not a field of
+        // anything — it **is** the arguments, and it is also the only proof the
+        // call arrived — so a value that is not an arguments object is a body in
+        // a shape this dialect does not recognise, and guessing at one is what
+        // "each dialect judges only its own syntax" rules out. Pinned from both
+        // sides by `the_two_envelopes_differ_on_a_non_object_arguments`.
         Some(parsed) => parsed.ok().filter(serde_json::Value::is_object).map_or(
             Reading::Unreadable,
             |arguments| {
@@ -3015,6 +3026,31 @@ mod tests {
                 "a body that arrived and is not a call is unreadable, not absent: {body}"
             );
         }
+    }
+
+    #[test]
+    fn the_two_envelopes_differ_on_a_non_object_arguments() {
+        // The one place the dialects differ on what they *accept*, recorded from
+        // both sides so it stays a decision rather than becoming a surprise.
+        //
+        // The wrapped body is an object carrying a `name`, and that is what says
+        // a call is here; an odd `arguments` inside a structure already
+        // recognised as a call is carried to the registry, whose error is fed
+        // back and gives the model a round to correct itself. That behaviour is
+        // older than #592 and is asserted here **unchanged** — three of the five
+        // registry models emit this dialect.
+        let call = call_in("<tool_call>{\"name\":\"echo\",\"arguments\":\"a string\"}</tool_call>")
+            .expect("the JSON dialect carries the call whatever `arguments` holds");
+        assert_eq!(call.arguments, serde_json::json!("a string"));
+
+        // The wrapperless body is not a field of anything — it *is* the
+        // arguments, and also the only proof the call arrived — so there is no
+        // surrounding structure left to recognise, and a scalar is refused
+        // rather than guessed at.
+        assert!(matches!(
+            read_markup(&stopped(&mistral_markup("echo", "\"a string\""))),
+            Markup::Unfinished(Unfinished::Unreadable)
+        ));
     }
 
     #[test]
