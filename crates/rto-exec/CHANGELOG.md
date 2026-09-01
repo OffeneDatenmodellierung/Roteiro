@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-exec-v4.0.0...rto-exec-v4.1.0) - 2026-09-01
+
+### Fixed
+
+- *(exec)* boxlite 0.10.0 will not boot our box as a side effect
+- *(ci)* the matrix never once turned `execution` off
+
+### Other
+
+- *(deps)* re-pin the sandbox runtime for boxlite 0.10.0
+- *(deps)* bump boxlite from 0.9.7 to 0.10.0
+
 ## [4.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-exec-v3.3.0...rto-exec-v4.0.0) - 2026-08-29
 
 ### Added
