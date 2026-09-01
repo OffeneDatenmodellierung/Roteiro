@@ -1259,6 +1259,13 @@ enum OkfAction {
         /// The bundle directory.
         path: String,
         /// List only the broken links, not the totals.
+        ///
+        /// Affects the **human-readable output only**. `--json` always emits the
+        /// whole report, deliberately: `--json` selects a *format* and must not
+        /// also change what is reported. That rule was settled on `main` by
+        /// "`--json` selected an output format and changed behaviour", and this
+        /// keeps it. A consumer filters the document; it should not have to ask
+        /// for a different one to get the totals.
         #[arg(long)]
         broken: bool,
         /// Exit non-zero if any link is broken, for use as a CI gate.
