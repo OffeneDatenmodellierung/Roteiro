@@ -323,6 +323,23 @@ pub enum ScoreError {
         /// The offending commit.
         sha: String,
     },
+    /// Two whole-change verdicts name the same commit.
+    ///
+    /// A verdict is a judgement of one change, so a second one for the same
+    /// commit is the candidate contradicting itself — and counting both would
+    /// double whatever [`Score::verdicts_contradicted`] says about that commit,
+    /// which is a number a reader acts on. Refused rather than de-duplicated,
+    /// because picking one of two contradictory judgements is a decision this
+    /// scorer has no basis for.
+    #[error(
+        "two verdicts name commit {sha}. A verdict is a judgement of one change, \
+         so a run may carry at most one per commit; two is the candidate \
+         contradicting itself, and there is no basis here for choosing between them"
+    )]
+    DuplicateVerdict {
+        /// The commit judged twice.
+        sha: String,
+    },
     /// The run attempted no commit the corpus knows, so there is nothing to score.
     #[error("the run attempted no commit, so there is nothing to score")]
     NothingAttempted,
@@ -667,6 +684,18 @@ fn check_shas(known: &BTreeSet<&str>, run: &CandidateRun) -> Result<(), ScoreErr
         }
         if !run.attempted_shas.contains(sha) {
             return Err(ScoreError::UndeclaredSha { sha: sha.clone() });
+        }
+    }
+    // At most one verdict per commit — the shape `docs/JSON_SCHEMA.md` states, now
+    // enforced rather than assumed. Findings are deliberately *not* held to this:
+    // a reviewer may say several things about one commit, and each is scored
+    // against its own row. A verdict is one judgement of one change.
+    let mut judged: BTreeSet<&str> = BTreeSet::new();
+    for verdict in &run.verdicts {
+        if !judged.insert(verdict.reviewed_sha.as_str()) {
+            return Err(ScoreError::DuplicateVerdict {
+                sha: verdict.reviewed_sha.clone(),
+            });
         }
     }
     Ok(())
@@ -1594,6 +1623,38 @@ mod tests {
             score(&corpus(), &undeclared),
             Err(ScoreError::UndeclaredSha { .. })
         ));
+    }
+
+    /// One judgement per change. Two verdicts on one commit is the candidate
+    /// contradicting itself, and counting both would double whatever
+    /// `verdicts_contradicted` says about that commit — a number a reader acts
+    /// on. Findings are deliberately not held to this: a reviewer may say several
+    /// things about one commit, each scored against its own row.
+    #[test]
+    fn two_verdicts_on_one_commit_are_refused_while_two_findings_are_not() {
+        let twice = CandidateRun {
+            verdicts: vec![
+                verdict(SHA_A, VerdictStance::Clean),
+                verdict(SHA_A, VerdictStance::Concerns),
+            ],
+            ..run(&[SHA_A], vec![])
+        };
+        assert!(matches!(
+            score(&corpus(), &twice),
+            Err(ScoreError::DuplicateVerdict { .. })
+        ));
+
+        let many_findings = run(
+            &[SHA_A],
+            vec![
+                finding(SHA_A, "src/a.rs", 100),
+                finding(SHA_A, "src/a.rs", 200),
+            ],
+        );
+        assert!(
+            score(&corpus(), &many_findings).is_ok(),
+            "several findings on one commit are ordinary and stay ordinary"
+        );
     }
 
     /// A `v1` document written before verdicts existed still parses, and one
