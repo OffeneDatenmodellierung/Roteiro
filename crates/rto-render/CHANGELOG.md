@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.2.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v5.1.0...rto-render-v5.2.0) - 2026-09-02
+
+### Added
+
+- *(okf)* make the validator a default dependency, not a feature
+- *(okf)* inspect a bundle as a bundle, and wire the oracle into a test
+- *(okf)* read bundles with okf-core, and stop re-deriving the format
+- *(okf)* discover a peer's bundle, ask once, and screen what it says
+
+### Fixed
+
+- *(okf)* drop okf-validator, and keep okf-core
+- *(okf)* skip symlinks in the fixture walk, and state `lint`'s exit status
+- *(okf)* attribute a confirmation to the verifier that supports it
+- *(okf)* order findings by severity, and never manufacture an actor token
+- *(okf)* the screen report named an outcome that did not happen
+
+### Other
+
+- *(okf)* the module header still described the crate that left
+- *(okf)* sort the fixture walk by path, not by path and body
+- *(okf)* read `verified` once, for the pairs and the tier alike
+
 ## [5.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v5.0.0...rto-render-v5.1.0) - 2026-09-01
 
 ### Added
