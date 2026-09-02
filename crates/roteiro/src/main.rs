@@ -7083,9 +7083,13 @@ fn build_scaffold(
             .map(|v| v.message.as_str())
             .collect();
         if !unreadable.is_empty() {
+            // "could not be parsed", not "could not be read": these come from
+            // `layer.malformed`, which is a parse failure — a missing `adr-id`,
+            // say — and never an IO error. A reader chasing a permissions
+            // problem because of this wording would be chasing the wrong thing.
             eprintln!(
                 "warning: {} document(s) declare themselves ADRs but could not be \
-                 read, so this id is proposed from an incomplete set and may \
+                 parsed, so this id is proposed from an incomplete set and may \
                  collide — run `roteiro check` for the detail:",
                 unreadable.len()
             );
@@ -7097,16 +7101,28 @@ fn build_scaffold(
         // keeps its decisions in X" is a statement about the repository, and
         // making it about one that has no decisions would be inventing a
         // convention and attributing it to them.
+        // Three cases, not two. A repository whose only ADRs are malformed has
+        // decisions — they just did not parse — so telling it there are none is
+        // false in the direction that matters: it is the repository most likely
+        // to be handed a colliding id, and the one being told there is nothing
+        // to collide with.
         if home.followed {
             eprintln!(
                 "note: this repository keeps its decisions in `{dir}/` — suggested \
                  path `{dir}/{adr_id}-<slug>.md`",
                 dir = home.dir
             );
-        } else {
+        } else if unreadable.is_empty() {
             eprintln!(
                 "note: no existing decisions found, so there is nothing to follow; \
                  `{dir}/{adr_id}-<slug>.md` is the conventional path",
+                dir = home.dir
+            );
+        } else {
+            eprintln!(
+                "note: every decision found failed to parse, so neither the id nor \
+                 the location could be read from them; `{dir}/{adr_id}-<slug>.md` \
+                 is the conventional path, and `{adr_id}` is a guess",
                 dir = home.dir
             );
         }

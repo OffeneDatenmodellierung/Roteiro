@@ -413,7 +413,12 @@ pub struct AdrHome {
     /// Repository-relative directory the new ADR should be written to, or `"."`
     /// when the repository keeps its decisions at the root.
     pub dir: String,
-    /// The next unused id, zero-padded to match the ids already in use.
+    /// One past the highest id in use, zero-padded to match it.
+    ///
+    /// Not *guaranteed* unused: it saturates at `u32::MAX`, so a repository
+    /// holding an ADR numbered `4294967295` gets that same id back rather than a
+    /// panic or a wrap to zero. Absurd input, but the caller is told what it
+    /// gets rather than promised something this cannot deliver.
     pub next_id: String,
     /// Whether this was read off existing ADRs, or is the fallback.
     ///
@@ -434,8 +439,8 @@ pub struct AdrHome {
 /// `docs/adr` is used — a default, which is what it always should have been, and
 /// [`AdrHome::followed`] says which of the two happened.
 ///
-/// **The id** is one past the highest `adr-id`, not one past the highest number
-/// in a *filename*. Those coincide here because this repository names files
+/// **The id** is one past the highest `adr-id` — saturating, so `u32::MAX`
+/// yields itself — and not one past the highest number in a *filename*. Those coincide here because this repository names files
 /// `0021-thing.md`, and they need not anywhere else: a repository naming them
 /// `use-postgres.md` would have had every new ADR proposed as `0001`. The width
 /// follows the widest id in use, so a project numbering `001` keeps three
