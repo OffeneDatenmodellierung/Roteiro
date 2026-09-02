@@ -76,6 +76,19 @@ pub enum InspectError {
         /// What `okf-core` said went wrong.
         detail: String,
     },
+    /// `--today` was given a value that is not an ISO `YYYY-MM-DD` date.
+    ///
+    /// Refused rather than silently falling back to the real clock: the flag
+    /// exists so a run is reproducible, and a typo that quietly restored
+    /// today's date would make a green pipeline mean nothing.
+    #[error("`{given}` is not an ISO date (expected YYYY-MM-DD)")]
+    BadDate {
+        /// The value as the caller gave it.
+        given: String,
+    },
+    /// The host clock could not be read and no `--today` was given.
+    #[error("cannot read the current date; pass --today YYYY-MM-DD")]
+    NoClock,
 }
 
 /// Load a bundle, naming the path in the error rather than only the cause.
@@ -101,6 +114,14 @@ pub struct ConceptTrust {
     /// timestamp does not count toward the tier but is still an attribution the
     /// bundle made, and dropping it would hide *why* the tier came out low.
     pub verified_by: Vec<String>,
+    /// The `stale_after` timestamp exactly as the document wrote it, if any.
+    pub stale_after: Option<String>,
+    /// Whether `today >= stale_after` (§5.4).
+    ///
+    /// Independent of `tier`: a concept can be human-reviewed *and* stale, and
+    /// that combination is the one most worth seeing before an import, because
+    /// the tier alone reads as reassurance.
+    pub stale: bool,
 }
 
 /// What a bundle claims about its own trustworthiness.
@@ -123,6 +144,14 @@ pub struct TrustSummary {
     pub machine_confirmed: usize,
     /// Concepts with no valid `verified` event.
     pub unverified: usize,
+    /// Concepts whose `stale_after` has passed, as of `today`.
+    pub stale: usize,
+    /// The date staleness was judged against, as `YYYY-MM-DD`.
+    ///
+    /// Always reported, whether it came from `--today` or the host clock, so a
+    /// captured summary says what it was true *of*. A tiered count with no date
+    /// beside it cannot be compared with the same bundle read a month later.
+    pub today: String,
     /// Every concept, in bundle order.
     pub concepts: Vec<ConceptTrust>,
 }
@@ -132,8 +161,27 @@ pub struct TrustSummary {
 /// # Errors
 ///
 /// [`InspectError::Unreadable`] if the path is not a loadable OKF bundle.
-pub fn trust_summary(root: &Path) -> Result<TrustSummary, InspectError> {
-    Ok(summarise_trust(&load(root)?, &root.display().to_string()))
+pub fn trust_summary(root: &Path, today: Option<&str>) -> Result<TrustSummary, InspectError> {
+    let today = resolve_today(today)?;
+    Ok(summarise_trust(
+        &load(root)?,
+        &root.display().to_string(),
+        today,
+    ))
+}
+
+/// The date staleness is judged against: `--today` when given, else the host's
+/// UTC date.
+///
+/// Separated out because it is the only non-deterministic input in this module,
+/// and every report that mentions staleness takes it the same way.
+fn resolve_today(given: Option<&str>) -> Result<okf_core::Date, InspectError> {
+    match given {
+        Some(raw) => okf_core::Date::parse(raw).ok_or_else(|| InspectError::BadDate {
+            given: raw.to_owned(),
+        }),
+        None => okf_core::Date::today_utc().ok_or(InspectError::NoClock),
+    }
 }
 
 /// The bundle-in-hand half of [`trust_summary`].
@@ -141,7 +189,7 @@ pub fn trust_summary(root: &Path) -> Result<TrustSummary, InspectError> {
 /// Split out so a caller that has already loaded a [`Bundle`] — to validate it,
 /// or to ask a person whether to import it — pays for the directory walk once.
 #[must_use]
-pub fn summarise_trust(bundle: &Bundle, root: &str) -> TrustSummary {
+pub fn summarise_trust(bundle: &Bundle, root: &str, today: okf_core::Date) -> TrustSummary {
     let mut summary = TrustSummary {
         root: root.to_owned(),
         okf_version: bundle.okf_version().map(ToOwned::to_owned),
@@ -149,6 +197,8 @@ pub fn summarise_trust(bundle: &Bundle, root: &str) -> TrustSummary {
         human_reviewed: 0,
         machine_confirmed: 0,
         unverified: 0,
+        stale: 0,
+        today: today.to_string(),
         concepts: Vec::with_capacity(bundle.concepts().len()),
     };
     for concept in bundle.concepts() {
@@ -158,10 +208,20 @@ pub fn summarise_trust(bundle: &Bundle, root: &str) -> TrustSummary {
             TrustTier::MachineConfirmed => summary.machine_confirmed += 1,
             TrustTier::Unverified => summary.unverified += 1,
         }
+        let stale = concept.is_stale_on(today);
+        if stale {
+            summary.stale += 1;
+        }
         summary.concepts.push(ConceptTrust {
             id: concept.id.to_string(),
             tier: tier.as_str(),
             status: concept.status().to_string(),
+            stale_after: concept
+                .document
+                .frontmatter
+                .stale_after()
+                .map(|d| d.to_string()),
+            stale,
             verified_by: concept
                 .document
                 .frontmatter
@@ -557,4 +617,240 @@ fn record(
             message: err.to_string(),
         });
     }
+}
+
+/// One concept's Attested Computation (§10), as the bundle declares it.
+#[derive(Debug, Clone, Serialize)]
+pub struct ComputationEntry {
+    /// The concept carrying the contract.
+    pub concept: String,
+    /// The bundle-relative file it lives in.
+    pub path: String,
+    /// §10's `runtime`, which decides how everything else is interpreted.
+    ///
+    /// `None` is a conformance error, not an absence — the spec makes it
+    /// REQUIRED — and it is surfaced here rather than skipped so a listing and
+    /// `okf validate` agree about what the bundle contains.
+    pub runtime: Option<String>,
+    /// `inline`, `file` or `missing`.
+    pub source: &'static str,
+    /// The file named by a `computation:` key, when `source` is `file`.
+    pub file: Option<String>,
+    /// The fenced language of an inline block, when it declared one.
+    pub language: Option<String>,
+    /// Lines of code in an inline block.
+    pub lines: Option<usize>,
+    /// The named holes an agent may fill.
+    pub parameters: Vec<String>,
+    /// Whether an executor is declared.
+    pub has_executor: bool,
+    /// Whether an attester is declared.
+    pub has_attester: bool,
+    /// `true` when the concept carries **both** an inline block and a
+    /// `computation:` file key.
+    ///
+    /// The spec asks for one or the other, so the two halves can disagree with
+    /// nothing to arbitrate between them. Listed rather than merely counted
+    /// because the fix is per concept.
+    pub redundant_inline: bool,
+}
+
+/// Every Attested Computation a bundle declares.
+#[derive(Debug, Clone, Serialize)]
+pub struct ComputationReport {
+    /// The bundle root, as the caller named it.
+    pub root: String,
+    /// Concepts read.
+    pub concepts: usize,
+    /// Concepts carrying a computation contract.
+    pub computations: usize,
+    /// Of those, how many carry the code inline.
+    pub inline: usize,
+    /// Of those, how many name a file instead.
+    pub file: usize,
+    /// Of those, how many declare neither — an incomplete contract.
+    pub missing: usize,
+    /// Every distinct `runtime`, sorted.
+    pub runtimes: Vec<String>,
+    /// The contracts themselves, in bundle order.
+    pub entries: Vec<ComputationEntry>,
+}
+
+impl ComputationReport {
+    /// Whether every contract found is complete: a runtime, and code somewhere.
+    ///
+    /// This is what `--check` gates on. A bundle with **no** computations is
+    /// clean by this measure, which is the right answer: §10 is optional, and
+    /// failing a bundle for not using an optional feature would make the gate
+    /// unusable on the three of four published bundles that declare none.
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
+        self.incomplete() == 0
+    }
+
+    /// Contracts that are declared but not usable: no `runtime`, no code, or
+    /// both an inline block and a file with nothing to arbitrate between them.
+    #[must_use]
+    pub fn incomplete(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|e| e.runtime.is_none() || e.source == "missing" || e.redundant_inline)
+            .count()
+    }
+}
+
+/// List the Attested Computations in the bundle at `root`.
+///
+/// # Errors
+///
+/// [`InspectError::Unreadable`] if the path is not a loadable OKF bundle.
+pub fn computation_report(root: &Path) -> Result<ComputationReport, InspectError> {
+    let bundle = load(root)?;
+    let mut report = ComputationReport {
+        root: root.display().to_string(),
+        concepts: bundle.concepts().len(),
+        computations: 0,
+        inline: 0,
+        file: 0,
+        missing: 0,
+        runtimes: Vec::new(),
+        entries: Vec::new(),
+    };
+    let mut runtimes = std::collections::BTreeSet::new();
+
+    for concept in bundle.concepts() {
+        let Some(computation) = concept.attested_computation() else {
+            continue;
+        };
+        report.computations += 1;
+        if let Some(runtime) = computation.runtime.as_deref() {
+            runtimes.insert(runtime.to_owned());
+        }
+        let (source, file, language, lines) = match &computation.computation {
+            okf_core::ComputationSource::Inline(inline) => {
+                report.inline += 1;
+                (
+                    "inline",
+                    None,
+                    inline.language.clone(),
+                    Some(inline.code.lines().count()),
+                )
+            }
+            okf_core::ComputationSource::File(path) => {
+                report.file += 1;
+                ("file", Some(path.clone()), None, None)
+            }
+            okf_core::ComputationSource::Missing => {
+                report.missing += 1;
+                ("missing", None, None, None)
+            }
+        };
+        report.entries.push(ComputationEntry {
+            concept: concept.id.to_string(),
+            path: concept
+                .path
+                .strip_prefix(bundle.root())
+                .unwrap_or(&concept.path)
+                .display()
+                .to_string(),
+            runtime: computation.runtime.clone(),
+            source,
+            file,
+            language,
+            lines,
+            // An unnamed parameter is dropped rather than rendered as a hole:
+            // §10 requires the name, so `okf validate` is what reports its
+            // absence, and repeating it here as an empty slot in a listing would
+            // read as a parameter called "".
+            parameters: computation
+                .parameters
+                .iter()
+                .filter_map(|p| p.name.clone())
+                .collect(),
+            has_executor: computation.executor.is_some(),
+            has_attester: computation.attester.is_some(),
+            redundant_inline: computation.has_redundant_inline,
+        });
+    }
+    report.runtimes = runtimes.into_iter().collect();
+    Ok(report)
+}
+
+/// What a bundle is, in one answer.
+///
+/// Composed from the reports the other commands already produce rather than
+/// re-deriving anything: this is the command you run *first*, on a bundle
+/// somebody handed you, to decide which of the others is worth running.
+#[derive(Debug, Clone, Serialize)]
+pub struct BundleInfo {
+    /// The bundle root, as the caller named it.
+    pub root: String,
+    /// The `okf_version` the root `index.md` declares (§10), if any.
+    ///
+    /// Absent is conformant — §8 and §12 make it MAY — so this is reported and
+    /// never warned about.
+    pub okf_version: Option<String>,
+    /// The bundle's title, from `index.md`.
+    pub title: Option<String>,
+    /// Concepts, excluding the reserved `index.md` / `log.md`.
+    pub concepts: usize,
+    /// Trust tiers and staleness, as of `today`.
+    pub trust: TrustSummary,
+    /// How many concepts carry each `status`, sorted by status.
+    pub statuses: Vec<(String, usize)>,
+    /// Internal links, and how many resolve to nothing.
+    pub links: (usize, usize),
+    /// Attested Computations, and how many are incomplete.
+    pub computations: (usize, usize),
+    /// Every distinct computation `runtime`, sorted.
+    pub runtimes: Vec<String>,
+}
+
+/// Summarise the bundle at `root`.
+///
+/// # Errors
+///
+/// [`InspectError::Unreadable`] if the path is not a loadable OKF bundle,
+/// [`InspectError::BadDate`] if `today` is not an ISO date.
+pub fn bundle_info(root: &Path, today: Option<&str>) -> Result<BundleInfo, InspectError> {
+    let today = resolve_today(today)?;
+    let bundle = load(root)?;
+    let trust = summarise_trust(&bundle, &root.display().to_string(), today);
+    let links = link_report(root)?;
+    let computations = computation_report(root)?;
+
+    let mut statuses: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for concept in bundle.concepts() {
+        *statuses.entry(concept.status().to_string()).or_default() += 1;
+    }
+
+    Ok(BundleInfo {
+        root: root.display().to_string(),
+        okf_version: bundle.okf_version().map(ToOwned::to_owned),
+        title: bundle_title(&bundle),
+        concepts: bundle.concepts().len(),
+        trust,
+        statuses: statuses.into_iter().collect(),
+        links: (links.links, links.broken.len()),
+        computations: (computations.computations, computations.incomplete()),
+        runtimes: computations.runtimes,
+    })
+}
+
+/// The bundle's own title, from the `title` of its root `index.md`.
+///
+/// Read through `Document::parse` — the same parser `Bundle::load` uses — rather
+/// than a second reader of the same bytes, so the two cannot disagree about what
+/// the file says. `okf-core` exposes the index only as a path, so this re-reads
+/// one small file; that is cheap next to the directory walk, and a bundle whose
+/// index is unreadable simply has no title here, because `okf validate` is what
+/// reports a broken index.
+fn bundle_title(bundle: &Bundle) -> Option<String> {
+    let path = bundle.index_files().first()?;
+    let text = std::fs::read_to_string(path).ok()?;
+    let document = okf_core::Document::parse(&text).ok()?;
+    document
+        .frontmatter
+        .title()
+        .map(std::borrow::Cow::into_owned)
 }

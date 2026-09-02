@@ -3,9 +3,11 @@
 //!
 //! These test the **CLI wiring**: that each action reaches the right library
 //! entry point, that `--json` parses, and that `--check` gates while the bare
-//! command does not. All five actions ship in a stock build — `validate` and
-//! `lint` were behind a feature earlier on this branch and are not any more, so
-//! there is no unavailable-surface case left to test.
+//! command does not. Every inspecting action ships in a stock build — `validate`
+//! and `lint` were behind a feature earlier on this branch and are not any more,
+//! so there is no unavailable-surface case left to test. (`view` is the one
+//! exception, and it is a server rather than a report: it lives behind
+//! `okf-viewer` and is tested in `crates/roteiro/src/okf_viewer.rs`.)
 //! What the underlying checks *mean* is settled in `rto-render`'s
 //! `okf_inspect.rs` against the specification's own published bundles; there is
 //! no value in asserting it twice, and a fixture copied into two crates is a
@@ -381,5 +383,257 @@ fn no_concepts_does_not_mean_nothing_to_gate_on() {
         "and it still says nothing was examined: {text}"
     );
     assert!(text.contains("broken.md"), "and names the file: {text}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A bundle whose one concept expires on a date this test names.
+///
+/// Written inline with an absolute `stale_after` rather than one computed from
+/// the clock: a fixture that expires relative to "now" would make this test pass
+/// or fail depending on the day it ran, which is the exact failure `--today`
+/// exists to prevent. Testing determinism with a non-deterministic fixture would
+/// be a joke at our own expense.
+fn expiring_bundle(tag: &str) -> PathBuf {
+    bundle(
+        tag,
+        &[
+            ("index.md", "---\nokf_version: \"0.2\"\n---\n\n# Bundle\n"),
+            (
+                "metrics/revenue.md",
+                "---\ntype: Metric\ntitle: Revenue\nstale_after: 2026-12-31T00:00:00Z\n\
+                 verified:\n  - by: human:alice\n    at: 2026-01-01T00:00:00Z\n---\n\n\
+                 # Revenue\n\nTotal revenue.\n",
+            ),
+        ],
+    )
+}
+
+/// `--today` makes staleness a function of the bundle, and `--check` gates on it.
+///
+/// The three dates are the boundary and its two sides, because `now >=
+/// stale_after` is the assertion most likely to be wrong by one.
+#[test]
+fn trust_judges_staleness_against_the_given_day_and_gates_on_it() {
+    let root = expiring_bundle("stale");
+    let path = root.to_string_lossy().into_owned();
+
+    let before = roteiro(&["okf", "trust", &path, "--today", "2026-12-30"]);
+    assert!(before.status.success());
+    assert!(
+        String::from_utf8_lossy(&before.stdout).contains("stale 0 (as of 2026-12-30)"),
+        "nothing is stale the day before"
+    );
+
+    let on = roteiro(&["okf", "trust", &path, "--today", "2026-12-31"]);
+    let on_stdout = String::from_utf8_lossy(&on.stdout).into_owned();
+    assert!(
+        on_stdout.contains("stale 1 (as of 2026-12-31)"),
+        "the day itself counts, because the rule is `now >= stale_after`; got:\n{on_stdout}"
+    );
+    assert!(
+        on_stdout.contains("[STALE since 2026-12-31T00:00:00Z]"),
+        "the concept line must say *since when*, not merely that it expired; got:\n{on_stdout}"
+    );
+
+    // Reporting without gating is what you want reading somebody else's bundle.
+    assert!(
+        on.status.success(),
+        "the bare command reports and does not gate"
+    );
+    assert!(
+        !roteiro(&["okf", "trust", &path, "--today", "2026-12-31", "--check"])
+            .status
+            .success(),
+        "--check must gate on staleness"
+    );
+    assert!(
+        roteiro(&["okf", "trust", &path, "--today", "2026-12-30", "--check"])
+            .status
+            .success(),
+        "--check must not gate when nothing is stale"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `--json` selects a format and must not change the verdict.
+///
+/// The JSON path returns early, which is exactly where a gate gets forgotten —
+/// and it was, on the first draft of this command.
+#[test]
+fn the_stale_gate_is_the_same_with_and_without_json() {
+    let root = expiring_bundle("stale-json");
+    let path = root.to_string_lossy().into_owned();
+    let text = roteiro(&["okf", "trust", &path, "--today", "2027-01-01", "--check"]);
+    let json = roteiro(&[
+        "okf",
+        "trust",
+        &path,
+        "--today",
+        "2027-01-01",
+        "--check",
+        "--json",
+    ]);
+    assert_eq!(
+        text.status.success(),
+        json.status.success(),
+        "--json must not change whether the command gates"
+    );
+    assert!(!json.status.success(), "and both must fail here");
+
+    let v: serde_json::Value = serde_json::from_slice(&json.stdout).expect("parseable JSON");
+    assert_eq!(v["stale"], 1);
+    assert_eq!(v["today"], "2027-01-01");
+    assert_eq!(v["concepts"][0]["stale"], true);
+    assert_eq!(v["concepts"][0]["stale_after"], "2026-12-31T00:00:00Z");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A `--today` that is not an ISO date is refused rather than ignored.
+#[test]
+fn a_malformed_today_fails_the_command() {
+    let root = expiring_bundle("stale-bad-date");
+    let out = roteiro(&[
+        "okf",
+        "trust",
+        &root.to_string_lossy(),
+        "--today",
+        "yesterday",
+    ]);
+    assert!(
+        !out.status.success(),
+        "a non-ISO date must fail the command"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("is not an ISO date"),
+        "and must say so by name"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `okf computations` lists the contracts, and `--check` gates on an incomplete
+/// one — while a bundle declaring none passes.
+#[test]
+fn computations_are_listed_and_only_incomplete_ones_gate() {
+    let complete = bundle(
+        "computations-ok",
+        &[
+            ("index.md", "---\nokf_version: \"0.2\"\n---\n\n# Bundle\n"),
+            (
+                "c/total.md",
+                "---\ntype: Attested Computation\ntitle: Total\nruntime: bigquery\n---\n\n\
+                 # Computation\n\n```sql\nSELECT 1\n```\n",
+            ),
+        ],
+    );
+    let out = roteiro(&["okf", "computations", &complete.to_string_lossy()]);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(out.status.success());
+    assert!(
+        stdout.contains("c/total — bigquery, inline sql, 1 line(s)"),
+        "the listing must say the runtime and where the code is; got:\n{stdout}"
+    );
+    assert!(
+        roteiro(&[
+            "okf",
+            "computations",
+            &complete.to_string_lossy(),
+            "--check"
+        ])
+        .status
+        .success(),
+        "a complete contract must not gate"
+    );
+
+    // No runtime: §10 makes it REQUIRED, so the contract cannot be run.
+    let broken = bundle(
+        "computations-no-runtime",
+        &[
+            ("index.md", "---\nokf_version: \"0.2\"\n---\n\n# Bundle\n"),
+            (
+                "c/total.md",
+                "---\ntype: Attested Computation\ntitle: Total\n---\n\n\
+                 # Computation\n\n```sql\nSELECT 1\n```\n",
+            ),
+        ],
+    );
+    assert!(
+        !roteiro(&["okf", "computations", &broken.to_string_lossy(), "--check"])
+            .status
+            .success(),
+        "a contract with no runtime must gate under --check"
+    );
+    assert!(
+        roteiro(&["okf", "computations", &broken.to_string_lossy()])
+            .status
+            .success(),
+        "and must not gate without it"
+    );
+
+    // §10 is optional, so declaring none is conformant and says so.
+    let none = bundle(
+        "computations-none",
+        &[
+            ("index.md", "---\nokf_version: \"0.2\"\n---\n\n# Bundle\n"),
+            (
+                "metrics/revenue.md",
+                "---\ntype: Metric\ntitle: Revenue\n---\n\n# Revenue\n\nTotal.\n",
+            ),
+        ],
+    );
+    let out = roteiro(&["okf", "computations", &none.to_string_lossy(), "--check"]);
+    assert!(out.status.success(), "declaring none is conformant");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("declares no attested computations"),
+        "and must say so, rather than printing an empty listing that reads as a failure"
+    );
+
+    for root in [complete, broken, none] {
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// `okf info` answers "what is this" without gating on any of it.
+#[test]
+fn info_summarises_without_gating() {
+    let root = expiring_bundle("info");
+    let out = roteiro(&[
+        "okf",
+        "info",
+        &root.to_string_lossy(),
+        "--today",
+        "2027-01-01",
+    ]);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        out.status.success(),
+        "info reports; the other commands gate — that is the division of labour"
+    );
+    for expected in [
+        "okf_version: 0.2",
+        "concepts: 1",
+        "stale: 1 (as of 2027-01-01)",
+        "internal links: 0, broken 0",
+        "computations: 0, incomplete 0",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "info must report `{expected}`; got:\n{stdout}"
+        );
+    }
+
+    let v: serde_json::Value = serde_json::from_slice(
+        &roteiro(&[
+            "okf",
+            "info",
+            &root.to_string_lossy(),
+            "--today",
+            "2027-01-01",
+            "--json",
+        ])
+        .stdout,
+    )
+    .expect("parseable JSON");
+    assert_eq!(v["trust"]["stale"], 1);
+    assert_eq!(v["concepts"], 1);
     let _ = std::fs::remove_dir_all(&root);
 }

@@ -1319,6 +1319,27 @@ enum OkfAction {
     Trust {
         /// The bundle directory.
         path: String,
+        /// The date to judge `stale_after` against, as `YYYY-MM-DD`.
+        ///
+        /// Defaults to the host's UTC date. Given explicitly, the report becomes
+        /// a pure function of the bundle — which is what makes it usable in a
+        /// test, in CI, or in any comparison between two runs. A summary that
+        /// silently changed the day a `stale_after` passed would be the kind of
+        /// failure that looks like a regression in whatever ran it.
+        ///
+        /// A value that is not an ISO date is refused rather than falling back
+        /// to the clock: the flag exists for reproducibility, and a typo that
+        /// quietly restored today's date would make a green run mean nothing.
+        #[arg(long, value_name = "YYYY-MM-DD")]
+        today: Option<String>,
+        /// Exit non-zero if any concept is stale, for use as a CI gate.
+        ///
+        /// Staleness only — not the tier. A bundle of entirely unverified
+        /// concepts is a fact about the peer and gates nothing here; a concept
+        /// whose own `stale_after` has passed is the bundle telling you it has
+        /// expired, which is a statement it made about itself.
+        #[arg(long)]
+        check: bool,
         /// Emit the summary as JSON.
         #[arg(long)]
         json: bool,
@@ -1347,6 +1368,51 @@ enum OkfAction {
         #[arg(long)]
         check: bool,
         /// Emit the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the bundle's Attested Computations (§10): runtime, where the code
+    /// lives, and what an agent may fill in.
+    ///
+    /// `okf syntax --computations` checks whether that code *parses*; this says
+    /// what contracts exist at all. The two answer different questions, and the
+    /// gap between them was worth closing: a bundle whose computations all name
+    /// files reports "0 checked" from `syntax`, which reads as "there were none"
+    /// when there were several.
+    Computations {
+        /// The bundle directory.
+        path: String,
+        /// Exit non-zero if any contract is incomplete, for use as a CI gate.
+        ///
+        /// Incomplete means no `runtime`, no code in either form, or *both* an
+        /// inline block and a `computation:` file — the last because §10 asks for
+        /// one or the other and nothing arbitrates when the two disagree.
+        ///
+        /// A bundle with **no** computations passes: §10 is optional, and three
+        /// of the four published bundles declare none.
+        #[arg(long)]
+        check: bool,
+        /// Emit the listing as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Summarise a bundle: what it is, how much of it there is, what it claims
+    /// about itself, and what it would cost to trust.
+    ///
+    /// The command to run *first* on a bundle somebody handed you, to decide
+    /// which of the others is worth running. It composes the reports `trust`,
+    /// `links` and `computations` already produce rather than deriving anything
+    /// of its own, so nothing here can disagree with the command that reports it
+    /// in detail.
+    Info {
+        /// The bundle directory.
+        path: String,
+        /// The date to judge `stale_after` against, as `YYYY-MM-DD`.
+        ///
+        /// Defaults to the host's UTC date; see `trust --today`.
+        #[arg(long, value_name = "YYYY-MM-DD")]
+        today: Option<String>,
+        /// Emit the summary as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -6332,7 +6398,14 @@ fn run_okf(action: OkfAction) -> anyhow::Result<()> {
             all_blocks,
             json,
         } => run_okf_syntax(&path, all_blocks, json),
-        OkfAction::Trust { path, json } => run_okf_trust(&path, json),
+        OkfAction::Trust {
+            path,
+            today,
+            check,
+            json,
+        } => run_okf_trust(&path, today.as_deref(), check, json),
+        OkfAction::Computations { path, check, json } => run_okf_computations(&path, check, json),
+        OkfAction::Info { path, today, json } => run_okf_info(&path, today.as_deref(), json),
         OkfAction::Links {
             path,
             broken,
@@ -6487,11 +6560,11 @@ fn run_okf_syntax(path: &str, all_blocks: bool, json: bool) -> anyhow::Result<()
     Ok(())
 }
 
-fn run_okf_trust(path: &str, json: bool) -> anyhow::Result<()> {
-    let summary = rto_render::okf::inspect::trust_summary(okf_bundle_root(path)?)?;
+fn run_okf_trust(path: &str, today: Option<&str>, check: bool, json: bool) -> anyhow::Result<()> {
+    let summary = rto_render::okf::inspect::trust_summary(okf_bundle_root(path)?, today)?;
     if json {
         emit_json(&summary)?;
-        return Ok(());
+        return gate_stale(check, summary.stale);
     }
     println!(
         "{}: {} concept(s){}",
@@ -6506,13 +6579,28 @@ fn run_okf_trust(path: &str, json: bool) -> anyhow::Result<()> {
         "  human-reviewed {}, machine-confirmed {}, unverified {}",
         summary.human_reviewed, summary.machine_confirmed, summary.unverified
     );
+    // The date is printed whether or not `--today` was given. A tiered count
+    // with no date beside it cannot be compared with the same bundle read a
+    // month later, and staleness is the one number here that moves on its own.
+    println!("  stale {} (as of {})", summary.stale, summary.today);
     for c in &summary.concepts {
         let by = if c.verified_by.is_empty() {
             String::new()
         } else {
             format!(" — verified by {}", c.verified_by.join(", "))
         };
-        println!("  {:<18} {}{by}", c.tier, c.id);
+        // Marked on the tier line rather than listed separately: "human-reviewed
+        // and stale" is the combination worth seeing, and splitting it into two
+        // lists is what lets a reader see the tier and stop reading.
+        let stale = if c.stale {
+            c.stale_after.as_ref().map_or_else(
+                || " [STALE]".to_owned(),
+                |after| format!(" [STALE since {after}]"),
+            )
+        } else {
+            String::new()
+        };
+        println!("  {:<18} {}{by}{stale}", c.tier, c.id);
     }
     // The tier is a claim the *bundle* makes, and `--trust` is what adopts it.
     // Saying so here keeps the two commands legible as one decision.
@@ -6522,6 +6610,131 @@ fn run_okf_trust(path: &str, json: bool) -> anyhow::Result<()> {
              adopts them, and without --trust every concept arrives as external-inferred"
         );
     }
+    gate_stale(check, summary.stale)
+}
+
+/// The shared exit rule for `okf trust --check`.
+///
+/// Split out so the JSON and human paths cannot drift: `--json` selects a format
+/// and must not change the verdict, and the earlier return in the JSON branch is
+/// exactly where that drift would have gone unnoticed.
+fn gate_stale(check: bool, stale: usize) -> anyhow::Result<()> {
+    if check && stale > 0 {
+        anyhow::bail!("{stale} concept(s) are stale");
+    }
+    Ok(())
+}
+
+/// `roteiro okf computations` — the bundle's Attested Computations (§10).
+fn run_okf_computations(path: &str, check: bool, json: bool) -> anyhow::Result<()> {
+    let report = rto_render::okf::inspect::computation_report(okf_bundle_root(path)?)?;
+    if json {
+        emit_json(&report)?;
+    } else {
+        println!(
+            "{}: {} concept(s), {} computation(s)",
+            report.root, report.concepts, report.computations
+        );
+        if report.computations == 0 {
+            // Said plainly, because §10 is optional and "none" is a conformant
+            // answer. Three of the four published bundles declare none, and a
+            // silent empty listing reads as a command that failed.
+            println!("  this bundle declares no attested computations");
+            return Ok(());
+        }
+        println!(
+            "  inline {}, by file {}, incomplete {}",
+            report.inline, report.file, report.missing
+        );
+        if !report.runtimes.is_empty() {
+            println!("  runtimes: {}", report.runtimes.join(", "));
+        }
+        for e in &report.entries {
+            let runtime = e.runtime.as_deref().unwrap_or("(no runtime)");
+            let where_ = match e.source {
+                "inline" => e.lines.map_or_else(
+                    || "inline".to_owned(),
+                    |n| {
+                        let lang = e.language.as_deref().unwrap_or("untagged");
+                        format!("inline {lang}, {n} line(s)")
+                    },
+                ),
+                "file" => e
+                    .file
+                    .as_ref()
+                    .map_or_else(|| "file".to_owned(), |f| format!("file {f}")),
+                _ => "no code".to_owned(),
+            };
+            println!("  {} — {runtime}, {where_}", e.concept);
+            if !e.parameters.is_empty() {
+                println!("      parameters: {}", e.parameters.join(", "));
+            }
+            let mut notes = Vec::new();
+            if !e.has_executor {
+                notes.push("no executor");
+            }
+            if !e.has_attester {
+                notes.push("no attester");
+            }
+            if e.redundant_inline {
+                notes.push("both an inline block and a computation: file");
+            }
+            if !notes.is_empty() {
+                println!("      {}", notes.join("; "));
+            }
+        }
+        let incomplete = report.incomplete();
+        if incomplete > 0 {
+            println!("  {incomplete} contract(s) incomplete");
+        }
+    }
+    if check && !report.is_clean() {
+        anyhow::bail!("{} computation contract(s) incomplete", report.incomplete());
+    }
+    Ok(())
+}
+
+/// `roteiro okf info` — what this bundle is, in one answer.
+fn run_okf_info(path: &str, today: Option<&str>, json: bool) -> anyhow::Result<()> {
+    let info = rto_render::okf::inspect::bundle_info(okf_bundle_root(path)?, today)?;
+    if json {
+        emit_json(&info)?;
+        return Ok(());
+    }
+    println!("{}", info.root);
+    if let Some(title) = &info.title {
+        println!("  title: {title}");
+    }
+    println!(
+        "  okf_version: {}",
+        info.okf_version.as_deref().unwrap_or("(not declared)")
+    );
+    println!("  concepts: {}", info.concepts);
+    println!(
+        "  trust: human-reviewed {}, machine-confirmed {}, unverified {}",
+        info.trust.human_reviewed, info.trust.machine_confirmed, info.trust.unverified
+    );
+    println!("  stale: {} (as of {})", info.trust.stale, info.trust.today);
+    if !info.statuses.is_empty() {
+        let statuses: Vec<String> = info
+            .statuses
+            .iter()
+            .map(|(s, n)| format!("{s} {n}"))
+            .collect();
+        println!("  status: {}", statuses.join(", "));
+    }
+    let (links, broken) = info.links;
+    println!("  internal links: {links}, broken {broken}");
+    let (computations, incomplete) = info.computations;
+    println!("  computations: {computations}, incomplete {incomplete}");
+    if !info.runtimes.is_empty() {
+        println!("  runtimes: {}", info.runtimes.join(", "));
+    }
+    // Named rather than implied. This command reports; the others gate, and
+    // which one to reach for next is the question it exists to answer.
+    println!(
+        "  `okf validate`, `lint`, `links --check`, `syntax` and `computations --check` are the gates"
+    );
     Ok(())
 }
 
