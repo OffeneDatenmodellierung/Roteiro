@@ -368,7 +368,12 @@ pub struct SyntaxReport {
     pub scope: &'static str,
     /// Blocks a backend actually parsed.
     pub checked: usize,
-    /// Blocks left alone: no language tag, or no backend for it in this build.
+    /// Blocks left alone, for any of three reasons: the block carried no
+    /// language tag, this build has no backend for the language it carried, or
+    /// the computation named a file rather than inlining its code.
+    ///
+    /// All three are "not looked at" rather than "looked at and clean", which is
+    /// the distinction the whole report exists to keep.
     pub skipped: usize,
     /// The languages this build can check, so a reader can tell why.
     pub languages: Vec<String>,
@@ -396,7 +401,10 @@ impl SyntaxReport {
 /// runtimes nobody has written yet is how a reader ends up with a confident
 /// diagnostic about a language the author never claimed.
 fn language_for_runtime(runtime: Option<&str>) -> Option<&'static str> {
-    match runtime.map(str::trim) {
+    // Case-insensitive, because every other tag here is: `Language::from_tag`
+    // lowercases, so `runtime: BigQuery` reading differently from `bigquery`
+    // would be an inconsistency inside one function's worth of code.
+    match runtime.map(|r| r.trim().to_ascii_lowercase()).as_deref() {
         Some("bigquery") => Some("sql"),
         _ => None,
     }
@@ -449,8 +457,12 @@ pub fn syntax_report(root: &Path, computations_only: bool) -> Result<SyntaxRepor
             };
             let okf_core::ComputationSource::Inline(inline) = &computation.computation else {
                 // A `computation:` file reference is checked by whatever owns
-                // that file; reading outside the concept is the import layer's
-                // job, not this one's.
+                // that file, and a `Missing` one has no code to check at all.
+                // Counted as **skipped** rather than passed over silently: a
+                // bundle whose computations all name files would otherwise
+                // report "0 checked, 0 skipped" and print "nothing to check",
+                // which reads as "there were none" when there were several.
+                report.skipped += 1;
                 continue;
             };
             // An indented block carries no info string, so fall back to the

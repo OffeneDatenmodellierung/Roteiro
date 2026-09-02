@@ -32,6 +32,22 @@ fn fixture(bundle: &str) -> PathBuf {
         .join(bundle)
 }
 
+/// A fresh directory for a synthetic bundle.
+///
+/// Keyed by process id **and** a monotonic counter, matching the CLI tests'
+/// `bundle` helper. Each caller begins by clearing its directory, so two
+/// concurrent test processes sharing a fixed name would race on
+/// `remove_dir_all` and flake — uniqueness must not depend on everyone
+/// remembering to pick a distinct name.
+fn scratch(tag: &str) -> PathBuf {
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let root =
+        std::env::temp_dir().join(format!("rto-okf-syntax-{}-{seq}-{tag}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    root
+}
+
 /// Walk a bundle into the `(bundle-relative path, content)` pairs the importer
 /// takes, the way the CLI's `read_bundle_files` does.
 fn walk(root: &Path) -> Vec<(String, String)> {
@@ -312,7 +328,7 @@ fn widening_to_all_blocks_looks_at_more() {
 /// A block that does not parse is found, and named precisely enough to fix.
 #[test]
 fn a_broken_block_is_found_with_its_place() {
-    let root = std::env::temp_dir().join("rto-okf-syntax-broken");
+    let root = scratch("broken");
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("computations")).expect("mkdir");
     std::fs::write(
@@ -342,7 +358,7 @@ fn a_broken_block_is_found_with_its_place() {
 /// what makes it checkable at all.
 #[test]
 fn an_indented_computation_is_read_through_its_runtime() {
-    let root = std::env::temp_dir().join("rto-okf-syntax-indented");
+    let root = scratch("indented");
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("computations")).expect("mkdir");
     std::fs::write(
@@ -363,5 +379,63 @@ fn an_indented_computation_is_read_through_its_runtime() {
         "an untagged block under `runtime: bigquery` is SQL: {report:?}"
     );
     assert_eq!(report.findings.len(), 1, "and it is broken: {report:?}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A computation whose code lives in a *file* is skipped, not forgotten.
+///
+/// This is the difference between "there were no computations" and "there were
+/// computations I could not reach", and only the second is true here. Without
+/// it the report would say `0 checked, 0 skipped` and the CLI would print
+/// "nothing to check" over a bundle that has two.
+#[test]
+fn a_computation_that_names_a_file_counts_as_skipped() {
+    let root = scratch("filed");
+    std::fs::create_dir_all(root.join("computations")).expect("mkdir");
+    std::fs::write(
+        root.join("index.md"),
+        "---\nokf_version: \"0.2\"\n---\n\n# Bundle\n",
+    )
+    .expect("index");
+    std::fs::write(
+        root.join("computations/filed.md"),
+        "---\ntype: Attested Computation\ntitle: Filed\nruntime: bigquery\n\
+         computation: queries/revenue.sql\n---\n\n# Computation\n\nSee the file.\n",
+    )
+    .expect("concept");
+
+    let report = inspect::syntax_report(&root, true).expect("load");
+    assert_eq!(report.checked, 0, "nothing inline to parse: {report:?}");
+    assert_eq!(
+        report.skipped, 1,
+        "but a computation was present and passed over: {report:?}"
+    );
+    assert!(report.passed(), "skipping is not a finding");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The runtime mapping is case-insensitive, like every other tag in this crate.
+#[test]
+fn a_capitalised_runtime_is_still_bigquery() {
+    let root = scratch("caps");
+    std::fs::create_dir_all(root.join("computations")).expect("mkdir");
+    std::fs::write(
+        root.join("index.md"),
+        "---\nokf_version: \"0.2\"\n---\n\n# Bundle\n",
+    )
+    .expect("index");
+    std::fs::write(
+        root.join("computations/caps.md"),
+        "---\ntype: Attested Computation\ntitle: Caps\nruntime: BigQuery\n---\n\n\
+         # Computation\n\n    SELCT a FROM t;\n",
+    )
+    .expect("concept");
+
+    let report = inspect::syntax_report(&root, true).expect("load");
+    assert_eq!(
+        report.checked, 1,
+        "`BigQuery` must read as `bigquery`: {report:?}"
+    );
+    assert_eq!(report.findings.len(), 1, "and the bad SQL is caught");
     let _ = std::fs::remove_dir_all(&root);
 }
