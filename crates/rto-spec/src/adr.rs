@@ -1320,7 +1320,7 @@ mod adr_home_tests {
 
     /// **A new ADR is numbered and placed by what the repository already does.**
     #[test]
-    fn the_home_follows_the_repositorys_own_decisions() {
+    fn the_home_follows_the_decisions_a_repository_already_has() {
         let home = adr_home(&[
             doc("architecture/decisions/0001-a.md", "0001"),
             doc("architecture/decisions/0002-b.md", "0002"),

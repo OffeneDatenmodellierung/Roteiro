@@ -7068,6 +7068,31 @@ fn build_scaffold(
         // only means something beside the decisions it continues, and this is
         // the one moment the tool knows where a reader should put it. stderr
         // because stdout is the document.
+        // A document that declares `type: adr` but does not parse — no
+        // `adr-id`, say — never reaches `layer.docs`, so it is invisible to
+        // `adr_home`. Saying "no existing decisions found" over a repository
+        // full of broken ones is false, and proposing `0001` beside ADRs that
+        // already hold ids is the duplicate this whole function exists to
+        // avoid, arriving by a different route. Reported before anything else,
+        // because it changes what the next line is worth.
+        let unreadable: Vec<&str> = docs
+            .layer
+            .malformed
+            .iter()
+            .filter(|v| v.kind == rto_spec::ViolationKind::MalformedAdr)
+            .map(|v| v.message.as_str())
+            .collect();
+        if !unreadable.is_empty() {
+            eprintln!(
+                "warning: {} document(s) declare themselves ADRs but could not be \
+                 read, so this id is proposed from an incomplete set and may \
+                 collide — run `roteiro check` for the detail:",
+                unreadable.len()
+            );
+            for message in &unreadable {
+                eprintln!("  {message}");
+            }
+        }
         // Two sentences, because they are two different claims. "This repository
         // keeps its decisions in X" is a statement about the repository, and
         // making it about one that has no decisions would be inventing a
