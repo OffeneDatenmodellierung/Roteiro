@@ -1,6 +1,7 @@
 [workspace]
-# All four crates version together while the project is young; loosen later
-# if the crates' release cadences diverge.
+# The nine product crates version together while the project is young; loosen
+# further if their release cadences diverge. `rto-okf-syntax` is already an
+# exception — see the `[[package]]` block at the bottom.
 changelog_update = true
 git_release_enable = true
 # Disabled: all crates share one [workspace.package] version (currently 1.0.0),
@@ -13,3 +14,27 @@ dependencies_update = false
 
 [changelog]
 protect_breaking_commits = true
+
+# `rto-okf-syntax` carries its own version, and is the first crate here to do so.
+#
+# The other nine take `version.workspace = true` because they are one product cut
+# into pieces: AGENTS.md treats their surface as internal, and a change to any of
+# them is a change to the CLI. This one is not that. It is written to be given
+# away (W4G1/okf#4), it is usable by anyone else who cannot take
+# `okf-validator`'s dependency tree, and it is meant to be *deleted* if upstream
+# adopts it.
+#
+# `0.1.0` states that honestly. A `0.x` bump is free to break under Cargo's
+# rules, which is the right promise for an API that tracks somebody else's and
+# whose purpose is to become redundant. Shipping it at `5.1.0` would claim four
+# majors of stability it has not earned and tie its cadence to changes in the
+# CLI it has nothing to do with.
+#
+# Mechanically this needs no switch: release-plz reads each package's own
+# version, so a literal `version = "0.1.0"` in the manifest is what decouples it.
+# This block exists to say so, and to keep the decision next to the release
+# configuration rather than only in a manifest comment.
+[[package]]
+name = "rto-okf-syntax"
+changelog_update = true
+git_release_enable = true

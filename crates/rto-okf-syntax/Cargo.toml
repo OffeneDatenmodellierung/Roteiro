@@ -1,0 +1,107 @@
+[package]
+name = "rto-okf-syntax"
+description = "Syntax checking for fenced code blocks in Open Knowledge Format bundles. A pure-Rust core with every code parser behind a feature, so a consumer chooses what it is willing to compile. Drop-in for `okf_validator::syntax`; written to be contributed upstream as `okf-syntax`."
+readme = "README.md"
+
+# **Versioned independently of the workspace, deliberately.**
+#
+# Every other crate here takes `version.workspace = true`, because they are one
+# product cut into pieces and AGENTS.md treats their surface as internal. This
+# one is different in a way that matters: it is written to be *given away*
+# (W4G1/okf#4), it is genuinely usable by anyone else who cannot take
+# `okf-validator`'s tree, and it may be deleted outright if upstream adopts it.
+#
+# `0.1` states that honestly. Under Cargo's rules a `0.x` bump is free to break,
+# which is the right promise for a crate whose API is tracking somebody else's
+# and whose whole purpose is to become redundant. Debuting it at `5.1.0` would
+# claim four majors of stability it has not earned, and would tie its cadence to
+# a version number driven by changes in the CLI.
+#
+# It also sidesteps the trap in AGENTS.md:186-192 — a `!` here would otherwise
+# re-propose a major for all ten crates.
+version = "0.1.0"
+
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+# The dependency list is the contract, not an implementation detail. This crate
+# exists *because* `okf-validator` could not be taken: its `rustpython-parser`
+# tree is 61 crates carrying LGPL-3.0-only and six unmaintained advisories, to
+# serve two of thirty-four checks. A replacement is only worth having while it
+# stays clean, so `dependencies_are_frozen` in `src/lib.rs` asserts this list
+# verbatim and widening it is a deliberate edit to a test rather than a
+# `cargo add`.
+#
+# **The core is pure Rust and parses no code.** With `--no-default-features`
+# this crate compiles no grammar, invokes no C toolchain, and still does the
+# work that needs no parser: lifting fenced blocks out of markdown, and checking
+# JSON, YAML and shell quoting. `serde_json` and `okf-core` are both pure Rust
+# and `okf-core` has zero dependencies of its own; YAML deliberately goes
+# through the same parser that read the frontmatter, so a document cannot fail
+# because two YAML implementations disagreed.
+[dependencies]
+okf-core = "0.2.6"
+serde_json = { workspace = true }
+
+# Everything that parses a programming language is optional, including
+# tree-sitter. See `[features]` for what each one buys and what it costs.
+tree-sitter = { version = "0.26.12", optional = true }
+tree-sitter-bash = { version = "0.25.1", optional = true }
+tree-sitter-javascript = { version = "0.25.0", optional = true }
+tree-sitter-python = { version = "0.25.0", optional = true }
+tree-sitter-rust = { version = "0.24.2", optional = true }
+tree-sitter-sequel = { version = "0.3.11", optional = true }
+tree-sitter-typescript = { version = "0.23.2", optional = true }
+sqlparser = { version = "0.58", optional = true }
+
+[features]
+# Roteiro's build. The grammars are already in this workspace's lockfile for AST
+# extraction, so for us this backend is free.
+default = ["grammars"]
+
+# tree-sitter backends for Python, JavaScript, TypeScript, Rust, SQL and Bash.
+#
+# Cheap *here* and not necessarily elsewhere: tree-sitter grammars compile C, so
+# a consumer who wants no C toolchain — upstream's `okf-*` crates describe
+# themselves as pure Rust — can leave this off and keep the core.
+#
+# The trade is error tolerance. tree-sitter never refuses input; it marks what it
+# could not fit. That fails toward *accepting* invalid code rather than rejecting
+# valid code, which is the right direction for checking somebody else's
+# documentation and the one §11 asks for. Measured in `tests/accuracy.rs`.
+grammars = [
+    "dep:tree-sitter",
+    "dep:tree-sitter-bash",
+    "dep:tree-sitter-javascript",
+    "dep:tree-sitter-python",
+    "dep:tree-sitter-rust",
+    "dep:tree-sitter-sequel",
+    "dep:tree-sitter-typescript",
+]
+
+# A strict SQL parser, which takes precedence over the grammar when both are on.
+#
+# Off by default, and the reasoning is recorded because the cost is not obvious:
+# `sqlparser` is pure Rust and Apache-2.0, but its tree is ~17 crates including
+# `stacker`/`psm`, which compile assembly, and `cc`/`object`. So it is not
+# cheaper than the grammar, it is *more accurate*: it is the only backend that
+# rejects `SELECT FROM;`, the one known gap in `tree-sitter-sequel`.
+#
+# Worth enabling if you check SQL-heavy bundles and want that gap closed.
+strict-sql = ["dep:sqlparser"]
+
+# `syn` is a dev-dependency only, and only to keep one claim honest:
+# `a_strict_rust_parser_would_be_worse_here` measures that `syn::parse_file`
+# rejects `let x = 1;` while this crate accepts it. That is the whole reason a
+# `strict-rust` feature does not exist, and an argument that load-bearing should
+# be a test rather than a comment. It is already in the workspace lockfile, so it
+# costs nothing.
+[dev-dependencies]
+syn = { version = "2", features = ["full", "parsing"] }
+
+[lints]
+workspace = true

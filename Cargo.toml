@@ -9,6 +9,7 @@ members = [
     "crates/rto-remote",
     "crates/rto-render",
     "crates/rto-serve",
+    "crates/rto-okf-syntax",
     "crates/roteiro",
 ]
 
