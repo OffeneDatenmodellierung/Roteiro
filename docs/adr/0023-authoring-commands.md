@@ -144,6 +144,14 @@ people run once.
   pull request. Each gets a test that runs it rather than reads it.
 - **`fmt` will churn once.** The first run over `docs/` reorders frontmatter in
   every ADR. That is a single reviewable commit, and it is the point.
+
+  A worked example arrived while this ADR was in review: the summary table's
+  first row is `**State**` in twenty of twenty-three ADRs and `**Status**` in the
+  other three, and `scaffold_adr` emits `**State**`. Neither spelling is wrong;
+  having both is. Settling it by hand means editing twenty documents *and* the
+  generator without missing one, which is the work `fmt` exists to do — and a
+  reviewer citing either group as "the convention" would be right in both cases,
+  which is what makes the drift worth a command rather than a style note.
 - **`fix` invites over-trust.** Its output must name what it did *not* fix as
   prominently as what it did, or it reads as "the lints are clean".
 - **Portability is inherited, not added.** These act through
