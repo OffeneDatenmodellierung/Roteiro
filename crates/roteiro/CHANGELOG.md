@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.3.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.2.0...roteiro-v5.3.0) - 2026-09-02
+
+### Added
+
+- *(okf)* add `roteiro okf syntax`, and give rto-okf-syntax a consumer
+
+### Fixed
+
+- *(okf-syntax)* a real line, a real bug, and two false rejections
+
+### Other
+
+- Merge pull request #733 from OffeneDatenmodellierung/feat/okf-syntax
+
 ## [5.2.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.1.0...roteiro-v5.2.0) - 2026-09-02
 
 ### Added
