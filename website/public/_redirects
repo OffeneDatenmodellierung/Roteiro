@@ -1,0 +1,9 @@
+# Cloudflare Pages redirects.
+#
+# The build plans were archived to `docs/history/` on 2026-09-02 and are now
+# served under `/history/` so the site's layout matches the repository's. These
+# two lines keep the URLs they were published at from 2026-08 onward working —
+# an archived document is exactly the kind that someone has already linked to,
+# so breaking its URL would be the wrong way to retire it.
+/build-plan.html     /history/build-plan.html     301
+/build-plan-v2.html  /history/build-plan-v2.html  301

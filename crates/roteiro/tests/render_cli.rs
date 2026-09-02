@@ -346,7 +346,8 @@ fn a_source_link_is_aimed_at_the_repository_at_the_rendered_commit() {
         .expect("run render");
     assert!(out.status.success(), "render failed: {out:?}");
 
-    let plan = std::fs::read_to_string(dir.join("site/build-plan.html")).expect("plan page");
+    let plan =
+        std::fs::read_to_string(dir.join("site/history/build-plan.html")).expect("plan page");
     assert!(
         plan.contains(&format!(
             "href=\"https://github.com/o/r/blob/{sha}/crates/x/src/sync.rs\""
@@ -394,7 +395,8 @@ fn without_an_origin_remote_a_source_link_is_left_as_authored() {
         .output()
         .expect("run render");
     assert!(out.status.success(), "render failed: {out:?}");
-    let plan = std::fs::read_to_string(dir.join("site/build-plan.html")).expect("plan page");
+    let plan =
+        std::fs::read_to_string(dir.join("site/history/build-plan.html")).expect("plan page");
     assert!(!plan.contains("github.com"), "nothing invented: {plan}");
     assert!(
         plan.contains("href=\"../crates/x/src/sync.rs\""),

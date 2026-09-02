@@ -15508,7 +15508,7 @@ fn discover_site_sources(
         );
     }
     if build_plan.is_some() {
-        published.publish("BUILD_PLAN.md", "build-plan.html");
+        published.publish("BUILD_PLAN.md", "history/build-plan.html");
     }
     for path in &blueprints {
         published.publish(
@@ -15617,11 +15617,16 @@ fn render_docs(out: Option<String>) -> anyhow::Result<()> {
     if let Some(build_plan) = &src.build_plan {
         let md = std::fs::read_to_string(build_plan)?;
         let source = doc_source_base(src.blob_base.as_deref(), root, build_plan);
-        let rendered = rto_render::render_doc(&md, "Build Plan", &src.published, source.as_ref());
-        std::fs::write(out.join("build-plan.html"), &rendered.html)?;
+        let rendered =
+            rto_render::render_doc_at(&md, "Build Plan", &src.published, source.as_ref(), 1);
+        // Served under `history/` so the site's layout matches the repository's:
+        // the document lives in `docs/history/`, and a reader following a link
+        // from an ADR lands on the same shape either way.
+        std::fs::create_dir_all(out.join("history"))?;
+        std::fs::write(out.join("history/build-plan.html"), &rendered.html)?;
         lifetime.push(rto_render::IndexEntry {
             // The index lives under adr/, so link up one level.
-            href: "../build-plan.html".to_owned(),
+            href: "../history/build-plan.html".to_owned(),
             title: rendered.title,
         });
     }
@@ -15652,7 +15657,14 @@ fn render_docs(out: Option<String>) -> anyhow::Result<()> {
             &src.published,
             source.as_ref(),
         );
-        std::fs::write(out.join(&href), &rendered.html)?;
+        // A slug may name a path (`history/build-plan-v2`), so the directory
+        // may not exist yet. Created here rather than up front because the set
+        // of directories is whatever the pages declare.
+        let dest = out.join(&href);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(dest, &rendered.html)?;
     }
 
     std::fs::write(

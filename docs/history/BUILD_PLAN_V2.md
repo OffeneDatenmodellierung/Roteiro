@@ -1,5 +1,5 @@
 ---
-site-page: build-plan-v2
+site-page: history/build-plan-v2
 site-nav: Roadmap
 site-order: 30
 status: deprecated
