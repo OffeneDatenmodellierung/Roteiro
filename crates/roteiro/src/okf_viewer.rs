@@ -88,7 +88,22 @@ const CYTOSCAPE: &str = include_str!("assets/cytoscape.min.js");
 /// The renderer already refuses to emit raw HTML, so this is a second line
 /// rather than the defence. It is worth having because the two fail
 /// independently — a bug in the escaping does not also disable the header.
-const CSP: &str = "default-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'";
+const CSP: &str = "default-src 'self'; img-src 'self'; object-src 'none'; base-uri 'none'";
+
+/// The most `/f/` will read into memory for one request.
+///
+/// The route reads a whole file before answering, and the bundle is somebody
+/// else's: without a bound, one large file — or a handful of concurrent requests
+/// for it — is memory pressure a peer chooses for you. This is a **memory bound,
+/// not a policy**: it says nothing about what a bundle may contain, only what
+/// this process will hold at once, and it is per request, so concurrency
+/// multiplies it.
+///
+/// 32 MiB is far above any image a concept embeds and far below anything that
+/// threatens a server. A bundle carrying something genuinely larger is not
+/// refused as a bundle — every other command still reads it — it simply is not
+/// served down this route.
+const MAX_FILE_BYTES: u64 = 32 * 1024 * 1024;
 
 fn page(title: &str, root: &str, base: &str, body: &str) -> Response {
     let mut out = String::with_capacity(body.len() + 2048);
@@ -361,7 +376,7 @@ async fn graph_page(State(v): State<Viewer>) -> Response {
         header::CONTENT_SECURITY_POLICY,
         header::HeaderValue::from_static(
             "default-src 'self'; script-src 'self' 'unsafe-inline'; \
-             img-src 'self' data:; object-src 'none'; base-uri 'none'",
+             img-src 'self'; object-src 'none'; base-uri 'none'",
         ),
     );
     res
@@ -417,6 +432,18 @@ async fn file(State(v): State<Viewer>, UrlPath(path): UrlPath<String>) -> Respon
     let Some(resolved) = view::safe_bundle_file(&v.root, &path) else {
         return refused();
     };
+    // Checked before the read, not after: `std::fs::read` allocates to the
+    // file's length, so a check on `bytes.len()` would already have paid the
+    // cost it exists to avoid.
+    let Ok(meta) = std::fs::metadata(&resolved) else {
+        return refused();
+    };
+    if meta.len() > MAX_FILE_BYTES {
+        // 404 rather than 413: the size of a file the route declines to serve is
+        // not something a stranger's client needs confirmed, and every other
+        // refusal here is already a 404.
+        return refused();
+    }
     let Ok(bytes) = std::fs::read(&resolved) else {
         return refused();
     };
@@ -631,6 +658,49 @@ mod tests {
         let (status, body) = get_(&root, "", "/c/metrics/nope").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(body.contains("no concept"), "{body}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **`/f/` will not read an unbounded file into memory.**
+    ///
+    /// The bundle is somebody else's, and the route reads a whole file before
+    /// answering, so without a bound one large file is memory pressure a peer
+    /// chooses for this process. Checked at `metadata().len()` rather than on
+    /// the bytes, because `std::fs::read` allocates to the file's length and a
+    /// check afterwards has already paid the cost.
+    ///
+    /// The fixture is written just over the bound, so it also pins the bound
+    /// being *applied* rather than merely defined — a constant nothing consults
+    /// reads exactly like this test passing.
+    #[tokio::test]
+    async fn the_file_route_refuses_a_file_too_large_to_hold() {
+        let root = fixture(
+            "big-file",
+            &[
+                ("index.md", "---\nokf_version: \"0.2\"\n---\n\n# B\n"),
+                ("img/logo.svg", "<svg/>"),
+            ],
+        );
+        let big = root.join("img/huge.bin");
+        // Sparse where the filesystem allows it, so this costs a few bytes on
+        // disk rather than 32 MiB per test run.
+        let handle = std::fs::File::create(&big).expect("create");
+        handle
+            .set_len(MAX_FILE_BYTES + 1)
+            .expect("size the file past the bound");
+        drop(handle);
+
+        let (status, _) = get_(&root, "", "/f/img/huge.bin").await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "a file past the bound must not be served"
+        );
+
+        // And the bound is a bound, not a ban: the small file beside it is fine.
+        let (ok, body) = get_(&root, "", "/f/img/logo.svg").await;
+        assert_eq!(ok, StatusCode::OK);
+        assert!(body.contains("svg"), "{body}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
