@@ -55,6 +55,11 @@
 //! producer that guarantees more than it must. A Roteiro bundle should not
 //! contain a broken link, and `roteiro check` is the reason.
 
+// Conformance and hygiene checking. Its own module rather than more of
+// `inspect`: `inspect` answers questions a bundle's *contents* raise, and this
+// answers whether the bundle is well-formed — a different question, and the one
+// with rules behind it.
+pub mod conform;
 pub mod inspect;
 pub mod read;
 

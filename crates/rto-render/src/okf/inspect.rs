@@ -79,7 +79,7 @@ pub enum InspectError {
 }
 
 /// Load a bundle, naming the path in the error rather than only the cause.
-fn load(root: &Path) -> Result<Bundle, InspectError> {
+pub(super) fn load(root: &Path) -> Result<Bundle, InspectError> {
     Bundle::load(root).map_err(|e| InspectError::Unreadable {
         path: root.display().to_string(),
         detail: e.to_string(),

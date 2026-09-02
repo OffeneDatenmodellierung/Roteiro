@@ -214,11 +214,23 @@ So the standing position is:
   the language parsers behind features
   ([`W4G1/okf`](https://github.com/W4G1/okf)); with that, `okf-validator` would
   become takeable at `default-features = false`.
-- **The structural checks are still wanted, and are being written here.** Not as
-  a re-derivation of the spec — the failure mode the rest of the ecosystem
-  demonstrates — but over `okf-core`'s model, which is where the parsing and the
-  trust semantics already live. That covers the thirty-two checks that are about
-  OKF and drops the two that are about Python.
+- **The structural checks are written here, and agree with upstream.**
+  `crates/rto-render/src/okf/conform.rs` implements them over `okf-core`'s model
+  rather than re-deriving the spec — the failure mode the rest of the ecosystem
+  demonstrates. Nothing there parses OKF: frontmatter, trust tiers, actors,
+  links, footnotes, headings and computations all come from `okf-core`, and only
+  the questions are ours.
+
+  Measured against `okf-validator` as a differential oracle over all four
+  published bundles: upstream reports **200** diagnostics, this implementation
+  reports **194**, and the entire difference is the **six code-syntax warnings**
+  that `roteiro okf syntax` now owns. Nothing is reported here that upstream does
+  not. Hygiene agrees exactly — 26/26, 29/29, 78/78 and 39/39.
+
+  The comparison earned its keep: four rules were wrong before it was run, each
+  inventing a requirement the specification does not state. The sharpest was a
+  warning for a missing `okf_version`, which §8 and §12 both make a *MAY* — it
+  fired on all four of the specification's own bundles.
 - **Use it as a differential oracle, then let it go.** It was run as a separate
   binary — never a dependency, of this workspace or of its test suite — and the
   agreement it established was frozen into `tests/okf_interop.rs`.

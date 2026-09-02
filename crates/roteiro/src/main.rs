@@ -1221,21 +1221,30 @@ enum Command {
 /// from reading one and deserves its own decision rather than arriving as a
 /// side-effect of this one.
 ///
-/// # `validate` and `lint` are absent on purpose
+/// # Where each answer comes from
 ///
-/// All three actions here come from `okf-core`, which has **zero**
-/// dependencies. Conformance checking and hygiene linting live in a second
-/// crate, `okf-validator`, and that one is not free: none of its dependencies
-/// is optional and it syntax-checks fenced code blocks in eight languages, so
-/// taking it means taking `rustpython-parser` — 61 crates, `LGPL-3.0-only`
-/// through `malachite`, and six unmaintained advisories with no upgrade
-/// available — into the default binary of an `MIT OR Apache-2.0` tool.
+/// `trust`, `links` and `diff` read the bundle through `okf-core`, which has
+/// **zero** dependencies. `validate` and `lint` apply Roteiro's own rules over
+/// that same model (`rto_render::okf::conform`), and `syntax` uses
+/// `rto-okf-syntax`. None of the three costs a dependency the reader did not
+/// already have.
 ///
-/// That buys two of its thirty-four checks. Whether a bundle's code samples
-/// parse is a linter's job, not an interchange format's, and `cargo deny`
-/// refuses the tree on both licence and advisory grounds. The structural checks
-/// are still worth having and are being reimplemented over `okf-core`; they
-/// will reappear here when they land.
+/// Upstream's `okf-validator` did `validate` and `lint` for a while and could
+/// not be kept: none of its dependencies is optional and it syntax-checks fenced
+/// code blocks in four languages, so taking it means taking `rustpython-parser`
+/// — 61 crates, `LGPL-3.0-only` through `malachite`, and six unmaintained
+/// advisories with no upgrade available — into the default binary of an
+/// `MIT OR Apache-2.0` tool. `cargo deny` refuses that tree on both counts.
+///
+/// # Three questions, not one
+///
+/// The split is the point rather than an artefact of that history.
+/// **`validate`** asks whether the bundle *is* OKF; **`lint`** asks whether it
+/// is *good* OKF; **`syntax`** asks whether the code inside it parses. Only the
+/// first is about conformance, and folding the third into it is what made
+/// upstream's validator both expensive and noisy — over the specification's own
+/// four bundles it reports six code-syntax warnings, every one a documentation
+/// fragment that was never meant to be a statement.
 #[derive(Subcommand)]
 enum OkfAction {
     /// Check that the code blocks in a bundle parse.
@@ -1265,6 +1274,37 @@ enum OkfAction {
         /// Check every fenced code block, not just Attested Computations.
         #[arg(long)]
         all_blocks: bool,
+        /// Emit the findings as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check a bundle for conformance with the OKF v0.2 specification.
+    ///
+    /// Deterministic: `stale_after` is checked for **syntax** but never against
+    /// the clock, so a bundle that validates today validates tomorrow — a check
+    /// whose result depends on when it ran cannot be a gate.
+    ///
+    /// Exits non-zero on a conformance **error**. Warnings do not fail, and that
+    /// is not timidity: §11 tells a consumer not to reject a document over a
+    /// soft-guidance deviation, and measured over the four bundles published
+    /// with the specification **not one** of the 200-odd diagnostics is an
+    /// error. A gate that failed on warnings would reject the specification's
+    /// own corpus.
+    Validate {
+        /// The bundle directory.
+        path: String,
+        /// Emit the findings as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check a bundle against the hygiene rules (`L1`..`L12`).
+    ///
+    /// A different question from `validate`: conformance asks whether the bundle
+    /// *is* OKF, linting asks whether it is *good* OKF. Nothing here is a
+    /// conformance failure, so this **never gates** — it reports and exits zero.
+    Lint {
+        /// The bundle directory.
+        path: String,
         /// Emit the findings as JSON.
         #[arg(long)]
         json: bool,
@@ -6285,6 +6325,8 @@ fn okf_root_key(root: &std::path::Path) -> String {
 /// Dispatch a `roteiro okf` action.
 fn run_okf(action: OkfAction) -> anyhow::Result<()> {
     match action {
+        OkfAction::Validate { path, json } => run_okf_validate(&path, json),
+        OkfAction::Lint { path, json } => run_okf_lint(&path, json),
         OkfAction::Syntax {
             path,
             all_blocks,
@@ -6321,6 +6363,78 @@ fn okf_bundle_root(path: &str) -> anyhow::Result<&std::path::Path> {
 }
 
 /// `roteiro okf trust` — §5.3's tier per concept.
+/// `roteiro okf validate` — conformance against the specification.
+fn run_okf_validate(path: &str, json: bool) -> anyhow::Result<()> {
+    let report = rto_render::okf::conform::validate_report(okf_bundle_root(path)?)?;
+    print_okf_findings(&report, json, true)
+}
+
+/// `roteiro okf lint` — the hygiene rules.
+fn run_okf_lint(path: &str, json: bool) -> anyhow::Result<()> {
+    let report = rto_render::okf::conform::lint_report(okf_bundle_root(path)?)?;
+    print_okf_findings(&report, json, false)
+}
+
+/// Print a check report, and gate on its errors when the caller is a gate.
+///
+/// `gates` is passed rather than derived from `report.errors`, because the two
+/// checks differ in kind and not only in outcome: `lint` has no error severity
+/// at all, so deriving it would make "this lint run happens to have found
+/// nothing that gates" indistinguishable from "lint does not gate".
+fn print_okf_findings(
+    report: &rto_render::okf::conform::CheckReport,
+    json: bool,
+    gates: bool,
+) -> anyhow::Result<()> {
+    if json {
+        emit_json(report)?;
+        if gates && !report.passed() {
+            exit_gate_failure();
+        }
+        return Ok(());
+    }
+
+    println!(
+        "{}: {} concept(s), {} finding(s) [{}]",
+        report.root,
+        report.concepts,
+        report.findings.len(),
+        report.check
+    );
+    if report.concepts == 0 {
+        // Nothing was examined, so "no findings" would be a green that means
+        // "could not look". Say which it is.
+        println!("  nothing to check — the bundle contains no concepts");
+        return Ok(());
+    }
+    for finding in &report.findings {
+        let code = finding.code.map_or_else(String::new, |c| format!("[{c}] "));
+        let where_ = finding
+            .concept
+            .as_deref()
+            .or(finding.path.as_deref())
+            .unwrap_or("-");
+        println!(
+            "  {:<7} {where_}: {code}{}",
+            finding.severity, finding.message
+        );
+    }
+    if report.findings.is_empty() {
+        println!("  no findings across {} concept(s)", report.concepts);
+    } else {
+        println!(
+            "  {} error(s), {} warning(s), {} info",
+            report.errors,
+            report.warnings,
+            report.findings.len() - report.errors - report.warnings
+        );
+    }
+    if gates && !report.passed() {
+        exit_gate_failure();
+    }
+    Ok(())
+}
+
 /// `roteiro okf syntax` — do the bundle's code blocks parse?
 ///
 /// Exits non-zero when something failed to parse. That is a deliberate contrast
