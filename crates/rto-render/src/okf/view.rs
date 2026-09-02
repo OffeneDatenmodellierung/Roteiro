@@ -202,7 +202,7 @@ pub fn overview(root: &Path) -> Result<BundleView, InspectError> {
 /// # Errors
 ///
 /// [`InspectError::Unreadable`] if the path is not a loadable OKF bundle.
-pub fn concept(root: &Path, id: &str) -> Result<Option<ConceptView>, InspectError> {
+pub fn concept(root: &Path, id: &str, base: &str) -> Result<Option<ConceptView>, InspectError> {
     let bundle = super::inspect::load(root)?;
     let Ok(parsed) = okf_core::ConceptId::parse(id) else {
         return Ok(None);
@@ -223,7 +223,7 @@ pub fn concept(root: &Path, id: &str) -> Result<Option<ConceptView>, InspectErro
             .unwrap_or(&concept.path)
             .display()
             .to_string(),
-        body_html: render_body(&concept.document.body, &bundle),
+        body_html: render_body(&concept.document.body, &bundle, base),
         links: bundle
             .links_from(&parsed)
             .iter()
@@ -314,8 +314,14 @@ fn screen_concept(concept: &Concept) -> Option<FlaggedConcept> {
 ///
 /// Raw HTML is escaped rather than emitted or dropped; a link is rewritten to a
 /// viewer route only when it resolves inside the bundle; no image is fetched.
+///
+/// `base` is the viewer's mount prefix — empty when served alone, `/okf` when
+/// nested under `serve`. Threaded in here rather than applied afterwards because
+/// these hrefs are *generated*, not rewritten: a pass over the finished HTML
+/// would have to tell a link this function produced from one already in the
+/// document.
 #[must_use]
-pub fn render_body(markdown: &str, bundle: &Bundle) -> String {
+pub fn render_body(markdown: &str, bundle: &Bundle, base: &str) -> String {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
@@ -327,7 +333,7 @@ pub fn render_body(markdown: &str, bundle: &Bundle) -> String {
         // a reader is entitled to see that the document carried markup, and what
         // it was, rather than have it silently disappear.
         Event::Html(raw) | Event::InlineHtml(raw) => Event::Text(raw),
-        Event::Start(tag) => Event::Start(rewrite_tag(tag, bundle)),
+        Event::Start(tag) => Event::Start(rewrite_tag(tag, bundle, base)),
         other => other,
     });
 
@@ -337,7 +343,11 @@ pub fn render_body(markdown: &str, bundle: &Bundle) -> String {
 }
 
 /// Rewrite a link or image destination, or neutralise it.
-fn rewrite_tag<'a>(tag: pulldown_cmark::Tag<'a>, bundle: &Bundle) -> pulldown_cmark::Tag<'a> {
+fn rewrite_tag<'a>(
+    tag: pulldown_cmark::Tag<'a>,
+    bundle: &Bundle,
+    base: &str,
+) -> pulldown_cmark::Tag<'a> {
     use pulldown_cmark::{CowStr, Tag};
     match tag {
         Tag::Link {
@@ -346,7 +356,7 @@ fn rewrite_tag<'a>(tag: pulldown_cmark::Tag<'a>, bundle: &Bundle) -> pulldown_cm
             title,
             id,
         } => {
-            let dest = viewer_href(&dest_url, bundle).unwrap_or(CowStr::Borrowed(""));
+            let dest = viewer_href(&dest_url, bundle, base).unwrap_or(CowStr::Borrowed(""));
             Tag::Link {
                 link_type,
                 dest_url: dest,
@@ -364,11 +374,13 @@ fn rewrite_tag<'a>(tag: pulldown_cmark::Tag<'a>, bundle: &Bundle) -> pulldown_cm
             // so a remote one is a network request they did not ask for. Only a
             // path inside the bundle survives, served back through the viewer's
             // own route; anything else loses its source and shows its alt text.
+            // `is_file`, not `exists`: `/f/` serves files, so a path naming a
+            // *directory* would otherwise become a `src` that 404s.
             let dest = bundle_path(&dest_url)
-                .filter(|rel| bundle.root().join(rel).exists())
+                .filter(|rel| bundle.root().join(rel).is_file())
                 .map_or_else(
                     || CowStr::Borrowed(""),
-                    |rel| CowStr::from(format!("/f/{rel}")),
+                    |rel| CowStr::from(format!("{base}/f/{rel}")),
                 );
             Tag::Image {
                 link_type,
@@ -388,7 +400,7 @@ fn rewrite_tag<'a>(tag: pulldown_cmark::Tag<'a>, bundle: &Bundle) -> pulldown_cm
 /// viewer's own route. Anything else — a path climbing out of the bundle, or one
 /// naming a file it does not contain — resolves to nothing, so the anchor is
 /// emitted with an empty destination and reads as plain text.
-fn viewer_href<'a>(dest: &str, bundle: &Bundle) -> Option<pulldown_cmark::CowStr<'a>> {
+fn viewer_href<'a>(dest: &str, bundle: &Bundle, base: &str) -> Option<pulldown_cmark::CowStr<'a>> {
     use pulldown_cmark::CowStr;
     if dest.starts_with("http://") || dest.starts_with("https://") || dest.starts_with("mailto:") {
         return Some(CowStr::from(dest.to_owned()));
@@ -406,8 +418,8 @@ fn viewer_href<'a>(dest: &str, bundle: &Bundle) -> Option<pulldown_cmark::CowStr
         return None;
     }
     Some(CowStr::from(fragment.map_or_else(
-        || format!("/c/{id}"),
-        |f| format!("/c/{id}#{f}"),
+        || format!("{base}/c/{id}"),
+        |f| format!("{base}/c/{id}#{f}"),
     )))
 }
 
@@ -492,6 +504,7 @@ mod tests {
         let html = render_body(
             "<script>alert(1)</script>\n\nText with <b>inline</b> markup.\n\n<div onclick=\"x\">block</div>\n",
             &bundle,
+            "",
         );
         // No tag from the input is emitted as markup...
         for raw in ["<script", "<b>", "<div", "</script>"] {
@@ -527,10 +540,10 @@ mod tests {
         );
         let bundle = load(&root);
 
-        let inside = render_body("[A](/metrics/a.md)\n", &bundle);
+        let inside = render_body("[A](/metrics/a.md)\n", &bundle, "");
         assert!(inside.contains("href=\"/c/metrics/a\""), "{inside}");
 
-        let anchored = render_body("[A](/metrics/a.md#defn)\n", &bundle);
+        let anchored = render_body("[A](/metrics/a.md#defn)\n", &bundle, "");
         assert!(
             anchored.contains("href=\"/c/metrics/a#defn\""),
             "{anchored}"
@@ -538,7 +551,7 @@ mod tests {
 
         // Absent, escaping, and Windows-shaped: none may become a link.
         for dest in ["/metrics/gone.md", "../../etc/passwd", "..\\..\\secrets.md"] {
-            let html = render_body(&format!("[x]({dest})\n"), &bundle);
+            let html = render_body(&format!("[x]({dest})\n"), &bundle, "");
             assert!(
                 html.contains("href=\"\""),
                 "`{dest}` must not become a destination: {html}"
@@ -547,7 +560,7 @@ mod tests {
 
         // An external link is the reader's choice and issues no request until
         // they take it, so it survives.
-        let external = render_body("[docs](https://example.invalid/x)\n", &bundle);
+        let external = render_body("[docs](https://example.invalid/x)\n", &bundle, "");
         assert!(
             external.contains("href=\"https://example.invalid/x\""),
             "{external}"
@@ -561,18 +574,18 @@ mod tests {
         let root = bundle_at("images", &[("index.md", INDEX), ("img/logo.svg", "<svg/>")]);
         let bundle = load(&root);
 
-        let remote = render_body("![alt](https://tracker.invalid/pixel.gif)\n", &bundle);
+        let remote = render_body("![alt](https://tracker.invalid/pixel.gif)\n", &bundle, "");
         assert!(!remote.contains("tracker.invalid"), "{remote}");
         assert!(
             remote.contains("alt=\"alt\""),
             "alt text survives: {remote}"
         );
 
-        let local = render_body("![logo](/img/logo.svg)\n", &bundle);
+        let local = render_body("![logo](/img/logo.svg)\n", &bundle, "");
         assert!(local.contains("src=\"/f/img/logo.svg\""), "{local}");
 
         // Named but absent: no route is invented for it.
-        let absent = render_body("![gone](/img/absent.png)\n", &bundle);
+        let absent = render_body("![gone](/img/absent.png)\n", &bundle, "");
         assert!(absent.contains("src=\"\""), "{absent}");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -634,9 +647,64 @@ mod tests {
     #[test]
     fn an_unknown_concept_is_not_an_error() {
         let root = bundle_at("missing", &[("index.md", INDEX)]);
-        assert!(concept(&root, "metrics/nope").expect("load").is_none());
+        assert!(concept(&root, "metrics/nope", "").expect("load").is_none());
         // And a malformed id is refused the same way, rather than panicking.
-        assert!(concept(&root, "../escape").expect("load").is_none());
+        assert!(concept(&root, "../escape", "").expect("load").is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **Body links and images carry the mount prefix too.**
+    ///
+    /// The viewer's chrome — nav, stylesheet, the concept listing — is built by
+    /// the HTTP layer, and a test there covers it. These hrefs are built *here*,
+    /// by the markdown renderer, and were not prefixed: nested under `/okf`,
+    /// every link inside a concept's prose and every bundle-local image would
+    /// have 404'd while the surrounding page looked correct.
+    ///
+    /// The chrome test could not have caught it, because the page it inspects
+    /// has no rendered body on it.
+    #[test]
+    fn a_nested_mount_prefixes_body_links_and_images() {
+        let root = bundle_at(
+            "nested",
+            &[
+                ("index.md", INDEX),
+                ("metrics/a.md", "---\ntype: Metric\ntitle: A\n---\n\n# A\n"),
+                ("img/logo.svg", "<svg/>"),
+            ],
+        );
+        let bundle = load(&root);
+        let html = render_body(
+            "[A](/metrics/a.md) and [anchored](/metrics/a.md#x)\n\n![logo](/img/logo.svg)\n",
+            &bundle,
+            "/okf",
+        );
+        assert!(html.contains("href=\"/okf/c/metrics/a\""), "{html}");
+        assert!(html.contains("href=\"/okf/c/metrics/a#x\""), "{html}");
+        assert!(html.contains("src=\"/okf/f/img/logo.svg\""), "{html}");
+        assert!(
+            !html.contains("href=\"/c/") && !html.contains("src=\"/f/"),
+            "an unprefixed href 404s when nested: {html}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A directory is not a file, so it never becomes an image source.
+    ///
+    /// `/f/` serves files; `exists()` would have accepted a directory and emitted
+    /// a `src` that could only 404.
+    #[test]
+    fn a_directory_never_becomes_an_image_source() {
+        let root = bundle_at(
+            "dir-img",
+            &[("index.md", INDEX), ("img/logo.svg", "<svg/>")],
+        );
+        let bundle = load(&root);
+        let html = render_body("![d](/img)\n", &bundle, "");
+        assert!(
+            html.contains("src=\"\""),
+            "a directory is not a source: {html}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

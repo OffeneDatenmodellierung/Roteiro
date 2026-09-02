@@ -249,7 +249,7 @@ async fn index(State(v): State<Viewer>) -> Response {
 
 async fn concept(State(v): State<Viewer>, UrlPath(id): UrlPath<String>) -> Response {
     let base = v.base.as_str();
-    let found = match view::concept(&v.root, &id) {
+    let found = match view::concept(&v.root, &id, base) {
         Ok(c) => c,
         Err(e) => return unreadable(&e),
     };
@@ -259,7 +259,7 @@ async fn concept(State(v): State<Viewer>, UrlPath(id): UrlPath<String>) -> Respo
             [(header::CONTENT_SECURITY_POLICY, CSP)],
             Html(format!(
                 "<p>The bundle contains no concept <code>{}</code>. \
-                 <a href=\"/\">Back to the bundle</a>.</p>",
+                 <a href=\"{base}/\">Back to the bundle</a>.</p>",
                 escape(&id)
             )),
         )
@@ -370,7 +370,10 @@ async fn graph_page(State(v): State<Viewer>) -> Response {
 async fn graph_json(State(v): State<Viewer>) -> Response {
     match view::graph(&v.root) {
         Ok(g) => (
-            [(header::CONTENT_TYPE, "application/json")],
+            [
+                (header::CONTENT_TYPE, "application/json"),
+                (header::CONTENT_SECURITY_POLICY, CSP),
+            ],
             serde_json::to_string(&g).unwrap_or_else(|_| "{}".to_owned()),
         )
             .into_response(),
@@ -385,11 +388,21 @@ async fn graph_json(State(v): State<Viewer>) -> Response {
 /// reader can type a URL: trusting that only our own hrefs arrive would put the
 /// check on the wrong side of the boundary.
 async fn file(State(v): State<Viewer>, UrlPath(path): UrlPath<String>) -> Response {
+    // The refusals carry the policy too. "Every response" has to mean every
+    // response, or it is not a rule but a description of the happy path — and a
+    // reader cannot tell which from the sentence.
+    let refused = || {
+        (
+            StatusCode::NOT_FOUND,
+            [(header::CONTENT_SECURITY_POLICY, CSP)],
+        )
+            .into_response()
+    };
     let Some(resolved) = view::safe_bundle_file(&v.root, &path) else {
-        return StatusCode::NOT_FOUND.into_response();
+        return refused();
     };
     let Ok(bytes) = std::fs::read(&resolved) else {
-        return StatusCode::NOT_FOUND.into_response();
+        return refused();
     };
     // Typed from the extension against a closed list. A bundle does not choose
     // the content type: echoing one back from the file would let a bundle serve
@@ -420,15 +433,25 @@ async fn file(State(v): State<Viewer>, UrlPath(path): UrlPath<String>) -> Respon
 }
 
 async fn stylesheet() -> Response {
-    ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], STYLE).into_response()
+    (
+        [
+            (header::CONTENT_TYPE, "text/css; charset=utf-8"),
+            (header::CONTENT_SECURITY_POLICY, CSP),
+        ],
+        STYLE,
+    )
+        .into_response()
 }
 
 async fn cytoscape() -> Response {
     (
-        [(
-            header::CONTENT_TYPE,
-            "application/javascript; charset=utf-8",
-        )],
+        [
+            (
+                header::CONTENT_TYPE,
+                "application/javascript; charset=utf-8",
+            ),
+            (header::CONTENT_SECURITY_POLICY, CSP),
+        ],
         CYTOSCAPE,
     )
         .into_response()
@@ -653,14 +676,46 @@ mod tests {
             !body.contains("href=\"/c/"),
             "an unprefixed href would 404 when nested: {body}"
         );
+
+        // **And a concept page, whose body links the renderer builds.**
+        //
+        // This half is the one that mattered: the index carries no rendered
+        // markdown, so checking only the chrome let unprefixed body links pass.
+        // Nested, every link inside a concept's prose would have 404'd while the
+        // page around it looked correct.
+        let (status, page) = get_(&root, "/okf", "/c/metrics/revenue").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            page.contains("href=\"/okf/c/metrics/cost\""),
+            "a link in the body must carry the prefix: {page}"
+        );
+        assert!(
+            !page.contains("href=\"/c/") && !page.contains("src=\"/f/"),
+            "no unprefixed href anywhere on the page: {page}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Every page carries a policy that cannot reach the network.
+    /// **Every** response carries the policy, not only the HTML ones.
+    ///
+    /// The module documentation says "every response". A test that checked only
+    /// the two HTML routes would have let that sentence describe the happy path
+    /// while the assets, the JSON and the refusals went bare — and a reader could
+    /// not tell the difference from the sentence.
     #[tokio::test]
     async fn responses_carry_a_content_security_policy() {
         let root = sample();
-        for uri in ["/", "/c/metrics/revenue"] {
+        for uri in [
+            "/",
+            "/c/metrics/revenue",
+            "/c/does/not/exist",
+            "/graph",
+            "/api/graph.json",
+            "/okf-viewer.css",
+            "/cytoscape.min.js",
+            "/f/../escape",
+        ] {
             let response = router(root.clone(), "")
                 .oneshot(
                     Request::builder()
