@@ -997,13 +997,6 @@ impl Drop for MediaEngineGuard {
     }
 }
 
-// Mirror of the `ocr_content` stub: needed only when the image path is compiled
-// (image-ocr on) with image-vision off, not in an audio-only build.
-#[cfg(all(feature = "image-ocr", not(feature = "image-vision")))]
-fn vlm_content(_bytes: &[u8]) -> Option<String> {
-    None
-}
-
 /// A cache-key component reflecting the **extraction** models' runtime
 /// environment: `0` when no extraction model feature is on or no model is
 /// installed, else a hash of the installed OCR model identity. Folded into the
