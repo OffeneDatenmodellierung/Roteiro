@@ -368,17 +368,33 @@ async fn graph_page(State(v): State<Viewer>) -> Response {
 }
 
 async fn graph_json(State(v): State<Viewer>) -> Response {
-    match view::graph(&v.root) {
-        Ok(g) => (
+    let graph = match view::graph(&v.root) {
+        Ok(g) => g,
+        Err(e) => return unreadable(&e),
+    };
+    // `GraphView` is plain owned data, so this does not fail in practice — which
+    // is exactly why it must not be swallowed. A `{}` under a 200 would render
+    // as a bundle with no concepts: a client cannot tell that from a real empty
+    // graph, so the one way this ever goes wrong is also the way that hides it.
+    let Ok(body) = serde_json::to_string(&graph) else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
             [
                 (header::CONTENT_TYPE, "application/json"),
                 (header::CONTENT_SECURITY_POLICY, CSP),
             ],
-            serde_json::to_string(&g).unwrap_or_else(|_| "{}".to_owned()),
+            r#"{"error":"the graph could not be serialised"}"#,
         )
-            .into_response(),
-        Err(e) => unreadable(&e),
-    }
+            .into_response();
+    };
+    (
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::CONTENT_SECURITY_POLICY, CSP),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 /// A file from inside the bundle — an image a concept embeds, and nothing else.

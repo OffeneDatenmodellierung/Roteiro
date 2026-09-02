@@ -399,8 +399,9 @@ fn rewrite_tag<'a>(
 ///
 /// Three outcomes, and the scheme rule is the one worth reading:
 ///
-/// - **`http:`, `https:` and `mailto:` keep their destination.** A navigation the
-///   reader chooses, issuing no request until they take it.
+/// - **`http:`, `https:` and `mailto:` keep their destination**, matched
+///   case-insensitively as RFC 3986 §3.1 requires. A navigation the reader
+///   chooses, issuing no request until they take it.
 /// - **A bundle-internal path becomes a viewer route.**
 /// - **Everything else resolves to `None`**, and the caller emits the anchor with
 ///   an empty destination — the link text stays, and the stylesheet marks it as
@@ -429,18 +430,29 @@ fn rewrite_tag<'a>(
 /// itself worth knowing before trusting a green run here.
 fn viewer_href<'a>(dest: &str, bundle: &Bundle, base: &str) -> Option<pulldown_cmark::CowStr<'a>> {
     use pulldown_cmark::CowStr;
-    if dest.starts_with("http://") || dest.starts_with("https://") || dest.starts_with("mailto:") {
-        return Some(CowStr::from(dest.to_owned()));
-    }
-    // Any other scheme is refused here, explicitly. A bundle-relative path never
-    // carries one, so nothing legitimate is lost.
-    if let Some(colon) = dest.find(':')
-        && dest[..colon]
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
-        && !dest[..colon].is_empty()
-    {
-        return None;
+    // One decision, taken once: if `dest` carries a scheme, it is allowed or it
+    // is refused, and nothing scheme-shaped reaches the path logic below.
+    //
+    // Schemes are **case-insensitive** (RFC 3986 §3.1), and matching them with
+    // `starts_with("https://")` was not — so `HTTPS://example.com` was stripped
+    // of its destination while being exactly what this function means to permit.
+    // The same slip in the other direction is the dangerous one, which is why
+    // both the allow-list and the refusal read the scheme rather than the prefix.
+    if let Some(colon) = dest.find(':') {
+        let scheme = &dest[..colon];
+        // `ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`. A leading digit means
+        // this is not a scheme at all, so it falls through to be read as a path
+        // — where a colon is refused anyway.
+        let is_scheme = scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+        if is_scheme {
+            let allowed = ["http", "https", "mailto"]
+                .iter()
+                .any(|a| scheme.eq_ignore_ascii_case(a));
+            return allowed.then(|| CowStr::from(dest.to_owned()));
+        }
     }
     // A pure fragment stays on the page.
     if dest.starts_with('#') {
@@ -862,10 +874,19 @@ mod tests {
 
         // The three that are allowed still are, so the rule discriminates rather
         // than simply refusing everything with a colon in it.
+        // Including the spellings that are *not* lowercase. Schemes are
+        // case-insensitive, and matching them with `starts_with` was not: these
+        // three were being stripped of their destinations while being exactly
+        // what the allow-list means to permit. The refusals above and the
+        // permissions here are the same rule read once, so a fix to one cannot
+        // quietly narrow the other.
         for allowed in [
             "https://example.invalid/x",
             "http://example.invalid/x",
             "mailto:someone@example.invalid",
+            "HTTPS://example.invalid/x",
+            "HtTp://example.invalid/x",
+            "MAILTO:someone@example.invalid",
         ] {
             let html = render_body(&format!("[ok]({allowed})\n"), &bundle, "");
             assert!(
