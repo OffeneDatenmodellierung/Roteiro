@@ -371,6 +371,7 @@ pub fn render_body(markdown: &str, bundle: &Bundle, base: &str) -> String {
     // which are its alt text — are emitted as ordinary text.
     let mut events = Vec::new();
     let mut refusing_image = false;
+    let mut refusing_link = false;
     for event in Parser::new_ext(markdown, options) {
         match event {
             // **Never emitted as markup.** Shown as visible text instead of
@@ -400,7 +401,43 @@ pub fn render_body(markdown: &str, bundle: &Bundle, base: &str) -> String {
             Event::End(pulldown_cmark::TagEnd::Image) if refusing_image => {
                 refusing_image = false;
             }
-            Event::Start(tag) => events.push(Event::Start(rewrite_tag(tag, bundle, base))),
+            Event::Start(pulldown_cmark::Tag::Link {
+                link_type,
+                dest_url,
+                title,
+                id,
+            }) => {
+                if let Some(dest) = viewer_href(&dest_url, bundle, base) {
+                    events.push(Event::Start(pulldown_cmark::Tag::Link {
+                        link_type,
+                        dest_url: dest,
+                        title,
+                        id,
+                    }));
+                } else {
+                    // No anchor at all, rather than `<a href="">`. An empty
+                    // `href` resolves to the current document, so a refused link
+                    // stayed focusable and still navigated on Enter —
+                    // `pointer-events: none` hid that from a mouse and from
+                    // nobody else. A `span` keeps the text visible and marked as
+                    // refused without being a control.
+                    //
+                    // Emitting markup here is safe in a way `Event::Html` from
+                    // the *document* is not: this string is ours, and the
+                    // bundle's own HTML has already been turned into text above.
+                    events.push(Event::Html(pulldown_cmark::CowStr::Borrowed(
+                        "<span class=\"refused\">",
+                    )));
+                    refusing_link = true;
+                }
+            }
+            Event::End(pulldown_cmark::TagEnd::Link) if refusing_link => {
+                events.push(Event::Html(pulldown_cmark::CowStr::Borrowed("</span>")));
+                refusing_link = false;
+            }
+            // Every other tag passes through: the two that carry a destination
+            // are handled above, and nothing else in the subset of markdown this
+            // enables can reach outside the page.
             other => events.push(other),
         }
     }
@@ -427,37 +464,6 @@ fn image_src<'a>(dest: &str, bundle: &Bundle, base: &str) -> Option<pulldown_cma
 }
 
 /// Rewrite a link or image destination, or neutralise it.
-/// Rewrite a start tag for the viewer.
-///
-/// Images are **not** handled here: refusing one means emitting no element at
-/// all, and a function returning a `Tag` has no way to say that. `render_body`
-/// owns that decision, and [`image_src`] is the half of it that answers where an
-/// image may point.
-fn rewrite_tag<'a>(
-    tag: pulldown_cmark::Tag<'a>,
-    bundle: &Bundle,
-    base: &str,
-) -> pulldown_cmark::Tag<'a> {
-    use pulldown_cmark::{CowStr, Tag};
-    match tag {
-        Tag::Link {
-            link_type,
-            dest_url,
-            title,
-            id,
-        } => {
-            let dest = viewer_href(&dest_url, bundle, base).unwrap_or(CowStr::Borrowed(""));
-            Tag::Link {
-                link_type,
-                dest_url: dest,
-                title,
-                id,
-            }
-        }
-        other => other,
-    }
-}
-
 /// Where a link should point in the viewer, or `None` when it should not be one.
 ///
 /// Three outcomes, and the scheme rule is the one worth reading:
@@ -694,8 +700,10 @@ mod tests {
         for dest in ["/metrics/gone.md", "../../etc/passwd", "..\\..\\secrets.md"] {
             let html = render_body(&format!("[x]({dest})\n"), &bundle, "");
             assert!(
-                html.contains("href=\"\""),
-                "`{dest}` must not become a destination: {html}"
+                !html.contains("<a "),
+                "`{dest}` must not become a destination — and `<a href=\"\">` is \
+                 still one, because it resolves to the current document and stays \
+                 keyboard-focusable: {html}"
             );
         }
 
@@ -934,8 +942,9 @@ mod tests {
         ] {
             let html = render_body(&format!("[click]({hostile})\n"), &bundle, "");
             assert!(
-                html.contains("href=\"\""),
-                "`{hostile}` must not become a destination: {html}"
+                !html.contains("<a "),
+                "`{hostile}` must not become a destination — an empty `href` is \
+                 still one: {html}"
             );
             assert!(html.contains("click"), "the text still shows: {html}");
         }

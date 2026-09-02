@@ -28,14 +28,13 @@ body {
 }
 
 a { color: var(--accent); }
-/* A link the renderer neutralised — one that named a concept the bundle does not
-   contain, or a path climbing out of it. It keeps its text and stops being a
-   destination, and this says so rather than leaving a dead-looking link.
-
-   `pointer-events: none` because `href=""` is not inert: it resolves to the
-   current document, so clicking one reloads the page and jumps to the top. The
-   styling said "not a destination" while the behaviour still navigated. */
-a[href=""] { color: var(--sub); text-decoration: line-through dotted; cursor: not-allowed; pointer-events: none; }
+/* A link the renderer refused — one that named a concept the bundle does not
+   contain, a path climbing out of it, or a scheme that is not allowed. It is
+   emitted as a `span`, never an `<a>`: an empty `href` resolves to the current
+   document, so such a link stayed keyboard-focusable and still navigated on
+   Enter. `pointer-events: none` hid that from a mouse and from nobody else, so
+   the element itself is now the fix and this is only how it looks. */
+.refused { color: var(--sub); text-decoration: line-through dotted; cursor: not-allowed; }
 
 header {
   background: var(--tint);
