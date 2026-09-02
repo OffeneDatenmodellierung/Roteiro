@@ -101,6 +101,23 @@ updates:
       semver-patch-days: 3
     open-pull-requests-limit: 10
     groups:
+      # `ocrs` and `rten` are one dependency wearing several names, and must move
+      # together or not at all. `ocrs 0.13.0` requires `rten ^0.26.0`, so bumping
+      # either alone puts two `rten` versions in the graph and the build fails
+      # with `expected rten::model::Model, found Model` — which is exactly what
+      # happened in #721 and #722, two PRs that could each only go green by
+      # merging the other.
+      #
+      # Listed **first** because Dependabot assigns a dependency to the first
+      # group it matches, and deliberately carries no `update-types`, so it
+      # applies to majors too. These are `0.x` crates, where every `x` bump is
+      # semver-major, so the "majors get their own PR" rule below would
+      # otherwise split them again every time.
+      ocr-stack:
+        patterns:
+          - "ocrs"
+          - "rten"
+          - "rten-*"
       # Patch and minor together: individually low-risk, collectively tedious,
       # and one green CI run is the same evidence for all of them.
       cargo-minor-and-patch:

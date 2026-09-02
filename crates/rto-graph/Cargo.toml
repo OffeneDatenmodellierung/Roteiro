@@ -85,8 +85,8 @@ pdf-extract = { version = "0.12", optional = true }
 # recognition on `rten`, a pure-Rust model runtime (no ONNX Runtime / tesseract /
 # C++ FFI). `image` is pinned to minimal codecs — its default features pull an
 # AVIF → libfuzzer-sys (NCSA) chain that is not on the `cargo deny` allow-list.
-ocrs = { version = "0.12", optional = true }
-rten = { version = "0.24", optional = true }
+ocrs = { version = "0.13", optional = true }
+rten = { version = "0.26", optional = true }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"], optional = true }
 yaml-rust2 = "0.12.0"
 
