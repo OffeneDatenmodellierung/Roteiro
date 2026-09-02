@@ -26,6 +26,8 @@
 | [0018](0018-analyzer-coverage-matrix.md) | Analyzer coverage — which analyzers deliver which languages, and on which axis | Accepted |
 | [0019](0019-remote-model-tier.md) | Remote model tier — an explicitly consented egress path, and the promises it changes | Accepted |
 | [0020](0020-build-capable-sandboxed-execution.md) | Build-capable sandboxed execution — running the repository's own build, and the non-goal it narrows | Draft |
+| [0021](0021-open-knowledge-format-bundle.md) | The graph's shareable form is an OKF bundle — replacing the Obsidian vault | Accepted |
+| [0022](0022-dynamic-okf-viewer.md) | A dynamic OKF viewer — the bundle is the source, and it is somebody else's | Draft |
 
 > **ADR 0018** is the third of the analyzer trio: 0012 decides how findings are
 > stored, 0014 how analyzers are executed and provisioned, and 0018 *which*
