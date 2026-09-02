@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.6.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v5.5.0...rto-spec-v5.6.0) - 2026-09-02
+
+### Added
+
+- *(spec)* an ADR is what a document declares, not where it sits
+
+### Fixed
+
+- *(spec)* a declared ADR is not excluded for being called README.md
+
+### Other
+
+- *(spec)* assert which violation, not merely that there is one
+
 ## [5.3.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v5.2.0...rto-spec-v5.3.0) - 2026-09-02
 
 ### Fixed
