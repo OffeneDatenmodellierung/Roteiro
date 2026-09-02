@@ -97,14 +97,17 @@ struct Cached {
     graph: Option<Arc<view::GraphView>>,
 }
 
-/// A cheap fingerprint of a bundle directory: how many files, and the newest
-/// modification time among them.
+/// A cheap fingerprint of a bundle directory: how many files it holds, and the
+/// newest modification time among **both its files and its directories**.
 ///
 /// Not a hash of the contents. Hashing 9,517 files would cost more than the
-/// parse it is meant to avoid, and this only has to answer "did anything
-/// change since I last looked", which an author editing a concept always makes
-/// true. The count is carried alongside the time because a deletion can leave
-/// the newest `mtime` untouched.
+/// parse it is meant to avoid, and this only has to answer "did anything change
+/// since I last looked", which an author editing a concept always makes true.
+///
+/// Both halves earn their place, and so does looking at directories. The count
+/// catches a deletion, which can leave the newest `mtime` untouched. The
+/// directories catch a **rename**, which changes neither the count nor any
+/// file's `mtime`.
 ///
 /// It inherits `mtime`'s limits and does not pretend otherwise: a filesystem
 /// with coarse timestamps could hide an edit made in the same second as the
@@ -119,6 +122,25 @@ struct Stamp {
 
 fn stamp(root: &std::path::Path) -> Stamp {
     fn walk(dir: &std::path::Path, out: &mut Stamp) {
+        // The directory's own `mtime`, as well as its files'. A **rename** inside
+        // the bundle changes neither any file's `mtime` nor the total count, so a
+        // files-only stamp was identical before and after one and the cache never
+        // reloaded — the viewer went on serving the old concept id and 404ing the
+        // new one. Measured: renaming `one.md` to `renamed.md` left a files-only
+        // stamp byte-identical while the directory's `mtime` moved by a second.
+        // `metadata`, which follows, **for the directory itself** — the one
+        // place in this walk where following is right. `walk` is only ever
+        // called on the root the user named or on an entry already shown to be
+        // a real directory by `file_type()`, so for everything but the root the
+        // two calls agree. For the root they do not: pointing the viewer at a
+        // symlink to a bundle, `symlink_metadata` reads the link's own `mtime`,
+        // which a rename inside the target never changes — reintroducing exactly
+        // the staleness this stamp exists to catch. Verified: after a rename in
+        // the target, the link's own `mtime` is unchanged and the target's has
+        // moved.
+        if let Ok(modified) = std::fs::metadata(dir).and_then(|m| m.modified()) {
+            out.newest = Some(out.newest.map_or(modified, |n| n.max(modified)));
+        }
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
@@ -1026,7 +1048,37 @@ mod tests {
 
         // And it still notices a real edit.
         std::fs::write(root.join("second.md"), "---\ntype: Metric\n---\n\n# S\n").expect("write");
-        assert!(first != stamp(&root), "a new file changes the stamp");
+        let added = stamp(&root);
+        assert!(first != added, "a new file changes the stamp");
+
+        // Including the change no file's `mtime` records. A rename alters
+        // neither the file count nor any file's timestamp, so a files-only stamp
+        // was byte-identical across one and the cache never reloaded — the
+        // viewer went on serving the old concept id and 404ing the new one. The
+        // directory's own `mtime` is what moves, which is why the walk reads it.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::rename(root.join("second.md"), root.join("renamed.md")).expect("rename");
+        assert!(
+            added != stamp(&root),
+            "a rename must change the stamp, or the viewer serves a concept that \
+             no longer exists under that id"
+        );
+
+        // And the same holds when the *root itself* is a symlink, which is how
+        // somebody points the viewer at a bundle without copying it. Reading the
+        // link's own `mtime` rather than its target's would leave this stale
+        // again: a rename inside the target never touches the link.
+        let alias = root.with_extension("alias");
+        let _ = std::fs::remove_file(&alias);
+        symlink(&root, &alias).expect("symlink the root");
+        let via_alias = stamp(&alias);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::rename(root.join("renamed.md"), root.join("again.md")).expect("rename");
+        assert!(
+            via_alias != stamp(&alias),
+            "a rename must change the stamp seen through a symlinked root too"
+        );
+        let _ = std::fs::remove_file(&alias);
         let _ = std::fs::remove_dir_all(&root);
     }
 
