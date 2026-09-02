@@ -231,9 +231,19 @@ pub fn authored_docs_from<E>(
         // whose decisions live somewhere else; the path is kept so nothing here
         // changes, and so an ADR that forgot the key is still found where it
         // lives. Same shape as the site-page rule below, for the same reason.
+        // The `README.md` exclusion belongs to the **path** rule, not to both. It
+        // is there because `docs/adr/README.md` is this repository's index of
+        // decisions rather than one of them — a fact about that file, inferred
+        // from its name because nothing in it says otherwise. A document that
+        // declares `type: adr` has said otherwise, wherever it sits and whatever
+        // it is called, and a repository keeping its one decision in
+        // `architecture/decisions/README.md` is entitled to be believed.
+        //
+        // Our own index is unaffected: it declares no `type`, so the path rule
+        // still excludes it.
         let is_adr = is_md
-            && name != "README.md"
-            && (blob.path.starts_with("docs/adr/") || crate::adr::declares_adr(&text));
+            && ((blob.path.starts_with("docs/adr/") && name != "README.md")
+                || crate::adr::declares_adr(&text));
         if is_adr {
             match crate::adr::parse_adr(&blob.path, &text) {
                 Ok(doc) => layer.docs.push(doc),
@@ -374,6 +384,47 @@ mod tests {
             vec!["0007", "0008"],
             "the declared one is found outside `docs/adr/`, and the path rule \
              still holds; malformed: {:?}",
+            layer.layer.malformed
+        );
+        assert!(
+            layer.layer.malformed.is_empty(),
+            "{:?}",
+            layer.layer.malformed
+        );
+    }
+
+    /// **A repository may keep its one decision in a `README.md`.**
+    ///
+    /// The name exclusion exists because `docs/adr/README.md` is this
+    /// repository's *index* of decisions rather than one of them — inferred from
+    /// its name because nothing in the file says otherwise. A document that
+    /// declares `type: adr` has said otherwise, so applying the exclusion to
+    /// declared ADRs too would have made one layout impossible for no reason.
+    #[test]
+    fn a_declared_adr_is_not_excluded_for_being_called_readme() {
+        let layer = classify(&[
+            (
+                "architecture/decisions/README.md",
+                "---\ntype: adr\nadr-id: \"0001\"\nstatus: Accepted\n---\n\n# ADR-0001: The one\n",
+            ),
+            // And this repository's own index, which declares nothing, is still
+            // excluded by the path rule.
+            (
+                "docs/adr/README.md",
+                "# Architecture Decision Records\n\nAn index.\n",
+            ),
+        ]);
+        let ids: Vec<&str> = layer
+            .layer
+            .docs
+            .iter()
+            .map(|d| d.meta.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["0001"],
+            "the declared README is a decision, the undeclared one is an index; \
+             malformed: {:?}",
             layer.layer.malformed
         );
         assert!(
