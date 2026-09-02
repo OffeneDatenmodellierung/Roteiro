@@ -6472,9 +6472,16 @@ fn okf_bundle_root(path: &str) -> anyhow::Result<&std::path::Path> {
 /// `roteiro okf trust` — §5.3's tier per concept.
 /// `roteiro okf view` — serve the bundle for a reader (ADR-0022).
 ///
-/// Binds on a small current-thread tokio runtime, axum only: no `rto-serve`, no
-/// model, no MCP, no C/C++ toolchain — the same shape as `roteiro explorer`.
-/// Blocks until shutdown.
+/// Binds on a multi-threaded tokio runtime, axum only: no `rto-serve`, no model,
+/// no MCP, no C/C++ toolchain. Blocks until shutdown.
+///
+/// Multi-threaded **unlike** `roteiro explorer`, which serves compiled-in assets
+/// and is happy on one thread. Every route here reads the bundle from disk, so on
+/// a current-thread runtime one request held every other behind it: eight
+/// concurrent requests against a 9,511-concept bundle did not finish in ten
+/// minutes. The handlers also move that work to the blocking pool, which is what
+/// makes the same code correct when it is nested into `serve` and does not own
+/// its runtime.
 #[cfg(feature = "okf-viewer")]
 fn run_okf_view(path: &str, addr: Option<&str>) -> anyhow::Result<()> {
     let root = okf_bundle_root(path)?.to_path_buf();

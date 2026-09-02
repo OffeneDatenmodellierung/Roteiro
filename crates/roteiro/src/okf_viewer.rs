@@ -123,12 +123,38 @@ fn stamp(root: &std::path::Path) -> Stamp {
             return;
         };
         for entry in entries.flatten() {
-            let Ok(meta) = entry.metadata() else { continue };
-            if meta.is_dir() {
-                walk(&entry.path(), out);
+            // This walks a directory a peer controls, so a symlink must never
+            // be recursed into: `loop -> ..` inside a bundle would send it
+            // round for ever, on *every* request, since the stamp is what
+            // decides whether to reload.
+            //
+            // `file_type()` is documented not to follow the link, and that is
+            // why it is used. The honest note is that `metadata()` did not
+            // follow it either: `DirEntry::metadata` is `lstat` on Unix, so the
+            // loop above never actually reproduced here — verified directly,
+            // after a reproduction in Python wrongly suggested it did, because
+            // Python's `DirEntry.stat()` *does* follow. The std documentation
+            // says `metadata` "will traverse symbolic links", so relying on it
+            // not to would be relying on the implementation over its contract.
+            //
+            // So this is the explicit form of a rule that currently holds by
+            // platform accident, in the same spirit as refusing an unknown URL
+            // scheme in `view.rs` rather than leaving it to a colon check.
+            //
+            // A symlink is counted as the file it is, by its own `mtime` via
+            // `symlink_metadata`. Its target is not consulted, which is right:
+            // if the target is inside the bundle it is already being walked, and
+            // if it is outside then `safe_bundle_file` refuses to serve it, so
+            // its changes cannot reach a reader and should not force a reload.
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if kind.is_dir() {
+                walk(&path, out);
             } else {
                 out.files += 1;
-                if let Ok(modified) = meta.modified() {
+                if let Ok(modified) = std::fs::symlink_metadata(&path).and_then(|m| m.modified()) {
                     out.newest = Some(out.newest.map_or(modified, |n| n.max(modified)));
                 }
             }
@@ -870,6 +896,51 @@ mod tests {
         let (status, body) = get_(&root, "", "/c/metrics/nope").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(body.contains("no concept"), "{body}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A symlinked directory does not send the stamp walk round in circles.**
+    ///
+    /// The stamp decides whether to re-read the bundle, so it runs on *every*
+    /// request over a directory a peer controls, and `loop -> ..` inside one
+    /// would send it round for ever.
+    ///
+    /// **A characterisation test, and it was nearly mislabelled a guard.**
+    /// Reverting `file_type()` to `metadata()` leaves it green, because
+    /// `DirEntry::metadata` is `lstat` on Unix and does not follow the link —
+    /// checked directly, after a reproduction written in Python appeared to
+    /// prove the opposite. Python's `DirEntry.stat()` follows; Rust's does not.
+    /// The reproduction was measuring itself.
+    ///
+    /// The property is therefore upheld today by platform behaviour that the std
+    /// documentation explicitly disclaims — it says `metadata` "will traverse
+    /// symbolic links". `file_type()` makes it hold by contract instead, and
+    /// this pins the property so a future walk that does follow gets caught.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_directory_does_not_make_the_stamp_walk_forever() {
+        use std::os::unix::fs::symlink;
+        let root = fixture(
+            "stamp-loop",
+            &[("index.md", "---\nokf_version: \"0.2\"\n---\n\n# B\n")],
+        );
+        symlink("..", root.join("loop")).expect("symlink to the parent");
+        symlink("/", root.join("everything")).expect("symlink to the root");
+
+        let first = stamp(&root);
+        // Two real entries — `index.md` and the two links, counted as the links
+        // they are rather than followed.
+        assert_eq!(first.files, 3, "the links count as files, not as trees");
+
+        // Stable across calls, so it does not force a reload on every request.
+        assert!(
+            first == stamp(&root),
+            "the stamp is stable when nothing changed"
+        );
+
+        // And it still notices a real edit.
+        std::fs::write(root.join("second.md"), "---\ntype: Metric\n---\n\n# S\n").expect("write");
+        assert!(first != stamp(&root), "a new file changes the stamp");
         let _ = std::fs::remove_dir_all(&root);
     }
 

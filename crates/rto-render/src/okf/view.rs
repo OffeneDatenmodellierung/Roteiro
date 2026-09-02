@@ -334,17 +334,23 @@ fn screen_concept(concept: &Concept) -> Option<FlaggedConcept> {
     if screened.findings.is_empty() {
         return None;
     }
-    let classes: Vec<String> = screened
-        .findings
-        .iter()
-        .map(|f| format!("{:?}", f.kind))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
+    // `as_str()` and `classes()`, not `{:?}`. These reach the page as CSS class
+    // names and as text a reader is shown, so they are output, not diagnostics —
+    // and Debug formatting is neither stable nor what the rest of the codebase
+    // says. This printed `InvisibleCharacters` where `okf_discovery` and the
+    // consent prompt both say `invisible-characters`: the same finding under two
+    // names, in a UI whose job is to report exactly that finding.
+    //
+    // `classes()` also sorts and dedupes, which is what the `BTreeSet` here was
+    // reimplementing.
     Some(FlaggedConcept {
         id: concept.id.to_string(),
-        verdict: format!("{:?}", screened.verdict).to_lowercase(),
-        classes,
+        verdict: screened.verdict.as_str().to_owned(),
+        classes: screened
+            .classes()
+            .into_iter()
+            .map(ToOwned::to_owned)
+            .collect(),
     })
 }
 
