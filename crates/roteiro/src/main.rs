@@ -6730,11 +6730,18 @@ fn run_okf_info(path: &str, today: Option<&str>, json: bool) -> anyhow::Result<(
     if !info.runtimes.is_empty() {
         println!("  runtimes: {}", info.runtimes.join(", "));
     }
-    // Named rather than implied. This command reports; the others gate, and
-    // which one to reach for next is the question it exists to answer.
+    // Named rather than implied: this command reports, and which one to reach
+    // for next is the question it exists to answer.
+    //
+    // The split is stated exactly, because the first draft of this line listed
+    // `lint` as a gate — it never gates — and omitted `trust --check`, which
+    // does, contradicting `docs/OKF_BUNDLE.md`'s table inside the same change.
+    // It is pinned by `the_named_gates_are_the_commands_that_actually_gate`,
+    // which runs the commands rather than reading this line.
     println!(
-        "  `okf validate`, `lint`, `links --check`, `syntax` and `computations --check` are the gates"
+        "  gates: `okf validate`, `okf syntax`, and `--check` on `links`, `trust`, `computations`"
     );
+    println!("  reports only: `okf lint`, `okf diff`, and this command");
     Ok(())
 }
 

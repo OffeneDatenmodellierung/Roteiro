@@ -637,3 +637,81 @@ fn info_summarises_without_gating() {
     assert_eq!(v["concepts"], 1);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// **The gates `okf info` names are the commands that actually gate.**
+///
+/// Not a string comparison against the line it prints — that would pin the claim
+/// without checking it. This runs each command over one bundle that is *both*
+/// link-broken and stale, and asserts the exit status.
+///
+/// It exists because the first draft of that line listed `lint` as a gate, which
+/// it has never been, and omitted `trust --check`, which is the gate this PR
+/// added — contradicting `docs/OKF_BUNDLE.md`'s table inside the same change. A
+/// hand-maintained list of which commands gate drifts from the commands; this is
+/// what stops the next edit doing it again.
+#[test]
+fn the_named_gates_are_the_commands_that_actually_gate() {
+    let root = bundle(
+        "gate-matrix",
+        &[
+            ("index.md", "---\nokf_version: \"0.2\"\n---\n\n# Bundle\n"),
+            (
+                "metrics/revenue.md",
+                "---\ntype: Metric\ntitle: Revenue\nstale_after: 2026-12-31T00:00:00Z\n\
+                 verified:\n  - by: human:alice\n    at: 2026-01-01T00:00:00Z\n---\n\n\
+                 # Revenue\n\nSee [missing](absent.md).\n",
+            ),
+        ],
+    );
+    let p = root.to_string_lossy().into_owned();
+    let ok = |args: &[&str]| roteiro(args).status.success();
+
+    // Reports only — these must succeed on a bundle with faults in it, because
+    // reporting is what you want when reading somebody else's.
+    assert!(ok(&["okf", "lint", &p]), "`lint` never gates");
+    assert!(ok(&["okf", "links", &p]), "bare `links` reports");
+    assert!(
+        ok(&["okf", "trust", &p, "--today", "2027-01-01"]),
+        "bare `trust` reports"
+    );
+    assert!(
+        ok(&["okf", "info", &p, "--today", "2027-01-01"]),
+        "`info` never gates"
+    );
+
+    // Gates — the same bundle, with `--check`.
+    assert!(
+        !ok(&["okf", "links", &p, "--check"]),
+        "`links --check` gates on a broken link"
+    );
+    assert!(
+        !ok(&["okf", "trust", &p, "--today", "2027-01-01", "--check"]),
+        "`trust --check` gates on staleness — the gate this omitted"
+    );
+
+    // And the printed line agrees with all of the above.
+    let stdout =
+        String::from_utf8_lossy(&roteiro(&["okf", "info", &p, "--today", "2027-01-01"]).stdout)
+            .into_owned();
+    let gates = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("gates:"))
+        .expect("info names its gates");
+    let reports = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("reports only:"))
+        .expect("info names what only reports");
+    assert!(
+        gates.contains("trust"),
+        "the stale gate must be named: {gates}"
+    );
+    assert!(
+        !gates.contains("lint"),
+        "`lint` must not be named as a gate: {gates}"
+    );
+    assert!(
+        reports.contains("lint"),
+        "`lint` belongs with the reporters: {reports}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
