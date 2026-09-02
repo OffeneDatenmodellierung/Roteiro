@@ -170,6 +170,12 @@ def suppressed(repo: str, pr: int) -> list[dict]:
     So nothing is discarded. Repeats collapse into a single entry that records
     how many rounds raised it and when it was last seen.
     """
+    # `--paginate` is safe to `json.loads` **here** because this endpoint returns
+    # a top-level array, and gh merges those into one document — measured with
+    # `per_page=1` across eight reviews, which parsed as a single 8-item array.
+    # It does *not* merge object responses; those come back as several
+    # concatenated documents. So this pattern is not general, and a future
+    # endpoint added here needs the same check rather than the same assumption.
     reviews = json.loads(gh("api", "--paginate", f"repos/{repo}/pulls/{pr}/reviews"))
     since = head_commit_time(repo, pr)
     out = []
