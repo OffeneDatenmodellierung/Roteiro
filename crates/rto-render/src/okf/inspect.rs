@@ -339,3 +339,222 @@ pub fn diff_report(before: &Path, after: &Path) -> Result<DiffReport, InspectErr
         links_mended: pairs(d.mended_links),
     })
 }
+
+/// One code block that did not parse.
+#[derive(Debug, Clone, Serialize)]
+pub struct SyntaxFinding {
+    /// The concept the block belongs to.
+    pub concept: String,
+    /// The concept's file, relative to the bundle root.
+    pub path: String,
+    /// 1-indexed line of the block's opening fence within that file's body,
+    /// when it could be determined.
+    ///
+    /// `None` for a computation whose code this crate could not locate in the
+    /// body — an indented block with no `# Computation` heading to anchor it.
+    /// Reporting a confident `1` there was worse than reporting nothing: it sent
+    /// a reader to the frontmatter for a fault further down the file.
+    pub line: Option<usize>,
+    /// The language the block was tagged with, canonicalised.
+    pub language: String,
+    /// What the parser said.
+    pub message: String,
+}
+
+/// The result of syntax-checking a bundle's code blocks.
+///
+/// `checked` and `skipped` are both reported, deliberately. A language with no
+/// backend compiled in is *not checked* rather than *clean*, and a report that
+/// conflated the two would be a check that passes by not looking.
+#[derive(Debug, Clone, Serialize)]
+pub struct SyntaxReport {
+    /// The bundle root, as the caller named it.
+    pub root: String,
+    /// `computations` or `all-blocks` — what was looked at.
+    pub scope: &'static str,
+    /// Blocks a backend actually parsed.
+    pub checked: usize,
+    /// Blocks left alone, for any of three reasons: the block carried no
+    /// language tag, this build has no backend for the language it carried, or
+    /// the computation named a file rather than inlining its code.
+    ///
+    /// All three are "not looked at" rather than "looked at and clean", which is
+    /// the distinction the whole report exists to keep.
+    pub skipped: usize,
+    /// The languages this build can check, so a reader can tell why.
+    pub languages: Vec<String>,
+    /// Findings, in bundle order.
+    pub findings: Vec<SyntaxFinding>,
+}
+
+impl SyntaxReport {
+    /// `true` when nothing failed to parse.
+    #[must_use]
+    pub const fn passed(&self) -> bool {
+        self.findings.is_empty()
+    }
+}
+
+/// The language an untagged computation block should be read as.
+///
+/// Only `bigquery` is mapped, and only because the corpus justifies it: every
+/// `runtime:` in the four bundles published with the specification is
+/// `bigquery`, and the spec's own Attested Computation example writes its query
+/// as an *indented* block, which carries no info string. Without this the one
+/// case that matters most would never be checked.
+///
+/// Deliberately not a general runtime→language table. Inventing a mapping for
+/// runtimes nobody has written yet is how a reader ends up with a confident
+/// diagnostic about a language the author never claimed.
+fn language_for_runtime(runtime: Option<&str>) -> Option<&'static str> {
+    // Case-insensitive, because every other tag here is: `Language::from_tag`
+    // lowercases, so `runtime: BigQuery` reading differently from `bigquery`
+    // would be an inconsistency inside one function's worth of code.
+    match runtime.map(|r| r.trim().to_ascii_lowercase()).as_deref() {
+        Some("bigquery") => Some("sql"),
+        _ => None,
+    }
+}
+
+/// Syntax-check the code blocks in a bundle.
+///
+/// With `computations_only`, just the bodies of Attested Computations — the
+/// concepts that declare a `runtime:` and that an agent is expected to *run*, so
+/// the ones where "does this parse" is a question about the bundle rather than
+/// about its prose. Otherwise every fenced block in every document.
+///
+/// Findings are the checker's, not conformance: a bundle can be perfectly
+/// conformant and contain a code sample that does not parse, which is why this
+/// is its own command rather than part of validation.
+///
+/// # Errors
+///
+/// [`InspectError::Unreadable`] if the path is not a loadable OKF bundle.
+pub fn syntax_report(root: &Path, computations_only: bool) -> Result<SyntaxReport, InspectError> {
+    let bundle = load(root)?;
+    let languages = rto_okf_syntax::checkable_languages()
+        .into_iter()
+        .map(|l| l.as_str().to_owned())
+        .collect();
+    let mut report = SyntaxReport {
+        root: root.display().to_string(),
+        scope: if computations_only {
+            "computations"
+        } else {
+            "all-blocks"
+        },
+        checked: 0,
+        skipped: 0,
+        languages,
+        findings: Vec::new(),
+    };
+
+    for concept in bundle.concepts() {
+        let rel = concept
+            .path
+            .strip_prefix(bundle.root())
+            .unwrap_or(&concept.path)
+            .display()
+            .to_string();
+
+        if computations_only {
+            let Some(computation) = concept.attested_computation() else {
+                continue;
+            };
+            let okf_core::ComputationSource::Inline(inline) = &computation.computation else {
+                // A `computation:` file reference is checked by whatever owns
+                // that file, and a `Missing` one has no code to check at all.
+                // Counted as **skipped** rather than passed over silently: a
+                // bundle whose computations all name files would otherwise
+                // report "0 checked, 0 skipped" and print "nothing to check",
+                // which reads as "there were none" when there were several.
+                report.skipped += 1;
+                continue;
+            };
+            // An indented block carries no info string, so fall back to the
+            // declared runtime — see `language_for_runtime`.
+            let tag = inline
+                .language
+                .as_deref()
+                .or_else(|| language_for_runtime(computation.runtime.as_deref()))
+                .unwrap_or("");
+            let line = computation_line(&concept.document.body, &inline.code);
+            record(
+                &mut report,
+                &concept.id.to_string(),
+                &rel,
+                line,
+                tag,
+                &inline.code,
+            );
+        } else {
+            for block in rto_okf_syntax::extract_fenced_code_blocks(&concept.document.body) {
+                let tag = block.language.as_deref().unwrap_or("");
+                record(
+                    &mut report,
+                    &concept.id.to_string(),
+                    &rel,
+                    Some(block.start_line),
+                    tag,
+                    &block.code,
+                );
+            }
+        }
+    }
+
+    Ok(report)
+}
+
+/// Where a computation's code starts in its document.
+///
+/// The fenced case is exact: the same extractor the all-blocks path uses finds
+/// the block whose contents are the computation's, and reports its opening
+/// fence. The indented case cannot be — `okf-core` dedents the code, so it no
+/// longer matches the file byte for byte — and the `# Computation` heading is the
+/// honest anchor there: it is where a reader should look, even though it is not
+/// where the parser stopped.
+///
+/// `None` rather than a confident `1` when neither is found. Pointing a reader at
+/// the frontmatter for a fault further down the file is worse than admitting the
+/// line is unknown.
+fn computation_line(body: &str, code: &str) -> Option<usize> {
+    let wanted = code.trim();
+    if let Some(block) = rto_okf_syntax::extract_fenced_code_blocks(body)
+        .into_iter()
+        .find(|b| b.code.trim() == wanted)
+    {
+        return Some(block.start_line);
+    }
+    body.lines().enumerate().find_map(|(i, l)| {
+        l.trim_start()
+            .strip_prefix('#')
+            .is_some_and(|rest| rest.trim().eq_ignore_ascii_case("computation"))
+            .then_some(i + 1)
+    })
+}
+
+/// Check one block and fold the outcome into the report.
+fn record(
+    report: &mut SyntaxReport,
+    concept: &str,
+    path: &str,
+    line: Option<usize>,
+    tag: &str,
+    code: &str,
+) {
+    let language = rto_okf_syntax::Language::from_tag(tag);
+    if !rto_okf_syntax::is_checkable(language) {
+        report.skipped += 1;
+        return;
+    }
+    report.checked += 1;
+    if let Err(err) = rto_okf_syntax::check_syntax(tag, code) {
+        report.findings.push(SyntaxFinding {
+            concept: concept.to_owned(),
+            path: path.to_owned(),
+            line,
+            language: err.language.clone(),
+            message: err.to_string(),
+        });
+    }
+}

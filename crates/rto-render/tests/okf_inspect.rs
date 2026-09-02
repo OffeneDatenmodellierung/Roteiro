@@ -32,6 +32,22 @@ fn fixture(bundle: &str) -> PathBuf {
         .join(bundle)
 }
 
+/// A fresh directory for a synthetic bundle.
+///
+/// Keyed by process id **and** a monotonic counter, matching the CLI tests'
+/// `bundle` helper. Each caller begins by clearing its directory, so two
+/// concurrent test processes sharing a fixed name would race on
+/// `remove_dir_all` and flake — uniqueness must not depend on everyone
+/// remembering to pick a distinct name.
+fn scratch(tag: &str) -> PathBuf {
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let root =
+        std::env::temp_dir().join(format!("rto-okf-syntax-{}-{seq}-{tag}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    root
+}
+
 /// Walk a bundle into the `(bundle-relative path, content)` pairs the importer
 /// takes, the way the CLI's `read_bundle_files` does.
 fn walk(root: &Path) -> Vec<(String, String)> {
@@ -246,4 +262,215 @@ fn a_path_that_is_not_a_bundle_is_refused_by_name() {
             .starts_with("`/no/such/bundle` is not a readable OKF bundle: "),
         "the error must name the path the caller gave, not only the cause: {err}"
     );
+}
+
+/// The specification's own Attested Computations parse.
+///
+/// `acme_retail` is the only vendored bundle that has any — two — and they are
+/// `BigQuery` SQL with backtick-quoted identifiers, which is the shape that
+/// decided the SQL backend: `tree-sitter-sequel` rejects 78 of 78 real blocks
+/// over exactly this, `sqlparser` accepts them.
+#[test]
+fn the_specifications_own_computations_parse() {
+    let report = inspect::syntax_report(&fixture("acme_retail"), true).expect("acme_retail");
+    assert_eq!(report.scope, "computations");
+    assert_eq!(
+        report.checked, 2,
+        "both Attested Computations must be looked at: {report:?}"
+    );
+    assert_eq!(report.skipped, 0);
+    assert!(
+        report.passed(),
+        "the published bundle's computations must parse: {:?}",
+        report.findings
+    );
+}
+
+/// A bundle with no Attested Computations reports **nothing checked**, not a
+/// clean bill of health.
+///
+/// This is the whole reason `checked` and `skipped` are in the report. `ga4` has
+/// no computations, so the honest answer is "I did not look", and a caller that
+/// printed "all clear" here would be reporting a green that means "could not
+/// look".
+#[test]
+fn a_bundle_without_computations_says_it_checked_nothing() {
+    let report = inspect::syntax_report(&fixture("ga4"), true).expect("ga4");
+    assert_eq!(report.checked, 0, "{report:?}");
+    assert!(report.passed(), "no findings, but also nothing checked");
+}
+
+/// `--all-blocks` widens past the computations, and finds real content.
+#[test]
+fn widening_to_all_blocks_looks_at_more() {
+    let narrow = inspect::syntax_report(&fixture("acme_retail"), true).expect("narrow");
+    let wide = inspect::syntax_report(&fixture("acme_retail"), false).expect("wide");
+    assert_eq!(wide.scope, "all-blocks");
+    // Blocks *seen*, not blocks *checked*: the extra ones this fixture carries
+    // are untagged prose samples, so they widen `skipped` rather than `checked`.
+    // Asserting on `checked` would have been asserting that the fixture happens
+    // to tag its non-computation blocks, which is not the property.
+    assert!(
+        wide.checked + wide.skipped > narrow.checked + narrow.skipped,
+        "widening must see more blocks: {}+{} vs {}+{}",
+        wide.checked,
+        wide.skipped,
+        narrow.checked,
+        narrow.skipped
+    );
+    assert!(
+        wide.skipped > 0,
+        "and the widened set includes untagged blocks, which are skipped rather \
+         than silently passed: {wide:?}"
+    );
+}
+
+/// A block that does not parse is found, and named precisely enough to fix.
+#[test]
+fn a_broken_block_is_found_with_its_place() {
+    let root = scratch("broken");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("computations")).expect("mkdir");
+    std::fs::write(
+        root.join("index.md"),
+        "---\nokf_version: \"0.2\"\n---\n\n# Bundle\n",
+    )
+    .expect("index");
+    std::fs::write(
+        root.join("computations/broken.md"),
+        "---\ntype: Attested Computation\ntitle: Broken\nruntime: bigquery\n---\n\n\
+         # Computation\n\n```sql\nSELCT a FROM t;\n```\n",
+    )
+    .expect("concept");
+
+    let report = inspect::syntax_report(&root, true).expect("load");
+    assert_eq!(report.checked, 1, "{report:?}");
+    assert_eq!(report.findings.len(), 1, "{report:?}");
+    let f = &report.findings[0];
+    assert_eq!(f.language, "sql");
+    assert!(f.path.contains("broken.md"), "{f:?}");
+    assert!(!report.passed());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// An **indented** computation block carries no info string, and the
+/// specification's own example is written that way. The declared `runtime:` is
+/// what makes it checkable at all.
+#[test]
+fn an_indented_computation_is_read_through_its_runtime() {
+    let root = scratch("indented");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("computations")).expect("mkdir");
+    std::fs::write(
+        root.join("index.md"),
+        "---\nokf_version: \"0.2\"\n---\n\n# Bundle\n",
+    )
+    .expect("index");
+    std::fs::write(
+        root.join("computations/indented.md"),
+        "---\ntype: Attested Computation\ntitle: Indented\nruntime: bigquery\n---\n\n\
+         # Computation\n\n    SELCT a FROM t;\n",
+    )
+    .expect("concept");
+
+    let report = inspect::syntax_report(&root, true).expect("load");
+    assert_eq!(
+        report.checked, 1,
+        "an untagged block under `runtime: bigquery` is SQL: {report:?}"
+    );
+    assert_eq!(report.findings.len(), 1, "and it is broken: {report:?}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A computation whose code lives in a *file* is skipped, not forgotten.
+///
+/// This is the difference between "there were no computations" and "there were
+/// computations I could not reach", and only the second is true here. Without
+/// it the report would say `0 checked, 0 skipped` and the CLI would print
+/// "nothing to check" over a bundle that has two.
+#[test]
+fn a_computation_that_names_a_file_counts_as_skipped() {
+    let root = scratch("filed");
+    std::fs::create_dir_all(root.join("computations")).expect("mkdir");
+    std::fs::write(
+        root.join("index.md"),
+        "---\nokf_version: \"0.2\"\n---\n\n# Bundle\n",
+    )
+    .expect("index");
+    std::fs::write(
+        root.join("computations/filed.md"),
+        "---\ntype: Attested Computation\ntitle: Filed\nruntime: bigquery\n\
+         computation: queries/revenue.sql\n---\n\n# Computation\n\nSee the file.\n",
+    )
+    .expect("concept");
+
+    let report = inspect::syntax_report(&root, true).expect("load");
+    assert_eq!(report.checked, 0, "nothing inline to parse: {report:?}");
+    assert_eq!(
+        report.skipped, 1,
+        "but a computation was present and passed over: {report:?}"
+    );
+    assert!(report.passed(), "skipping is not a finding");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The runtime mapping is case-insensitive, like every other tag in this crate.
+#[test]
+fn a_capitalised_runtime_is_still_bigquery() {
+    let root = scratch("caps");
+    std::fs::create_dir_all(root.join("computations")).expect("mkdir");
+    std::fs::write(
+        root.join("index.md"),
+        "---\nokf_version: \"0.2\"\n---\n\n# Bundle\n",
+    )
+    .expect("index");
+    std::fs::write(
+        root.join("computations/caps.md"),
+        "---\ntype: Attested Computation\ntitle: Caps\nruntime: BigQuery\n---\n\n\
+         # Computation\n\n    SELCT a FROM t;\n",
+    )
+    .expect("concept");
+
+    let report = inspect::syntax_report(&root, true).expect("load");
+    assert_eq!(
+        report.checked, 1,
+        "`BigQuery` must read as `bigquery`: {report:?}"
+    );
+    assert_eq!(report.findings.len(), 1, "and the bad SQL is caught");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A finding points at the line the code is on, not at the top of the file.
+///
+/// The computations path used to report a hardcoded `1`, which sent a reader to
+/// the frontmatter for a fault further down. A confident wrong number is worse
+/// than an honest unknown, so this pins the fenced case as *exact* and the
+/// indented case as anchored to its `# Computation` heading.
+#[test]
+fn a_finding_names_the_line_its_code_is_on() {
+    let root = scratch("lines");
+    std::fs::create_dir_all(root.join("computations")).expect("mkdir");
+    std::fs::write(
+        root.join("index.md"),
+        "---\nokf_version: \"0.2\"\n---\n\n# Bundle\n",
+    )
+    .expect("index");
+    // Frontmatter is 5 lines; the body then has prose before the fence.
+    std::fs::write(
+        root.join("computations/fenced.md"),
+        "---\ntype: Attested Computation\ntitle: F\nruntime: bigquery\n---\n\n\
+         # Computation\n\nSome prose first.\n\n```sql\nSELCT a FROM t;\n```\n",
+    )
+    .expect("concept");
+
+    let report = inspect::syntax_report(&root, true).expect("load");
+    assert_eq!(report.findings.len(), 1, "{report:?}");
+    let line = report.findings[0]
+        .line
+        .expect("a fenced block has an exact line");
+    assert!(
+        line > 1,
+        "the fence is several lines into the body, not line 1: {line}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
 }
