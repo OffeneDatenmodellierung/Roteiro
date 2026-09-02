@@ -1,5 +1,5 @@
 ---
-Title: Widening the content screen — four gaps closed, one refused, and none by subprocess
+Title: Widening the content screen — what a peer's bundle can carry, and what we never say about it
 Space: ARCH
 Parent: ADRs
 
@@ -16,7 +16,7 @@ last-modified: 2026-09-02
 confluence-url:
 ---
 
-# ADR-0024: Widening the content screen — four gaps closed, one refused, and none by subprocess
+# ADR-0024: Widening the content screen — what a peer's bundle can carry, and what we never say about it
 
 | | |
 |---|---|
@@ -46,8 +46,15 @@ deliberately does not attempt. An external contributor — the author of
 `okf-guard`, which the screen credits as prior art — asked in issue #723 whether
 those could be covered.
 
-**Four are closed, one is reshaped, and one is refused.** The refusal and the
-reshaping are the decisions; the rest is work.
+**Four are closed, one becomes a report rather than an extraction, and one stays
+refused.** The two that are not simply closed are the decisions; the rest is work.
+
+The sharpest correction came from outside the exclusion list. It said "a bundle
+is markdown", and a bundle is not: `okf-core` resolves a frontmatter path to any
+file, §10's `computation:` names one, and the four published bundles being
+all-markdown is a fact about those four bundles. A peer can hand over a valid
+bundle citing a hijacked PDF, and **every report we produce would call it clean
+without mentioning the PDF exists**.
 
 Nothing here shells out. Issue #723 proposed invoking `okfguard` as a
 subprocess, and the reason not to is neither language nor licence: a subprocess
@@ -79,8 +86,9 @@ was defending against a strawman of its own construction.
 
 ## Recommended option
 
-Close four gaps natively, reshape the fifth, refuse the sixth, and make the two
-that can grow **configurable but never weakenable**.
+Close four gaps natively, inventory what cannot be screened, keep refusing
+semantic judgement, and make the two that can grow **configurable but never
+weakenable**.
 
 ## Options considered + consequences
 
@@ -91,12 +99,43 @@ makes a Python runtime a hard dependency of `roteiro import`. ADR-0017 refused
 `okf-validator` for a related reason: a dependency admitted to close a gap has to
 be paid for by everyone who builds the tool, not only by those who hit the gap.
 
-### Option B — close everything okf-guard covers
+### Option B — close everything okf-guard covers, including binary extraction
 
-Rejected. Its PDF, DOCX, PPTX and XLSX adapters exist because it screens
-*sources before conversion*. An OKF bundle is markdown. Building extraction for
-formats a bundle cannot contain would be coverage measured against the wrong
-input.
+Rejected for extraction, **but the reasoning that first rejected it was wrong**
+and the correction changed this ADR.
+
+The original argument was "an OKF bundle is markdown, so those adapters cover
+formats a bundle cannot contain". That is false. `okf-core`'s own
+`resolve_path_field` resolves a frontmatter path to *any* file with `is_file()`
+and no extension filter, §10's `computation:` names a file, and the four
+published bundles happening to be all-markdown is a property of those four
+bundles rather than of the format.
+
+Checked rather than assumed, on a bundle carrying a PDF:
+
+```
+GET /f/docs/policy.pdf
+HTTP/1.1 200 OK
+content-type: application/octet-stream
+content-security-policy: default-src 'none'; sandbox; base-uri 'none'
+x-content-type-options: nosniff
+```
+
+Two things are already sound: the viewer **refuses to link** a non-markdown file
+— only images resolve to `/f/`, so a markdown link to a PDF renders as refused
+text — and `roteiro import` reads no binary at all. The bytes are served as an
+attachment, sandboxed, with `nosniff`.
+
+**What is missing is that nobody is told they exist.** `okf validate`, `lint`,
+`trust`, `links` and `info` all report on a bundle and none of them mentions that
+it carries three PDFs. A person reads "0 violations", decides the source is
+trustworthy, and the binaries were never in scope of the thing they read. That is
+the gap, and it is a reporting gap rather than an extraction one.
+
+Extraction is still refused *for now*: a PDF parser is a dependency with real
+weight under ADR-0017, and the media pipeline that already exists
+(`image-ocr`, `audio-transcribe`) is the place it would belong if it is ever
+wanted. Refusing to extract is defensible. Refusing to *mention* was not.
 
 ### Option C — close what applies, and say why the rest does not *(recommended)*
 
@@ -107,7 +146,18 @@ input.
 | non-English directives | **reshape** | control tokens first; phrases via an optional dictionary |
 | CSS cascade | **close, bounded** | same-document `<style>` only; no specificity, no inheritance |
 | semantic judgement | **refuse** | unchanged — whether text *is* an attack is not decided here |
-| binary extraction | **refuse** | a bundle is markdown; the media pipeline is a different path |
+| binary files | **report, do not extract** | a bundle *can* carry them, and nothing said so |
+
+#### Binary files: an inventory, in every report that describes a bundle
+
+A bundle's non-markdown files are counted and listed — by path, size and
+extension — wherever a bundle is summarised, and surfaced in the consent prompt,
+which is the moment a person decides whether to trust the source. Nothing is
+opened, parsed or extracted.
+
+The screen's own principle applies: **a finding has to do something.** Knowing a
+bundle carries an unscreenable file and not saying so is the same failure as
+computing a quarantine verdict and then storing the body anyway.
 
 #### Encoded payloads: depth is configurable, and defaults to 5
 
@@ -164,7 +214,12 @@ safe, subtracting is not, so only adding is possible.
   measured the cost and does not want it should be able to say so, and a setting
   people disable by patching the source is worse than one they disable by name.
 - **The exclusion list stays**, minus what is closed. It is the honest half of
-  this module and deleting it would make the screen look broader than it is.
+  this module and deleting it would make the screen look broader than it is —
+  but "a bundle is markdown" comes out of it, because it was not true.
+- **Every bundle report grows a line.** For the four published bundles it will
+  read zero, which is worth printing rather than omitting: "no unscreenable
+  files" is information, and a line that appears only sometimes is one a reader
+  learns to stop looking for.
 
 ## Implementation
 
@@ -191,4 +246,4 @@ maintainer's backlog.
 
 | Version | Date | Notes |
 |---------|------|-------|
-| 0.1 | 2026-09-02 | Draft. Closes four of the screen's stated exclusions, reshapes the non-English one around language-independent control tokens plus additive dictionaries, and refuses binary extraction and semantic judgement. `decode_depth` defaults to 5 and is configurable; dictionaries may only ever *add* patterns, because a screen whose configuration can weaken it fails silently in the repository that weakened it. Records that the homoglyph exclusion argued against "contains Cyrillic" rather than against UTS #39's mixed-script rule. |
+| 0.1 | 2026-09-02 | Draft. Records that "a bundle is markdown" was false — `okf-core` resolves a frontmatter path to any file, so a peer can cite a hijacked PDF and every report would call the bundle clean without mentioning it; binary files are therefore **inventoried** in every bundle report and in the consent prompt, while extraction stays refused on ADR-0017 grounds. Closes four of the screen's stated exclusions, reshapes the non-English one around language-independent control tokens plus additive dictionaries, and refuses binary extraction and semantic judgement. `decode_depth` defaults to 5 and is configurable; dictionaries may only ever *add* patterns, because a screen whose configuration can weaken it fails silently in the repository that weakened it. Records that the homoglyph exclusion argued against "contains Cyrillic" rather than against UTS #39's mixed-script rule. |
