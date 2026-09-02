@@ -55,6 +55,7 @@
 //! producer that guarantees more than it must. A Roteiro bundle should not
 //! contain a broken link, and `roteiro check` is the reason.
 
+pub mod inspect;
 pub mod read;
 
 use std::collections::BTreeMap;

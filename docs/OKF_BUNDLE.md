@@ -160,11 +160,11 @@ detection, decoding of encoded payloads, non-English patterns, or CSS cascade
 resolution — see `crates/rto-graph/src/screen.rs`, which says so at length.
 
 
-## Why Roteiro does not ship its own OKF validator
+## OKF validation: what Roteiro borrows, and what it refuses
 
 The obvious next feature is `roteiro okf validate` — a conformance gate over a
-stranger's bundle. It was investigated and deliberately **not** built, because a
-good one already exists.
+stranger's bundle. The question is not whether to have one but how much of it to
+import, and the answer turned out to be "the model, not the checker".
 
 [`W4G1/okf`](https://github.com/W4G1/okf) is a pure-Rust OKF **v0.2** toolkit on
 crates.io (Apache-2.0, compatible with this project's `MIT OR Apache-2.0`). Its
@@ -186,15 +186,39 @@ own.
 
 So the standing position is:
 
-- **No Roteiro validator.** Re-implementing `okf-validator` would duplicate real
-  work and drift from the spec, which is the failure mode the rest of the
-  ecosystem already demonstrates.
-- **No runtime dependency on it either.** `okf-validator` pulls a JavaScript
-  parser, a Python parser, a SQL parser and `syn` — 94 transitive crates — to
-  syntax-check fenced code blocks. That is a large supply-chain surface for a CLI
-  convenience, and ADR-0017 exists because this project takes that seriously.
-  `okf-core` alone (zero dependencies) is a much better candidate and is worth
-  revisiting for the reader itself.
+- **`okf-core` is adopted.** Roteiro's reader is built on it rather than on a
+  second hand-rolled reading of the same specification. It carries **zero**
+  dependencies, so it costs one lockfile entry. This is the "worth revisiting"
+  above, revisited and taken.
+- **`okf-validator` is refused, and the measurement is why.** Adopting it was
+  attempted and reverted. None of its dependencies is optional, and it
+  syntax-checks fenced code blocks in eight languages, so taking it means taking
+  `rustpython-parser`. `cargo deny --all-features check` then fails **thirteen
+  times**: seven licence rejections (five `malachite*` crates are
+  `LGPL-3.0-only`, plus `tiny-keccak` CC0-1.0 and `unicode_names2`
+  Unicode-DFS-2016) and six unmaintained advisories against the `unic-*` crates
+  (RUSTSEC-2025-0098, -0100), whose own text says *"No safe upgrade is
+  available"*.
+
+  Every one of the thirteen traces to `rustpython-parser` alone — `oxc_parser`
+  (58 crates), `sqlparser` (18) and `syn` contribute none. And that parser
+  powers exactly **two of the validator's thirty-four checks**,
+  `check_code_block_syntax` and `check_computation_script_syntax`; `lint.rs`
+  never touches it. So the price is not "a conformance checker", it is a Python
+  parser, and ADR-0017 §3 says a licence must not be admitted merely to turn CI
+  green.
+- **Whether a bundle's *code* parses is not the format's question.** An
+  interchange format should validate its own structure; checking that a fenced
+  Python block is syntactically valid is a linter's job, and a job this
+  workspace already has tree-sitter grammars for. Upstream has been asked to put
+  the language parsers behind features
+  ([`W4G1/okf`](https://github.com/W4G1/okf)); with that, `okf-validator` would
+  become takeable at `default-features = false`.
+- **The structural checks are still wanted, and are being written here.** Not as
+  a re-derivation of the spec — the failure mode the rest of the ecosystem
+  demonstrates — but over `okf-core`'s model, which is where the parsing and the
+  trust semantics already live. That covers the thirty-two checks that are about
+  OKF and drops the two that are about Python.
 - **Use it as a differential oracle, then let it go.** It was run as a separate
   binary — never a dependency, of this workspace or of its test suite — and the
   agreement it established was frozen into `tests/okf_interop.rs`.

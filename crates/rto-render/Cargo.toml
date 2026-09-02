@@ -52,22 +52,54 @@ thiserror = { workspace = true }
 # `rto-graph` depends on serde_json non-optionally, so every build of this crate
 # already compiles it.
 serde_json = { workspace = true }
-# The OKF **reader**'s frontmatter parser. It was a dev-dependency while the
-# reader hand-parsed a line-oriented subset; that subset was shaped like the
-# bundles this crate itself writes and silently lost flow mappings, flow
-# sequences, unindented block sequences and multi-line scalars — all ordinary
-# YAML, and all present in Google's published bundles. See `okf::read`'s
-# `parse_frontmatter` for what that cost.
+# The OKF format itself (ADR-0021), as somebody else's implementation.
 #
-# Still **not** used to emit: `YamlEmitter` dumps a whole document with its own
+# This replaces a hand-rolled YAML-subset reader *and* the general-purpose YAML
+# parser that briefly stood in for it. The hand-rolled subset was shaped like
+# the bundles this crate itself writes, and silently lost flow mappings, flow
+# sequences, unindented block sequences and multi-line scalars — all ordinary
+# YAML, all present in Google's published bundles. A general parser fixed the
+# YAML and left the *format* still ours to re-derive: trust tiers, the actor
+# convention, the bare-mapping shorthand §5.2 mandates. Those are the parts an
+# interchange format exists to standardise, and re-deriving them is how two
+# readers of one spec end up disagreeing.
+#
+# `okf-core` is a pure-Rust OKF v0.2 implementation by an author who is not us,
+# which is the point: it is an independent reading of the same specification.
+# It carries **zero dependencies** (verified against the crates.io index), so
+# adopting it costs one crate in the lockfile and removes another
+# (`yaml-rust2`, still non-optional in `rto-graph` and untouched there).
+#
+# Still **not** used to emit. Its emitter dumps a whole document with its own
 # layout and cannot write one scalar into a hand-built block, so emitting
 # through it would rewrite every note's frontmatter and break #442's
-# byte-identity promise. The writer keeps its own escaper, and `okf.rs`'s tests
-# keep using this crate to prove that escaper round-trips.
+# byte-identity promise. The writer keeps its own escaper, and
+# `a_scalar_round_trips_through_the_writers_escaper` now proves that escaper
+# against *this* parser — a stronger proof than before, since this is the
+# parser a peer would actually read our bundles with.
+okf-core = "0.2.6"
+# `okf-validator` is deliberately NOT taken, though it is the obvious companion.
 #
-# No new crate in the lockfile: `rto-graph` already depends on it
-# non-optionally. Keep the version in step with `crates/rto-graph/Cargo.toml`.
-yaml-rust2 = "0.12.0"
+# It holds upstream's conformance checks and hygiene lints, which are genuinely
+# worth having. The problem is that none of its dependencies is optional, and it
+# syntax-checks fenced code blocks in eight languages. That drags in
+# `rustpython-parser`: 61 crates, `LGPL-3.0-only` via the `malachite` tree, and
+# six unmaintained RUSTSEC advisories whose own text says "No safe upgrade is
+# available". `cargo deny` refuses it on both counts, and ADR-0017 §3 is
+# explicit that a licence must not be admitted merely to turn CI green.
+#
+# Measured rather than assumed: all thirteen `cargo deny` failures trace to
+# `rustpython-parser` alone. `oxc_parser` (58 crates), `sqlparser` (18) and
+# `syn` contribute none. And the Python parser powers exactly TWO of the
+# validator's thirty-four checks — `check_code_block_syntax` and
+# `check_computation_script_syntax`. `lint.rs` never touches it.
+#
+# So the cost is not "a conformance checker"; it is a Python parser we do not
+# need, to check code this crate has no opinion about. Whether a bundle's code
+# samples parse is a linter's job, not an interchange format's. Upstream has
+# been asked to gate the language parsers behind features
+# (github.com/W4G1/okf); until then the structural checks are reimplemented
+# over `okf-core`, which costs nothing.
 
 [features]
 # MCP server support (`roteiro serve`), off by default — CLI-first. Adopts rmcp
