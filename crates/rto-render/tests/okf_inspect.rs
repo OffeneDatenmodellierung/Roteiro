@@ -439,3 +439,38 @@ fn a_capitalised_runtime_is_still_bigquery() {
     assert_eq!(report.findings.len(), 1, "and the bad SQL is caught");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A finding points at the line the code is on, not at the top of the file.
+///
+/// The computations path used to report a hardcoded `1`, which sent a reader to
+/// the frontmatter for a fault further down. A confident wrong number is worse
+/// than an honest unknown, so this pins the fenced case as *exact* and the
+/// indented case as anchored to its `# Computation` heading.
+#[test]
+fn a_finding_names_the_line_its_code_is_on() {
+    let root = scratch("lines");
+    std::fs::create_dir_all(root.join("computations")).expect("mkdir");
+    std::fs::write(
+        root.join("index.md"),
+        "---\nokf_version: \"0.2\"\n---\n\n# Bundle\n",
+    )
+    .expect("index");
+    // Frontmatter is 5 lines; the body then has prose before the fence.
+    std::fs::write(
+        root.join("computations/fenced.md"),
+        "---\ntype: Attested Computation\ntitle: F\nruntime: bigquery\n---\n\n\
+         # Computation\n\nSome prose first.\n\n```sql\nSELCT a FROM t;\n```\n",
+    )
+    .expect("concept");
+
+    let report = inspect::syntax_report(&root, true).expect("load");
+    assert_eq!(report.findings.len(), 1, "{report:?}");
+    let line = report.findings[0]
+        .line
+        .expect("a fenced block has an exact line");
+    assert!(
+        line > 1,
+        "the fence is several lines into the body, not line 1: {line}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

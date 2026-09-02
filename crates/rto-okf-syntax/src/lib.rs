@@ -590,19 +590,32 @@ fn check_yaml(source: &str) -> Result<(), SyntaxError> {
 fn check_shell_quoting(source: &str) -> Result<(), SyntaxError> {
     let mut quote: Option<char> = None;
     let mut escaped = false;
-    let mut depth: i32 = 0;
+    // `usize`, so the saturating close below genuinely floors at zero rather
+    // than at `i32::MIN` — which would have made `) (` cancel out and hide a
+    // real unclosed paren.
+    let mut depth: usize = 0;
     let mut line = 1usize;
     let mut quote_line = 1usize;
 
     let mut chars = source.chars();
     while let Some(c) = chars.next() {
+        // Escape state is consumed **before** the newline branch, deliberately.
+        // A backslash before a newline is a POSIX line continuation: it escapes
+        // the newline itself, so the next line begins unescaped. Checking the
+        // newline first left `escaped` set across the break, which then swallowed
+        // the first character of the following line — and swallowing an opening
+        // quote or paren is exactly how this matcher would produce the false
+        // rejection it exists to avoid.
+        if escaped {
+            escaped = false;
+            if c == '\n' {
+                line += 1;
+            }
+            continue;
+        }
         if c == '\n' {
             line += 1;
             // A newline ends a comment but not a quote: shell strings span lines.
-            continue;
-        }
-        if escaped {
-            escaped = false;
             continue;
         }
         // Backslash escapes everywhere except inside single quotes.
@@ -632,8 +645,21 @@ fn check_shell_quoting(source: &str) -> Result<(), SyntaxError> {
                 quote = Some(c);
                 quote_line = line;
             }
-            '(' | '{' | '[' => depth += 1,
-            ')' | '}' | ']' => depth -= 1,
+            // **Parentheses only, and only in the unclosed direction.**
+            //
+            // `[`, `]`, `{` and `}` are ordinary arguments in shell far more
+            // often than they are structure — `echo ]` and `echo }` are both
+            // valid — so counting them produced exactly the false rejection this
+            // matcher exists to avoid.
+            //
+            // A *closing* paren is no safer: `case x in a) ;; esac` is valid
+            // shell whose `)` has no opener, and `;;` patterns make that shape
+            // common. So a close saturates at zero rather than going negative,
+            // and only an **unclosed** `(` is reported. That keeps the case
+            // worth catching — an unterminated `$(` — and drops the direction
+            // that produces false positives.
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
             _ => {}
         }
     }
@@ -646,14 +672,10 @@ fn check_shell_quoting(source: &str) -> Result<(), SyntaxError> {
             column: None,
         });
     }
-    if depth != 0 {
+    if depth > 0 {
         return Err(SyntaxError {
             language: "bash".to_owned(),
-            message: if depth > 0 {
-                "unclosed bracket".to_owned()
-            } else {
-                "unbalanced closing bracket".to_owned()
-            },
+            message: "unclosed `(`".to_owned(),
             line: None,
             column: None,
         });
@@ -837,6 +859,30 @@ mod tests {
             assert!(check("if [ -f x ]; then echo y; fi\n").is_ok());
             assert!(check("echo \"unterminated\n").is_err());
             assert!(check("a=$(b\n").is_err());
+
+            // A backslash before a newline is a line continuation: it escapes
+            // the newline, so the next line starts unescaped. Consuming the
+            // escape *after* the newline branch left it set across the break and
+            // swallowed the next line's first character — here the opening
+            // quote, which then read as unbalanced.
+            assert!(
+                check("echo one \\\n\"two\"\n").is_ok(),
+                "a line continuation must not swallow the next line's first char"
+            );
+
+            // `[`, `]`, `{` and `}` are ordinary arguments far more often than
+            // they are structure, so they are not counted. Counting them is how
+            // this matcher would reject valid input.
+            for ok in ["echo ]\n", "echo }\n", "echo [\n", "case x in a) ;; esac\n"] {
+                assert!(check(ok).is_ok(), "must not reject valid shell: {ok:?}");
+            }
+
+            // A stray close saturates at zero rather than cancelling a later
+            // open, so this is still caught.
+            assert!(
+                check(") a=$(b\n").is_err(),
+                "a close must not license an open"
+            );
         }
     }
 

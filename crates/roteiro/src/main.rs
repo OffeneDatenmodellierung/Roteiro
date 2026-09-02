@@ -6354,7 +6354,11 @@ fn run_okf_syntax(path: &str, all_blocks: bool, json: bool) -> anyhow::Result<()
         );
     }
     for f in &report.findings {
-        println!("  {}:{} [{}] {}", f.path, f.line, f.concept, f.message);
+        // An unknown line prints as `?`, not as a plausible-looking number. A
+        // reader who is sent to line 1 and finds nothing wrong there stops
+        // trusting every other line in the report.
+        let at = f.line.map_or_else(|| "?".to_owned(), |l| l.to_string());
+        println!("  {}:{at} [{}] {}", f.path, f.concept, f.message);
     }
     if report.findings.is_empty() {
         if report.checked > 0 {

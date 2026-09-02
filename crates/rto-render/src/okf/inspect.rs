@@ -347,8 +347,14 @@ pub struct SyntaxFinding {
     pub concept: String,
     /// The concept's file, relative to the bundle root.
     pub path: String,
-    /// 1-indexed line of the block's opening fence within that file's body.
-    pub line: usize,
+    /// 1-indexed line of the block's opening fence within that file's body,
+    /// when it could be determined.
+    ///
+    /// `None` for a computation whose code this crate could not locate in the
+    /// body — an indented block with no `# Computation` heading to anchor it.
+    /// Reporting a confident `1` there was worse than reporting nothing: it sent
+    /// a reader to the frontmatter for a fault further down the file.
+    pub line: Option<usize>,
     /// The language the block was tagged with, canonicalised.
     pub language: String,
     /// What the parser said.
@@ -472,11 +478,12 @@ pub fn syntax_report(root: &Path, computations_only: bool) -> Result<SyntaxRepor
                 .as_deref()
                 .or_else(|| language_for_runtime(computation.runtime.as_deref()))
                 .unwrap_or("");
+            let line = computation_line(&concept.document.body, &inline.code);
             record(
                 &mut report,
                 &concept.id.to_string(),
                 &rel,
-                1,
+                line,
                 tag,
                 &inline.code,
             );
@@ -487,7 +494,7 @@ pub fn syntax_report(root: &Path, computations_only: bool) -> Result<SyntaxRepor
                     &mut report,
                     &concept.id.to_string(),
                     &rel,
-                    block.start_line,
+                    Some(block.start_line),
                     tag,
                     &block.code,
                 );
@@ -498,12 +505,40 @@ pub fn syntax_report(root: &Path, computations_only: bool) -> Result<SyntaxRepor
     Ok(report)
 }
 
+/// Where a computation's code starts in its document.
+///
+/// The fenced case is exact: the same extractor the all-blocks path uses finds
+/// the block whose contents are the computation's, and reports its opening
+/// fence. The indented case cannot be — `okf-core` dedents the code, so it no
+/// longer matches the file byte for byte — and the `# Computation` heading is the
+/// honest anchor there: it is where a reader should look, even though it is not
+/// where the parser stopped.
+///
+/// `None` rather than a confident `1` when neither is found. Pointing a reader at
+/// the frontmatter for a fault further down the file is worse than admitting the
+/// line is unknown.
+fn computation_line(body: &str, code: &str) -> Option<usize> {
+    let wanted = code.trim();
+    if let Some(block) = rto_okf_syntax::extract_fenced_code_blocks(body)
+        .into_iter()
+        .find(|b| b.code.trim() == wanted)
+    {
+        return Some(block.start_line);
+    }
+    body.lines().enumerate().find_map(|(i, l)| {
+        l.trim_start()
+            .strip_prefix('#')
+            .is_some_and(|rest| rest.trim().eq_ignore_ascii_case("computation"))
+            .then_some(i + 1)
+    })
+}
+
 /// Check one block and fold the outcome into the report.
 fn record(
     report: &mut SyntaxReport,
     concept: &str,
     path: &str,
-    line: usize,
+    line: Option<usize>,
     tag: &str,
     code: &str,
 ) {
