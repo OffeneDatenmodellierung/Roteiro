@@ -19,9 +19,18 @@ Usage:
     scripts/pr-review-status.py 738 --repo owner/name
     scripts/pr-review-status.py 738 --quiet     # only what needs attention
 
-Exits 1 when anything needs attention, so it composes into a watch loop:
+Exit codes, so it composes into a watch loop:
+
+    0  clean — checks finished, no open threads, no suppressed findings
+    1  something needs attention
+    2  nothing wrong yet, but checks are still running
 
     until scripts/pr-review-status.py 738 --quiet; do sleep 60; done
+
+The loop above needed `2` to exist. With pending checks reported as `0`, it
+exited the moment CI started and called a pull request clean before a single
+check had reported — the docstring and the behaviour disagreed, and the
+docstring was the one that was right.
 
 Requires `gh`, authenticated. Works against any repository, not only this one.
 """
@@ -79,12 +88,20 @@ def checks(repo: str, pr: int) -> tuple[list[str], list[str]]:
 
 
 def open_threads(repo: str, pr: int) -> list[dict]:
+    """Every unresolved review thread, following pagination to the end.
+
+    A single page was the first version, and a cap that silently truncates is
+    the wrong failure for a tool whose output is meant to be trusted as
+    "nothing outstanding". A busy pull request would simply stop reporting the
+    oldest threads.
+    """
     owner, name = repo.split("/", 1)
     query = """
-    query($owner:String!, $name:String!, $pr:Int!) {
+    query($owner:String!, $name:String!, $pr:Int!, $after:String) {
       repository(owner:$owner, name:$name) {
         pullRequest(number:$pr) {
-          reviewThreads(last:100) {
+          reviewThreads(first:100, after:$after) {
+            pageInfo { hasNextPage endCursor }
             nodes {
               isResolved path line
               comments(first:1) { nodes { author { login } body url } }
@@ -93,21 +110,23 @@ def open_threads(repo: str, pr: int) -> list[dict]:
         }
       }
     }"""
-    data = json.loads(
-        gh(
-            "api",
-            "graphql",
-            "-f",
-            f"query={query}",
-            "-F",
-            f"owner={owner}",
-            "-F",
-            f"name={name}",
-            "-F",
-            f"pr={pr}",
-        )
-    )
-    nodes = data["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+    nodes, after = [], None
+    while True:
+        args = [
+            "api", "graphql", "-f", f"query={query}",
+            "-F", f"owner={owner}", "-F", f"name={name}", "-F", f"pr={pr}",
+        ]
+        # `-F after=` sends an empty string, which GraphQL rejects for a cursor;
+        # the first page has to omit the variable so it defaults to null.
+        if after:
+            args += ["-F", f"after={after}"]
+        page = json.loads(gh(*args))["data"]["repository"]["pullRequest"][
+            "reviewThreads"
+        ]
+        nodes.extend(page["nodes"])
+        if not page["pageInfo"]["hasNextPage"]:
+            break
+        after = page["pageInfo"]["endCursor"]
     out = []
     for thread in nodes:
         if thread["isResolved"]:
@@ -122,6 +141,19 @@ def open_threads(repo: str, pr: int) -> list[dict]:
             }
         )
     return out
+
+
+def head_commit_time(repo: str, pr: int) -> str:
+    """When the pull request's newest commit was made.
+
+    The dividing line between a finding that is certainly still open and one
+    that a later push may already have fixed. Without it every suppressed
+    finding a pull request ever received counts forever, the exit code can
+    never return to zero, and a gate that is always red is a gate nobody reads.
+    """
+    data = json.loads(gh("pr", "view", str(pr), "--repo", repo, "--json", "commits"))
+    commits = data.get("commits") or []
+    return commits[-1]["committedDate"] if commits else ""
 
 
 def suppressed(repo: str, pr: int) -> list[dict]:
@@ -139,11 +171,18 @@ def suppressed(repo: str, pr: int) -> list[dict]:
     how many rounds raised it and when it was last seen.
     """
     reviews = json.loads(gh("api", "--paginate", f"repos/{repo}/pulls/{pr}/reviews"))
+    since = head_commit_time(repo, pr)
     out = []
     for review in reviews:
         body = review.get("body") or ""
         section = SUPPRESSED.search(body)
         if not section:
+            continue
+        declared = int(section.group(1))
+        if declared == 0:
+            # A heading with nothing under it. Not a parse failure — a review
+            # that suppressed nothing says so — and reporting it as one would
+            # make the tool cry wolf on every clean round.
             continue
         findings = FINDING.findall(section.group(2))
         if not findings:
@@ -165,6 +204,10 @@ def suppressed(repo: str, pr: int) -> list[dict]:
                     "when": review["submitted_at"],
                     "where": where.strip(),
                     "text": " ".join(text.split()),
+                    # A review submitted after the newest commit cannot have
+                    # been answered by it. Earlier ones might have been, so they
+                    # are shown but do not hold the exit code red.
+                    "live": bool(since) and review["submitted_at"] > since,
                 }
             )
     return _dedupe(out)
@@ -184,6 +227,7 @@ def _dedupe(findings: list[dict]) -> list[dict]:
         if key in seen:
             seen[key]["rounds"] += 1
             seen[key]["when"] = max(seen[key]["when"], finding["when"])
+            seen[key]["live"] = seen[key].get("live") or finding.get("live")
         else:
             seen[key] = {**finding, "rounds": 1}
     return sorted(seen.values(), key=lambda f: f["when"], reverse=True)
@@ -218,22 +262,45 @@ def main() -> int:
             if thread["url"]:
                 print(f"    {thread['url']}")
 
-    if hidden:
-        print(f"\nsuppressed findings ({len(hidden)}) — in no thread, resolve by hand:")
-        for finding in hidden:
+    live = [f for f in hidden if f.get("live")]
+    earlier = [f for f in hidden if not f.get("live")]
+
+    def show(group: list[dict]) -> None:
+        for finding in group:
             rounds = finding.get("rounds", 1)
             again = f", raised in {rounds} rounds" if rounds > 1 else ""
             print(f"  {finding['where']}  (last seen {finding['when']}{again})")
             print(f"    {finding['text'][:280]}")
-        print("  note: these accumulate across rounds and are never withdrawn here,")
-        print("        so some may already be fixed — check before re-doing work.")
 
-    if not args.quiet and not (failing or threads or hidden):
-        print(f"{repo}#{args.pr}: nothing outstanding"
-              + (f"; {len(pending)} check(s) still running" if pending else ""))
+    if live:
+        print(
+            f"\nsuppressed findings ({len(live)}) — raised after the newest commit, "
+            "and in no thread:"
+        )
+        show(live)
+    if earlier and not args.quiet:
+        print(
+            f"\nearlier suppressed findings ({len(earlier)}) — raised before the "
+            "newest commit, so a later push may already have answered them:"
+        )
+        show(earlier)
 
-    # Pending checks alone are not "needs attention" — they need waiting.
-    return 1 if (failing or threads or hidden) else 0
+    if failing or threads or live:
+        return 1
+
+    if pending:
+        if not args.quiet:
+            print(
+                f"{repo}#{args.pr}: nothing outstanding, "
+                f"{len(pending)} check(s) still running"
+            )
+        # Not clean yet: a pending check can still fail, and answering 0 here
+        # would let a watch loop exit before anything had reported.
+        return 2
+
+    if not args.quiet:
+        print(f"{repo}#{args.pr}: clean")
+    return 0
 
 
 if __name__ == "__main__":
