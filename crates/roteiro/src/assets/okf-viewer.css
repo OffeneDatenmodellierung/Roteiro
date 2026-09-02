@@ -1,0 +1,104 @@
+/* The OKF viewer's theme (ADR-0022).
+ *
+ * The first rule is the site's palette, copied verbatim from
+ * `website/public/style.css`. It is a copy rather than an `include_str!` because
+ * `roteiro` publishes to crates.io and `cargo package` takes only files under the
+ * crate directory — a build-time include reaching out of it would ship a crate
+ * that does not compile.
+ *
+ * A copy can drift, so it is asserted: `the_viewer_shares_the_sites_palette` in
+ * `okf_viewer.rs` reads both files and fails if the `:root` line differs. That is
+ * the same trade the vendored upstream fixtures make — pin the bytes, and let a
+ * test rather than a habit keep them equal.
+ *
+ * Everything below the palette is the viewer's own. It deliberately does not copy
+ * the site's layout rules: this is an application with a sidebar, not a document,
+ * and duplicating 105 lines to reuse eight colours would be the drift risk
+ * without the benefit. */
+:root { --ink:#1a2733; --accent:#0e6e8c; --paper:#f7f5f0; --line:#d8d2c4; --sub:#6b7684; --tint:#ece8df; --card:#fbfaf6; --muted:#3d4b57; }
+
+* { box-sizing: border-box; }
+
+body {
+  font-family: Georgia, 'Times New Roman', serif;
+  color: var(--ink);
+  background: var(--paper);
+  margin: 0;
+  line-height: 1.6;
+}
+
+a { color: var(--accent); }
+/* A link the renderer neutralised — one that named a concept the bundle does not
+   contain, or a path climbing out of it. It keeps its text and stops being a
+   destination, and this says so rather than leaving a dead-looking link. */
+a[href=""] { color: var(--sub); text-decoration: line-through dotted; cursor: not-allowed; }
+
+header {
+  background: var(--tint);
+  border-bottom: 1px solid var(--line);
+  padding: .7rem 1.2rem;
+  display: flex;
+  gap: 1.2rem;
+  align-items: baseline;
+  position: sticky;
+  top: 0;
+}
+header .name { font-weight: bold; }
+header .root { color: var(--sub); font-size: .85rem; font-family: ui-monospace, monospace; }
+header nav { margin-left: auto; display: flex; gap: 1rem; }
+
+main { display: flex; gap: 2rem; max-width: 72rem; margin: 0 auto; padding: 1.5rem 1.2rem 4rem; }
+aside { flex: 0 0 18rem; }
+article { flex: 1 1 auto; min-width: 0; }
+
+aside ol { list-style: none; margin: 0; padding: 0; font-size: .9rem; }
+aside li { padding: .18rem 0; overflow-wrap: anywhere; }
+aside .group { color: var(--sub); font-size: .78rem; text-transform: uppercase; letter-spacing: .06em; margin: 1rem 0 .3rem; }
+
+.counts { display: flex; gap: .5rem; flex-wrap: wrap; margin: 0 0 1rem; padding: 0; list-style: none; }
+.counts li { background: var(--card); border: 1px solid var(--line); border-radius: .3rem; padding: .35rem .6rem; font-size: .85rem; }
+.counts .n { font-weight: bold; }
+
+/* §5.3's three tiers, and §5.4's lifecycle. Colour is never the only signal —
+   each pill carries its word — because a reader who cannot distinguish the hues
+   still has to be able to read the tier. */
+.tier { font-size: .72rem; border-radius: .8rem; padding: .1rem .5rem; border: 1px solid var(--line); white-space: nowrap; }
+.tier-human-reviewed { background: #dcefe4; border-color: #9ec7ae; }
+.tier-machine-confirmed { background: var(--tint); }
+.tier-unverified { background: var(--card); color: var(--sub); }
+.status-deprecated { text-decoration: line-through; color: var(--sub); }
+
+/* The screener said something about this document. Loud on purpose: ADR-0021
+   treats a peer's bundle as text that may be written to be read as
+   instructions, and a viewer that knew and did not say would be worse than one
+   that never looked. */
+.screened {
+  background: #fdf3e3;
+  border: 1px solid #d8b978;
+  border-left: .3rem solid #d8b978;
+  border-radius: .3rem;
+  padding: .7rem .9rem;
+  margin: 0 0 1.2rem;
+  font-size: .9rem;
+}
+.screened code { background: #f5e6c8; padding: 0 .25rem; border-radius: .2rem; }
+
+article h1 { margin-top: 0; }
+article table { border-collapse: collapse; }
+article th, article td { border: 1px solid var(--line); padding: .3rem .6rem; text-align: left; }
+article pre { background: var(--card); border: 1px solid var(--line); border-radius: .3rem; padding: .8rem; overflow-x: auto; }
+article code { font-family: ui-monospace, monospace; font-size: .9em; }
+article blockquote { border-left: .2rem solid var(--line); margin-left: 0; padding-left: 1rem; color: var(--muted); }
+article img { max-width: 100%; }
+/* An image whose source the renderer removed: never fetched, alt text shown. */
+article img[src=""] { display: none; }
+
+.meta { color: var(--sub); font-size: .85rem; margin: 0 0 1.4rem; display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
+.rel { margin-top: 2.5rem; border-top: 1px solid var(--line); padding-top: 1rem; font-size: .9rem; }
+.rel h2 { font-size: .95rem; margin: 0 0 .4rem; }
+.rel ul { margin: 0 0 1rem; padding-left: 1.2rem; }
+.rel .absent { color: var(--sub); }
+
+#graph { width: 100%; height: 78vh; border: 1px solid var(--line); border-radius: .3rem; background: var(--card); }
+
+footer { border-top: 1px solid var(--line); color: var(--sub); font-size: .8rem; padding: 1rem 1.2rem; text-align: center; }

@@ -506,6 +506,14 @@ jobs:
   #     `rto-render::mcp` surface and `dep:tokio`, which the floor leaves out.
   #   * `--no-default-features --features execution` — the ADR-0014 posture,
   #     below, unchanged.
+  #   * `--no-default-features --features okf-viewer` — ADR-0022's commitment.
+  #     A new optional feature that no job compiled in isolation would be the
+  #     fourth defect of this exact class in a year (`vlm_content` under
+  #     `image-ocr`, four unused items under `audio-transcribe`, and #445's
+  #     `execution` drift), so the ADR made the cell part of the decision rather
+  #     than a follow-up. Note what it does NOT cover: the rules about untrusted
+  #     content live in `rto_render::okf::view`, which is unconditional and so is
+  #     already built and run by every job here.
   #
   # Adding cells here rather than adding a job, deliberately: `no-default-features`
   # is a REQUIRED status check on `main` (branch protection lists it by name), so
@@ -607,6 +615,17 @@ jobs:
       - name: Test (execution only, no default features)
         if: env.RELEASE_PR != 'true'
         run: cargo test --workspace --no-default-features --features execution --no-fail-fast
+
+      # ADR-0022's viewer. Clippy AND tests, matching the cells above: the route
+      # tests are `#[cfg(feature = "okf-viewer")]`, so a clippy-only cell would
+      # compile them and never run them — the mistake the `execution` cell above
+      # records having made.
+      - name: Clippy (okf-viewer only, no default features)
+        if: env.RELEASE_PR != 'true'
+        run: cargo clippy --workspace --all-targets --no-default-features --features okf-viewer -- -D warnings
+      - name: Test (okf-viewer only, no default features)
+        if: env.RELEASE_PR != 'true'
+        run: cargo test --workspace --no-default-features --features okf-viewer --no-fail-fast
 
   # Test coverage — MEASURING, NOT BLOCKING (issue #319).
   #

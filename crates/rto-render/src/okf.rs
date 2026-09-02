@@ -62,6 +62,10 @@
 pub mod conform;
 pub mod inspect;
 pub mod read;
+// The viewer's model (ADR-0022). Rendering only — the HTTP layer is roteiro's
+// `okf_viewer`, behind the `okf-viewer` feature. Kept out of that gate so the
+// part with rules in it is compiled and tested by the default build.
+pub mod view;
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;

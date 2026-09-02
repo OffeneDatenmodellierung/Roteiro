@@ -28,6 +28,11 @@ mod init;
 /// A sibling module rather than more of `main.rs`: the policy — in particular
 /// what happens when there is no terminal — is worth reading in one piece.
 mod okf_discovery;
+/// The served half of the OKF viewer (ADR-0022): axum routes over
+/// `rto_render::okf::view`, which owns every rule about untrusted content and is
+/// compiled by the default build.
+#[cfg(feature = "okf-viewer")]
+mod okf_viewer;
 mod overview;
 mod pins;
 // The remote model tier's transport (ADR-0019) — **the only module in this
@@ -1277,6 +1282,33 @@ enum OkfAction {
         /// Emit the findings as JSON.
         #[arg(long)]
         json: bool,
+    },
+    /// Serve a read-only web view of a bundle (ADR-0022).
+    ///
+    /// Renders the bundle's own markdown and links at request time, so an author
+    /// editing a concept sees it on reload. It takes a path and knows nothing
+    /// about Roteiro's graph, so it works on any conformant bundle — ours is
+    /// merely the default argument.
+    ///
+    /// **Read-only in the strong sense**: it writes nothing, to the graph or
+    /// anywhere else. `roteiro import --from okf` remains the only path by which
+    /// a peer's content enters the graph, and it keeps its consent gate — a
+    /// viewer that could import would make "have a look at this" a trust
+    /// decision.
+    ///
+    /// A bundle is somebody else's markdown, so raw HTML is escaped and never
+    /// emitted, a link becomes a route only if it resolves inside the bundle, no
+    /// image is fetched from off it, and the content screener's findings are
+    /// shown rather than quietly known.
+    #[cfg(feature = "okf-viewer")]
+    View {
+        /// The bundle directory. Defaults to `okf/`, which is where
+        /// `roteiro render okf` writes.
+        #[arg(default_value = "okf")]
+        path: String,
+        /// Address to bind. Defaults to loopback, like `explorer`.
+        #[arg(long)]
+        addr: Option<String>,
     },
     /// Check a bundle for conformance with the OKF v0.2 specification.
     ///
@@ -6391,6 +6423,8 @@ fn okf_root_key(root: &std::path::Path) -> String {
 /// Dispatch a `roteiro okf` action.
 fn run_okf(action: OkfAction) -> anyhow::Result<()> {
     match action {
+        #[cfg(feature = "okf-viewer")]
+        OkfAction::View { path, addr } => run_okf_view(&path, addr.as_deref()),
         OkfAction::Validate { path, json } => run_okf_validate(&path, json),
         OkfAction::Lint { path, json } => run_okf_lint(&path, json),
         OkfAction::Syntax {
@@ -6436,6 +6470,52 @@ fn okf_bundle_root(path: &str) -> anyhow::Result<&std::path::Path> {
 }
 
 /// `roteiro okf trust` — §5.3's tier per concept.
+/// `roteiro okf view` — serve the bundle for a reader (ADR-0022).
+///
+/// Binds on a small current-thread tokio runtime, axum only: no `rto-serve`, no
+/// model, no MCP, no C/C++ toolchain — the same shape as `roteiro explorer`.
+/// Blocks until shutdown.
+#[cfg(feature = "okf-viewer")]
+fn run_okf_view(path: &str, addr: Option<&str>) -> anyhow::Result<()> {
+    let root = okf_bundle_root(path)?.to_path_buf();
+    // Refused here rather than on the first request: a server that binds a port
+    // and then 404s everything is a worse answer than not starting.
+    let overview = rto_render::okf::view::overview(&root)?;
+
+    let addr = addr.unwrap_or("127.0.0.1:8018").to_owned();
+    let socket: std::net::SocketAddr = addr
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid --addr `{addr}`: {e}"))?;
+
+    // Mounted at the root when served alone; see `serve` for the nested case.
+    let app = okf_viewer::router(root.clone(), "");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async move {
+        let listener = tokio::net::TcpListener::bind(socket)
+            .await
+            .map_err(|e| anyhow::anyhow!("cannot bind {socket}: {e}"))?;
+        println!(
+            "okf view: {} concept(s) from {} on http://{socket}",
+            overview.concepts.len(),
+            root.display()
+        );
+        if !overview.flagged.is_empty() {
+            // Said at startup as well as in the page: somebody running this over
+            // a bundle they were sent should not have to open a tab to find out.
+            println!(
+                "  note: {} concept(s) tripped the content screener; the viewer marks them",
+                overview.flagged.len()
+            );
+        }
+        println!("  read-only — nothing here is imported into the graph");
+        axum::serve(listener, app)
+            .await
+            .map_err(|e| anyhow::anyhow!("server error: {e}"))
+    })
+}
+
 /// `roteiro okf validate` — conformance against the specification.
 fn run_okf_validate(path: &str, json: bool) -> anyhow::Result<()> {
     let report = rto_render::okf::conform::validate_report(okf_bundle_root(path)?)?;
@@ -14660,13 +14740,35 @@ fn serve_v1_tail(
     #[cfg(not(feature = "explorer"))]
     let graph_note = "";
 
+    // The OKF viewer, nested at `/okf` (ADR-0022) — the explorer already holds
+    // `/`, and two UIs cannot both be the root.
+    //
+    // Mounted **only when the project has an `okf/` bundle**. `serve` hosts
+    // workspaces rather than a bundle path, so unless `render okf` has written
+    // one there is nothing to point at, and a route that 404'd every request
+    // would be worse than an absent one. `roteiro okf view <path>` is how any
+    // other bundle is opened.
+    #[cfg(feature = "okf-viewer")]
+    let (router, okf_note) = {
+        let bundle = std::env::current_dir().map(|d| d.join("okf")).ok();
+        match bundle.filter(|b| b.join("index.md").is_file()) {
+            Some(root) => (
+                router.nest("/okf", okf_viewer::router(root, "/okf")),
+                " + /okf (OKF viewer)",
+            ),
+            None => (router, ""),
+        }
+    };
+    #[cfg(not(feature = "okf-viewer"))]
+    let okf_note = "";
+
     // `--models --mcp`: also mount the MCP graph server at `/mcp` on the SAME port.
     if opts.mcp {
         #[cfg(feature = "mcp")]
         {
             let combined = router.merge(rto_render::mcp::mcp_router(flat, &opts.mcp_surface));
             eprintln!(
-                "roteiro server listening on {scheme}://{socket} — /v1{tools_note}{graph_note} + /mcp — serving: {names}"
+                "roteiro server listening on {scheme}://{socket} — /v1{tools_note}{graph_note}{okf_note} + /mcp — serving: {names}"
             );
             return match tls {
                 Some((cert, key)) => {
@@ -14682,7 +14784,7 @@ fn serve_v1_tail(
     }
 
     eprintln!(
-        "roteiro model server listening on {scheme}://{socket}/v1{tools_note}{graph_note} — serving: {names}"
+        "roteiro model server listening on {scheme}://{socket}/v1{tools_note}{graph_note}{okf_note} — serving: {names}"
     );
     match tls {
         Some((cert, key)) => rto_serve::serve_blocking_router_tls(router, socket, &cert, &key),

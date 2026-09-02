@@ -237,6 +237,17 @@ mcp = ["rto-render/mcp", "dep:tokio"]
 # builds, serves (`roteiro explorer`), and tests without a C/C++ toolchain. Also
 # merged onto `/v1` when combined with `serve` (see `serve_v1_tail`).
 explorer = ["dep:axum", "dep:tokio"]
+# The dynamic OKF viewer (`roteiro okf view`), off by default — ADR-0022. Same
+# shape and same cost as `explorer`: axum + tokio, no `rto-serve`, no model, no
+# C/C++ toolchain, and merged onto `/okf` when combined with `serve`.
+#
+# **Only the server is behind this flag.** Everything that decides what a reader
+# is shown — what is escaped, where a link may point, what is never fetched —
+# is `rto_render::okf::view`, which is unconditional. That is deliberate: this
+# repository has found three defects in a year inside feature combinations no CI
+# job compiled, so the half with rules in it is kept where the default build
+# tests it.
+okf-viewer = ["dep:axum", "dep:tokio"]
 # Offline similarity inference (`roteiro infer`) — the `inferred` provenance
 # class. Adds no dependencies (pure-Rust hashing embedding; ADR-0003).
 inference = ["rto-graph/inference"]
