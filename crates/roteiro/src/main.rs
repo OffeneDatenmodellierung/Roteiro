@@ -7034,7 +7034,32 @@ fn build_scaffold(
         // directory it may not have. `Worktree` because an ADR scaffolded and
         // saved a minute ago is not committed yet, and proposing its id again
         // would be the obvious way to get this wrong.
-        let docs = rto_spec::authored_docs(&repo, rto_graph::GraphSource::Worktree)?;
+        // Markdown blobs only. `authored_docs` classifies the whole authored
+        // layer, which also scans every Rust file for annotations and
+        // conventions — work this caller throws away. Filtering first cannot
+        // lose an ADR, because the classifier requires `is_md` before anything
+        // else, and it goes through the *same* `authored_docs_from`, so there is
+        // still one classification rule rather than a second one that could
+        // disagree with the gate.
+        //
+        // Measured on this repository: 349 ms for the whole layer against 33 ms
+        // for the markdown alone, both finding the same 22 ADRs — a third of a
+        // second off a command that otherwise takes about a second.
+        let source = rto_graph::GraphSource::Worktree;
+        let markdown: Vec<_> = rto_spec::authored_blobs(&repo, source)?
+            .into_iter()
+            // The **same** predicate the classifier uses, not an approximation
+            // of it: `ends_with(".md")` was narrower, so a `README.MD` would
+            // have been filtered out here and found by the gate — the filter
+            // silently disagreeing with the rule it exists to pre-empt.
+            .filter(|blob| {
+                std::path::Path::new(&blob.path)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("md"))
+            })
+            .collect();
+        let docs = rto_spec::authored_docs_from(markdown, &|blob| repo.read_source(blob, source))?;
         let home = rto_spec::adr_home(&docs.layer.docs);
         let adr_id = home.next_id.clone();
         // On stderr, and always — not folded into the label, which is printed

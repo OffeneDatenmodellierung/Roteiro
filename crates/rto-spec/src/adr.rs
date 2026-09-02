@@ -450,10 +450,16 @@ pub fn adr_home(docs: &[AdrDoc]) -> AdrHome {
     for doc in docs {
         let dir = doc.path.rsplit_once('/').map_or("", |(head, _)| head);
         *per_dir.entry(dir).or_default() += 1;
-        if let Ok(n) = doc.meta.id.parse::<u32>() {
+        // Trimmed for **both**, not just the width. `clean_value` strips
+        // surrounding whitespace and then the quotes, so `adr-id: "0007 "`
+        // reaches here as `0007 ` — which fails to parse, leaves `highest` too
+        // low, and hands the next ADR an id that already exists. Verified: that
+        // spelling yields `id="0007 "` and `parse::<u32>()` of `None`.
+        let id = doc.meta.id.trim();
+        if let Ok(n) = id.parse::<u32>() {
             highest = highest.max(n);
         }
-        width = width.max(doc.meta.id.trim().len());
+        width = width.max(id.len());
     }
 
     // `max_by_key` keeps the **last** maximum, and `BTreeMap` iterates in
@@ -1353,6 +1359,24 @@ mod adr_home_tests {
         assert_eq!(home.dir, ".", "the root, reported as a directory");
         assert_eq!(home.next_id, "0003");
         assert!(home.followed, "this repository does have a home");
+    }
+
+    /// **An id quoted with incidental whitespace still counts.**
+    ///
+    /// `clean_value` strips the surrounding whitespace and then the quotes, so
+    /// `adr-id: "0007 "` arrives as `0007 `. Parsing that untrimmed fails
+    /// silently, leaves the highest id too low, and hands the next ADR one that
+    /// already exists — a duplicate produced by a stray space.
+    #[test]
+    fn an_id_with_incidental_whitespace_is_still_read() {
+        let md = "---\ntype: adr\nadr-id: \"0007 \"\nstatus: Accepted\n---\n\n# ADR-0007: X\n";
+        let parsed = parse_adr("decisions/x.md", md).expect("parse");
+        assert_eq!(parsed.meta.id, "0007 ", "the raw id keeps the space");
+        assert_eq!(
+            adr_home(&[parsed]).next_id,
+            "0008",
+            "and the next id is still one past it"
+        );
     }
 
     /// **An absurd `adr-id` does not panic.**
