@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.2.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.2.0...roteiro-v5.2.1) - 2026-09-02
+
+### Fixed
+
+- *(docs)* four review findings on the archived-plans move
+
+### Other
+
+- two comments that still described the pre-move rendering
+- serve the archived build plans from /history/, matching the repo
+- archive the build plans to docs/history/ (WIP — one open question)
+
 ## [5.2.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.1.0...roteiro-v5.2.0) - 2026-09-02
 
 ### Added

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.2.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v5.2.0...rto-spec-v5.2.1) - 2026-09-02
+
+### Fixed
+
+- *(docs)* four review findings on the archived-plans move
+
+### Other
+
+- four more review findings — three stale claims and a tense slip
+- serve the archived build plans from /history/, matching the repo
+- archive the build plans to docs/history/ (WIP — one open question)
+
 ## [4.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v4.0.0...rto-spec-v4.1.0) - 2026-09-01
 
 ### Fixed
