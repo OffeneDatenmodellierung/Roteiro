@@ -226,7 +226,24 @@ pub fn authored_docs_from<E>(
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or_default();
-        let is_adr = blob.path.starts_with("docs/adr/") && is_md && name != "README.md";
+        // Either the path this repository uses, **or** the document saying so.
+        // The declaration is what makes the authored layer usable on a repository
+        // whose decisions live somewhere else; the path is kept so nothing here
+        // changes, and so an ADR that forgot the key is still found where it
+        // lives. Same shape as the site-page rule below, for the same reason.
+        // The `README.md` exclusion belongs to the **path** rule, not to both. It
+        // is there because `docs/adr/README.md` is this repository's index of
+        // decisions rather than one of them — a fact about that file, inferred
+        // from its name because nothing in it says otherwise. A document that
+        // declares `type: adr` has said otherwise, wherever it sits and whatever
+        // it is called, and a repository keeping its one decision in
+        // `architecture/decisions/README.md` is entitled to be believed.
+        //
+        // Our own index is unaffected: it declares no `type`, so the path rule
+        // still excludes it.
+        let is_adr = is_md
+            && ((blob.path.starts_with("docs/adr/") && name != "README.md")
+                || crate::adr::declares_adr(&text));
         if is_adr {
             match crate::adr::parse_adr(&blob.path, &text) {
                 Ok(doc) => layer.docs.push(doc),
@@ -277,6 +294,7 @@ pub fn authored_docs_from<E>(
 #[cfg(test)]
 mod tests {
     use super::authored_docs_from;
+    use crate::check::ViolationKind;
     use rto_graph::BlobRef;
 
     /// Classify a set of `(path, text)` pairs through the one classification
@@ -324,6 +342,130 @@ mod tests {
             layer.layer.malformed.is_empty(),
             "{:?}",
             layer.layer.malformed
+        );
+    }
+
+    /// **A decision record is found where another repository keeps it.**
+    ///
+    /// The authored layer classified ADRs by path — anything under `docs/adr/`.
+    /// That is this repository's convention rather than a property of the
+    /// document, so the drift gate, the version rules and the link checking were
+    /// all unavailable to any repository that keeps its decisions somewhere
+    /// else. Roteiro is meant to run on other people's repositories, and this is
+    /// what stopped it doing so for their decisions.
+    ///
+    /// The declaration wins wherever the file sits; the path still works for a
+    /// document that did not declare anything.
+    #[test]
+    fn an_adr_is_recognised_wherever_a_repository_keeps_it() {
+        let layer = classify(&[
+            // Somewhere else entirely, and it says what it is.
+            (
+                "architecture/decisions/0007-thing.md",
+                "---\ntype: adr\nadr-id: \"0007\"\nstatus: Accepted\n---\n\n# ADR-0007: Thing\n",
+            ),
+            // The old rule still holds for a document that declares nothing.
+            (
+                "docs/adr/0008-other.md",
+                "---\nadr-id: \"0008\"\nstatus: Accepted\n---\n\n# ADR-0008: Other\n",
+            ),
+            // And ordinary prose is still ordinary prose, wherever it lives.
+            ("notes/thoughts.md", "# Just a note\n\nNothing declared.\n"),
+        ]);
+        let mut ids: Vec<&str> = layer
+            .layer
+            .docs
+            .iter()
+            .map(|d| d.meta.id.as_str())
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(
+            ids,
+            vec!["0007", "0008"],
+            "the declared one is found outside `docs/adr/`, and the path rule \
+             still holds; malformed: {:?}",
+            layer.layer.malformed
+        );
+        assert!(
+            layer.layer.malformed.is_empty(),
+            "{:?}",
+            layer.layer.malformed
+        );
+    }
+
+    /// **A repository may keep its one decision in a `README.md`.**
+    ///
+    /// The name exclusion exists because `docs/adr/README.md` is this
+    /// repository's *index* of decisions rather than one of them — inferred from
+    /// its name because nothing in the file says otherwise. A document that
+    /// declares `type: adr` has said otherwise, so applying the exclusion to
+    /// declared ADRs too would have made one layout impossible for no reason.
+    #[test]
+    fn a_declared_adr_is_not_excluded_for_being_called_readme() {
+        let layer = classify(&[
+            (
+                "architecture/decisions/README.md",
+                "---\ntype: adr\nadr-id: \"0001\"\nstatus: Accepted\n---\n\n# ADR-0001: The one\n",
+            ),
+            // And this repository's own index, which declares nothing, is still
+            // excluded by the path rule.
+            (
+                "docs/adr/README.md",
+                "# Architecture Decision Records\n\nAn index.\n",
+            ),
+        ]);
+        let ids: Vec<&str> = layer
+            .layer
+            .docs
+            .iter()
+            .map(|d| d.meta.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["0001"],
+            "the declared README is a decision, the undeclared one is an index; \
+             malformed: {:?}",
+            layer.layer.malformed
+        );
+        assert!(
+            layer.layer.malformed.is_empty(),
+            "{:?}",
+            layer.layer.malformed
+        );
+    }
+
+    /// **Declaring `type: adr` without an `adr-id` is malformed, not ignored.**
+    ///
+    /// Classification and parsing are separate: a document that says it is a
+    /// decision record and then is not should be reported, because silently
+    /// skipping it is how a repository ends up with decisions the gate never
+    /// sees. This is the cost of the wider rule, and it is the right cost.
+    #[test]
+    fn a_document_claiming_to_be_an_adr_without_an_id_is_reported() {
+        let layer = classify(&[(
+            "elsewhere/half-baked.md",
+            "---\ntype: adr\nstatus: Accepted\n---\n\n# Not really\n",
+        )]);
+        assert!(layer.layer.docs.is_empty());
+        // Which violation, not merely that there is one. Asserting the count
+        // alone would pass if the document had been misclassified and reported
+        // as a malformed *site page* — the failure this test exists to exclude
+        // is precisely a classification error, so the class has to be checked.
+        assert_eq!(
+            layer.layer.malformed.len(),
+            1,
+            "it must be reported rather than skipped: {:?}",
+            layer.layer.malformed
+        );
+        let violation = &layer.layer.malformed[0];
+        assert_eq!(
+            violation.kind,
+            ViolationKind::MalformedAdr,
+            "reported as a malformed ADR, which is what it claimed to be: {violation:?}"
+        );
+        assert!(
+            violation.message.contains("elsewhere/half-baked.md"),
+            "and the message names the file: {violation:?}"
         );
     }
 

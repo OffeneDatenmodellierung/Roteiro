@@ -401,6 +401,44 @@ fn stored(text: &str) -> Option<serde_json::Value> {
     (!capped.is_empty()).then(|| serde_json::Value::from(capped))
 }
 
+/// Whether a document declares itself an ADR, by carrying `type: adr` in its
+/// frontmatter.
+///
+/// The authored layer classified ADRs by **path** — anything under `docs/adr/`.
+/// That is this repository's convention, not a property of the document, and it
+/// made the whole authored-layer gate unavailable to any other repository whose
+/// decisions live somewhere else: `doc/decisions/`, `architecture/adr/`, beside
+/// the code they govern.
+///
+/// Declaring it is the pattern already used for site pages
+/// ([`crate::site::is_site_page`]), whose comment in `layer.rs` gives the reason:
+/// a document that says what it is should never be demoted by a coincidence of
+/// its path. Blueprints have the same escape hatch through their H1 marker. ADRs
+/// were the only one of the three still decided by location alone.
+///
+/// The path rule is kept alongside this, so nothing in this repository changes:
+/// every ADR here already declares `type: adr`, and one that forgot would still
+/// be found where it lives.
+///
+/// Note this only decides *classification*. [`parse_adr`] then requires an
+/// `adr-id`, so a document claiming to be an ADR without one is reported as
+/// malformed rather than silently ignored — which is the right answer for a
+/// file that says it is a decision record and is not one.
+#[must_use]
+pub fn declares_adr(text: &str) -> bool {
+    let (frontmatter, _) = split_frontmatter(text);
+    frontmatter.lines().any(|line| {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            return false;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            return false;
+        };
+        key.trim().eq_ignore_ascii_case("type") && clean_value(value).eq_ignore_ascii_case("adr")
+    })
+}
+
 /// Parse an ADR markdown document at `rel_path`.
 ///
 /// # Errors
