@@ -438,8 +438,13 @@ fn rewrite_doc_link(
     let (path, frag) = dest
         .split_once('#')
         .map_or((dest, None), |(p, f)| (p, Some(f)));
-    // Only the final segment can differ between the repository and the site, so
-    // the link's own directory hops are kept verbatim; see [`PublishedPages`].
+    // Split so the two halves can be recombined differently depending on what the
+    // site serves. This *used* to be the whole rule — only the final segment could
+    // differ between repository and site, so the link's own directory hops were
+    // kept verbatim — and it is still what happens for a served name without a
+    // directory. It is no longer true in general: a slug may name a path, and for
+    // those the hops are replaced rather than kept. See the published-page branch
+    // below, and [`PublishedPages`].
     let (dir, file) = path.rsplit_once('/').map_or(("", path), |(d, f)| (d, f));
     // `strip_suffix` rather than `ends_with`: the extension is matched exactly as
     // it is written, which is the rule every document in this repository follows.

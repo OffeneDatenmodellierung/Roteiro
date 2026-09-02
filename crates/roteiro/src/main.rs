@@ -15610,9 +15610,13 @@ fn render_docs(out: Option<String>) -> anyhow::Result<()> {
     }
 
     // Render lifetime docs (the Build Plan and the house-style blueprints) as
-    // first-class root-level pages, and list them above the ADRs on the index.
-    // Their `[[docs/adr/…]]` links resolve into the `adr/` subdirectory (the
-    // `render_doc` prefix), which is correct for a root-level page.
+    // first-class pages, listed above the ADRs on the index.
+    //
+    // The blueprints are root-level, so their `[[docs/adr/…]]` links resolve into
+    // the `adr/` subdirectory and `render_doc`'s depth-0 prefix is right for
+    // them. The Build Plan is **not**: it was archived to `docs/history/` and is
+    // served from `history/`, so it goes through `render_doc_at` at depth 1 and
+    // climbs back to the root for the theme, the nav and `adr/`.
     let mut lifetime = Vec::new();
     if let Some(build_plan) = &src.build_plan {
         let md = std::fs::read_to_string(build_plan)?;
