@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.4.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v5.3.0...rto-render-v5.4.0) - 2026-09-02
+
+### Added
+
+- *(okf)* restore `okf validate` and `okf lint`, over our own checks
+
+### Fixed
+
+- *(okf)* three review findings, and the fifth false compile claim
+
+### Other
+
+- a wrong count, and a list item that rendered as a code block
+
 ## [5.3.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v5.2.0...rto-render-v5.3.0) - 2026-09-02
 
 ### Added
