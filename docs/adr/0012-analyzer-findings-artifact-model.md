@@ -183,7 +183,7 @@ explicit and informative, and no code path becomes quietly network-dependent.
 
 ## Status
 
-**Accepted** (2026-08-17), and implemented — Stage 21 (#293), released in **v1.10.0**. It was executed contract-first, as [BUILD_PLAN_V2](../BUILD_PLAN_V2.md) Stage 21
+**Accepted** (2026-08-17), and implemented — Stage 21 (#293), released in **v1.10.0**. It was executed contract-first, as [BUILD_PLAN_V2](../history/BUILD_PLAN_V2.md) Stage 21
 sequenced it: the runner trait, the normalized finding schema, and
 `roteiro security ingest` landed before any sandboxed backend (the backend itself is
 [[docs/adr/0014-sandboxed-analyzer-execution.md]]).

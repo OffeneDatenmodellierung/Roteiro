@@ -167,7 +167,7 @@ CI (`.github/workflows/ci.yml`) enforces these; run them locally before pushing.
 - **Architecture is governed by ADRs** in `docs/adr/`. A change that alters an
   architectural decision updates or adds an ADR in the house style (frontmatter
   with `adr-id`, `## ` sections, `[[path#Symbol]]` links, a version-history row).
-  See `docs/BUILD_PLAN.md` for the staged roadmap.
+  See `docs/history/BUILD_PLAN.md` for the staged roadmap.
 - Commit messages and PR descriptions explain the **why**, not just the what.
 - **`!` is a release instruction, not a severity marker.** A `!` after the type
   (`fix(schema)!:`) or a `BREAKING CHANGE:` footer tells release-plz to bump the

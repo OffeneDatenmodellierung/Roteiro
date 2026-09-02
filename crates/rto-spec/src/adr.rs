@@ -5,7 +5,7 @@
 //! flat `key: value` block that also contains `#` comment lines (which a strict
 //! YAML parser handles differently), and hand-parsing keeps `rto-spec`
 //! dependency-free (no `serde_yaml`, which is unmaintained and would trip the
-//! audit gate). See ADR-0001 / `docs/BUILD_PLAN.md` Q4.
+//! audit gate). See ADR-0001 / `docs/history/BUILD_PLAN.md` Q4.
 
 use rto_graph::{Edge, EdgeKind, FactSet, Node, NodeKind, Provenance};
 use serde::{Deserialize, Serialize};

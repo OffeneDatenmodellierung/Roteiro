@@ -118,13 +118,13 @@ fn ci_measures_coverage_without_gating_it() {
         "CI must still measure coverage: the docs say it does, and the whole \
          point of #319 is that the docs stopped being true. If coverage \
          measurement is being removed, remove the claim in \
-         docs/BUILD_PLAN.md §11 in the same change."
+         docs/history/BUILD_PLAN.md §11 in the same change."
     );
     assert!(
         ci.contains("continue-on-error: true"),
         "the coverage job must stay non-blocking while the docs say the 85% \
          floor is NOT enforced. Making it blocking is fine — but rewrite \
-         docs/BUILD_PLAN.md §11 in the same change, or the docs go back to \
+         docs/history/BUILD_PLAN.md §11 in the same change, or the docs go back to \
          describing a pipeline that does not exist."
     );
 }
@@ -145,8 +145,8 @@ fn no_document_claims_the_coverage_floor_is_enforced() {
         "| Coverage | 85% per-file ratchet |",
     ];
     const DOCS: &[&str] = &[
-        "docs/BUILD_PLAN.md",
-        "docs/BUILD_PLAN_V2.md",
+        "docs/history/BUILD_PLAN.md",
+        "docs/history/BUILD_PLAN_V2.md",
         "docs/adr/0001-build-roteiro-unified-codebase-knowledge-graph.md",
     ];
 
@@ -165,7 +165,7 @@ fn no_document_claims_the_coverage_floor_is_enforced() {
 
 #[test]
 fn the_build_plan_records_what_is_actually_enforced() {
-    let Some(plan) = repo_file("docs/BUILD_PLAN.md") else {
+    let Some(plan) = repo_file("docs/history/BUILD_PLAN.md") else {
         return;
     };
     // The corrected §11 must name the real gates, so a reader comparing the doc
@@ -180,7 +180,7 @@ fn the_build_plan_records_what_is_actually_enforced() {
     ] {
         assert!(
             plan.contains(gate),
-            "docs/BUILD_PLAN.md must list `{gate}` among the enforcing gates"
+            "docs/history/BUILD_PLAN.md must list `{gate}` among the enforcing gates"
         );
     }
     assert!(

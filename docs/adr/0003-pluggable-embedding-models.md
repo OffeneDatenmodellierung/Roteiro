@@ -27,7 +27,7 @@ confluence-url:
 
 ## Reference
 
-Governs the embedding model used by the inference layer (Stage 8) of [[docs/adr/0001-build-roteiro-unified-codebase-knowledge-graph.md]]. Answers open question Q7 (the offline embedding model + binary-size budget) from `docs/BUILD_PLAN.md`.
+Governs the embedding model used by the inference layer (Stage 8) of [[docs/adr/0001-build-roteiro-unified-codebase-knowledge-graph.md]]. Answers open question Q7 (the offline embedding model + binary-size budget) from `docs/history/BUILD_PLAN.md`.
 
 ## Summary
 

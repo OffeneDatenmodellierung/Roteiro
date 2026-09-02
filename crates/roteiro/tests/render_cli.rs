@@ -238,7 +238,7 @@ fn a_declared_site_page_is_emitted_with_the_shared_bar() {
     );
     write(
         &dir,
-        "docs/BUILD_PLAN_V2.md",
+        "docs/history/BUILD_PLAN_V2.md",
         "---\nsite-page: build-plan-v2\nsite-nav: Roadmap\nsite-order: 3\n---\n\n# Roadmap\n",
     );
     git(&dir, &["add", "."]);
@@ -304,7 +304,7 @@ fn a_declared_site_page_is_emitted_with_the_shared_bar() {
 
 #[test]
 fn a_source_link_is_aimed_at_the_repository_at_the_rendered_commit() {
-    // Issue #456: `docs/BUILD_PLAN.md` cites code as evidence for its claims.
+    // Issue #456: `docs/history/BUILD_PLAN.md` cites code as evidence for its claims.
     // That link is correct in a checkout and dead on the site, which publishes
     // documents and not source — so it is re-aimed at the repository's web view,
     // pinned to the commit the site was built from.
@@ -319,8 +319,8 @@ fn a_source_link_is_aimed_at_the_repository_at_the_rendered_commit() {
     );
     write(
         &dir,
-        "docs/BUILD_PLAN.md",
-        "# Build Plan\n\nEvidence: [sync](../crates/x/src/sync.rs).\n\n\
+        "docs/history/BUILD_PLAN.md",
+        "# Build Plan\n\nEvidence: [sync](../../crates/x/src/sync.rs).\n\n\
          Site link: [adrs](adr/).\n",
     );
     write(&dir, "crates/x/src/sync.rs", "pub fn f() {}\n");
@@ -382,7 +382,7 @@ fn without_an_origin_remote_a_source_link_is_left_as_authored() {
     );
     write(
         &dir,
-        "docs/BUILD_PLAN.md",
+        "docs/history/BUILD_PLAN.md",
         "# Build Plan\n\nEvidence: [sync](../crates/x/src/sync.rs).\n",
     );
     git(&dir, &["add", "."]);

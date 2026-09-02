@@ -70,7 +70,7 @@ mod telemetry;
         One SQLite store holding structure, intent, and context as a single \
         provenance-tagged knowledge graph, queryable by humans and AI agents \
         alike. Subcommands are scaffolds while the graph core lands; see \
-        ADR-0001 and docs/BUILD_PLAN.md for the roadmap.",
+        ADR-0001 and docs/history/BUILD_PLAN.md for the roadmap.",
     arg_required_else_help = true,
     propagate_version = true
 )]
@@ -15468,7 +15468,7 @@ fn discover_site_sources(
         .collect();
     adrs.sort();
 
-    let build_plan = Some(root.join("docs/BUILD_PLAN.md")).filter(|p| p.is_file());
+    let build_plan = Some(root.join("docs/history/BUILD_PLAN.md")).filter(|p| p.is_file());
 
     // Blueprints live under docs/blueprint(s)/ (ADR-0004); the overall project
     // blueprint is one. Each is rendered to a root-level page like the Build Plan.
@@ -15498,7 +15498,7 @@ fn discover_site_sources(
 
     // What the site serves each source document as. A slug is URL-safe by
     // construction, so a page's published name need not resemble its file name —
-    // and rewriting `../BUILD_PLAN_V2.md` to `../BUILD_PLAN_V2.html` aimed four
+    // and rewriting `../history/BUILD_PLAN_V2.md` to `../BUILD_PLAN_V2.html` aimed four
     // correct repository links at a page that is never emitted (issue #446).
     let mut published = rto_render::PublishedPages::new();
     for path in &adrs {

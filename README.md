@@ -125,7 +125,7 @@ including the air-gapped route.
 
 See <https://roteiro.dev> for the full guide (modes, local models, languages,
 config), and [ADR-0001](docs/adr/0001-build-roteiro-unified-codebase-knowledge-graph.md)
-plus [`docs/BUILD_PLAN.md`](docs/BUILD_PLAN.md) for the design and roadmap.
+plus [`docs/history/BUILD_PLAN.md`](docs/history/BUILD_PLAN.md) for the design and roadmap.
 Contribution + review standards live in [`AGENTS.md`](AGENTS.md).
 
 ### Sandboxed analyzers (`--features exec-boxlite`)

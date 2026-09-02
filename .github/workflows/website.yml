@@ -18,14 +18,14 @@ on:
     paths:
       - "website/**"
       - "docs/adr/**"
-      - "docs/BUILD_PLAN.md"
+      - "docs/history/BUILD_PLAN.md"
       - ".github/workflows/website.yml"
   push:
     branches: [main]
     paths:
       - "website/**"
       - "docs/adr/**"
-      - "docs/BUILD_PLAN.md"
+      - "docs/history/BUILD_PLAN.md"
       - ".github/workflows/website.yml"
   workflow_dispatch:
 

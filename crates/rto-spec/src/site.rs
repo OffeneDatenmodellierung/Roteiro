@@ -10,8 +10,8 @@
 //! `site-page:` slug**. Nothing about its location says so.
 //!
 //! That is deliberate. `docs/` mixes published material with internal material —
-//! `docs/REVIEW_CHECKLIST.md` and `docs/BUILD_PLAN_V2.md` are working documents,
-//! while `docs/BUILD_PLAN.md` is already rendered to the site — so the line was
+//! `docs/REVIEW_CHECKLIST.md` and `docs/history/BUILD_PLAN_V2.md` are working documents,
+//! while `docs/history/BUILD_PLAN.md` is already rendered to the site — so the line was
 //! never a clean directory boundary and a path convention could only ever
 //! approximate it. A path rule also has to be *remembered*: it lives in a
 //! renderer someone has to go read, and the file itself gives no hint either way.

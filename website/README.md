@@ -28,7 +28,7 @@ site-order: 3           # position in the bar (unset sorts last, then by slug)
 ```
 
 Publication is **declared, never inferred from a path**, so a document can gain a
-public page *in place*: `docs/OFFLINE_SETUP.md`, `docs/BUILD_PLAN_V2.md` and
+public page *in place*: `docs/OFFLINE_SETUP.md`, `docs/history/BUILD_PLAN_V2.md` and
 `docs/JSON_SCHEMA.md` are published where they already were, keeping every
 existing link to their repository paths. The pages that were split out of the
 landing page live in `website/pages/`.

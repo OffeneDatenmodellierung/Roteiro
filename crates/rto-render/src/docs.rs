@@ -27,10 +27,10 @@ pub struct RenderedAdr {
 /// serves, keyed by the source markdown's file name.
 ///
 /// [`rewrite_doc_link`] used to derive a link's target from the link's own
-/// spelling — `../BUILD_PLAN_V2.md` → `../BUILD_PLAN_V2.html` — which is correct
+/// spelling — `../history/BUILD_PLAN_V2.md` → `../BUILD_PLAN_V2.html` — which is correct
 /// only while every document is served under its own stem. Site pages ended
 /// that: a page is published as its declared `site-page:` slug, and a slug is
-/// URL-safe by construction (`[a-z0-9-]+`), so `docs/BUILD_PLAN_V2.md` is served
+/// URL-safe by construction (`[a-z0-9-]+`), so `docs/history/BUILD_PLAN_V2.md` is served
 /// as `build-plan-v2.html`. The rewrite then pointed four correct repository
 /// links at a page that is never emitted — issue #446, live on roteiro.dev.
 ///
@@ -349,7 +349,7 @@ fn options() -> Options {
 /// recording here.
 ///
 /// So the divergence is left, documented, and the affected anchors were given
-/// explicit ids that neither rule touches (see `docs/BUILD_PLAN.md`). **Nothing
+/// explicit ids that neither rule touches (see `docs/history/BUILD_PLAN.md`). **Nothing
 /// currently checks an intra-document anchor** in either rendering — not
 /// `roteiro check`, not this crate. Issue #459 is where that check belongs.
 fn heading_ids(md: &str) -> Vec<String> {
@@ -1361,19 +1361,31 @@ mod tests {
 
     #[test]
     fn a_link_resolves_to_the_page_the_site_actually_serves() {
-        // Issue #446: four ADRs link `../BUILD_PLAN_V2.md`, which is correct in
+        // Issue #446: four ADRs link `../history/BUILD_PLAN_V2.md`, which is correct in
         // the repository. Published under a `site-page:` slug, that document is
         // served as `build-plan-v2.html` — so rewriting the link to its own stem
         // aims it at a page that is never emitted.
         let mut pages = PublishedPages::new();
         pages.publish("BUILD_PLAN_V2.md", "build-plan-v2.html");
-        let html = render_markdown("See [V2](../BUILD_PLAN_V2.md).\n", "", &pages, None, 0);
+        let html = render_markdown(
+            "See [V2](../history/BUILD_PLAN_V2.md).\n",
+            "",
+            &pages,
+            None,
+            0,
+        );
         assert!(
             html.contains("href=\"../build-plan-v2.html\""),
             "served name, and the link's own hop kept: {html}"
         );
         // A fragment survives the substitution.
-        let frag = render_markdown("[s](../BUILD_PLAN_V2.md#stage-21)\n", "", &pages, None, 0);
+        let frag = render_markdown(
+            "[s](../history/BUILD_PLAN_V2.md#stage-21)\n",
+            "",
+            &pages,
+            None,
+            0,
+        );
         assert!(
             frag.contains("href=\"../build-plan-v2.html#stage-21\""),
             "{frag}"
@@ -1541,7 +1553,7 @@ mod tests {
         pages.publish("BUILD_PLAN_V2.md", "build-plan-v2.html");
         let base = source("website/pages");
         let html = render_markdown(
-            "[v2](../../docs/BUILD_PLAN_V2.md)\n",
+            "[v2](../../docs/history/BUILD_PLAN_V2.md)\n",
             "adr/",
             &pages,
             Some(&base),

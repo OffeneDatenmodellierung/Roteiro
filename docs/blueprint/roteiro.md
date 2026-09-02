@@ -2,7 +2,7 @@
 
 _The overall project blueprint: a graph-grounded build plan for the whole system,
 the sibling of the ADRs in the authoring pillar ([[docs/adr/0004-spec-blueprint-authoring-pillar.md]]).
-Where the Build Plan (`docs/BUILD_PLAN.md`) tracks **stages over time**, this
+Where the Build Plan (`docs/history/BUILD_PLAN.md`) tracks **stages over time**, this
 blueprint describes **how the system fits together right now** — each section is
 wired into the code it governs by `[[…]]` links that `roteiro check` validates
 against the derived graph, so this document cannot silently drift from the

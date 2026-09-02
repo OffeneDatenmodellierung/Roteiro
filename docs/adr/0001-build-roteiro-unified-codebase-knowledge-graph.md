@@ -11,8 +11,8 @@ architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.5"
-last-modified: 2026-09-01
+version: "1.6"
+last-modified: 2026-09-02
 confluence-url:
 ---
 
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | Accepted |
 | **Architectural Significance** | HIGH |
 | **Domain** | Developer Tooling |
-| **Document version** | 1.5 |
+| **Document version** | 1.6 |
 
 ## Reference
 
@@ -153,6 +153,34 @@ the point.** The break is the signal, and anything that would require one should
 first be asked whether it is a graph fact at all — which, three times out of
 three, it was not.
 
+## The MSRV rule
+
+**Stay on the current MSRV until a dependency forces a move, and treat any bump
+as an ADR-worthy decision.**
+
+This rule was written in `docs/BUILD_PLAN.md` and lived there until that
+document was archived (2026-09-02). It is restated here rather than retired
+because it is still in force and because v1.4 below already cites it *as*
+ADR-0001's rule — a citation that would otherwise point into a document marked
+"no longer maintained".
+
+Two consequences the wording carries and that are easy to lose:
+
+- **"Until a dependency forces a move"** is the trigger, not a preference for
+  newness. The MSRV does not rise because a newer toolchain is available; it
+  rises because something the project has decided to depend on will not build
+  without it. v1.4 is the worked example: the OKF conformance stack declared
+  `rust-version = 1.96`, and the alternative to raising the floor was gating a
+  capability that had already been accepted into the default build.
+- **"ADR-worthy"** means the bump is recorded here with its driver, not merely
+  performed. An MSRV is a compatibility promise to anyone building this project,
+  and a promise that changes without a record is not one.
+
+Pinning a dependency to hold the floor is the ordinary counter-move and needs no
+ADR — `rusqlite = 0.39` is the standing example. What that pin does *not* do is
+survive its own reason: when the blocker lifts, the manifest says so rather than
+continuing to imply an MSRV constraint that has gone (see v1.4).
+
 ## Advice Received
 
 Accepted by the project team without external advisory review — single-team open-source project; future significant changes will be superseding ADRs. Naming secured: `roteiro.dev` registered, crates.io names available, repo created at `OffeneDatenmodellierung/Roteiro`. Planned: circulate v0.x for review before implementation beyond crate-name reservation.
@@ -171,3 +199,4 @@ Accepted by the project team without external advisory review — single-team op
 | 1.3 | 2026-08-19 | **Answers a question the code had left to silence** (issue #448): is `derived \| authored \| inferred` closed on purpose, permanently? Yes, and the evidence is that the project has since declined to extend it three times running — ADR-0012 gave analyzer findings their own artifact store, ADR-0013 gave agent memory one, ADR-0015 gave generated media one. Each was a candidate for a fourth variant; each time what did not fit was not a fourth way of *producing a graph fact* but something that was **not a graph fact**. Records the consequence for anyone reaching for `#[non_exhaustive]` on this enum: it would be **weaker documentation than the current silence**, because it would imply a fourth variant is anticipated when three consecutive ADRs establish that it is not. The precedent for saying so at the definition is `rto_remote::escalation::Trigger`. The cost is stated rather than hidden — `Provenance` rides every edge of every `roteiro.query/v1` document, so a fourth class is simultaneously a Rust break and a wire break on the most-consumed document the project emits, and that break is the signal rather than the obstacle. No architectural decision changes; a standing one is written down. |
 | 1.4 | 2026-09-01 | **MSRV raised 1.94 → 1.96.** The driver is the OKF conformance stack (ADR-0021): `okf-validator`'s tree pulls twelve `oxc_*` crates that declare `rust-version = 1.96`, and the project accepted that tree into the **default** build rather than gating it — so the MSRV, not a feature flag, is what has to give. This is the project's first MSRV move, and it is made under BUILD_PLAN's standing rule that a bump is ADR-worthy and happens only when a dependency forces one, which is what happened. A second consequence is recorded rather than left implicit: the raise **retires the `rusqlite = 0.39` pin's stated reason**. That pin exists because `libsqlite3-sys` 0.38+ uses `cfg_select!`, stable since 1.95, and 1.95 was newer than the old MSRV; at 1.96 that blocker is gone. It is **not** thereby unblocked, and the manifest now says so: `boxlite` 0.10.0 requires `rusqlite ^0.39` and `libsqlite3-sys` declares `links = "sqlite3"`, so the graph admits one version and `--all-features` cannot move to 0.40 until boxlite does. Lifting the pin is a dependency-upgrade task gated upstream, not an MSRV one — recorded so the next MSRV bump does not inherit it as unfinished business. On CI only three of the ten pinned `toolchain:` values move — `ci.yml`'s `msrv` job and both `website.yml` jobs; the other seven already ran 1.98 and are untouched. No architectural decision in this ADR changes. |
 | 1.5 | 2026-09-01 | **The anticipated break happened** (issue #706; recorded as a decision in ADR-0021 v1.1). v1.3 above closed `derived \| authored \| inferred` on purpose and named the price of ever opening it: a fourth class would be *"simultaneously a Rust break and a wire break on the most-consumed document the project emits, and that break is the signal rather than the obstacle"*. Reading a peer's OKF bundle is that case, and it resolved the way v1.3 said it should. The enum was **not** given a fourth way of *producing* a graph fact; the three that exist were qualified by **who** produced them — `external-derived` / `external-authored` / `external-inferred`, six tokens, with externality flattened to exactly one level and the import layer's `src_ref` naming the source. v1.3's reasoning is why a flat `External` was rejected rather than an oversight: collapsing a peer's tier would force one arm of `okf::origin_for` and then re-emit the flattened tier outward, laundering by round-trip. So v1.3 should be read as having priced this correctly, not as having forbidden it, and `#[non_exhaustive]` is still declined for the reason it gives. **The consequence v1.3 attached is narrower than it reads.** `Provenance` is a `pub` enum without `#[non_exhaustive]`, and `rto-graph-v5.0.0` shipped three variants, so six is technically breaking for a downstream exhaustive match. `AGENTS.md` carves the `rto-*` crates out of that escalation **deliberately**: they publish only so that `cargo install roteiro` resolves, `roteiro` is their sole reverse dependency, and a technically-breaking change to their surface — a field's type, an enum variant, a signature — ships as a **minor** and does not take a `!`. `7a98938` invoked exactly that in its body ("No `!`, deliberately"), and release-plz cut `5.1.0` accordingly. So v1.3's "the break is the signal" is discharged by the **record** rather than by a major version, and the wire cost it named is borne by migration 14, which makes an older build report a widened store as written by a newer Roteiro rather than as corrupt. The escalation v1.3 imagined belongs to `roteiro` itself — its CLI contracts, config keys and on-disk formats, the surfaces `AGENTS.md` explicitly does **not** carve out — not to `rto-graph`'s Rust API. Recorded because the conclusion is counter-intuitive: this is a real break that correctly ships as a minor, and the reasoning lives in two places (`AGENTS.md` and that commit body) rather than here. |
+| 1.6 | 2026-09-02 | **Adopts the MSRV rule from `BUILD_PLAN.md`**, which has been archived to `docs/history/` along with `BUILD_PLAN_V2.md`. Both plans were delivered and their work moved to tracked issues, so they are marked `status: deprecated` — OKF §5.4's value, whose gloss is exactly this case: *"kept for links and history; no longer current."* Archiving rather than deleting follows the same principle this project already applies to ADR-0005's go/no-go spike table and `BUILD_PLAN_V2`'s own baseline snapshot: a record of what was decided or measured at the time is not rewritten to match the present. **One rule did not retire with them.** v1.4 above cites *"BUILD_PLAN's standing rule that a bump is ADR-worthy and happens only when a dependency forces one"*, which would have left a live constraint sourced from a dead document; it now has a section of its own here. No architectural decision changes — this moves a rule and a pair of documents, and adds nothing. |

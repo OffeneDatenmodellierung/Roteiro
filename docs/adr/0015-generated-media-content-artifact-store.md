@@ -287,7 +287,7 @@ for something extracted from the source.
 
 ## Status
 
-**Accepted** (2026-08-17), and implemented — Stage 28a/28b (#310, #312), released from **v1.10.x**. Sequenced in [BUILD_PLAN_V2](../BUILD_PLAN_V2.md) as Stage 28, and
+**Accepted** (2026-08-17), and implemented — Stage 28a/28b (#310, #312), released from **v1.10.x**. Sequenced in [BUILD_PLAN_V2](../history/BUILD_PLAN_V2.md) as Stage 28, and
 implemented across two changes: the artifact store, its CLI and the search
 channel (Stage 28a), then the pre-generation gate and the explorer surfacing
 (Stage 28b). The projector cache (#301) is complementary and tracked separately;
