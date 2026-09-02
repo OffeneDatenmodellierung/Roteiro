@@ -42,6 +42,7 @@ import json
 import re
 import subprocess
 import sys
+from datetime import datetime, timezone
 
 # The heading Copilot writes above findings it did not post as inline comments.
 # Matched loosely on purpose: the "(N)" count and any "**Previously missed (N)**"
@@ -161,6 +162,19 @@ def last_answered_at(repo: str, pr: int) -> str:
     Deliberately **not** `updatedAt`: that moves on every comment, including the
     review that raised the finding, so it would mark everything answered the
     moment it appeared.
+
+    Also not `pushedDate`, despite it being the more honest name for what this
+    wants: GitHub has deprecated it and it comes back `null` here, so preferring
+    it would be dead code carrying an implication it cannot keep. `committedDate`
+    is used instead, and it does move on a rebase — checked, 19:13:30 to 19:13:32
+    across one — so the usual worry about it does not apply.
+
+    The worry that *does* apply is a timestamp in the future, from a skewed clock
+    or a hand-set committer date. That would push the line past every finding and
+    turn the tool green while work was outstanding, which is the one direction of
+    error that matters here: a finding wrongly shown is noise, a finding wrongly
+    hidden is the bug this tool exists to prevent. Future moments are therefore
+    discarded.
     """
     owner, name = repo.split("/", 1)
     query = """
@@ -168,8 +182,8 @@ def last_answered_at(repo: str, pr: int) -> str:
       repository(owner:$owner, name:$name) {
         pullRequest(number:$pr) {
           commits(last:1) { nodes { commit { committedDate } } }
-          userContentEdits(last:20) { nodes { editedAt } }
-          timelineItems(last:50, itemTypes:[RENAMED_TITLE_EVENT]) {
+          userContentEdits(last:1) { nodes { editedAt } }
+          timelineItems(last:1, itemTypes:[RENAMED_TITLE_EVENT]) {
             nodes { ... on RenamedTitleEvent { createdAt } }
           }
         }
@@ -183,16 +197,19 @@ def last_answered_at(repo: str, pr: int) -> str:
     )["data"]["repository"]["pullRequest"]
 
     moments = []
-    for node in data["commits"]["nodes"]:
-        moments.append(node["commit"]["committedDate"])
+    for node in data["commits"]["nodes"] or []:
+        moments.append((node.get("commit") or {}).get("committedDate"))
     for node in data["userContentEdits"]["nodes"] or []:
-        if node.get("editedAt"):
-            moments.append(node["editedAt"])
+        moments.append(node.get("editedAt"))
     for node in data["timelineItems"]["nodes"] or []:
-        if node.get("createdAt"):
-            moments.append(node["createdAt"])
+        moments.append(node.get("createdAt"))
+
+    # Any of these can be absent — a deleted edit, an unexpected timeline node —
+    # and `max()` over a list containing `None` raises rather than degrading.
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    usable = [m for m in moments if m and m <= now]
     # ISO-8601 UTC throughout, so lexicographic order is chronological order.
-    return max(moments) if moments else ""
+    return max(usable) if usable else ""
 
 
 def suppressed(repo: str, pr: int) -> list[dict]:
