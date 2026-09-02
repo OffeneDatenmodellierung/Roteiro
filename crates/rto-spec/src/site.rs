@@ -64,7 +64,8 @@ pub enum ParseError {
     /// make the author's intended link the broken one.
     #[error(
         "site-page slug `{0}` is not URL-safe (expected `/`-separated segments of \
-         lowercase a-z, 0-9 and `-`, none empty or `-`-terminated)"
+         lowercase a-z, 0-9 and `-`, none empty and none starting or ending with \
+         `-`)"
     )]
     InvalidSlug(String),
     /// `site-order` was present but not a non-negative integer.
@@ -299,8 +300,9 @@ fn field<'a>(text: &'a str, key: &str) -> Option<&'a str> {
     })
 }
 
-/// Whether `slug` is safe to use verbatim as a published filename: a non-empty
-/// run of `a-z`, `0-9` and `-`, not starting or ending with `-`.
+/// Whether `slug` is safe to use verbatim as a published path: one or more
+/// `/`-separated segments, each a non-empty run of `a-z`, `0-9` and `-` that
+/// neither starts nor ends with `-`.
 fn is_url_safe_slug(slug: &str) -> bool {
     // A slug may name a *path*, not just a file: `history/build-plan-v2` serves
     // at `/history/build-plan-v2.html`. That is a widening rather than a new

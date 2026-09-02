@@ -1484,3 +1484,70 @@ fn a_cross_repo_link_resolves_into_the_other_member() {
 
     std::fs::remove_dir_all(&base).ok();
 }
+
+/// A `site-page:` slug may name a **path**, and the page it produces has to work
+/// from where it actually sits.
+///
+/// The unit tests cover the slug rule and the link rewrite separately; this is
+/// the one that would have caught them being right individually and wrong
+/// together — the directory has to be created, the theme and nav have to climb
+/// back to the root, and a link from an ADR has to land on it.
+#[test]
+fn a_slug_that_names_a_directory_is_served_from_it() {
+    let dir = fresh_dir("nestedslug");
+    git(&dir, &["init", "-q"]);
+    write(&dir, "website/public/index.html", "<h1>Home</h1>\n");
+    write(&dir, "website/public/style.css", "body{}\n");
+    write(
+        &dir,
+        "website/pages/modes.md",
+        "---\nsite-page: modes\nsite-nav: Modes\nsite-order: 1\n---\n\n# Modes\n",
+    );
+    write(
+        &dir,
+        "docs/history/BUILD_PLAN_V2.md",
+        "---\nsite-page: history/build-plan-v2\nsite-nav: Roadmap\nsite-order: 3\n---\n\n\
+         # Roadmap\n",
+    );
+    write(
+        &dir,
+        "docs/adr/0001-example.md",
+        "---\nadr-id: \"0001\"\nstatus: Accepted\n---\n\n# ADR-0001: Example\n\n\
+         Sequenced in [V2](../history/BUILD_PLAN_V2.md).\n",
+    );
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+
+    let out = Command::new(BIN)
+        .args(["render", "docs", "--out", "site"])
+        .current_dir(&dir)
+        .output()
+        .expect("run render");
+    assert!(out.status.success(), "render failed: {out:?}");
+    let site = dir.join("site");
+
+    // Served from the directory its slug names, not from the root.
+    let page = std::fs::read_to_string(site.join("history/build-plan-v2.html"))
+        .expect("page under history/");
+    assert!(
+        !site.join("build-plan-v2.html").exists(),
+        "and not also at the root"
+    );
+
+    // A page one level down climbs for everything outside it: theme, nav, ADRs.
+    assert!(
+        page.contains("href=\"../style.css\""),
+        "theme resolves from where the page sits: {page}"
+    );
+    assert!(
+        page.contains("href=\"../modes.html\""),
+        "nav entries are root-relative and must climb: {page}"
+    );
+
+    // And the ADR's repository-correct link lands on it.
+    let adr = std::fs::read_to_string(site.join("adr/0001-example.html")).expect("adr page");
+    assert!(
+        adr.contains("href=\"../history/build-plan-v2.html\""),
+        "the ADR link resolves to the served path: {adr}"
+    );
+}

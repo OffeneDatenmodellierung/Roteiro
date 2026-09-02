@@ -27,12 +27,20 @@ pub struct RenderedAdr {
 /// serves, keyed by the source markdown's file name.
 ///
 /// [`rewrite_doc_link`] used to derive a link's target from the link's own
-/// spelling — `../history/BUILD_PLAN_V2.md` → `../BUILD_PLAN_V2.html` — which is correct
+/// spelling — `../BUILD_PLAN_V2.md` → `../BUILD_PLAN_V2.html` — which is correct
 /// only while every document is served under its own stem. Site pages ended
-/// that: a page is published as its declared `site-page:` slug, and a slug is
-/// URL-safe by construction (`[a-z0-9-]+`), so `docs/history/BUILD_PLAN_V2.md` is served
-/// as `build-plan-v2.html`. The rewrite then pointed four correct repository
-/// links at a page that is never emitted — issue #446, live on roteiro.dev.
+/// that: a page is published as its declared `site-page:` slug, so
+/// `docs/history/BUILD_PLAN_V2.md` is served as whatever its slug says. The
+/// rewrite then pointed four correct repository links at a page that is never
+/// emitted — issue #446, live on roteiro.dev.
+///
+/// A slug may also name a **path** — `history/build-plan-v2` serves at
+/// `/history/build-plan-v2.html` — so a served name is not necessarily a bare
+/// filename. When it contains a `/` it is a path from the site root, and
+/// [`rewrite_doc_link`] replaces the link's own directory hops with the climb
+/// back to the root rather than keeping them; keeping them doubled the
+/// directory. A bare served name still keeps the link's hops, which is what
+/// every ADR-to-ADR link depends on.
 ///
 /// So the served name is *looked up* rather than guessed. The renderer is handed
 /// the index of what the site emits, which is the only thing that knows the
