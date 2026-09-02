@@ -104,7 +104,7 @@ provenance is partly invented is worse than one that admits a gap.
 | Class | n | real | false |
 |---|---:|---:|---:|
 | `contract-drift` — a doc, comment or ADR contradicts the code it describes | 5 | 5 | 0 |
-| `false-compile-claim` — asserts the code will not build | 4 | 0 | 4 |
+| `false-compile-claim` — asserts the code will not build | 5 | 0 | 5 |
 | `vacuous-test` — a test passes while the behaviour it names is broken | 3 | 3 | 0 |
 | `error-text-drift` — an error message does not state the rule it enforces | 2 | 2 | 0 |
 | `permissive-constraint` — a constraint permits the state it exists to forbid | 2 | 2 | 0 |
@@ -220,11 +220,16 @@ falsify a reviewer decisively; it cannot finely rank two good ones.
 
 ### Measured cost of using it
 
-Reconstructing all 15 review diffs at `-U3` costs about **513k tokens in total**,
-averaging **34k per commit** and reaching **103k** on PR #339. Against a measured
-single-call budget of ~30k on this repository, **9 of the 15 diffs do not fit in one
+Reconstructing all 16 review diffs at `-U3` costs about **531k tokens in total**,
+averaging **33k per commit** and reaching **103k** on PR #339. Against a measured
+single-call budget of ~30k on this repository, **9 of the 16 diffs do not fit in one
 call before any context is added**, which is why a whole-diff reviewer is not the
-shape to build. (Figures are `len(diff) / 4`, so they are an estimate of the same
+shape to build.
+
+The 16th (PR #736, ~18k) was added when its comment was adjudicated. It does not
+change the conclusion — it is one of the seven that *would* fit — and the totals
+are restated rather than left at 15 so the figures keep describing the corpus
+that is actually here. (Figures are `len(diff) / 4`, so they are an estimate of the same
 order, not a tokeniser's count.)
 
 **Per file, the budget is not the constraint at all** — measured in Stage 35b over

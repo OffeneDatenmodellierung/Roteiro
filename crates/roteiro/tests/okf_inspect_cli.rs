@@ -274,3 +274,112 @@ fn nothing_to_check_is_reported_as_nothing_rather_than_as_clean() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// `okf validate` gates on a conformance error, and names the concept.
+#[test]
+fn a_conformance_error_fails_the_validate_command() {
+    let root = bundle(
+        "validate-error",
+        &[
+            ("index.md", "---\nokf_version: \"0.2\"\n---\n\n# Bundle\n"),
+            // §4.1 requires `type` on every concept.
+            (
+                "metrics/untyped.md",
+                "---\ntitle: Untyped\n---\n\n# Untyped\n\nProse.\n",
+            ),
+        ],
+    );
+    let path = root.to_string_lossy().into_owned();
+    let out = roteiro(&["okf", "validate", &path]);
+    assert!(!out.status.success(), "a conformance error must gate");
+    let text = String::from_utf8(out.stdout).expect("utf-8");
+    assert!(text.contains("metrics/untyped"), "names it: {text}");
+    assert!(text.contains("`type` is missing"), "{text}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `okf lint` reports and never gates.
+///
+/// The two commands differ in kind and not only in outcome: hygiene has no error
+/// severity at all, so a lint run that found plenty still exits zero.
+#[test]
+fn lint_reports_without_gating() {
+    let root = bundle(
+        "lint-noisy",
+        &[
+            ("index.md", "---\nokf_version: \"0.2\"\n---\n\n# Bundle\n"),
+            (
+                "metrics/messy.md",
+                "---\ntitle: Messy\ntype: Metric\nstatus: draft\n---\n\nNo heading at all.   \n",
+            ),
+        ],
+    );
+    let path = root.to_string_lossy().into_owned();
+    let out = roteiro(&["okf", "lint", &path]);
+    assert!(
+        out.status.success(),
+        "hygiene never gates, however much it finds"
+    );
+    let text = String::from_utf8(out.stdout).expect("utf-8");
+    for code in ["[L1]", "[L12]"] {
+        assert!(text.contains(code), "expected {code} in: {text}");
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The two are wired to different checks, and say which they are.
+#[test]
+fn validate_and_lint_are_not_the_same_command() {
+    let root = two_tier_bundle("conform-json");
+    let path = root.to_string_lossy().into_owned();
+
+    let v: serde_json::Value =
+        serde_json::from_slice(&roteiro(&["okf", "validate", &path, "--json"]).stdout)
+            .expect("validate --json");
+    let l: serde_json::Value =
+        serde_json::from_slice(&roteiro(&["okf", "lint", &path, "--json"]).stdout)
+            .expect("lint --json");
+
+    assert_eq!(v["check"], "validate");
+    assert_eq!(l["check"], "lint");
+    // `concepts` is what tells a reader the check looked at something — without
+    // it, "no findings" over an empty bundle reads as a clean bill of health.
+    assert_eq!(v["concepts"], 2, "{v}");
+    assert_eq!(l["concepts"], 2, "{l}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A bundle with **no concepts** still gates when something in it is an error.
+///
+/// The report is right and the *printer* was wrong: an early return on
+/// `concepts == 0` skipped both the findings and the gate, so `okf validate`
+/// exited 0 on a bundle whose only document does not parse. A vacuous green in
+/// the command whose whole job is to refuse one.
+#[test]
+fn no_concepts_does_not_mean_nothing_to_gate_on() {
+    let root = bundle(
+        "no-concepts-error",
+        &[
+            ("index.md", "---\nokf_version: \"0.2\"\n---\n\n# Bundle\n"),
+            // Does not parse, so it is a conformance error *and* contributes no
+            // concept — the exact pair the early return hid.
+            (
+                "metrics/broken.md",
+                "---\ntype: [unclosed\n---\n\n# Broken\n",
+            ),
+        ],
+    );
+    let path = root.to_string_lossy().into_owned();
+    let out = roteiro(&["okf", "validate", &path]);
+    let text = String::from_utf8(out.stdout).expect("utf-8");
+    assert!(
+        !out.status.success(),
+        "an unreadable document is an error however few concepts survived it: {text}"
+    );
+    assert!(
+        text.contains("no concepts examined"),
+        "and it still says nothing was examined: {text}"
+    );
+    assert!(text.contains("broken.md"), "and names the file: {text}");
+    let _ = std::fs::remove_dir_all(&root);
+}

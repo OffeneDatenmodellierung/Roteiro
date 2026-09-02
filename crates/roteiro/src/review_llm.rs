@@ -1823,8 +1823,13 @@ mod tests {
 
     /// The measured scale of a replay, asserted so a change to the recipe that
     /// quietly reviews half the corpus is caught. The budget analysis was computed
-    /// over 190 changed paths on 15 commits, of which **184 are reviewable** —
+    /// over 197 changed paths on 16 commits, of which **191 are reviewable** —
     /// both halves are asserted, because a drop in either is a different bug.
+    ///
+    /// These numbers move when the **corpus** gains a commit, which is the guard
+    /// working rather than failing: the replay window is the corpus's distinct
+    /// `reviewed_sha` values, so adjudicating a comment on a new commit widens
+    /// it. #736 took it from 15 commits and 190 paths to 16 and 197.
     #[test]
     fn a_replay_covers_the_measured_number_of_files() {
         let repo = repo();
@@ -1840,8 +1845,8 @@ mod tests {
         }
         assert_eq!(
             (corpus_shas().len(), changed, reviewable),
-            (15, 190, 184),
-            "15 commits, 190 changed paths, 184 with a reviewable diff"
+            (16, 197, 191),
+            "16 commits, 197 changed paths, 191 with a reviewable diff"
         );
     }
 
