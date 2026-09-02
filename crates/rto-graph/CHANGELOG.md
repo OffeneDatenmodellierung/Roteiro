@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.3.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v5.2.0...rto-graph-v5.3.0) - 2026-09-02
+
+### Fixed
+
+- *(graph)* delete a stub whose caller ADR-0015 removed
+
+### Other
+
+- Merge pull request #729 from OffeneDatenmodellierung/fix/orphaned-vlm-stub
+
 ## [5.2.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v5.1.0...rto-graph-v5.2.0) - 2026-09-02
 
 ### Added
