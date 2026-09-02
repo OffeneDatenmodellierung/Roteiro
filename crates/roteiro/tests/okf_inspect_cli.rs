@@ -348,3 +348,38 @@ fn validate_and_lint_are_not_the_same_command() {
     assert_eq!(l["concepts"], 2, "{l}");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A bundle with **no concepts** still gates when something in it is an error.
+///
+/// The report is right and the *printer* was wrong: an early return on
+/// `concepts == 0` skipped both the findings and the gate, so `okf validate`
+/// exited 0 on a bundle whose only document does not parse. A vacuous green in
+/// the command whose whole job is to refuse one.
+#[test]
+fn no_concepts_does_not_mean_nothing_to_gate_on() {
+    let root = bundle(
+        "no-concepts-error",
+        &[
+            ("index.md", "---\nokf_version: \"0.2\"\n---\n\n# Bundle\n"),
+            // Does not parse, so it is a conformance error *and* contributes no
+            // concept — the exact pair the early return hid.
+            (
+                "metrics/broken.md",
+                "---\ntype: [unclosed\n---\n\n# Broken\n",
+            ),
+        ],
+    );
+    let path = root.to_string_lossy().into_owned();
+    let out = roteiro(&["okf", "validate", &path]);
+    let text = String::from_utf8(out.stdout).expect("utf-8");
+    assert!(
+        !out.status.success(),
+        "an unreadable document is an error however few concepts survived it: {text}"
+    );
+    assert!(
+        text.contains("no concepts examined"),
+        "and it still says nothing was examined: {text}"
+    );
+    assert!(text.contains("broken.md"), "and names the file: {text}");
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -626,10 +626,9 @@ fn check_duplicate_titles(cx: &mut Cx<'_>, bundle: &Bundle) {
         let others: Vec<String> = concepts.iter().map(|c| c.id.to_string()).collect();
         for concept in &concepts {
             cx.at(concept);
-            let siblings: Vec<&String> = others
-                .iter()
-                .filter(|id| **id != concept.id.to_string())
-                .collect();
+            // Formatted once per concept rather than once per comparison.
+            let self_id = concept.id.to_string();
+            let siblings: Vec<&String> = others.iter().filter(|id| **id != self_id).collect();
             cx.warn(format!(
                 "title `{title}` is shared with {}; \
                  the two are indistinguishable in any listing that shows titles",
@@ -659,9 +658,12 @@ fn check_circular_derivation(cx: &mut Cx<'_>, bundle: &Bundle) {
             let Some(rel) = bundle_relative(resource) else {
                 continue;
             };
+            // A self-edge is kept. A concept whose `sources` names itself is a
+            // cycle of length one — the shortest way to make provenance
+            // unresolvable — and dropping it as "not really an edge" was the one
+            // shape this rule could not see.
             if let Some(id) = okf_core::links::concept_id_for_path(&rel)
                 && bundle.contains(&id)
-                && id.to_string() != from
             {
                 edges
                     .entry(from.clone())
@@ -1045,9 +1047,34 @@ fn bundle_relative(raw: &str) -> Option<String> {
         return None;
     }
     let trimmed = raw.trim_start_matches('/');
-    // `..` would escape the bundle, and a checker that followed it would report
-    // on files the bundle does not own.
-    if trimmed.is_empty() || trimmed.split('/').any(|s| s == "..") {
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // Nothing that could climb out of the bundle or re-root the join, on
+    // **either** platform's rules. A bundle is a portable artefact — one written
+    // on Windows is read on Unix — so the separator cannot be left to whichever
+    // machine happens to be reading. `..\..` is a single ordinary filename to
+    // Unix and a climb to Windows, and `C:\…` re-roots the join outright; the
+    // caller does `bundle.root().join(rel)`, so either would have this checker
+    // stat a file the bundle does not own.
+    if trimmed
+        .split(['/', '\\'])
+        .any(|segment| segment == ".." || segment == "." || segment.is_empty())
+    {
+        return None;
+    }
+    // A drive or UNC prefix. A URL was already excluded above, and no portable
+    // filename carries a colon, so this costs nothing that was readable anyway.
+    if trimmed.contains(':') {
+        return None;
+    }
+    // The platform's own reading, as a backstop: whatever the two rules above
+    // missed, every component must still be an ordinary name.
+    if Path::new(trimmed)
+        .components()
+        .any(|c| !matches!(c, std::path::Component::Normal(_)))
+    {
         return None;
     }
     Some(trimmed.to_owned())

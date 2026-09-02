@@ -6403,9 +6403,11 @@ fn print_okf_findings(
     );
     if report.concepts == 0 {
         // Nothing was examined, so "no findings" would be a green that means
-        // "could not look". Say which it is.
-        println!("  nothing to check — the bundle contains no concepts");
-        return Ok(());
+        // "could not look". Say which it is — but say it and carry on, because
+        // a bundle with no *concepts* can still have errors: a root `index.md`
+        // that does not parse produces one, and returning here would have
+        // exited zero on it.
+        println!("  no concepts examined — the bundle contains none");
     }
     for finding in &report.findings {
         let code = finding.code.map_or_else(String::new, |c| format!("[{c}] "));

@@ -544,3 +544,123 @@ fn a_path_that_is_not_a_bundle_is_refused() {
         "the refusal names the path the caller gave: {err}"
     );
 }
+
+/// A concept whose `sources` names itself.
+///
+/// A cycle of length one, and the shortest way to make provenance unresolvable.
+/// An earlier draft dropped the self-edge as "not really an edge", so this was
+/// the one cycle shape the rule could not see.
+#[test]
+fn a_concept_that_derives_from_itself_is_a_cycle() {
+    let root = bundle(
+        "self-cycle",
+        &[
+            ("index.md", ROOT_INDEX),
+            (
+                "metrics/ouroboros.md",
+                "---\ntype: Metric\ntitle: O\nsources:\n  - { id: me, resource: /metrics/ouroboros.md }\n---\n\n# O\n",
+            ),
+        ],
+    );
+    let report = conform::validate_report(&root).expect("load");
+    let cycles: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|f| f.message.contains("circular derivation"))
+        .collect();
+    assert_eq!(cycles.len(), 1, "{report:?}");
+    assert_eq!(cycles[0].severity, "error");
+    assert!(!report.passed());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A path field must not be able to climb out of the bundle, on **either**
+/// platform's reading of a separator.
+///
+/// The caller does `bundle.root().join(rel)`, so a path that escapes would have
+/// this checker stat a file the bundle does not own. A bundle is portable — one
+/// written on Windows is read on Unix — so the separator cannot be left to
+/// whichever machine happens to be reading: `..\..` is one ordinary filename to
+/// Unix and a climb to Windows.
+#[test]
+fn a_resource_that_escapes_the_bundle_is_not_followed() {
+    let escapes = [
+        ("../outside.md", "unix parent"),
+        ("..\\outside.md", "windows parent"),
+        ("a/../../outside.md", "climb through"),
+        ("C:\\outside.md", "drive letter"),
+        ("./here.md", "current-dir component"),
+    ];
+    for (target, label) in escapes {
+        let root = bundle(
+            "escape",
+            &[
+                ("index.md", ROOT_INDEX),
+                (
+                    "metrics/m.md",
+                    &format!("---\ntype: Metric\ntitle: M\nresource: {target}\n---\n\n# M\n"),
+                ),
+            ],
+        );
+        let report = conform::validate_report(&root).expect("load");
+        assert!(
+            !messages(&report, None)
+                .iter()
+                .any(|m| m.contains("which the bundle does not contain")),
+            "{label} (`{target}`) must not be resolved against the bundle root: {:?}",
+            messages(&report, None)
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // And an ordinary bundle-relative path still is, so the guard above has not
+    // simply switched the check off.
+    let root = bundle(
+        "escape-control",
+        &[
+            ("index.md", ROOT_INDEX),
+            (
+                "metrics/m.md",
+                "---\ntype: Metric\ntitle: M\nresource: /metrics/absent.md\n---\n\n# M\n",
+            ),
+        ],
+    );
+    let report = conform::validate_report(&root).expect("load");
+    assert!(
+        messages(&report, None)
+            .iter()
+            .any(|m| m.contains("which the bundle does not contain")),
+        "a real bundle-relative path is still checked: {:?}",
+        messages(&report, None)
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A bundle with **no concepts** can still carry a conformance error.
+///
+/// A root `index.md` that does not parse produces one, and the report must still
+/// count it — this is the library half of the gating bug the CLI test pins.
+#[test]
+fn a_bundle_with_no_concepts_can_still_fail() {
+    // A *concept* that does not parse: it produces a parse error and, because it
+    // did not parse, contributes no concept. A malformed root `index.md` is not
+    // the case — it is read as an index file rather than a concept, so it yields
+    // neither.
+    let root = bundle(
+        "unparseable",
+        &[
+            ("index.md", ROOT_INDEX),
+            (
+                "metrics/broken.md",
+                "---\ntype: [unclosed\n---\n\n# Broken\n",
+            ),
+        ],
+    );
+    let report = conform::validate_report(&root).expect("load");
+    assert_eq!(report.concepts, 0, "nothing to examine: {report:?}");
+    assert!(
+        !report.passed(),
+        "but the unreadable root is an error, and `concepts == 0` must not hide it: {report:?}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
