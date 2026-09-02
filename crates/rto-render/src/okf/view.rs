@@ -373,10 +373,13 @@ fn rewrite_tag<'a>(
             // so a remote one is a network request they did not ask for. Only a
             // path inside the bundle survives, served back through the viewer's
             // own route; anything else loses its source and shows its alt text.
-            // `is_file`, not `exists`: `/f/` serves files, so a path naming a
-            // *directory* would otherwise become a `src` that 404s.
+            // The route's own guard, not a lexical approximation of it: it is
+            // `is_file` rather than `exists` because `/f/` serves files, and it
+            // resolves symlinks because a lexically clean path can still leave
+            // the bundle. Sharing it is what keeps a `src` we emit and a `src`
+            // the route will honour the same set.
             let dest = bundle_path(&dest_url)
-                .filter(|rel| bundle.root().join(rel).is_file())
+                .filter(|rel| safe_bundle_file(bundle.root(), rel).is_some())
                 .map_or_else(
                     || CowStr::Borrowed(""),
                     |rel| CowStr::from(format!("{base}/f/{rel}")),
@@ -465,13 +468,32 @@ fn viewer_href<'a>(dest: &str, bundle: &Bundle, base: &str) -> Option<pulldown_c
 /// its input came from our renderer would be a guard on the wrong side of the
 /// boundary.
 ///
-/// Returns the absolute path only when it resolves inside the bundle **and**
-/// exists.
+/// Returns the canonical path only when it is a file that really resolves
+/// inside the bundle.
+///
+/// **Both halves are load-bearing, and the second was missing.** [`bundle_path`]
+/// is purely lexical — it rejects `..`, an absolute path and a scheme — but a
+/// symlink has an entirely ordinary relative path. A bundle containing
+/// `notes.png -> /etc/passwd` passed every lexical check, and `is_file()`
+/// followed it, so `/f/notes.png` served the target. Measured, not theorised: two
+/// symlinks in a scratch bundle, one to a sibling file outside the root and one
+/// to `/etc/passwd`, were both served in full before this.
+///
+/// So the path is resolved and containment is required. The **root** is
+/// canonicalised too, not just compared against: on macOS `/tmp` is itself a
+/// symlink to `/private/tmp`, so comparing a resolved path against an
+/// unresolved root would refuse every legitimate file under a temporary bundle
+/// while passing on Linux — a whole-feature outage that CI could not see.
 #[must_use]
 pub fn safe_bundle_file(root: &Path, rel: &str) -> Option<std::path::PathBuf> {
     let rel = bundle_path(rel)?;
     let path = root.join(rel);
-    path.is_file().then_some(path)
+    if !path.is_file() {
+        return None;
+    }
+    let resolved_root = root.canonicalize().ok()?;
+    let resolved = path.canonicalize().ok()?;
+    resolved.starts_with(&resolved_root).then_some(resolved)
 }
 
 /// The bundle-relative path a destination names, or `None` when it names
@@ -739,6 +761,60 @@ mod tests {
             html.contains("src=\"\""),
             "a directory is not a source: {html}"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A symlink does not carry a file out of the bundle.**
+    ///
+    /// The lexical guard cannot see this one: `innocent.txt -> ../outside.txt`
+    /// has an ordinary relative path, no `..`, no scheme. Before the fix both
+    /// links below were served in full, `/etc/passwd` included, which in a
+    /// feature whose whole premise is "this bundle came from somebody else" is
+    /// the difference between reading their document and reading your disk.
+    ///
+    /// Unlike the scheme test above, this one *is* a guard: nothing else in the
+    /// path upholds it, and reverting the containment check turns it red.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_does_not_carry_a_file_out_of_the_bundle() {
+        use std::os::unix::fs::symlink;
+        let root = bundle_at(
+            "symlink",
+            &[("index.md", INDEX), ("img/logo.svg", "<svg/>")],
+        );
+        let outside = root.parent().expect("parent").join("outside-secret.txt");
+        std::fs::write(&outside, "not yours").expect("write");
+        symlink(&outside, root.join("escape.txt")).expect("symlink out");
+        symlink("/etc/passwd", root.join("passwd.txt")).expect("symlink absolute");
+        symlink("img/logo.svg", root.join("alias.svg")).expect("symlink within");
+
+        for escaping in ["escape.txt", "passwd.txt"] {
+            assert!(
+                safe_bundle_file(&root, escaping).is_none(),
+                "`{escaping}` leaves the bundle and must not be served"
+            );
+        }
+
+        // A real file still is — and so is a symlink that stays inside. This is
+        // the half that fails if the *root* is left uncanonicalised, because the
+        // bundle here lives under a `/tmp` that macOS resolves to `/private/tmp`.
+        for legitimate in ["img/logo.svg", "alias.svg"] {
+            assert!(
+                safe_bundle_file(&root, legitimate).is_some(),
+                "`{legitimate}` is inside the bundle and must still be served"
+            );
+        }
+
+        // And the renderer agrees with the route: an escaping image loses its
+        // source rather than emitting a `src` the route would refuse.
+        let bundle = load(&root);
+        let html = render_body("![x](escape.txt)\n", &bundle, "");
+        assert!(
+            html.contains(r#"src="""#),
+            "escaping image keeps no source: {html}"
+        );
+
+        let _ = std::fs::remove_file(&outside);
         let _ = std::fs::remove_dir_all(&root);
     }
 
