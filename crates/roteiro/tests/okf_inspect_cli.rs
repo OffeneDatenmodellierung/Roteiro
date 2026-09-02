@@ -53,9 +53,11 @@ fn two_tier_bundle(tag: &str) -> PathBuf {
         tag,
         &[
             // The root `index.md` declares `okf_version` and **nothing else**;
-            // adding a `type` here is a conformance error, which is exactly the
-            // kind of thing this bundle was originally written wrong and
-            // `okf validate` caught.
+            // adding a `type` here is a conformance error. This bundle was
+            // originally written that way and an OKF conformance check caught
+            // it — worth keeping correct even though nothing here validates it
+            // today, because the fixture is what a conformance check would run
+            // against when one lands.
             ("index.md", "---\nokf_version: \"0.2\"\n---\n\n# Bundle\n"),
             (
                 "metrics/revenue.md",
@@ -199,27 +201,6 @@ fn a_path_that_is_not_a_bundle_is_refused_by_name() {
         "Error: OKF bundle not found: /no/such/bundle (expected a directory of concept documents)\n",
         "the refusal must name the path and say what was expected"
     );
-}
-
-/// `validate` and `lint` are wired to *different* checks.
-#[test]
-fn validate_and_lint_are_wired_to_different_checks() {
-    let root = two_tier_bundle("validate");
-    let path = root.to_string_lossy().into_owned();
-
-    let validate =
-        String::from_utf8(roteiro(&["okf", "validate", &path, "--json"]).stdout).expect("utf-8");
-    let lint = String::from_utf8(roteiro(&["okf", "lint", &path, "--json"]).stdout).expect("utf-8");
-
-    let v: serde_json::Value = serde_json::from_str(&validate).expect("validate --json");
-    let l: serde_json::Value = serde_json::from_str(&lint).expect("lint --json");
-    assert_eq!(v["check"], "validate");
-    assert_eq!(l["check"], "lint");
-    assert_eq!(
-        v["errors"], 0,
-        "the inline bundle is conformant, so validate must find no errors: {validate}"
-    );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The vendored upstream fixtures are `rto-render`'s, and this test does not

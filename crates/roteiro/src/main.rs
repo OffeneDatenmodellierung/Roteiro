@@ -1203,10 +1203,10 @@ enum Command {
 
 /// `roteiro okf` actions (ADR-0021).
 ///
-/// The names are **upstream's**, deliberately: `trust`, `links`, `diff`,
-/// `validate` and `lint` are what the `okf` CLI calls the same five operations,
-/// so somebody who knows that tool already knows this one. Inventing synonyms
-/// would buy nothing and cost every reader who arrives from the specification.
+/// The names are **upstream's**, deliberately: `trust`, `links` and `diff` are
+/// what the `okf` CLI calls the same three operations, so somebody who knows
+/// that tool already knows this one. Inventing synonyms would buy nothing and
+/// cost every reader who arrives from the specification.
 ///
 /// The library is called **in-process**. Roteiro is a self-contained offline
 /// binary; requiring `okf` on `PATH` would make these commands work on the
@@ -1216,22 +1216,26 @@ enum Command {
 ///
 /// `graph` is left out: the explorer already renders the graph, and two tools
 /// answering that question drift apart. `info` is left out: its statistics are
-/// covered between `trust` and `validate`. `fix` and `fmt` are left out because
-/// they **rewrite** a bundle, which is a different kind of operation from
-/// reading one and deserves its own decision rather than arriving as a
+/// covered by `trust` and by `roteiro check`. `fix` and `fmt` are left out
+/// because they **rewrite** a bundle, which is a different kind of operation
+/// from reading one and deserves its own decision rather than arriving as a
 /// side-effect of this one.
 ///
-/// # All five ship in a stock build, and two of them are not cheap
+/// # `validate` and `lint` are absent on purpose
 ///
-/// `trust`, `links` and `diff` come from `okf-core`, which has zero
-/// dependencies. `validate` and `lint` come from `okf-validator`, which is worth
-/// 73 crates and raises the workspace MSRV to 1.96.
+/// All three actions here come from `okf-core`, which has **zero**
+/// dependencies. Conformance checking and hygiene linting live in a second
+/// crate, `okf-validator`, and that one is not free: none of its dependencies
+/// is optional and it syntax-checks fenced code blocks in eight languages, so
+/// taking it means taking `rustpython-parser` — 61 crates, `LGPL-3.0-only`
+/// through `malachite`, and six unmaintained advisories with no upgrade
+/// available — into the default binary of an `MIT OR Apache-2.0` tool.
 ///
-/// That cost was weighed and accepted rather than gated. Roteiro both writes OKF
-/// and reads it, so an independent conformance checker is the only thing here
-/// that can disagree with us about our own output — and a check shipped off by
-/// default is a check almost nobody runs. Gating it would have made the cheap
-/// answer differ from the valuable one.
+/// That buys two of its thirty-four checks. Whether a bundle's code samples
+/// parse is a linter's job, not an interchange format's, and `cargo deny`
+/// refuses the tree on both licence and advisory grounds. The structural checks
+/// are still worth having and are being reimplemented over `okf-core`; they
+/// will reappear here when they land.
 #[derive(Subcommand)]
 enum OkfAction {
     /// What the bundle claims about its own trustworthiness: §5.3's tier per
@@ -1289,39 +1293,6 @@ enum OkfAction {
         /// The bundle to treat as "after".
         after: String,
         /// Emit the report as JSON.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Check a bundle for conformance with the OKF v0.2 specification.
-    ///
-    /// Deterministic: `stale_after` is checked
-    /// for syntax but never against the clock, so a bundle that validates today
-    /// validates tomorrow — a check whose result depends on when it ran cannot
-    /// be a gate. Exits non-zero on a conformance **error**; warnings do not
-    /// fail, because §11 tells a consumer not to reject a document over a
-    /// soft-guidance deviation.
-    Validate {
-        /// The bundle directory.
-        path: String,
-        /// Emit the findings as JSON.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Check a bundle against the hygiene rules (`L1`..`L12`).
-    ///
-    /// A different question from `validate`: conformance asks whether the bundle
-    /// *is* OKF, linting asks whether it is *good* OKF. Two entry points into one
-    /// crate, which is why neither could ever have been had without the other.
-    ///
-    /// Gates the same way `validate` does — non-zero on an `error` finding,
-    /// never on a warning. In practice the hygiene rules report warnings and
-    /// info, so this usually exits zero and is read rather than gated; the
-    /// exit status is stated here so a CI script does not have to find out
-    /// by experiment.
-    Lint {
-        /// The bundle directory.
-        path: String,
-        /// Emit the findings as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -6295,8 +6266,6 @@ fn run_okf(action: OkfAction) -> anyhow::Result<()> {
             after,
             json,
         } => run_okf_diff(&before, &after, json),
-        OkfAction::Validate { path, json } => run_okf_validate(&path, json),
-        OkfAction::Lint { path, json } => run_okf_lint(&path, json),
     }
 }
 
@@ -6427,50 +6396,6 @@ fn run_okf_diff(before: &str, after: &str, json: bool) -> anyhow::Result<()> {
         println!("  link mended {from} -> {target}");
     }
     Ok(())
-}
-
-/// Print a validator report and gate on its errors. Shared by `validate` and
-/// `lint`, which differ in the entry point they call and in nothing else.
-fn print_okf_findings(
-    report: &rto_render::okf::inspect::CheckReport,
-    json: bool,
-) -> anyhow::Result<()> {
-    if json {
-        emit_json(report)?;
-    } else {
-        println!(
-            "{} ({}): {} error(s), {} warning(s)",
-            report.root, report.check, report.errors, report.warnings
-        );
-        for f in &report.findings {
-            let where_ = f
-                .concept
-                .as_deref()
-                .or(f.path.as_deref())
-                .unwrap_or("(bundle)");
-            let fixable = if f.fixable { " [fixable]" } else { "" };
-            println!("  {:<8} {where_}: {}{fixable}", f.severity, f.message);
-        }
-        if report.findings.is_empty() {
-            println!("  nothing to report");
-        }
-    }
-    if !report.passed() {
-        exit_gate_failure();
-    }
-    Ok(())
-}
-
-/// `roteiro okf validate` — conformance against the specification.
-fn run_okf_validate(path: &str, json: bool) -> anyhow::Result<()> {
-    let report = rto_render::okf::inspect::validate_report(okf_bundle_root(path)?)?;
-    print_okf_findings(&report, json)
-}
-
-/// `roteiro okf lint` — the hygiene rules.
-fn run_okf_lint(path: &str, json: bool) -> anyhow::Result<()> {
-    let report = rto_render::okf::inspect::lint_report(okf_bundle_root(path)?)?;
-    print_okf_findings(&report, json)
 }
 
 /// Every markdown file under an OKF bundle root, keyed by its bundle-relative

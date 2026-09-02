@@ -78,33 +78,28 @@ serde_json = { workspace = true }
 # against *this* parser — a stronger proof than before, since this is the
 # parser a peer would actually read our bundles with.
 okf-core = "0.2.6"
-# Independent conformance checking and hygiene linting of a bundle
-# (`roteiro okf validate` / `roteiro okf lint`).
+# `okf-validator` is deliberately NOT taken, though it is the obvious companion.
 #
-# **Not optional, by an explicit decision, and it is the expensive one.**
-# Measured with `cargo tree -p rto-render -e normal`: this crate's tree goes
-# from 161 to 234, so it is worth **73 crates** against **one** for `okf-core`.
+# It holds upstream's conformance checks and hygiene lints, which are genuinely
+# worth having. The problem is that none of its dependencies is optional, and it
+# syntax-checks fenced code blocks in eight languages. That drags in
+# `rustpython-parser`: 61 crates, `LGPL-3.0-only` via the `malachite` tree, and
+# six unmaintained RUSTSEC advisories whose own text says "No safe upgrade is
+# available". `cargo deny` refuses it on both counts, and ADR-0017 §3 is
+# explicit that a licence must not be admitted merely to turn CI green.
 #
-# They are a *parallel* stack rather than reuse. It syntax-checks fenced code
-# blocks, parsing JavaScript/TypeScript with `oxc_parser` (15 `oxc_*` crates),
-# Python with `rustpython-parser` and SQL with `sqlparser` — all three languages
-# this workspace already parses, with tree-sitter. What overlap there is is
-# generic plumbing (serde, syn, anyhow); nothing language-specific is shared.
+# Measured rather than assumed: all thirteen `cargo deny` failures trace to
+# `rustpython-parser` alone. `oxc_parser` (58 crates), `sqlparser` (18) and
+# `syn` contribute none. And the Python parser powers exactly TWO of the
+# validator's thirty-four checks — `check_code_block_syntax` and
+# `check_computation_script_syntax`. `lint.rs` never touches it.
 #
-# It was behind a feature until the cost was weighed against what it buys.
-# Roteiro both writes OKF and reads it, so an independent conformance checker is
-# the only thing in the workspace that can disagree with us about our own
-# output — and a check that ships off by default is a check almost nobody runs.
-# The gate would have made the cheap answer ("it built") differ from the
-# valuable one.
-#
-# Note also that none of its dependencies is optional, so its conformance
-# checking could never have been taken without its syntax checking; a
-# finer-grained gate was not on the table.
-#
-# **MSRV**: twelve `oxc_*` crates declare `rust-version = 1.96`, so this
-# dependency is what makes 1.96 the workspace floor.
-okf-validator = "0.2.6"
+# So the cost is not "a conformance checker"; it is a Python parser we do not
+# need, to check code this crate has no opinion about. Whether a bundle's code
+# samples parse is a linter's job, not an interchange format's. Upstream has
+# been asked to gate the language parsers behind features
+# (github.com/W4G1/okf); until then the structural checks are reimplemented
+# over `okf-core`, which costs nothing.
 
 [features]
 # MCP server support (`roteiro serve`), off by default — CLI-first. Adopts rmcp
