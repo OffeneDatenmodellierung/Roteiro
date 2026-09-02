@@ -42,6 +42,8 @@ import json
 import re
 import subprocess
 import sys
+from datetime import timezone
+from email.utils import parsedate_to_datetime
 
 # The heading Copilot writes above findings it did not post as inline comments.
 # Matched loosely on purpose: the "(N)" count and any "**Previously missed (N)**"
@@ -143,17 +145,106 @@ def open_threads(repo: str, pr: int) -> list[dict]:
     return out
 
 
-def head_commit_time(repo: str, pr: int) -> str:
-    """When the pull request's newest commit was made.
+def github_now() -> str:
+    """GitHub's own clock, as an ISO-8601 UTC string.
 
-    The dividing line between a finding that is certainly still open and one
-    that a later push may already have fixed. Without it every suppressed
-    finding a pull request ever received counts forever, the exit code can
-    never return to zero, and a gate that is always red is a gate nobody reads.
+    Read from the `Date` header of `/rate_limit`, which does not consume quota.
+    Used so that "is this timestamp in the future" is asked of one clock rather
+    than compared across two.
+
+    Parsed with `email.utils.parsedate_to_datetime`, which is what the RFC-2822
+    format this header uses is for. `strptime` with `%a`/`%b`/`%Z` is
+    **locale-dependent** and fails outright anywhere the month and day names are
+    not English — measured, it raises `ValueError` under both `de_DE.UTF-8` and
+    `fr_FR.UTF-8` — which would silently disable the guard for those users while
+    passing every test run in `C`.
+
+    Returns `""` if it cannot be determined, and callers treat that as "do not
+    filter": losing the future-guard is a smaller failure than discarding every
+    real timestamp because a header moved.
     """
-    data = json.loads(gh("pr", "view", str(pr), "--repo", repo, "--json", "commits"))
-    commits = data.get("commits") or []
-    return commits[-1]["committedDate"] if commits else ""
+    out = gh("api", "-i", "/rate_limit")
+    for line in out.splitlines():
+        if line.lower().startswith("date:"):
+            stamp = line.split(":", 1)[1].strip()
+            try:
+                parsed = parsedate_to_datetime(stamp)
+            except (TypeError, ValueError):
+                return ""
+            return parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return ""
+
+
+def last_answered_at(repo: str, pr: int) -> str:
+    """The latest moment at which a finding could have been answered.
+
+    The dividing line between a finding that is certainly still open and one a
+    later change may already have addressed. Without it, every suppressed
+    finding a pull request ever received counts forever, the exit code can never
+    return to zero, and a gate that is always red is a gate nobody reads.
+
+    **Three sources, not one.** The first version used the newest commit alone,
+    and reviewers also raise findings about the pull request's *description and
+    title* — "this PR adds a script the description doesn't mention". Those
+    cannot be answered by a commit, so such a finding stayed live for ever no
+    matter how thoroughly it had been dealt with. Editing the body and renaming
+    the title now count, which is what actually answers them.
+
+    Deliberately **not** `updatedAt`: that moves on every comment, including the
+    review that raised the finding, so it would mark everything answered the
+    moment it appeared.
+
+    Also not `pushedDate`, despite it being the more honest name for what this
+    wants: GitHub has deprecated it and it comes back `null` here, so preferring
+    it would be dead code carrying an implication it cannot keep. `committedDate`
+    is used instead, and it does move on a rebase — checked, 19:13:30 to 19:13:32
+    across one — so the usual worry about it does not apply.
+
+    The worry that *does* apply is a timestamp in the future, from a skewed clock
+    or a hand-set committer date. That would push the line past every finding and
+    turn the tool green while work was outstanding, which is the one direction of
+    error that matters here: a finding wrongly shown is noise, a finding wrongly
+    hidden is the bug this tool exists to prevent. Future moments are therefore
+    discarded — against **GitHub's** clock, from the `Date` header of a response,
+    not the local machine's. Comparing GitHub's timestamps to a local clock would
+    have introduced a second skew to fix the first: a machine running a minute
+    behind would discard the newest commit and report answered findings as live.
+    One clock, or none.
+    """
+    owner, name = repo.split("/", 1)
+    query = """
+    query($owner:String!, $name:String!, $pr:Int!) {
+      repository(owner:$owner, name:$name) {
+        pullRequest(number:$pr) {
+          commits(last:1) { nodes { commit { committedDate } } }
+          userContentEdits(last:1) { nodes { editedAt } }
+          timelineItems(last:1, itemTypes:[RENAMED_TITLE_EVENT]) {
+            nodes { ... on RenamedTitleEvent { createdAt } }
+          }
+        }
+      }
+    }"""
+    data = json.loads(
+        gh(
+            "api", "graphql", "-f", f"query={query}",
+            "-F", f"owner={owner}", "-F", f"name={name}", "-F", f"pr={pr}",
+        )
+    )["data"]["repository"]["pullRequest"]
+
+    moments = []
+    for node in data["commits"]["nodes"] or []:
+        moments.append((node.get("commit") or {}).get("committedDate"))
+    for node in data["userContentEdits"]["nodes"] or []:
+        moments.append(node.get("editedAt"))
+    for node in data["timelineItems"]["nodes"] or []:
+        moments.append(node.get("createdAt"))
+
+    # Any of these can be absent — a deleted edit, an unexpected timeline node —
+    # and `max()` over a list containing `None` raises rather than degrading.
+    now = github_now()
+    usable = [m for m in moments if m and (not now or m <= now)]
+    # ISO-8601 UTC throughout, so lexicographic order is chronological order.
+    return max(usable) if usable else ""
 
 
 def suppressed(repo: str, pr: int) -> list[dict]:
@@ -177,7 +268,7 @@ def suppressed(repo: str, pr: int) -> list[dict]:
     # concatenated documents. So this pattern is not general, and a future
     # endpoint added here needs the same check rather than the same assumption.
     reviews = json.loads(gh("api", "--paginate", f"repos/{repo}/pulls/{pr}/reviews"))
-    since = head_commit_time(repo, pr)
+    since = last_answered_at(repo, pr)
     out = []
     for review in reviews:
         body = review.get("body") or ""
@@ -210,9 +301,10 @@ def suppressed(repo: str, pr: int) -> list[dict]:
                     "when": review["submitted_at"],
                     "where": where.strip(),
                     "text": " ".join(text.split()),
-                    # A review submitted after the newest commit cannot have
-                    # been answered by it. Earlier ones might have been, so they
-                    # are shown but do not hold the exit code red.
+                    # A review submitted after the last commit, body edit or
+                    # rename cannot have been answered by any of them. Earlier
+                    # ones might have been, so they are shown but do not hold the
+                    # exit code red.
                     "live": bool(since) and review["submitted_at"] > since,
                 }
             )
@@ -280,14 +372,14 @@ def main() -> int:
 
     if live:
         print(
-            f"\nsuppressed findings ({len(live)}) — raised after the newest commit, "
-            "and in no thread:"
+            f"\nsuppressed findings ({len(live)}) — raised after the last change "
+            "to this PR, and in no thread:"
         )
         show(live)
     if earlier and not args.quiet:
         print(
             f"\nearlier suppressed findings ({len(earlier)}) — raised before the "
-            "newest commit, so a later push may already have answered them:"
+            "last commit, body edit or rename, so may already be answered:"
         )
         show(earlier)
 
