@@ -295,14 +295,13 @@ fn screen_concept(concept: &Concept) -> Option<FlaggedConcept> {
     if screened.findings.is_empty() {
         return None;
     }
-    let mut classes: Vec<String> = screened
+    let classes: Vec<String> = screened
         .findings
         .iter()
         .map(|f| format!("{:?}", f.kind))
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    classes.sort();
     Some(FlaggedConcept {
         id: concept.id.to_string(),
         verdict: format!("{:?}", screened.verdict).to_lowercase(),
@@ -395,15 +394,50 @@ fn rewrite_tag<'a>(
 
 /// Where a link should point in the viewer, or `None` when it should not be one.
 ///
-/// An external link keeps its destination: it is a navigation the reader chooses
-/// and issues no request until they do. A bundle-internal one is rewritten to the
-/// viewer's own route. Anything else — a path climbing out of the bundle, or one
-/// naming a file it does not contain — resolves to nothing, so the anchor is
-/// emitted with an empty destination and reads as plain text.
+/// Three outcomes, and the scheme rule is the one worth reading:
+///
+/// - **`http:`, `https:` and `mailto:` keep their destination.** A navigation the
+///   reader chooses, issuing no request until they take it.
+/// - **A bundle-internal path becomes a viewer route.**
+/// - **Everything else resolves to `None`**, and the caller emits the anchor with
+///   an empty destination — the link text stays, and the stylesheet marks it as
+///   not a destination. It is not stripped to bare text: a reader is better served
+///   seeing that a link was written and refused than seeing nothing.
+///
+/// The scheme list is an **allow-list, and deliberately short**: `javascript:`
+/// and `data:` never reaching an `href` is the one way a link in somebody else's
+/// markdown could execute. Broadening it — `tel:`, `ftp:` — buys a bundle almost
+/// nothing and widens exactly that surface, so it is a decision rather than an
+/// oversight.
+///
+/// **Three independent mechanisms currently uphold that, and this is one of
+/// them.** The others are [`bundle_path`], which refuses anything containing a
+/// colon, and `concept_id_for_path`, which requires a `.md` suffix and a
+/// parseable id before `bundle.contains` requires the concept to actually exist.
+/// Any one of the three suffices on its own — measured by removing them: taking
+/// out either of the first two leaves the behaviour unchanged.
+///
+/// The rejection is stated *here* anyway, because the other two are accidents of
+/// their own purposes. `bundle_path`'s colon rule is about paths, and
+/// `concept_id_for_path`'s is about ids; relaxing either for a perfectly good
+/// reason would quietly remove a scheme guard nobody was thinking about. This one
+/// is about schemes, so it is the one that survives such a change — and the
+/// redundancy means no single-fault test can prove it load-bearing, which is
+/// itself worth knowing before trusting a green run here.
 fn viewer_href<'a>(dest: &str, bundle: &Bundle, base: &str) -> Option<pulldown_cmark::CowStr<'a>> {
     use pulldown_cmark::CowStr;
     if dest.starts_with("http://") || dest.starts_with("https://") || dest.starts_with("mailto:") {
         return Some(CowStr::from(dest.to_owned()));
+    }
+    // Any other scheme is refused here, explicitly. A bundle-relative path never
+    // carries one, so nothing legitimate is lost.
+    if let Some(colon) = dest.find(':')
+        && dest[..colon]
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+        && !dest[..colon].is_empty()
+    {
+        return None;
     }
     // A pure fragment stays on the page.
     if dest.starts_with('#') {
@@ -705,6 +739,54 @@ mod tests {
             html.contains("src=\"\""),
             "a directory is not a source: {html}"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **An executable scheme never reaches an `href`.**
+    ///
+    /// A characterisation test of the property, and deliberately labelled as one:
+    /// it is **not** a guard on any single rule, and it cannot be. Three
+    /// mechanisms uphold this independently — the scheme allow-list in
+    /// [`viewer_href`], `bundle_path`'s colon rejection, and the requirement that
+    /// a destination resolve to a `.md` concept the bundle actually contains.
+    ///
+    /// Measured rather than assumed: this test still passes with **both** of the
+    /// first two removed, because the third alone blocks every case. So a green
+    /// run here says the property holds, not that any particular rule is doing
+    /// the work — and anyone deleting one of them on the strength of this test
+    /// passing would be reading it wrong.
+    #[test]
+    fn an_executable_scheme_never_becomes_a_destination() {
+        let root = bundle_at("schemes", &[("index.md", INDEX)]);
+        let bundle = load(&root);
+        for hostile in [
+            "javascript:alert(1)",
+            "JAVASCRIPT:alert(1)",
+            "data:text/html;base64,PHNjcmlwdD4=",
+            "vbscript:msgbox(1)",
+            "file:///etc/passwd",
+        ] {
+            let html = render_body(&format!("[click]({hostile})\n"), &bundle, "");
+            assert!(
+                html.contains("href=\"\""),
+                "`{hostile}` must not become a destination: {html}"
+            );
+            assert!(html.contains("click"), "the text still shows: {html}");
+        }
+
+        // The three that are allowed still are, so the rule discriminates rather
+        // than simply refusing everything with a colon in it.
+        for allowed in [
+            "https://example.invalid/x",
+            "http://example.invalid/x",
+            "mailto:someone@example.invalid",
+        ] {
+            let html = render_body(&format!("[ok]({allowed})\n"), &bundle, "");
+            assert!(
+                html.contains(&format!("href=\"{allowed}\"")),
+                "`{allowed}` should survive: {html}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 }
