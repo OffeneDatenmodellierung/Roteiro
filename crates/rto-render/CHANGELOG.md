@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.5.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v5.4.0...rto-render-v5.5.0) - 2026-09-02
+
+### Added
+
+- *(okf)* the dynamic OKF viewer (ADR-0022)
+- *(okf)* report staleness, list computations, and add `okf info`
+
+### Fixed
+
+- *(okf)* serve a peer's files under their own policy, not the page's
+- *(okf)* stable screener tokens, and two stale docs I wrote this session
+- *(okf)* a refused link is no longer an anchor at all
+- *(okf)* match URL schemes case-insensitively, and fail the graph JSON loudly
+- *(okf)* a symlink no longer carries a file out of the viewer's bundle
+- *(okf)* refuse an unknown URL scheme in the viewer explicitly
+- *(okf)* the renderer's own hrefs were never prefixed
+- *(okf)* the computations report contradicted its own gate, and two doc gaps
+
+### Other
+
+- *(okf)* the viewer re-read and re-derived the whole bundle every request
+- *(okf)* record why safe_bundle_file re-resolves the root per call
+
 ## [5.4.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v5.3.0...rto-render-v5.4.0) - 2026-09-02
 
 ### Added
