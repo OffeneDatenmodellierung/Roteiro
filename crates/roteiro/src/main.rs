@@ -7021,13 +7021,33 @@ fn build_scaffold(
     }
     let (repo, mut store, cache) = open_graph()?;
     build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
-    let root = repo
-        .workdir()
-        .ok_or_else(|| anyhow::anyhow!("cannot scaffold in a bare repository"))?;
+    // Kept as a check though the path is no longer needed: a bare repository has
+    // no working tree to write into, and failing here says so, where failing
+    // later would say something about the authored layer instead.
+    if repo.workdir().is_none() {
+        anyhow::bail!("cannot scaffold in a bare repository");
+    }
     let ctx = rto_spec::context(&store, topic, 10)?;
 
     let (md, label) = if kind == "adr" {
-        let adr_id = next_adr_id(&root.join("docs/adr"));
+        // Asked of the repository's own ADRs rather than of a `docs/adr`
+        // directory it may not have. `Worktree` because an ADR scaffolded and
+        // saved a minute ago is not committed yet, and proposing its id again
+        // would be the obvious way to get this wrong.
+        let docs = rto_spec::authored_docs(&repo, rto_graph::GraphSource::Worktree)?;
+        let home = rto_spec::adr_home(&docs.layer.docs);
+        let adr_id = home.next_id.clone();
+        // On stderr, and always — not folded into the label, which is printed
+        // only when `--out` is given, and this matters most in the common case
+        // where the scaffold goes to stdout to be redirected by hand. The id
+        // only means something beside the decisions it continues, and this is
+        // the one moment the tool knows where a reader should put it. stderr
+        // because stdout is the document.
+        eprintln!(
+            "note: this repository keeps its decisions in `{dir}/` — suggested \
+             path `{dir}/{adr_id}-<slug>.md`",
+            dir = home.dir
+        );
         (
             rto_spec::scaffold_adr(topic, title, &adr_id, &today_utc(), &ctx),
             format!("ADR-{adr_id}"),
@@ -7533,23 +7553,6 @@ fn run_spec_draft(
          and sends only what `roteiro remote dry-run` shows. \
          (`spec scaffold` works with no model at all.)"
     )
-}
-
-/// The next zero-padded ADR id: one past the highest `NNNN-*.md` under `adr_dir`
-/// (or `0001` if none/absent).
-fn next_adr_id(adr_dir: &std::path::Path) -> String {
-    let mut max = 0u32;
-    if let Ok(entries) = std::fs::read_dir(adr_dir) {
-        for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                let digits: String = name.chars().take_while(char::is_ascii_digit).collect();
-                if let Ok(n) = digits.parse::<u32>() {
-                    max = max.max(n);
-                }
-            }
-        }
-    }
-    format!("{:04}", max + 1)
 }
 
 /// Today's UTC date as `YYYY-MM-DD`, dependency-free (Hinnant's civil-from-days).

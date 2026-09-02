@@ -401,6 +401,75 @@ fn stored(text: &str) -> Option<serde_json::Value> {
     (!capped.is_empty()).then(|| serde_json::Value::from(capped))
 }
 
+/// Where a new ADR belongs in a repository, and what its id should be.
+///
+/// Both answers are derived from the ADRs a repository already has rather than
+/// from this project's own layout. [`declares_adr`] made an ADR a thing a
+/// document *is*; this makes writing one follow suit, so `roteiro spec scaffold`
+/// works on a repository that keeps its decisions in `architecture/decisions/`
+/// instead of putting a stray file in a `docs/adr/` it does not use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdrHome {
+    /// Repository-relative directory the new ADR should be written to.
+    pub dir: String,
+    /// The next unused id, zero-padded to match the ids already in use.
+    pub next_id: String,
+}
+
+/// Decide [`AdrHome`] from the ADRs a repository already contains.
+///
+/// **The directory** is the one holding the most of them. A repository that has
+/// moved its decisions leaves some behind, and the majority is a better guess
+/// than the first or last in an arbitrary order; ties break on the
+/// lexicographically smaller path so two runs agree. With no ADRs at all there
+/// is nothing to follow, so the conventional `docs/adr` is used — a default,
+/// which is what it always should have been.
+///
+/// **The id** is one past the highest `adr-id`, not one past the highest number
+/// in a *filename*. Those coincide here because this repository names files
+/// `0021-thing.md`, and they need not anywhere else: a repository naming them
+/// `use-postgres.md` would have had every new ADR proposed as `0001`. The width
+/// follows the widest id in use, so a project numbering `001` keeps three
+/// digits rather than being silently widened to four.
+#[must_use]
+pub fn adr_home(docs: &[AdrDoc]) -> AdrHome {
+    use std::collections::BTreeMap;
+
+    let mut per_dir: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut highest = 0u32;
+    let mut width = 0usize;
+    for doc in docs {
+        let dir = doc.path.rsplit_once('/').map_or("", |(head, _)| head);
+        *per_dir.entry(dir).or_default() += 1;
+        if let Ok(n) = doc.meta.id.parse::<u32>() {
+            highest = highest.max(n);
+        }
+        width = width.max(doc.meta.id.trim().len());
+    }
+
+    // `max_by_key` keeps the **last** maximum, and `BTreeMap` iterates in
+    // ascending key order, so reversing gives the lexicographically smallest
+    // directory among equals — deterministic rather than merely stable.
+    let dir = per_dir
+        .iter()
+        .rev()
+        .max_by_key(|(_, count)| **count)
+        .map_or("docs/adr", |(dir, _)| *dir);
+
+    // The floor applies only when there is nothing to follow. Applying it
+    // always would widen a project numbering `001` to `0002` — the opposite of
+    // following the repository, and the thing this function exists to stop.
+    let width = if docs.is_empty() { 4 } else { width.max(1) };
+    AdrHome {
+        dir: if dir.is_empty() {
+            "docs/adr".to_owned()
+        } else {
+            dir.to_owned()
+        },
+        next_id: format!("{:0width$}", highest + 1, width = width),
+    }
+}
+
 /// Whether a document declares itself an ADR, by carrying `type: adr` in its
 /// frontmatter.
 ///
@@ -1211,5 +1280,93 @@ mod tests {
         )
         .expect("parse");
         assert_eq!(adr.meta.title, "Sandboxed linting");
+    }
+}
+
+#[cfg(test)]
+mod adr_home_tests {
+    use super::{AdrHome, adr_home, parse_adr};
+
+    fn doc(path: &str, id: &str) -> super::AdrDoc {
+        let md =
+            format!("---\ntype: adr\nadr-id: \"{id}\"\nstatus: Accepted\n---\n\n# ADR-{id}: X\n");
+        parse_adr(path, &md).expect("parse")
+    }
+
+    /// **A new ADR is numbered and placed by what the repository already does.**
+    #[test]
+    fn the_home_follows_the_repositorys_own_decisions() {
+        let home = adr_home(&[
+            doc("architecture/decisions/0001-a.md", "0001"),
+            doc("architecture/decisions/0002-b.md", "0002"),
+        ]);
+        assert_eq!(
+            home,
+            AdrHome {
+                dir: "architecture/decisions".to_owned(),
+                next_id: "0003".to_owned(),
+            }
+        );
+    }
+
+    /// **With no ADRs at all, the convention is a default rather than a rule.**
+    #[test]
+    fn an_empty_repository_gets_the_conventional_home() {
+        let home = adr_home(&[]);
+        assert_eq!(home.dir, "docs/adr");
+        assert_eq!(home.next_id, "0001");
+    }
+
+    /// **The id comes from `adr-id`, not from the filename.**
+    ///
+    /// They coincide in this repository because files are named `0021-thing.md`.
+    /// A repository naming them for their subject would otherwise have had every
+    /// new ADR proposed as `0001`, silently, for ever.
+    #[test]
+    fn the_next_id_reads_the_frontmatter_not_the_file_name() {
+        let home = adr_home(&[
+            doc("decisions/use-postgres.md", "0007"),
+            doc("decisions/drop-redis.md", "0008"),
+        ]);
+        assert_eq!(home.next_id, "0009");
+    }
+
+    /// **A repository that moved its decisions is followed to where most are.**
+    ///
+    /// The majority is a better guess than the first or last in an arbitrary
+    /// order, and a move usually leaves something behind.
+    #[test]
+    fn the_majority_directory_wins_and_ties_are_deterministic() {
+        let moved = adr_home(&[
+            doc("docs/adr/0001-old.md", "0001"),
+            doc("architecture/decisions/0002-new.md", "0002"),
+            doc("architecture/decisions/0003-new.md", "0003"),
+        ]);
+        assert_eq!(moved.dir, "architecture/decisions");
+
+        // An even split has to resolve the same way every run, or `scaffold`
+        // proposes a different home each time it is asked.
+        let tied = adr_home(&[
+            doc("zeta/0001-a.md", "0001"),
+            doc("alpha/0002-b.md", "0002"),
+        ]);
+        assert_eq!(tied.dir, "alpha", "ties break on the smaller path");
+    }
+
+    /// **A project numbering its decisions `001` keeps three digits.**
+    ///
+    /// The first version padded to four always, which widened `001` to `0002` —
+    /// the opposite of following the repository. Caught by this test disagreeing
+    /// with the docstring above it, which is the only reason it was caught.
+    #[test]
+    fn the_id_width_follows_the_ids_already_in_use() {
+        let narrow = adr_home(&[doc("decisions/001-a.md", "001")]);
+        assert_eq!(narrow.next_id, "002", "three digits in, three digits out");
+
+        let wide = adr_home(&[doc("decisions/000042-a.md", "000042")]);
+        assert_eq!(wide.next_id, "000043", "and a wider scheme is preserved");
+
+        // Four only where there is nothing to follow.
+        assert_eq!(adr_home(&[]).next_id, "0001");
     }
 }
