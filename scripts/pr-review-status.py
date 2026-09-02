@@ -42,7 +42,8 @@ import json
 import re
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import timezone
+from email.utils import parsedate_to_datetime
 
 # The heading Copilot writes above findings it did not post as inline comments.
 # Matched loosely on purpose: the "(N)" count and any "**Previously missed (N)**"
@@ -151,6 +152,13 @@ def github_now() -> str:
     Used so that "is this timestamp in the future" is asked of one clock rather
     than compared across two.
 
+    Parsed with `email.utils.parsedate_to_datetime`, which is what the RFC-2822
+    format this header uses is for. `strptime` with `%a`/`%b`/`%Z` is
+    **locale-dependent** and fails outright anywhere the month and day names are
+    not English — measured, it raises `ValueError` under both `de_DE.UTF-8` and
+    `fr_FR.UTF-8` — which would silently disable the guard for those users while
+    passing every test run in `C`.
+
     Returns `""` if it cannot be determined, and callers treat that as "do not
     filter": losing the future-guard is a smaller failure than discarding every
     real timestamp because a header moved.
@@ -160,10 +168,10 @@ def github_now() -> str:
         if line.lower().startswith("date:"):
             stamp = line.split(":", 1)[1].strip()
             try:
-                parsed = datetime.strptime(stamp, "%a, %d %b %Y %H:%M:%S %Z")
-            except ValueError:
+                parsed = parsedate_to_datetime(stamp)
+            except (TypeError, ValueError):
                 return ""
-            return parsed.replace(tzinfo=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            return parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return ""
 
 
