@@ -762,8 +762,9 @@ since been cut and published to crates.io (crates are now on `v1.1.0`).
   Python: a generic tree-sitter *tags* extractor covers **15 languages + SQL**
   (see the Stage 3 delivery note). Rust keeps its dedicated walker.
 - **Obsidian export quality — ✅ delivered.** The vault renderer
-  (`rto-render/src/obsidian.rs` — **removed in 4.0.0**, when the vault renderer was replaced by the OKF bundle; unlinked here because the file no longer exists) emits a
-  generated **`_Home`** overview note (what was scanned, node/edge counts by kind,
+  (`rto-render/src/obsidian.rs` — **removed in 4.0.0**, when the vault renderer
+  was replaced by the OKF bundle; unlinked here because the file no longer
+  exists) emitted a generated **`_Home`** overview note (what was scanned, node/edge counts by kind,
   provenance breakdown, ADR statuses, intent-debt summary) plus per-node notes
   that carry frontmatter **`tags`** (`roteiro/kind/*`, `roteiro/lang/*`,
   `roteiro/status/*` — colourable/filterable in Obsidian's graph view), **surface
