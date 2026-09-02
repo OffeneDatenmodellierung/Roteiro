@@ -410,20 +410,29 @@ fn stored(text: &str) -> Option<serde_json::Value> {
 /// instead of putting a stray file in a `docs/adr/` it does not use.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdrHome {
-    /// Repository-relative directory the new ADR should be written to.
+    /// Repository-relative directory the new ADR should be written to, or `"."`
+    /// when the repository keeps its decisions at the root.
     pub dir: String,
     /// The next unused id, zero-padded to match the ids already in use.
     pub next_id: String,
+    /// Whether this was read off existing ADRs, or is the fallback.
+    ///
+    /// Carried so a caller can tell a reader which it is. "This repository keeps
+    /// its decisions in `docs/adr/`" is a claim, and stating it about a
+    /// repository that has no decisions at all would be inventing a convention
+    /// and attributing it to them.
+    pub followed: bool,
 }
 
 /// Decide [`AdrHome`] from the ADRs a repository already contains.
 ///
-/// **The directory** is the one holding the most of them. A repository that has
-/// moved its decisions leaves some behind, and the majority is a better guess
-/// than the first or last in an arbitrary order; ties break on the
-/// lexicographically smaller path so two runs agree. With no ADRs at all there
-/// is nothing to follow, so the conventional `docs/adr` is used — a default,
-/// which is what it always should have been.
+/// **The directory** is the one holding the most of them, reported as `"."` when
+/// that is the repository root. A repository that has moved its decisions leaves
+/// some behind, and the majority is a better guess than the first or last in an
+/// arbitrary order; ties break on the lexicographically smaller path so two runs
+/// agree. With no ADRs at all there is nothing to follow, so the conventional
+/// `docs/adr` is used — a default, which is what it always should have been, and
+/// [`AdrHome::followed`] says which of the two happened.
 ///
 /// **The id** is one past the highest `adr-id`, not one past the highest number
 /// in a *filename*. Those coincide here because this repository names files
@@ -450,23 +459,33 @@ pub fn adr_home(docs: &[AdrDoc]) -> AdrHome {
     // `max_by_key` keeps the **last** maximum, and `BTreeMap` iterates in
     // ascending key order, so reversing gives the lexicographically smallest
     // directory among equals — deterministic rather than merely stable.
-    let dir = per_dir
-        .iter()
-        .rev()
-        .max_by_key(|(_, count)| **count)
-        .map_or("docs/adr", |(dir, _)| *dir);
+    // `docs.is_empty()` decides the fallback, **not** an empty directory string.
+    // Those are different repositories: one has no decisions, the other keeps
+    // them at its root, where `rsplit_once('/')` yields `""`. Conflating them
+    // sent a root-level project to `docs/adr` while the docstring promised it
+    // would be followed.
+    let dir = if docs.is_empty() {
+        "docs/adr".to_owned()
+    } else {
+        per_dir
+            .iter()
+            .rev()
+            .max_by_key(|(_, count)| **count)
+            .map_or(".", |(dir, _)| if dir.is_empty() { "." } else { dir })
+            .to_owned()
+    };
 
     // The floor applies only when there is nothing to follow. Applying it
     // always would widen a project numbering `001` to `0002` — the opposite of
     // following the repository, and the thing this function exists to stop.
     let width = if docs.is_empty() { 4 } else { width.max(1) };
     AdrHome {
-        dir: if dir.is_empty() {
-            "docs/adr".to_owned()
-        } else {
-            dir.to_owned()
-        },
-        next_id: format!("{:0width$}", highest + 1, width = width),
+        dir,
+        // Saturating rather than wrapping: an `adr-id` of `4294967295` is
+        // absurd, but it panics in debug and silently produces `0` in release,
+        // and neither is a thing to do because somebody typed a long number.
+        next_id: format!("{:0width$}", highest.saturating_add(1), width = width),
+        followed: !docs.is_empty(),
     }
 }
 
@@ -1305,6 +1324,7 @@ mod adr_home_tests {
             AdrHome {
                 dir: "architecture/decisions".to_owned(),
                 next_id: "0003".to_owned(),
+                followed: true,
             }
         );
     }
@@ -1315,6 +1335,34 @@ mod adr_home_tests {
         let home = adr_home(&[]);
         assert_eq!(home.dir, "docs/adr");
         assert_eq!(home.next_id, "0001");
+        assert!(
+            !home.followed,
+            "and says it is a default, so a caller does not report a convention \
+             this repository has not got"
+        );
+    }
+
+    /// **Decisions at the repository root are followed there, not redirected.**
+    ///
+    /// `rsplit_once('/')` yields `""` for a root-level path, and the first
+    /// version mapped that to the `docs/adr` fallback — so the one layout that
+    /// most obviously *has* a home was the one told it had none.
+    #[test]
+    fn decisions_at_the_root_are_followed_to_the_root() {
+        let home = adr_home(&[doc("0001-a.md", "0001"), doc("0002-b.md", "0002")]);
+        assert_eq!(home.dir, ".", "the root, reported as a directory");
+        assert_eq!(home.next_id, "0003");
+        assert!(home.followed, "this repository does have a home");
+    }
+
+    /// **An absurd `adr-id` does not panic.**
+    ///
+    /// `highest + 1` panics in debug and wraps to `0` in release. Neither is a
+    /// thing to do because somebody typed a long number.
+    #[test]
+    fn an_enormous_id_saturates_rather_than_overflowing() {
+        let home = adr_home(&[doc("decisions/x.md", "4294967295")]);
+        assert_eq!(home.next_id, "4294967295");
     }
 
     /// **The id comes from `adr-id`, not from the filename.**

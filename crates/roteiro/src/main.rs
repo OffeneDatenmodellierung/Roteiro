@@ -7043,11 +7043,23 @@ fn build_scaffold(
         // only means something beside the decisions it continues, and this is
         // the one moment the tool knows where a reader should put it. stderr
         // because stdout is the document.
-        eprintln!(
-            "note: this repository keeps its decisions in `{dir}/` — suggested \
-             path `{dir}/{adr_id}-<slug>.md`",
-            dir = home.dir
-        );
+        // Two sentences, because they are two different claims. "This repository
+        // keeps its decisions in X" is a statement about the repository, and
+        // making it about one that has no decisions would be inventing a
+        // convention and attributing it to them.
+        if home.followed {
+            eprintln!(
+                "note: this repository keeps its decisions in `{dir}/` — suggested \
+                 path `{dir}/{adr_id}-<slug>.md`",
+                dir = home.dir
+            );
+        } else {
+            eprintln!(
+                "note: no existing decisions found, so there is nothing to follow; \
+                 `{dir}/{adr_id}-<slug>.md` is the conventional path",
+                dir = home.dir
+            );
+        }
         (
             rto_spec::scaffold_adr(topic, title, &adr_id, &today_utc(), &ctx),
             format!("ADR-{adr_id}"),
