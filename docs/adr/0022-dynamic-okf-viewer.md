@@ -6,12 +6,12 @@ Parent: ADRs
 # ADR-specific metadata (unknown keys are ignored; used for indexing/search)
 type: adr
 adr-id: "0022"
-status: Draft                       # Draft | For Review | Accepted | Rejected | Superseded
+status: Accepted                    # Draft | For Review | Accepted | Rejected | Superseded
 architectural-significance: MEDIUM  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "0.1"
+version: "1.0"
 last-modified: 2026-09-02
 confluence-url:
 ---
@@ -20,8 +20,8 @@ confluence-url:
 
 | | |
 |---|---|
-| **Document version** | 0.1 |
-| **Status** | Draft |
+| **Document version** | 1.0 |
+| **Status** | Accepted |
 | **Decision makers** | The Roteiro Project Team |
 | **Related** | [[docs/adr/0021-open-knowledge-format-bundle.md]] · [[docs/adr/0010-explorer-web-app-vendored-js.md]] · [[docs/adr/0008-multi-repo-workspace-serve.md]] · [[docs/adr/0017-dependency-security-policy.md]] |
 
@@ -194,3 +194,4 @@ issue tracker, and two points in it changed the design:
 | Version | Date | Notes |
 |---------|------|-------|
 | 0.1 | 2026-09-02 | Initial draft. Records the gap ADR-0021 left — Roteiro writes OKF and imports it, but cannot look at one — and proposes a served, themed, read-only viewer over `okf_core::Bundle`. The load-bearing distinction is between `okf::read` (import-shaped: provenance, screening, trust adoption) and `okf::inspect` (bundle-shaped), and the viewer builds on the second so that looking at a stranger's bundle is not a trust decision. Rejects rendering to static HTML (a third renderer, stale by construction, and only ever pointed at our own output) and extending `explorer` (serves the graph, so viewing would require importing first). Records the untrusted-input posture — HTML disabled rather than sanitised, no remote fetches, screener classes surfaced — and that the feature must be added to the `no-default-features` job, since two defects have already been found in feature combinations no job builds. |
+| 1.0 | 2026-09-02 | **Accepted and implemented.** The recommended option was built as written: `rto_render::okf::view` is the model and `roteiro`'s `okf_viewer` is the HTTP, behind an `okf-viewer` feature that is off by default and costs the default build nothing. `roteiro okf view [path]` serves it alone; under `serve` it nests at **`/okf`**, because the explorer already holds `/` and two UIs cannot both be the root — and only when the project has an `okf/` bundle, since `serve` hosts workspaces rather than a bundle path and a route that 404'd every request would be worse than an absent one. **One thing the draft did not anticipate**: nesting means every generated href must carry the mount prefix, because a concept id contains slashes and so relative hrefs sit at varying depths. A router that emitted absolute unprefixed paths would look right standalone and 404 on every link the moment it was mounted, so `base` is threaded through and `a_nested_mount_prefixes_every_href` pins it. **The split moved in the draft's favour**: only the *server* is behind the feature. Every rule about untrusted content — HTML escaped and never emitted, a link rewritten only when it resolves inside the bundle, no image fetched from off it, screener classes surfaced — lives in `okf::view`, which is unconditional and therefore compiled and tested by every job. That was chosen because this repository has found three defects in a year inside feature combinations nothing built. Two additions beyond the draft: raw HTML is **escaped and shown** rather than dropped, since silently discarding part of a document is its own kind of lie; and a `Content-Security-Policy` of `default-src 'self'` rides every response as a second, independently-failing line behind the escaping. The `no-default-features` job gains clippy **and test** cells for the feature, as the draft committed — tests too, because the route tests are themselves feature-gated and a clippy-only cell would compile them and never run them. No decision in this ADR changes. |
