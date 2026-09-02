@@ -35,6 +35,34 @@ use serde::{Deserialize, Serialize};
 /// confidence is a number *we computed*; OKF carries none for a relationship, so
 /// adopting one would mean inventing it. That asymmetry is deliberate and is
 /// enforced by the store's own `CHECK` as well as by Rust.
+///
+/// # Compatibility
+///
+/// This enum had **three** variants up to and including `5.0.0`; the three
+/// `External*` variants arrived in **`5.1.0`**. It is `pub`, re-exported from
+/// the crate root, and deliberately not `#[non_exhaustive]`
+/// ([[docs/adr/0001-build-roteiro-unified-codebase-knowledge-graph.md]] v1.3
+/// argues why that is the right shape), so the addition is technically
+/// breaking for anyone who matches it exhaustively.
+///
+/// It shipped as a **minor**, deliberately and per policy: `AGENTS.md` treats
+/// the `rto-*` crates' public surface as internal, since they publish only so
+/// that `cargo install roteiro` resolves and `roteiro` is their sole reverse
+/// dependency. This note is the record that posture asks for, not a dissent
+/// from it.
+///
+/// If you do depend on this crate directly, two concrete consequences:
+///
+/// - An **exhaustive** `match` over the old three variants stops compiling.
+///   Add the three arms, or match with a wildcard if you only care about the
+///   local classes. A match that already had one is unaffected.
+/// - The serialized tokens are additive, so a `5.0.0` consumer reading a
+///   document written by `5.1.0` or later rejects `external-derived`,
+///   `external-authored` and `external-inferred` as unknown variants.
+///   `Provenance` rides every edge of every `roteiro.query/v1` document. On
+///   disk the guard for this is migration 14, which makes an older build
+///   report such a store as written by a newer Roteiro rather than as corrupt
+///   ([[docs/adr/0021-open-knowledge-format-bundle.md]]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 // Kebab-case, so serde's tokens and [`Provenance::as_str`]'s are the same six
 // strings. They have to be: a persisted import layer is `FactSet` JSON written
