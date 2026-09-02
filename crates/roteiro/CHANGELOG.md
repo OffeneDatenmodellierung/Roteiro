@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.4.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.3.0...roteiro-v5.4.0) - 2026-09-02
+
+### Added
+
+- *(okf)* restore `okf validate` and `okf lint`, over our own checks
+
+### Fixed
+
+- *(okf)* three review findings, and the fifth false compile claim
+
 ## [5.3.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.2.0...roteiro-v5.3.0) - 2026-09-02
 
 ### Added
