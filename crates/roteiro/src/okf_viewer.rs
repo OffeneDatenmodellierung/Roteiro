@@ -32,7 +32,7 @@
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::Router;
 use axum::extract::{Path as UrlPath, State};
@@ -45,6 +45,22 @@ use rto_render::okf::view;
 #[derive(Clone)]
 struct Viewer {
     root: Arc<PathBuf>,
+    /// The last bundle read, and the stamp it was read at.
+    ///
+    /// ADR-0022 renders at request time so an author editing a concept sees it
+    /// on reload, and the first implementation took that literally: every HTML
+    /// route re-read and re-parsed the whole bundle. Measured against this
+    /// repository's own 9,511-concept bundle, `/` took **6.7 s** and
+    /// `/api/graph.json` 1.4 s — and on a current-thread runtime eight
+    /// concurrent requests did not finish in ten minutes, because each waited
+    /// for the one before it.
+    ///
+    /// Re-reading is now conditional on the bundle having changed, which costs
+    /// a walk of its `mtime`s: **58 ms** for those same 9,517 files, 115x less
+    /// than the parse it avoids. The promise ADR-0022 makes is kept — an edit
+    /// still appears on the next request — while the cost is paid only when
+    /// there was an edit.
+    cache: Arc<Mutex<Option<Cached>>>,
     /// The path this viewer is mounted under: empty when served alone, `/okf`
     /// when nested into `serve` beside the explorer.
     ///
@@ -62,10 +78,166 @@ struct Viewer {
 ///
 /// `base` is the mount path: empty when served alone by `roteiro okf view`, and
 /// `/okf` when nested beside the explorer under `serve`.
+/// A bundle, what it looked like on disk when it was read, and the whole-bundle
+/// views derived from it.
+///
+/// The derived views are cached because loading is not the only cost. With the
+/// bundle cached, `/` still took 5.8 s against 9,511 concepts while
+/// `/api/graph.json` took 0.28 s — the difference being that the index runs the
+/// content screener over every concept, and the graph only walks links. Caching
+/// the parse and then re-deriving that on each request would have fixed the
+/// smaller half of the problem and reported it as fixed.
+///
+/// Both are filled on demand rather than at load, so a bundle nobody asks the
+/// index about does not pay for one.
+struct Cached {
+    stamp: Stamp,
+    bundle: Arc<view::Bundle>,
+    overview: Option<Arc<view::BundleView>>,
+    graph: Option<Arc<view::GraphView>>,
+}
+
+/// A cheap fingerprint of a bundle directory: how many files, and the newest
+/// modification time among them.
+///
+/// Not a hash of the contents. Hashing 9,517 files would cost more than the
+/// parse it is meant to avoid, and this only has to answer "did anything
+/// change since I last looked", which an author editing a concept always makes
+/// true. The count is carried alongside the time because a deletion can leave
+/// the newest `mtime` untouched.
+///
+/// It inherits `mtime`'s limits and does not pretend otherwise: a filesystem
+/// with coarse timestamps could hide an edit made in the same second as the
+/// read, in a bundle whose file count did not change. The failure that would
+/// cause is a stale page until the next edit, on a read-only viewer — which is
+/// why this is acceptable here and would not be in the import path.
+#[derive(PartialEq, Eq, Clone, Copy)]
+struct Stamp {
+    files: usize,
+    newest: Option<std::time::SystemTime>,
+}
+
+fn stamp(root: &std::path::Path) -> Stamp {
+    fn walk(dir: &std::path::Path, out: &mut Stamp) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                walk(&entry.path(), out);
+            } else {
+                out.files += 1;
+                if let Ok(modified) = meta.modified() {
+                    out.newest = Some(out.newest.map_or(modified, |n| n.max(modified)));
+                }
+            }
+        }
+    }
+    let mut out = Stamp {
+        files: 0,
+        newest: None,
+    };
+    walk(root, &mut out);
+    out
+}
+
+impl Viewer {
+    /// The bundle, re-read only if the directory changed since it was last read.
+    ///
+    /// Blocking: every caller runs it inside [`blocking`].
+    fn bundle(&self) -> Result<Arc<view::Bundle>, rto_render::okf::inspect::InspectError> {
+        self.with_cache(|cached| Arc::clone(&cached.bundle))
+    }
+
+    /// The index view, derived once per bundle read.
+    fn overview(&self) -> Result<Arc<view::BundleView>, rto_render::okf::inspect::InspectError> {
+        let root = self.root.display().to_string();
+        self.with_cache(|cached| {
+            Arc::clone(
+                cached
+                    .overview
+                    .get_or_insert_with(|| Arc::new(view::overview_in(&cached.bundle, &root))),
+            )
+        })
+    }
+
+    /// The concept graph, derived once per bundle read.
+    fn graph(&self) -> Result<Arc<view::GraphView>, rto_render::okf::inspect::InspectError> {
+        self.with_cache(|cached| {
+            Arc::clone(
+                cached
+                    .graph
+                    .get_or_insert_with(|| Arc::new(view::graph_in(&cached.bundle))),
+            )
+        })
+    }
+
+    /// Re-read the bundle if the directory changed, then hand the entry to `f`.
+    ///
+    /// Blocking, and holds the lock across the load: a burst of concurrent cold
+    /// requests reads the bundle once rather than once each. That serialises
+    /// them behind one parse — which is the cost being avoided anyway, and far
+    /// better than N parses competing for the same page cache.
+    fn with_cache<T>(
+        &self,
+        f: impl FnOnce(&mut Cached) -> T,
+    ) -> Result<T, rto_render::okf::inspect::InspectError> {
+        let current = stamp(&self.root);
+        let mut cache = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let stale = cache.as_ref().is_none_or(|cached| cached.stamp != current);
+        if stale {
+            // The derived views go with it. Keeping them beside a new bundle is
+            // how a viewer shows an edited concept in the body and the old title
+            // in the sidebar — the two halves of one page disagreeing.
+            *cache = Some(Cached {
+                stamp: current,
+                bundle: Arc::new(view::load(&self.root)?),
+                overview: None,
+                graph: None,
+            });
+        }
+        Ok(f(cache.as_mut().expect("just populated")))
+    }
+}
+
+/// Run blocking work off the async executor.
+///
+/// Every route here touches the filesystem, and the standalone server runs on a
+/// current-thread runtime, so doing that work inline stalls every other request
+/// for its duration — measured at ten minutes for eight concurrent requests
+/// against a 9,511-concept bundle. `spawn_blocking` is the portable fix: it is
+/// correct whether the viewer is standalone or nested inside `serve`'s runtime.
+async fn blocking<T, F>(work: F) -> Option<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    // `Option` rather than `Result<T, Response>`: the only failure is the task
+    // panicking or being cancelled, which carries no information a caller can
+    // act on, and a `Response` in the error position makes every `Result` in
+    // this module 128 bytes wide for a case that never carries a message.
+    tokio::task::spawn_blocking(work).await.ok()
+}
+
+/// The response when the blocking pool could not run the work.
+fn spawn_failed() -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        [(header::CONTENT_SECURITY_POLICY, CSP)],
+        Html("<p>The viewer failed to read the bundle.</p>"),
+    )
+        .into_response()
+}
+
 pub fn router(root: PathBuf, base: &str) -> Router {
     let state = Viewer {
         root: Arc::new(root),
         base: Arc::new(base.to_owned()),
+        cache: Arc::new(Mutex::new(None)),
     };
     Router::new()
         .route("/", get(index))
@@ -104,6 +276,19 @@ const CSP: &str = "default-src 'self'; img-src 'self'; object-src 'none'; base-u
 /// refused as a bundle — every other command still reads it — it simply is not
 /// served down this route.
 const MAX_FILE_BYTES: u64 = 32 * 1024 * 1024;
+
+/// `Cache-Control` for the two compiled-in assets.
+///
+/// They are `include_str!`ed, so they change only when the binary does — the
+/// same reasoning and the same hour as `explorer_app`'s `CACHE_JS`. Without it a
+/// browser refetches the whole of cytoscape on every navigation, which on a
+/// bundle whose pages are otherwise cheap is the largest thing on the wire.
+///
+/// Deliberately **not** applied to any bundle content. `/f/` serves files an
+/// author is editing, and `/`, `/c/` and the graph are rendered from a bundle
+/// that changes underneath the server — caching those in the browser would undo
+/// the reload guarantee the server-side cache is careful to keep.
+const CACHE_ASSET: &str = "public, max-age=3600";
 
 fn page(title: &str, root: &str, base: &str, body: &str) -> Response {
     let mut out = String::with_capacity(body.len() + 2048);
@@ -176,11 +361,14 @@ fn pill(class: &str, text: &str) -> String {
 }
 
 async fn index(State(v): State<Viewer>) -> Response {
-    let base = v.base.as_str();
-    let view = match view::overview(&v.root) {
-        Ok(v) => v,
-        Err(e) => return unreadable(&e),
+    let state = v.clone();
+    let built = blocking(move || state.overview()).await;
+    let view = match built {
+        Some(Ok(view)) => view,
+        Some(Err(e)) => return unreadable(&e),
+        None => return spawn_failed(),
     };
+    let base = v.base.as_str();
 
     let mut body = String::new();
     body.push_str("<aside>");
@@ -263,10 +451,22 @@ async fn index(State(v): State<Viewer>) -> Response {
 }
 
 async fn concept(State(v): State<Viewer>, UrlPath(id): UrlPath<String>) -> Response {
+    let state = v.clone();
+    let wanted = id.clone();
+    let built = blocking(move || {
+        let bundle = state.bundle()?;
+        Ok::<_, rto_render::okf::inspect::InspectError>(view::concept_in(
+            &bundle,
+            &wanted,
+            &state.base,
+        ))
+    })
+    .await;
     let base = v.base.as_str();
-    let found = match view::concept(&v.root, &id, base) {
-        Ok(c) => c,
-        Err(e) => return unreadable(&e),
+    let found = match built {
+        Some(Ok(found)) => found,
+        Some(Err(e)) => return unreadable(&e),
+        None => return spawn_failed(),
     };
     let Some(c) = found else {
         return (
@@ -383,15 +583,17 @@ async fn graph_page(State(v): State<Viewer>) -> Response {
 }
 
 async fn graph_json(State(v): State<Viewer>) -> Response {
-    let graph = match view::graph(&v.root) {
-        Ok(g) => g,
-        Err(e) => return unreadable(&e),
+    let built = blocking(move || v.graph()).await;
+    let graph = match built {
+        Some(Ok(graph)) => graph,
+        Some(Err(e)) => return unreadable(&e),
+        None => return spawn_failed(),
     };
     // `GraphView` is plain owned data, so this does not fail in practice — which
     // is exactly why it must not be swallowed. A `{}` under a 200 would render
     // as a bundle with no concepts: a client cannot tell that from a real empty
     // graph, so the one way this ever goes wrong is also the way that hides it.
-    let Ok(body) = serde_json::to_string(&graph) else {
+    let Ok(body) = serde_json::to_string(graph.as_ref()) else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             [
@@ -429,24 +631,32 @@ async fn file(State(v): State<Viewer>, UrlPath(path): UrlPath<String>) -> Respon
         )
             .into_response()
     };
-    let Some(resolved) = view::safe_bundle_file(&v.root, &path) else {
+
+    // Guard, size check and read happen together on the blocking pool rather
+    // than as three hops: they are one decision about one file, and splitting
+    // them would widen the window in which it can change underneath us.
+    let root = Arc::clone(&v.root);
+    let wanted = path.clone();
+    let read = blocking(move || {
+        let resolved = view::safe_bundle_file(&root, &wanted)?;
+        // Checked before the read, not after: `std::fs::read` allocates to the
+        // file's length, so a check on `bytes.len()` would already have paid
+        // the cost it exists to avoid.
+        let meta = std::fs::metadata(&resolved).ok()?;
+        if meta.len() > MAX_FILE_BYTES {
+            return None;
+        }
+        let bytes = std::fs::read(&resolved).ok()?;
+        Some((resolved, bytes))
+    })
+    .await;
+    let Some(Some((resolved, bytes))) = read else {
+        // A file past the bound refuses as 404 like every other refusal here:
+        // the size of a file this route declines to serve is not something a
+        // stranger's client needs confirmed.
         return refused();
     };
-    // Checked before the read, not after: `std::fs::read` allocates to the
-    // file's length, so a check on `bytes.len()` would already have paid the
-    // cost it exists to avoid.
-    let Ok(meta) = std::fs::metadata(&resolved) else {
-        return refused();
-    };
-    if meta.len() > MAX_FILE_BYTES {
-        // 404 rather than 413: the size of a file the route declines to serve is
-        // not something a stranger's client needs confirmed, and every other
-        // refusal here is already a 404.
-        return refused();
-    }
-    let Ok(bytes) = std::fs::read(&resolved) else {
-        return refused();
-    };
+
     // Typed from the extension against a closed list. A bundle does not choose
     // the content type: echoing one back from the file would let a bundle serve
     // itself as `text/html` and undo the escaping.
@@ -480,6 +690,7 @@ async fn stylesheet() -> Response {
         [
             (header::CONTENT_TYPE, "text/css; charset=utf-8"),
             (header::CONTENT_SECURITY_POLICY, CSP),
+            (header::CACHE_CONTROL, CACHE_ASSET),
         ],
         STYLE,
     )
@@ -494,6 +705,7 @@ async fn cytoscape() -> Response {
                 "application/javascript; charset=utf-8",
             ),
             (header::CONTENT_SECURITY_POLICY, CSP),
+            (header::CACHE_CONTROL, CACHE_ASSET),
         ],
         CYTOSCAPE,
     )

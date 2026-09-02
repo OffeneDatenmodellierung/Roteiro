@@ -30,8 +30,12 @@ body {
 a { color: var(--accent); }
 /* A link the renderer neutralised — one that named a concept the bundle does not
    contain, or a path climbing out of it. It keeps its text and stops being a
-   destination, and this says so rather than leaving a dead-looking link. */
-a[href=""] { color: var(--sub); text-decoration: line-through dotted; cursor: not-allowed; }
+   destination, and this says so rather than leaving a dead-looking link.
+
+   `pointer-events: none` because `href=""` is not inert: it resolves to the
+   current document, so clicking one reloads the page and jumps to the top. The
+   styling said "not a destination" while the behaviour still navigated. */
+a[href=""] { color: var(--sub); text-decoration: line-through dotted; cursor: not-allowed; pointer-events: none; }
 
 header {
   background: var(--tint);
@@ -90,8 +94,6 @@ article pre { background: var(--card); border: 1px solid var(--line); border-rad
 article code { font-family: ui-monospace, monospace; font-size: .9em; }
 article blockquote { border-left: .2rem solid var(--line); margin-left: 0; padding-left: 1rem; color: var(--muted); }
 article img { max-width: 100%; }
-/* An image whose source the renderer removed: never fetched, alt text shown. */
-article img[src=""] { display: none; }
 
 .meta { color: var(--sub); font-size: .85rem; margin: 0 0 1.4rem; display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
 .rel { margin-top: 2.5rem; border-top: 1px solid var(--line); padding-top: 1rem; font-size: .9rem; }

@@ -247,7 +247,12 @@ explorer = ["dep:axum", "dep:tokio"]
 # repository has found three defects in a year inside feature combinations no CI
 # job compiled, so the half with rules in it is kept where the default build
 # tests it.
-okf-viewer = ["dep:axum", "dep:tokio"]
+#
+# `tokio/rt-multi-thread` is scoped to this feature rather than added to the
+# shared dependency line: `explorer` deliberately runs on a current-thread
+# runtime and gains nothing from the work-stealing scheduler, so widening the
+# tokio line would make every build carry it for one command's benefit.
+okf-viewer = ["dep:axum", "dep:tokio", "tokio/rt-multi-thread"]
 # Offline similarity inference (`roteiro infer`) — the `inferred` provenance
 # class. Adds no dependencies (pure-Rust hashing embedding; ADR-0003).
 inference = ["rto-graph/inference"]

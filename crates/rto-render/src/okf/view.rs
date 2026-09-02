@@ -42,7 +42,15 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use okf_core::{Bundle, Concept, TrustTier};
+use okf_core::{Concept, TrustTier};
+
+/// The loaded bundle, re-exported.
+///
+/// A caller holding one across requests — the viewer's cache does — would
+/// otherwise need its own `okf-core` dependency to name the type, which would
+/// let the two drift onto different versions of the parser. One crate owns the
+/// dependency; everyone else names it through here.
+pub use okf_core::Bundle;
 use pulldown_cmark::{Event, Options, Parser, html};
 use serde::Serialize;
 
@@ -166,15 +174,38 @@ pub struct GraphView {
     pub edges: Vec<GraphEdge>,
 }
 
+/// Load a bundle, for a caller that will hold it and use the `_in` family.
+///
+/// # Errors
+///
+/// [`InspectError::Unreadable`] if the path is not a loadable OKF bundle.
+pub fn load(root: &Path) -> Result<Bundle, InspectError> {
+    super::inspect::load(root)
+}
+
 /// Read a bundle and summarise it for the viewer's index.
 ///
 /// # Errors
 ///
 /// [`InspectError::Unreadable`] if the path is not a loadable OKF bundle.
 pub fn overview(root: &Path) -> Result<BundleView, InspectError> {
-    let bundle = super::inspect::load(root)?;
+    Ok(overview_in(
+        &super::inspect::load(root)?,
+        &root.display().to_string(),
+    ))
+}
+
+/// [`overview`] over a bundle already in hand.
+///
+/// The whole family has one of these, because loading a bundle is by far the
+/// expensive part — 6.7 s for a 9,511-concept bundle against 58 ms to check
+/// whether it changed — and a server answering a request per page cannot pay it
+/// each time. The `&Path` forms remain the API for a caller doing this once;
+/// these are for a caller that has decided when to reload.
+#[must_use]
+pub fn overview_in(bundle: &Bundle, root: &str) -> BundleView {
     let mut view = BundleView {
-        root: root.display().to_string(),
+        root: root.to_owned(),
         okf_version: bundle.okf_version().map(ToOwned::to_owned),
         concepts: Vec::with_capacity(bundle.concepts().len()),
         human_reviewed: 0,
@@ -194,7 +225,7 @@ pub fn overview(root: &Path) -> Result<BundleView, InspectError> {
             view.flagged.push(flag);
         }
     }
-    Ok(view)
+    view
 }
 
 /// Render one concept, or `None` when the bundle does not contain it.
@@ -203,15 +234,18 @@ pub fn overview(root: &Path) -> Result<BundleView, InspectError> {
 ///
 /// [`InspectError::Unreadable`] if the path is not a loadable OKF bundle.
 pub fn concept(root: &Path, id: &str, base: &str) -> Result<Option<ConceptView>, InspectError> {
-    let bundle = super::inspect::load(root)?;
+    Ok(concept_in(&super::inspect::load(root)?, id, base))
+}
+
+/// [`concept`] over a bundle already in hand. See [`overview_in`].
+#[must_use]
+pub fn concept_in(bundle: &Bundle, id: &str, base: &str) -> Option<ConceptView> {
     let Ok(parsed) = okf_core::ConceptId::parse(id) else {
-        return Ok(None);
+        return None;
     };
-    let Some(concept) = bundle.get(&parsed) else {
-        return Ok(None);
-    };
+    let concept = bundle.get(&parsed)?;
     let card = card(concept);
-    Ok(Some(ConceptView {
+    Some(ConceptView {
         id: card.id,
         title: card.title,
         kind: card.kind,
@@ -223,7 +257,7 @@ pub fn concept(root: &Path, id: &str, base: &str) -> Result<Option<ConceptView>,
             .unwrap_or(&concept.path)
             .display()
             .to_string(),
-        body_html: render_body(&concept.document.body, &bundle, base),
+        body_html: render_body(&concept.document.body, bundle, base),
         links: bundle
             .links_from(&parsed)
             .iter()
@@ -241,7 +275,7 @@ pub fn concept(root: &Path, id: &str, base: &str) -> Result<Option<ConceptView>,
         screen: screen_concept(concept)
             .map(|f| f.classes)
             .unwrap_or_default(),
-    }))
+    })
 }
 
 /// The concept graph.
@@ -250,7 +284,12 @@ pub fn concept(root: &Path, id: &str, base: &str) -> Result<Option<ConceptView>,
 ///
 /// [`InspectError::Unreadable`] if the path is not a loadable OKF bundle.
 pub fn graph(root: &Path) -> Result<GraphView, InspectError> {
-    let bundle = super::inspect::load(root)?;
+    Ok(graph_in(&super::inspect::load(root)?))
+}
+
+/// [`graph`] over a bundle already in hand. See [`overview_in`].
+#[must_use]
+pub fn graph_in(bundle: &Bundle) -> GraphView {
     let mut nodes = Vec::with_capacity(bundle.concepts().len());
     let mut edges = Vec::new();
     for concept in bundle.concepts() {
@@ -271,7 +310,7 @@ pub fn graph(root: &Path) -> Result<GraphView, InspectError> {
             }
         }
     }
-    Ok(GraphView { nodes, edges })
+    GraphView { nodes, edges }
 }
 
 fn card(concept: &Concept) -> ConceptCard {
@@ -327,21 +366,73 @@ pub fn render_body(markdown: &str, bundle: &Bundle, base: &str) -> String {
     options.insert(Options::ENABLE_FOOTNOTES);
     options.insert(Options::ENABLE_TASKLISTS);
 
-    let events = Parser::new_ext(markdown, options).map(|event| match event {
-        // **Never emitted as markup.** Shown as visible text instead of dropped:
-        // a reader is entitled to see that the document carried markup, and what
-        // it was, rather than have it silently disappear.
-        Event::Html(raw) | Event::InlineHtml(raw) => Event::Text(raw),
-        Event::Start(tag) => Event::Start(rewrite_tag(tag, bundle, base)),
-        other => other,
-    });
+    // Collected rather than mapped, because refusing an image needs one bit of
+    // state: the `<img>` is dropped and the events between its start and end —
+    // which are its alt text — are emitted as ordinary text.
+    let mut events = Vec::new();
+    let mut refusing_image = false;
+    for event in Parser::new_ext(markdown, options) {
+        match event {
+            // **Never emitted as markup.** Shown as visible text instead of
+            // dropped: a reader is entitled to see that the document carried
+            // markup, and what it was, rather than have it silently disappear.
+            Event::Html(raw) | Event::InlineHtml(raw) => events.push(Event::Text(raw)),
+            Event::Start(pulldown_cmark::Tag::Image {
+                link_type,
+                dest_url,
+                title,
+                id,
+            }) => match image_src(&dest_url, bundle, base) {
+                Some(src) => events.push(Event::Start(pulldown_cmark::Tag::Image {
+                    link_type,
+                    dest_url: src,
+                    title,
+                    id,
+                })),
+                // No element at all, rather than `src=""`. An `<img>` with an
+                // empty source is still an element the browser may try to
+                // resolve — historically against the page's own URL — and it
+                // does not reliably show its alt text, which is what the reader
+                // is owed when the source was refused. Dropping it makes the
+                // alt text the content, which is what this always claimed to do.
+                None => refusing_image = true,
+            },
+            Event::End(pulldown_cmark::TagEnd::Image) if refusing_image => {
+                refusing_image = false;
+            }
+            Event::Start(tag) => events.push(Event::Start(rewrite_tag(tag, bundle, base))),
+            other => events.push(other),
+        }
+    }
 
     let mut out = String::new();
-    html::push_html(&mut out, events);
+    html::push_html(&mut out, events.into_iter());
     out
 }
 
+/// Where an image may point, or `None` when it may not be one.
+///
+/// An image is fetched by the browser without the reader choosing to, so a
+/// remote one is a network request they did not ask for. Only a path inside the
+/// bundle survives, served back through the viewer's own route.
+///
+/// Uses the route's own guard rather than a lexical approximation of it: it is
+/// `is_file` because `/f/` serves files, and it resolves symlinks because a
+/// lexically clean path can still leave the bundle. Sharing it is what keeps a
+/// `src` we emit and a `src` the route will honour the same set.
+fn image_src<'a>(dest: &str, bundle: &Bundle, base: &str) -> Option<pulldown_cmark::CowStr<'a>> {
+    let rel = bundle_path(dest)?;
+    safe_bundle_file(bundle.root(), &rel)?;
+    Some(pulldown_cmark::CowStr::from(format!("{base}/f/{rel}")))
+}
+
 /// Rewrite a link or image destination, or neutralise it.
+/// Rewrite a start tag for the viewer.
+///
+/// Images are **not** handled here: refusing one means emitting no element at
+/// all, and a function returning a `Tag` has no way to say that. `render_body`
+/// owns that decision, and [`image_src`] is the half of it that answers where an
+/// image may point.
 fn rewrite_tag<'a>(
     tag: pulldown_cmark::Tag<'a>,
     bundle: &Bundle,
@@ -357,34 +448,6 @@ fn rewrite_tag<'a>(
         } => {
             let dest = viewer_href(&dest_url, bundle, base).unwrap_or(CowStr::Borrowed(""));
             Tag::Link {
-                link_type,
-                dest_url: dest,
-                title,
-                id,
-            }
-        }
-        Tag::Image {
-            link_type,
-            dest_url,
-            title,
-            id,
-        } => {
-            // An image is fetched by the browser without the reader choosing to,
-            // so a remote one is a network request they did not ask for. Only a
-            // path inside the bundle survives, served back through the viewer's
-            // own route; anything else loses its source and shows its alt text.
-            // The route's own guard, not a lexical approximation of it: it is
-            // `is_file` rather than `exists` because `/f/` serves files, and it
-            // resolves symlinks because a lexically clean path can still leave
-            // the bundle. Sharing it is what keeps a `src` we emit and a `src`
-            // the route will honour the same set.
-            let dest = bundle_path(&dest_url)
-                .filter(|rel| safe_bundle_file(bundle.root(), rel).is_some())
-                .map_or_else(
-                    || CowStr::Borrowed(""),
-                    |rel| CowStr::from(format!("{base}/f/{rel}")),
-                );
-            Tag::Image {
                 link_type,
                 dest_url: dest,
                 title,
@@ -654,9 +717,13 @@ mod tests {
 
         let remote = render_body("![alt](https://tracker.invalid/pixel.gif)\n", &bundle, "");
         assert!(!remote.contains("tracker.invalid"), "{remote}");
+        // No element at all, not `src=""`: an `<img>` with an empty source is
+        // still something a browser may try to resolve, and it does not reliably
+        // show its alt text — which is the whole of what a reader is owed here.
+        assert!(!remote.contains("<img"), "no element survives: {remote}");
         assert!(
-            remote.contains("alt=\"alt\""),
-            "alt text survives: {remote}"
+            remote.contains("alt"),
+            "the alt text becomes the content: {remote}"
         );
 
         let local = render_body("![logo](/img/logo.svg)\n", &bundle, "");
@@ -664,7 +731,7 @@ mod tests {
 
         // Named but absent: no route is invented for it.
         let absent = render_body("![gone](/img/absent.png)\n", &bundle, "");
-        assert!(absent.contains("src=\"\""), "{absent}");
+        assert!(!absent.contains("<img"), "{absent}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -780,9 +847,10 @@ mod tests {
         let bundle = load(&root);
         let html = render_body("![d](/img)\n", &bundle, "");
         assert!(
-            html.contains("src=\"\""),
-            "a directory is not a source: {html}"
+            !html.contains("<img"),
+            "a directory is not a source, and leaves no element: {html}"
         );
+        assert!(html.contains('d'), "its alt text remains: {html}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -832,8 +900,8 @@ mod tests {
         let bundle = load(&root);
         let html = render_body("![x](escape.txt)\n", &bundle, "");
         assert!(
-            html.contains(r#"src="""#),
-            "escaping image keeps no source: {html}"
+            !html.contains("<img"),
+            "an escaping image leaves no element: {html}"
         );
 
         let _ = std::fs::remove_file(&outside);

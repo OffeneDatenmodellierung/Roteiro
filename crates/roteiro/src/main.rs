@@ -6489,7 +6489,14 @@ fn run_okf_view(path: &str, addr: Option<&str>) -> anyhow::Result<()> {
 
     // Mounted at the root when served alone; see `serve` for the nested case.
     let app = okf_viewer::router(root.clone(), "");
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    // Multi-threaded, unlike `explorer`. Every route reads the bundle from
+    // disk, and on a current-thread runtime one slow request holds every other
+    // one behind it: eight concurrent requests against a 9,511-concept bundle
+    // did not finish in ten minutes. The handlers also move that work to the
+    // blocking pool, which is what makes this correct when the viewer is nested
+    // into `serve` and does not own its runtime — the two fixes are for the same
+    // fault seen from either side of the mount.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     runtime.block_on(async move {
