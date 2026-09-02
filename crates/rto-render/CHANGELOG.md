@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.5.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v5.4.0...rto-render-v5.5.0) - 2026-09-02
+
+### Added
+
+- *(okf)* report staleness, list computations, and add `okf info`
+
+### Fixed
+
+- *(okf)* the computations report contradicted its own gate, and two doc gaps
+
 ## [5.4.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v5.3.0...rto-render-v5.4.0) - 2026-09-02
 
 ### Added
