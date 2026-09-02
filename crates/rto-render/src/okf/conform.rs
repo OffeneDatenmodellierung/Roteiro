@@ -100,7 +100,7 @@ impl CheckReport {
     ///
     /// Warnings deliberately do not fail: §11 tells a consumer not to reject a
     /// document over a soft-guidance deviation, and a check that failed on one
-    /// would be unusable against real third-party bundles. Measured: of the 208
+    /// would be unusable against real third-party bundles. Measured: of the 200
     /// diagnostics upstream reports over the four published bundles, **none** is
     /// an error — so a gate that failed on warnings would reject the
     /// specification's own corpus.

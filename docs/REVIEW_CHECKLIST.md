@@ -123,19 +123,17 @@ But adjudicate before acting, and one rule pays for itself:
       `msrv` job at that commit, not by an investigation.** In that sample every
       false positive was a compile-error claim (a move out of a borrow, three
       times), and *every* compile-error claim was a false positive. Two have
-        since joined them: #352's `Duration::from_mins` called "not on MSRV
-        1.94", though it is stable since 1.91.0; and #736's
-        `**id != concept.id.to_string()` called a move out of a `&&String`, when
-        `!=` borrows both operands. So the class now stands at **5 for 5**, with
-        no real defect in it — and four of the five are the same mistake, a
-        borrow read as a move.
-
-        **A comment can be half right, and #736's was.** The same one that made
-        that claim also said the `to_string()` was allocated once per comparison
-        rather than once per concept, which was true and was fixed. Adjudicate
-        the compile claim against CI and the rest of the comment on its merits;
-        do not discard the whole comment with the false half. Record a newly adjudicated comment
-      in the corpus linked above. `msrv` is
+      since joined them: #352's `Duration::from_mins` called "not on MSRV 1.94",
+      though it is stable since 1.91.0; and #736's
+      `**id != concept.id.to_string()` called a move out of a `&&String`, when
+      `!=` borrows both operands. So the class now stands at **5 for 5**, with no
+      real defect in it — and four of the five are the same mistake, a borrow
+      read as a move. **But a comment can be half right**, and #736's was: the
+      same one that made that claim also said the `to_string()` was allocated
+      once per comparison rather than once per concept, which was true and was
+      fixed. Adjudicate the compile claim against CI and the rest of the comment
+      on its merits; do not discard the whole comment with the false half.
+      Record a newly adjudicated comment in the corpus linked above. `msrv` is
       `cargo check --workspace --all-features` and finishes in about 40 seconds;
       in each case it had already gone green **at the commit the comment was
       left on**, roughly a minute before the comment was posted. So the
@@ -165,11 +163,11 @@ But adjudicate before acting, and one rule pays for itself:
       - **Toolchain.** Only `msrv` is on 1.96. A green `stable` build says
         nothing about an MSRV claim.
 
-      If no green job covers the configuration, the claim is unrefuted and you
-      owe it a real look. `rto_graph::compile_claim` is this rule as code — the
-      coverage model, the four axes, and every case above as a test — so a
-      reviewer applying it mechanically and a human applying it by eye reach the
-      same answer.
+    If no green job covers the configuration, the claim is unrefuted and you
+    owe it a real look. `rto_graph::compile_claim` is this rule as code — the
+    coverage model, the four axes, and every case above as a test — so a
+    reviewer applying it mechanically and a human applying it by eye reach the
+    same answer.
 - [ ] Every other class in that sample was real. Treat a non-compile finding as
       probably correct and verify it against the code, rather than assuming the
       reviewer is noisy.
