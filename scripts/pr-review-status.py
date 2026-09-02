@@ -144,6 +144,29 @@ def open_threads(repo: str, pr: int) -> list[dict]:
     return out
 
 
+def github_now() -> str:
+    """GitHub's own clock, as an ISO-8601 UTC string.
+
+    Read from the `Date` header of `/rate_limit`, which does not consume quota.
+    Used so that "is this timestamp in the future" is asked of one clock rather
+    than compared across two.
+
+    Returns `""` if it cannot be determined, and callers treat that as "do not
+    filter": losing the future-guard is a smaller failure than discarding every
+    real timestamp because a header moved.
+    """
+    out = gh("api", "-i", "/rate_limit")
+    for line in out.splitlines():
+        if line.lower().startswith("date:"):
+            stamp = line.split(":", 1)[1].strip()
+            try:
+                parsed = datetime.strptime(stamp, "%a, %d %b %Y %H:%M:%S %Z")
+            except ValueError:
+                return ""
+            return parsed.replace(tzinfo=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return ""
+
+
 def last_answered_at(repo: str, pr: int) -> str:
     """The latest moment at which a finding could have been answered.
 
@@ -174,7 +197,11 @@ def last_answered_at(repo: str, pr: int) -> str:
     turn the tool green while work was outstanding, which is the one direction of
     error that matters here: a finding wrongly shown is noise, a finding wrongly
     hidden is the bug this tool exists to prevent. Future moments are therefore
-    discarded.
+    discarded — against **GitHub's** clock, from the `Date` header of a response,
+    not the local machine's. Comparing GitHub's timestamps to a local clock would
+    have introduced a second skew to fix the first: a machine running a minute
+    behind would discard the newest commit and report answered findings as live.
+    One clock, or none.
     """
     owner, name = repo.split("/", 1)
     query = """
@@ -206,8 +233,8 @@ def last_answered_at(repo: str, pr: int) -> str:
 
     # Any of these can be absent — a deleted edit, an unexpected timeline node —
     # and `max()` over a list containing `None` raises rather than degrading.
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    usable = [m for m in moments if m and m <= now]
+    now = github_now()
+    usable = [m for m in moments if m and (not now or m <= now)]
     # ISO-8601 UTC throughout, so lexicographic order is chronological order.
     return max(usable) if usable else ""
 
