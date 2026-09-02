@@ -8,11 +8,11 @@
 //! # Why an independent implementation is the whole value
 //!
 //! Roteiro both *writes* OKF (`render okf`) and *reads* it (`import --from
-//! okf`). A checker of our own construction, run over our own output, would
+//! okf`). A reader of our own construction, run over our own output, would
 //! agree with us about a format we also invent: it can only catch a mistake we
-//! did not make twice. `okf-core` and `okf-validator` are an independent reading
-//! of the same specification by an author who is not us, so their disagreement
-//! is *information*.
+//! did not make twice. `okf-core` is an independent reading of the same
+//! specification by an author who is not us, so its disagreement is
+//! *information*.
 //!
 //! That is not hypothetical here. ADR-0021 records that deriving a concept's
 //! path from its node key "guessed wrong for 43 links" in a real render, and the
@@ -21,28 +21,31 @@
 //! found by checking our output against something that did not share our
 //! assumptions.
 //!
-//! # What is here, and what it costs
+//! # What is here, and what is not
 //!
-//! The two crates behind this module differ in price by two orders of magnitude:
+//! [`trust_summary`], [`link_report`] and [`diff_report`], all built on
+//! `okf-core` — **one crate, zero transitive dependencies**.
 //!
-//! | Surface | Crate | Cost |
-//! | --- | --- | --- |
-//! | [`trust_summary`], [`link_report`], [`diff_report`] | `okf-core` | **one crate**, zero transitive |
-//! | [`validate_report`], [`lint_report`] | `okf-validator` | **73 crates** |
+//! Conformance checking and hygiene linting are **not** here. They live
+//! upstream in a second crate, `okf-validator`, whose dependencies are not
+//! optional and which syntax-checks fenced code blocks in eight languages.
+//! Taking it means taking `rustpython-parser`: 61 crates, `LGPL-3.0-only`
+//! through the `malachite` tree, and six unmaintained advisories whose own text
+//! says no safe upgrade exists. `cargo deny` refuses it on both counts, and
+//! ADR-0017 §3 is explicit that a licence is not admitted merely to turn CI
+//! green.
 //!
-//! Both are **unconditional**, which for the second was a decision rather than a
-//! default. It was behind a feature first, and the gate was removed on the
-//! reasoning that a conformance checker nobody enables checks nothing: the whole
-//! value of an independent implementation is that it runs. See `Cargo.toml` for
-//! the measurement and ADR-0017 for the policy the adoption was argued under.
+//! That price bought two of the validator's thirty-four checks, both of them
+//! about whether embedded *code* parses rather than whether the *bundle*
+//! conforms. See `Cargo.toml` for the full measurement.
 //!
 //! # Subcommand names are upstream's
 //!
-//! `trust`, `links`, `diff`, `validate` and `lint` match the `okf` CLI's own
-//! names for the same operations, so somebody who knows that tool already knows
-//! this one. The library is called **in-process**; Roteiro is a self-contained
-//! offline binary and requiring `okf` on `PATH` would reintroduce exactly the
-//! coupling the vendored interop fixtures exist to avoid.
+//! `trust`, `links` and `diff` match the `okf` CLI's own names for the same
+//! operations, so somebody who knows that tool already knows this one. The
+//! library is called **in-process**; Roteiro is a self-contained offline binary
+//! and requiring `okf` on `PATH` would reintroduce exactly the coupling the
+//! vendored interop fixtures exist to avoid.
 
 use std::path::Path;
 
