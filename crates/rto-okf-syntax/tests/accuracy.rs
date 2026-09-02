@@ -15,6 +15,19 @@
 //! Every test here runs in **every** feature configuration. A case whose
 //! language this build cannot check is asserted to report clean rather than
 //! skipped, so a `--no-default-features` run still proves something.
+//!
+//! # Where these cases come from, and why that matters
+//!
+//! The SQL cases are lifted from the four bundles published in the OKF
+//! specification repository at `ad30107`, not invented. That distinction is not
+//! pedantry: an earlier version of this file contained only SQL *we* had
+//! written, reported **zero** false positives, and was wrong. Against the real
+//! corpus the then-default `tree-sitter-sequel` backend rejected **78 of 78**
+//! blocks, because it cannot parse `BigQuery`'s backtick-quoted identifiers — and
+//! that is how essentially every query in the corpus names its table.
+//!
+//! A corpus of cases you thought to write down measures what you already
+//! suspected. Where a real one exists, use it.
 
 use rto_okf_syntax::{Language, check_syntax, checkable_languages, is_checkable};
 
@@ -147,6 +160,23 @@ const CORPUS: &[Case] = &[
         true,
         "placeholder",
     ),
+    // Lifted from crypto_bitcoin/tables/inputs.md. This is the case the
+    // synthetic corpus missed and the grammar backend could not read.
+    (
+        "sql",
+        "SELECT\n  block_timestamp,\n  value / 100000000 AS value_btc\n\
+         FROM `bigquery-public-data.crypto_bitcoin.inputs`\n\
+         WHERE block_timestamp >= '2024-04-17 00:00:00 UTC'\n\
+         ORDER BY value DESC\nLIMIT 10;\n",
+        true,
+        "BigQuery backtick identifiers (real corpus)",
+    ),
+    (
+        "sql",
+        "SELECT COUNT(*) AS n FROM `p.d.t` WHERE x IS NOT NULL;\n",
+        true,
+        "backtick identifier, minimal",
+    ),
     // ---- bash ------------------------------------------------------------
     ("bash", "echo hi\n", true, "echo"),
     (
@@ -225,13 +255,11 @@ fn the_checker_agrees_with_the_corpus() {
 fn the_default_build_actually_checks_something() {
     let set = checkable_languages();
     // Three need no parser at all and must survive every configuration; the
-    // grammars add five more; `strict-sql` alone adds only SQL. Derived rather
-    // than hardcoded, so adding a backend updates this by construction.
-    let expected = 3 + if cfg!(feature = "grammars") {
-        5
-    } else {
-        usize::from(cfg!(feature = "strict-sql"))
-    };
+    // grammars add four (Python, JavaScript, TypeScript, Rust); `sql` adds SQL.
+    // Derived rather than hardcoded, so adding a backend updates this by
+    // construction.
+    let expected =
+        3 + if cfg!(feature = "grammars") { 4 } else { 0 } + usize::from(cfg!(feature = "sql"));
     assert_eq!(
         set.len(),
         expected,
@@ -252,27 +280,54 @@ fn the_default_build_actually_checks_something() {
     );
 }
 
-/// A known gap, pinned so it is a documented limitation rather than a surprise.
+/// The known limitation of the SQL arm: it wants statements, not fragments.
 ///
-/// `tree-sitter-sequel` accepts `SELECT FROM;` — it parses `FROM` as the
-/// selected expression and finds no ERROR node. This is the one thing the
-/// `strict-sql` feature exists to fix, and the two halves are asserted together
-/// so neither can drift.
+/// `sqlparser` rejects a bare join condition or a bare scalar expression, and
+/// documentation contains both — six of the 78 SQL blocks in the published
+/// corpus are exactly this, all in `stackoverflow/references/`. They are correct
+/// as documentation and unparseable as statements.
+///
+/// Pinned rather than fixed. The alternatives are worse: wrapping a fragment in
+/// a synthetic `SELECT` guesses at what the author meant, and the error-tolerant
+/// grammar that would accept them rejects 78 of 78 real blocks instead. Six
+/// false positives against seventy-two correct answers is the better trade, and
+/// naming it here keeps it a known cost rather than a surprise.
+///
+/// The real fix belongs to the caller, not this crate: only 2 of the corpus's 54
+/// concepts are Attested Computations, and those are the ones that declare a
+/// `runtime:` and must actually execute. Checking every fenced block in every
+/// document is the wrong scope.
+#[cfg(feature = "sql")]
 #[test]
-fn the_sql_gap_is_closed_only_by_strict_sql() {
-    let result = check_syntax("sql", "SELECT FROM;\n");
-    if cfg!(feature = "strict-sql") {
+fn sql_fragments_are_rejected_and_that_is_known() {
+    for (fragment, label) in [
+        ("ON a.id = b.post_id\n", "bare join condition"),
+        ("SAFE_DIVIDE(accepted, total)\n", "bare scalar expression"),
+    ] {
         assert!(
-            result.is_err(),
-            "strict-sql must reject what the grammar accepts"
-        );
-    } else if cfg!(feature = "grammars") {
-        assert!(
-            result.is_ok(),
-            "if this now fails, tree-sitter-sequel got stricter: the strict-sql \
-             feature may no longer be earning its ~17 crates"
+            check_syntax("sql", fragment).is_err(),
+            "{label} is expected to fail; if it now passes, sqlparser grew \
+             fragment support and this limitation can be dropped"
         );
     }
+}
+
+/// The shape of real OKF SQL, which is `BigQuery`'s.
+///
+/// This is the case a synthetic corpus missed entirely and that decided the
+/// backend: `tree-sitter-sequel` rejects it, `sqlparser` accepts it, and
+/// essentially every query in the published bundles is written this way.
+#[cfg(feature = "sql")]
+#[test]
+fn backtick_quoted_bigquery_identifiers_are_accepted() {
+    let real = "SELECT\n  block_timestamp,\n  value / 100000000 AS value_btc\n\
+                FROM `bigquery-public-data.crypto_bitcoin.inputs`\n\
+                WHERE block_timestamp >= '2024-04-17 00:00:00 UTC'\n\
+                ORDER BY value DESC\nLIMIT 10;\n";
+    assert!(
+        check_syntax("sql", real).is_ok(),
+        "this is the dominant shape in the real corpus and must not be rejected"
+    );
 }
 
 /// Why `syn` is not wired up, measured rather than asserted.

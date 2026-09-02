@@ -31,10 +31,10 @@ authors.workspace = true
 # The dependency list is the contract, not an implementation detail. This crate
 # exists *because* `okf-validator` could not be taken: its `rustpython-parser`
 # tree is 61 crates carrying LGPL-3.0-only and six unmaintained advisories, to
-# serve two of thirty-four checks. A replacement is only worth having while it
-# stays clean, so `dependencies_are_frozen` in `src/lib.rs` asserts this list
-# verbatim and widening it is a deliberate edit to a test rather than a
-# `cargo add`.
+# serve one 129-line file in the entire published corpus. A replacement is only
+# worth having while it stays clean, so `dependencies_are_frozen` in
+# `src/lib.rs` asserts this list verbatim and widening it is a deliberate edit
+# to a test rather than a `cargo add`.
 #
 # **The core is pure Rust and parses no code.** With `--no-default-features`
 # this crate compiles no grammar, invokes no C toolchain, and still does the
@@ -54,16 +54,17 @@ tree-sitter-bash = { version = "0.25.1", optional = true }
 tree-sitter-javascript = { version = "0.25.0", optional = true }
 tree-sitter-python = { version = "0.25.0", optional = true }
 tree-sitter-rust = { version = "0.24.2", optional = true }
-tree-sitter-sequel = { version = "0.3.11", optional = true }
 tree-sitter-typescript = { version = "0.23.2", optional = true }
 sqlparser = { version = "0.58", optional = true }
 
 [features]
-# Roteiro's build. The grammars are already in this workspace's lockfile for AST
-# extraction, so for us this backend is free.
-default = ["grammars"]
+# Both backends on. `sql` is in the default set even though it is the more
+# expensive one, because SQL is 81 of the 82 tagged code blocks in the published
+# OKF corpus — a build without it cannot check the only language that actually
+# occurs.
+default = ["grammars", "sql"]
 
-# tree-sitter backends for Python, JavaScript, TypeScript, Rust, SQL and Bash.
+# tree-sitter backends for Python, JavaScript, TypeScript, Rust and Bash.
 #
 # Cheap *here* and not necessarily elsewhere: tree-sitter grammars compile C, so
 # a consumer who wants no C toolchain — upstream's `okf-*` crates describe
@@ -73,26 +74,35 @@ default = ["grammars"]
 # could not fit. That fails toward *accepting* invalid code rather than rejecting
 # valid code, which is the right direction for checking somebody else's
 # documentation and the one §11 asks for. Measured in `tests/accuracy.rs`.
+#
+# **SQL is deliberately not in this list** — see the `sql` feature.
 grammars = [
     "dep:tree-sitter",
     "dep:tree-sitter-bash",
     "dep:tree-sitter-javascript",
     "dep:tree-sitter-python",
     "dep:tree-sitter-rust",
-    "dep:tree-sitter-sequel",
     "dep:tree-sitter-typescript",
 ]
 
-# A strict SQL parser, which takes precedence over the grammar when both are on.
+# SQL, via `sqlparser`. The **only** SQL backend, and the reason is measured.
 #
-# Off by default, and the reasoning is recorded because the cost is not obvious:
-# `sqlparser` is pure Rust and Apache-2.0, but its tree is ~17 crates including
-# `stacker`/`psm`, which compile assembly, and `cc`/`object`. So it is not
-# cheaper than the grammar, it is *more accurate*: it is the only backend that
-# rejects `SELECT FROM;`, the one known gap in `tree-sitter-sequel`.
+# This started life as `strict-sql`, an optional accuracy upgrade over
+# `tree-sitter-sequel`. Running both over all four bundles published in the OKF
+# specification repository at `ad30107` inverted that: the grammar rejects
+# **78 of 78** SQL blocks, because it cannot parse BigQuery's backtick-quoted
+# identifiers — `FROM \`bigquery-public-data.crypto_bitcoin.inputs\`` — which is
+# how essentially every query in the corpus names its table. `sqlparser` rejects
+# 6, all of them documentation *fragments* (a bare `ON` clause, a bare
+# `SAFE_DIVIDE(...)`), and passes both real Attested Computations.
 #
-# Worth enabling if you check SQL-heavy bundles and want that gap closed.
-strict-sql = ["dep:sqlparser"]
+# So `tree-sitter-sequel` is not a weaker option, it is an unusable one for this
+# format, and it has been dropped rather than left as a fallback: a fallback
+# that reports 78 false errors is worse than reporting "not checked".
+#
+# The price is ~17 crates including `stacker`/`psm`, which compile assembly.
+# That is the cost of checking the one language OKF actually uses.
+sql = ["dep:sqlparser"]
 
 # `syn` is a dev-dependency only, and only to keep one claim honest:
 # `a_strict_rust_parser_would_be_worse_here` measures that `syn::parse_file`

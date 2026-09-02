@@ -37,8 +37,8 @@
 //!
 //! | Feature | Adds | Costs |
 //! | --- | --- | --- |
-//! | `grammars` *(default)* | Python, JavaScript, TypeScript, Rust, SQL, Bash | tree-sitter grammars, which compile C |
-//! | `strict-sql` | a strict SQL parser that closes the one known grammar gap | ~17 crates, two of which compile assembly |
+//! | `grammars` *(default)* | Python, JavaScript, TypeScript, Rust, Bash | tree-sitter grammars, which compile C |
+//! | `sql` *(default)* | SQL, via `sqlparser` | ~17 crates, two of which compile assembly |
 //!
 //! That is also what makes the crate donatable. Upstream describes itself as a
 //! pure-Rust implementation, so a backend that compiles C cannot be mandatory;
@@ -74,18 +74,34 @@
 //! in a specific direction: more likely to **accept** something a strict parser
 //! rejects than to reject something valid.
 //!
-//! For code samples in somebody else's documentation that is the right direction
-//! — a false rejection makes the check unusable against real bundles, a false
-//! acceptance merely means it did not fire — and it is what §11 asks for. It is
-//! measured rather than asserted in `tests/accuracy.rs`, over a corpus weighted
-//! toward valid-but-awkward input.
+//! For code samples in somebody else's documentation that is usually the right
+//! direction — a false rejection makes the check unusable against real bundles,
+//! a false acceptance merely means it did not fire — and it is what §11 asks
+//! for.
 //!
-//! Strictness is not automatically better, which is why `syn` is not wired up
-//! even though it is clean and already in this workspace's lockfile:
+//! **Usually, but not always, and the exception decided the feature set.** SQL
+//! is handled by `sqlparser` and *not* by a grammar, because
+//! `tree-sitter-sequel` rejects **78 of 78** SQL blocks in the four bundles
+//! published in the OKF specification repository: it cannot parse `BigQuery`'s
+//! backtick-quoted identifiers, which is how essentially every query in that
+//! corpus names its table. An error-tolerant parser is not automatically the
+//! safer choice; it is only safer where its tolerance covers the dialect in
+//! front of it.
+//!
+//! That was found by running against somebody else's bundles rather than our
+//! own fixtures. The synthetic corpus in `tests/accuracy.rs` reported zero false
+//! positives while the real one was at 100%, which is worth remembering before
+//! trusting any accuracy number here: the cases in that file are the ones we
+//! thought to write down.
+//!
+//! Strictness is not automatically better either, which is why `syn` is not
+//! wired up even though it is clean and already in this workspace's lockfile:
 //! `syn::parse_file` rejects `let x = 1;`, because a bare statement is not a
-//! valid Rust *file*. Documentation is full of fragments, so the strict parser
-//! is the one that gets them wrong. That measurement is in
-//! `tests/accuracy.rs::a_strict_rust_parser_would_be_worse_here`.
+//! valid Rust *file*. Documentation is full of fragments, so there the strict
+//! parser is the one that gets it wrong. `sqlparser` has the same weakness on
+//! the same kind of input — six of the corpus's SQL blocks are bare `ON`
+//! clauses or scalar expressions — and it is still the right choice at 6
+//! failures against 78. Both measurements are in `tests/accuracy.rs`.
 
 #![forbid(unsafe_code)]
 
@@ -208,7 +224,8 @@ pub const fn is_checkable(language: Language) -> bool {
     match language {
         // No parser needed, so always available.
         Language::Json | Language::Yaml | Language::Bash => true,
-        Language::Sql => cfg!(any(feature = "grammars", feature = "strict-sql")),
+        // `sqlparser` only: the grammar is not a fallback here, it is wrong.
+        Language::Sql => cfg!(feature = "sql"),
         Language::Python | Language::JavaScript | Language::TypeScript | Language::Rust => {
             cfg!(feature = "grammars")
         }
@@ -357,14 +374,15 @@ pub fn check_syntax(language_tag: &str, source: &str) -> Result<(), SyntaxError>
     }
 }
 
-/// SQL, strict parser preferred.
+/// SQL, via `sqlparser`, or not at all.
 ///
-/// `strict-sql` wins over the grammar deliberately: it is the only backend that
-/// rejects `SELECT FROM;`, so a consumer who paid ~17 crates for it should get
-/// it. Written as three cfg-selected definitions rather than one function with
-/// branches inside, so each configuration compiles exactly the code it uses and
-/// nothing is reachable-but-dead.
-#[cfg(feature = "strict-sql")]
+/// There is deliberately **no grammar fallback**. `tree-sitter-sequel` rejects
+/// every SQL block in the published OKF corpus over `BigQuery`'s backtick-quoted
+/// identifiers, so falling back to it would report 78 false errors where
+/// reporting "not checked" is honest. A backend that is wrong is worse than a
+/// backend that is absent, because [`is_checkable`] can tell a caller about the
+/// absence.
+#[cfg(feature = "sql")]
 fn check_sql(source: &str) -> Result<(), SyntaxError> {
     let dialect = sqlparser::dialect::GenericDialect {};
     sqlparser::parser::Parser::parse_sql(&dialect, source).map_or_else(
@@ -380,12 +398,7 @@ fn check_sql(source: &str) -> Result<(), SyntaxError> {
     )
 }
 
-#[cfg(all(not(feature = "strict-sql"), feature = "grammars"))]
-fn check_sql(source: &str) -> Result<(), SyntaxError> {
-    grammar::check(&tree_sitter_sequel::LANGUAGE.into(), Language::Sql, source)
-}
-
-#[cfg(all(not(feature = "strict-sql"), not(feature = "grammars")))]
+#[cfg(not(feature = "sql"))]
 #[expect(
     clippy::unnecessary_wraps,
     reason = "signature is fixed by its callers"
@@ -681,7 +694,6 @@ mod tests {
                 "tree-sitter-javascript".to_owned(),
                 "tree-sitter-python".to_owned(),
                 "tree-sitter-rust".to_owned(),
-                "tree-sitter-sequel".to_owned(),
                 "tree-sitter-typescript".to_owned(),
             ],
             "the dependency list changed; see this test's documentation"
@@ -731,8 +743,9 @@ mod tests {
         );
         assert_eq!(
             set.contains(&Language::Sql),
-            cfg!(any(feature = "grammars", feature = "strict-sql")),
-            "SQL has two possible backends"
+            cfg!(feature = "sql"),
+            "SQL is checkable exactly when `sqlparser` is compiled in — the \
+             grammar is not a fallback, because it is wrong for this corpus"
         );
     }
 
@@ -854,15 +867,29 @@ mod tests {
         assert!(check_syntax("jsx", jsx).is_ok(), "jsx must accept JSX");
     }
 
-    /// `strict-sql` exists to close exactly one gap. If it ever stops closing
-    /// it, the feature is no longer worth its ~17 crates.
-    #[cfg(feature = "strict-sql")]
+    /// The shape of real OKF SQL, which is `BigQuery`'s.
+    ///
+    /// This is the case that a synthetic corpus missed entirely and that decided
+    /// the backend: `tree-sitter-sequel` rejects it, `sqlparser` accepts it, and
+    /// essentially every query in the published bundles is written this way.
+    #[cfg(feature = "sql")]
     #[test]
-    fn strict_sql_closes_the_grammars_gap() {
+    fn backtick_quoted_bigquery_identifiers_are_accepted() {
+        let real = "SELECT\n  block_timestamp,\n  value / 100000000 AS value_btc\n\
+                    FROM `bigquery-public-data.crypto_bitcoin.inputs`\n\
+                    WHERE block_timestamp >= '2024-04-17 00:00:00 UTC'\n\
+                    ORDER BY value DESC\nLIMIT 10;\n";
         assert!(
-            check_syntax("sql", "SELECT FROM;\n").is_err(),
-            "the strict parser must reject what tree-sitter-sequel accepts"
+            check_syntax("sql", real).is_ok(),
+            "this is the dominant shape in the real corpus and must not be rejected"
         );
-        assert!(check_syntax("sql", "SELECT a FROM t;\n").is_ok());
+    }
+
+    /// Nonsense is still caught, so the SQL arm is not merely permissive.
+    #[cfg(feature = "sql")]
+    #[test]
+    fn the_sql_arm_still_rejects_nonsense() {
+        assert!(check_syntax("sql", "SELECT FROM;\n").is_err());
+        assert!(check_syntax("sql", "SELCT a FROM t;\n").is_err());
     }
 }

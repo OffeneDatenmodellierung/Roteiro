@@ -4466,7 +4466,6 @@ dependencies = [
  "tree-sitter-javascript",
  "tree-sitter-python",
  "tree-sitter-rust",
- "tree-sitter-sequel",
  "tree-sitter-typescript",
 ]
 
