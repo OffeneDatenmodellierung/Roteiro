@@ -288,6 +288,27 @@ const CYTOSCAPE: &str = include_str!("assets/cytoscape.min.js");
 /// independently — a bug in the escaping does not also disable the header.
 const CSP: &str = "default-src 'self'; img-src 'self'; object-src 'none'; base-uri 'none'";
 
+/// The policy for `/f/`, which serves **bytes a peer wrote**.
+///
+/// Tighter than [`CSP`], and deliberately a different constant. The page policy
+/// says `default-src 'self'` because the viewer's own pages legitimately load
+/// their own stylesheet and script. A file out of the bundle needs neither, and
+/// `'self'` is too generous for one: `script-src` falls back to `default-src`,
+/// so an SVG served from here and opened directly could have pulled in
+/// `/f/anything.js` from the same bundle.
+///
+/// That was blocked in practice — the mime table serves an unknown extension as
+/// `application/octet-stream` and `nosniff` refuses to execute it as script — but
+/// that is three unrelated rules happening to line up, not a policy. SVG is
+/// active content, unlike every other type in the table, and the bundle chooses
+/// its contents.
+///
+/// `sandbox` puts a directly-opened file in a unique origin with scripting off;
+/// `default-src 'none'` stops it fetching anything at all. Neither affects an
+/// image embedded with `<img>`, which is how the viewer itself loads them —
+/// scripts never run in that context regardless.
+const FILE_CSP: &str = "default-src 'none'; sandbox; base-uri 'none'";
+
 /// The most `/f/` will read into memory for one request.
 ///
 /// The route reads a whole file before answering, and the bundle is somebody
@@ -653,7 +674,7 @@ async fn file(State(v): State<Viewer>, UrlPath(path): UrlPath<String>) -> Respon
     let refused = || {
         (
             StatusCode::NOT_FOUND,
-            [(header::CONTENT_SECURITY_POLICY, CSP)],
+            [(header::CONTENT_SECURITY_POLICY, FILE_CSP)],
         )
             .into_response()
     };
@@ -703,7 +724,7 @@ async fn file(State(v): State<Viewer>, UrlPath(path): UrlPath<String>) -> Respon
     (
         [
             (header::CONTENT_TYPE, mime),
-            (header::CONTENT_SECURITY_POLICY, CSP),
+            (header::CONTENT_SECURITY_POLICY, FILE_CSP),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
         ],
         bytes,
@@ -896,6 +917,71 @@ mod tests {
         let (status, body) = get_(&root, "", "/c/metrics/nope").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(body.contains("no concept"), "{body}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A file out of the bundle is served under a policy of its own.**
+    ///
+    /// `/f/` serves bytes a peer wrote, and one of the types it will label is
+    /// `image/svg+xml` — active content, unlike every other entry in the table.
+    /// Under the page policy, `script-src` falls back to `default-src 'self'`, so
+    /// an SVG opened directly could have referenced `/f/anything.js` from the same
+    /// bundle. The mime table and `nosniff` did stop that, but by coincidence
+    /// rather than by policy.
+    ///
+    /// Asserted as a *difference* from [`CSP`] rather than as a literal string:
+    /// the point is that the two are not the same policy, and a future edit that
+    /// unified them would be the regression.
+    #[tokio::test]
+    async fn a_bundle_file_is_served_under_a_stricter_policy_than_a_page() {
+        let root = fixture(
+            "file-csp",
+            &[
+                ("index.md", "---\nokf_version: \"0.2\"\n---\n\n# B\n"),
+                ("img/logo.svg", "<svg/>"),
+            ],
+        );
+        let policy = |uri: &'static str| {
+            let root = root.clone();
+            async move {
+                let response = router(root, "")
+                    .oneshot(
+                        Request::builder()
+                            .uri(uri)
+                            .body(Body::empty())
+                            .expect("req"),
+                    )
+                    .await
+                    .expect("response");
+                response
+                    .headers()
+                    .get(header::CONTENT_SECURITY_POLICY)
+                    .expect("every response carries a policy")
+                    .to_str()
+                    .expect("ascii")
+                    .to_owned()
+            }
+        };
+
+        let file = policy("/f/img/logo.svg").await;
+        let page = policy("/").await;
+        assert_ne!(file, page, "a peer's bytes do not get the page's policy");
+        assert!(
+            file.contains("sandbox"),
+            "a directly-opened file is sandboxed: {file}"
+        );
+        assert!(
+            file.contains("default-src 'none'"),
+            "and fetches nothing: {file}"
+        );
+        assert!(
+            !file.contains("'self'"),
+            "`'self'` is what let an SVG reach the rest of the bundle: {file}"
+        );
+
+        // The refusal path carries it too — "every response" has to mean every.
+        let missing = policy("/f/img/absent.png").await;
+        assert_eq!(missing, file, "a refusal carries the same policy as a hit");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1100,8 +1186,18 @@ mod tests {
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or_default()
                 .to_owned();
-            assert!(csp.contains("default-src 'self'"), "{uri}: {csp}");
-            assert!(csp.contains("object-src 'none'"), "{uri}: {csp}");
+            // Two policies, and which one applies is the point: the viewer's
+            // own pages load their own stylesheet and script, so they need
+            // `'self'`; bytes out of a peer's bundle need nothing at all. What
+            // this asserts of every route is that *some* policy is present and
+            // that nothing can execute.
+            if uri.starts_with("/f/") {
+                assert!(csp.contains("default-src 'none'"), "{uri}: {csp}");
+                assert!(csp.contains("sandbox"), "{uri}: {csp}");
+            } else {
+                assert!(csp.contains("default-src 'self'"), "{uri}: {csp}");
+                assert!(csp.contains("object-src 'none'"), "{uri}: {csp}");
+            }
         }
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -478,10 +478,11 @@ fn image_src<'a>(dest: &str, bundle: &Bundle, base: &str) -> Option<pulldown_cma
 ///   case-insensitively as RFC 3986 §3.1 requires. A navigation the reader
 ///   chooses, issuing no request until they take it.
 /// - **A bundle-internal path becomes a viewer route.**
-/// - **Everything else resolves to `None`**, and the caller emits the anchor with
-///   an empty destination — the link text stays, and the stylesheet marks it as
-///   not a destination. It is not stripped to bare text: a reader is better served
-///   seeing that a link was written and refused than seeing nothing.
+/// - **Everything else resolves to `None`**, and the caller emits no anchor at
+///   all — `<span class="refused">` around the original text. The link text
+///   stays and the stylesheet marks it, so a reader is better served than by
+///   seeing nothing; but it is not a control, because `<a href="">` resolves to
+///   the current document and stayed keyboard-focusable and followable.
 ///
 /// The scheme list is an **allow-list, and deliberately short**: `javascript:`
 /// and `data:` never reaching an `href` is the one way a link in somebody else's
