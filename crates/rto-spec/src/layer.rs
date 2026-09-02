@@ -284,6 +284,7 @@ pub fn authored_docs_from<E>(
 #[cfg(test)]
 mod tests {
     use super::authored_docs_from;
+    use crate::check::ViolationKind;
     use rto_graph::BlobRef;
 
     /// Classify a set of `(path, text)` pairs through the one classification
@@ -395,11 +396,25 @@ mod tests {
             "---\ntype: adr\nstatus: Accepted\n---\n\n# Not really\n",
         )]);
         assert!(layer.layer.docs.is_empty());
+        // Which violation, not merely that there is one. Asserting the count
+        // alone would pass if the document had been misclassified and reported
+        // as a malformed *site page* — the failure this test exists to exclude
+        // is precisely a classification error, so the class has to be checked.
         assert_eq!(
             layer.layer.malformed.len(),
             1,
             "it must be reported rather than skipped: {:?}",
             layer.layer.malformed
+        );
+        let violation = &layer.layer.malformed[0];
+        assert_eq!(
+            violation.kind,
+            ViolationKind::MalformedAdr,
+            "reported as a malformed ADR, which is what it claimed to be: {violation:?}"
+        );
+        assert!(
+            violation.message.contains("elsewhere/half-baked.md"),
+            "and the message names the file: {violation:?}"
         );
     }
 
