@@ -6643,7 +6643,12 @@ fn run_okf_computations(path: &str, check: bool, json: bool) -> anyhow::Result<(
             return Ok(());
         }
         println!(
-            "  inline {}, by file {}, incomplete {}",
+            // `missing` is only *one* of the three ways a contract is
+            // incomplete, so calling it "incomplete" here contradicted the gate:
+            // a bundle whose sole contract declares no runtime printed
+            // "incomplete 0" and then failed `--check`. The line now names what
+            // it counts, and the total the gate uses is printed separately.
+            "  inline {}, by file {}, no code {}",
             report.inline, report.file, report.missing
         );
         if !report.runtimes.is_empty() {

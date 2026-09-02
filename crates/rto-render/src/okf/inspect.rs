@@ -160,7 +160,11 @@ pub struct TrustSummary {
 ///
 /// # Errors
 ///
-/// [`InspectError::Unreadable`] if the path is not a loadable OKF bundle.
+/// [`InspectError::Unreadable`] if the path is not a loadable OKF bundle,
+/// [`InspectError::BadDate`] if `today` is given and is not an ISO date, and
+/// [`InspectError::NoClock`] if `today` is `None` and the host date cannot be
+/// read. The last is the one worth handling deliberately: it is the only way
+/// this fails on a perfectly good bundle, and the remedy is to pass `today`.
 pub fn trust_summary(root: &Path, today: Option<&str>) -> Result<TrustSummary, InspectError> {
     let today = resolve_today(today)?;
     Ok(summarise_trust(
@@ -811,7 +815,9 @@ pub struct BundleInfo {
 /// # Errors
 ///
 /// [`InspectError::Unreadable`] if the path is not a loadable OKF bundle,
-/// [`InspectError::BadDate`] if `today` is not an ISO date.
+/// [`InspectError::BadDate`] if `today` is given and is not an ISO date, and
+/// [`InspectError::NoClock`] if `today` is `None` and the host date cannot be
+/// read — the same three as [`trust_summary`], which this calls.
 pub fn bundle_info(root: &Path, today: Option<&str>) -> Result<BundleInfo, InspectError> {
     let today = resolve_today(today)?;
     let bundle = load(root)?;

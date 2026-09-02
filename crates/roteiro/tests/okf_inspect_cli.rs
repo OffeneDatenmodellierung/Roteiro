@@ -556,6 +556,25 @@ fn computations_are_listed_and_only_incomplete_ones_gate() {
             ),
         ],
     );
+    let broken_out = roteiro(&["okf", "computations", &broken.to_string_lossy()]);
+    let broken_stdout = String::from_utf8_lossy(&broken_out.stdout).into_owned();
+    // The summary line counts the *ways* a contract can be incomplete
+    // separately, and only one of them is "no code". Labelling that count
+    // "incomplete" made this bundle print `incomplete 0` and then fail
+    // `--check`, which is the report contradicting the gate in three lines.
+    assert!(
+        broken_stdout.contains("no code 0"),
+        "the per-kind line counts what it says; got:\n{broken_stdout}"
+    );
+    assert!(
+        broken_stdout.contains("1 contract(s) incomplete"),
+        "and the total the gate uses is stated too; got:\n{broken_stdout}"
+    );
+    assert!(
+        !broken_stdout.contains("incomplete 0"),
+        "the report must never say `incomplete 0` about a bundle it then gates on; \
+         got:\n{broken_stdout}"
+    );
     assert!(
         !roteiro(&["okf", "computations", &broken.to_string_lossy(), "--check"])
             .status
