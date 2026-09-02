@@ -124,7 +124,10 @@ fn importer_tiers(bundle: &str) -> Vec<(String, String)> {
 
 /// The tier `okf-core` assigned each concept, keyed by concept id.
 fn oracle_tiers(bundle: &str) -> Vec<(String, String)> {
-    let summary = inspect::trust_summary(&fixture(bundle)).expect("load the upstream bundle");
+    // A fixed date, though this test only reads tiers: letting the host clock
+    // in would make an oracle comparison depend on the day it ran.
+    let summary = inspect::trust_summary(&fixture(bundle), Some("2026-09-02"))
+        .expect("load the upstream bundle");
     let mut tiers: Vec<(String, String)> = summary
         .concepts
         .into_iter()
@@ -256,7 +259,8 @@ fn two_different_bundles_do_not_diff_as_unchanged() {
 /// A path that is not a bundle is refused by name.
 #[test]
 fn a_path_that_is_not_a_bundle_is_refused_by_name() {
-    let err = inspect::trust_summary(Path::new("/no/such/bundle")).expect_err("refuse");
+    let err = inspect::trust_summary(Path::new("/no/such/bundle"), Some("2026-09-02"))
+        .expect_err("refuse");
     assert!(
         err.to_string()
             .starts_with("`/no/such/bundle` is not a readable OKF bundle: "),
@@ -473,4 +477,143 @@ fn a_finding_names_the_line_its_code_is_on() {
         "the fence is several lines into the body, not line 1: {line}"
     );
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **The staleness boundary is the one the bundle documents for itself.**
+///
+/// `acme_retail` sets `stale_after: 2026-12-31T00:00:00Z` on seven concepts and
+/// then says, in `computations/revenue-ytd.md`, that "on 2027-01-01, a consumer
+/// running this computation SHOULD flag the result for re-verification". So the
+/// fixture is not just data here — it states the answer, and this checks ours
+/// against it rather than against my reading of §5.4.
+///
+/// The day *of* `stale_after` counts as stale, because the rule is
+/// `now >= stale_after` and not `>`. That is the assertion most likely to be
+/// wrong by one, so it is pinned on both sides.
+#[test]
+fn staleness_is_judged_on_the_day_the_bundle_names() {
+    let before = inspect::trust_summary(&fixture("acme_retail"), Some("2026-12-30"))
+        .expect("load the upstream bundle");
+    let boundary = inspect::trust_summary(&fixture("acme_retail"), Some("2026-12-31"))
+        .expect("load the upstream bundle");
+    let after = inspect::trust_summary(&fixture("acme_retail"), Some("2027-01-01"))
+        .expect("load the upstream bundle");
+
+    assert_eq!(before.stale, 0, "nothing is stale the day before");
+    assert_eq!(
+        boundary.stale, 7,
+        "`now >= stale_after`, so the day itself counts"
+    );
+    assert_eq!(after.stale, 7, "and it stays stale");
+
+    // The combination the report exists to surface: a concept can be
+    // human-reviewed *and* expired, and the tier alone reads as reassurance.
+    let stale_and_reviewed = boundary
+        .concepts
+        .iter()
+        .filter(|c| c.stale && c.tier == "human-reviewed")
+        .count();
+    assert_eq!(
+        stale_and_reviewed, 7,
+        "every stale concept here is also human-reviewed, which is the point"
+    );
+
+    // The date is reported whatever its source, so a captured summary says what
+    // it was true of.
+    assert_eq!(boundary.today, "2026-12-31");
+}
+
+/// **A malformed `--today` is refused, not quietly replaced by the clock.**
+///
+/// The flag exists to make the report reproducible. Falling back to today's date
+/// on a typo would leave a pipeline green and meaningless, and the failure would
+/// surface as staleness appearing on its own months later.
+#[test]
+fn a_malformed_today_is_refused_rather_than_ignored() {
+    for bad in ["yesterday", "2026-13-45", "02-09-2026", ""] {
+        let err = inspect::trust_summary(&fixture("acme_retail"), Some(bad))
+            .expect_err("a non-ISO date must be refused");
+        assert!(
+            err.to_string().contains("is not an ISO date"),
+            "`{bad}` must be refused by name: {err}"
+        );
+    }
+}
+
+/// **The computations listing finds what the bundle actually declares.**
+///
+/// `okf syntax --computations` reports whether the code parses; this reports
+/// what contracts exist. A bundle whose computations all named files would show
+/// "0 checked" from `syntax`, which reads as "there were none".
+#[test]
+fn the_computations_listing_matches_the_upstream_bundle() {
+    let report =
+        inspect::computation_report(&fixture("acme_retail")).expect("load the upstream bundle");
+    assert_eq!(report.computations, 2);
+    assert_eq!(report.inline, 2);
+    assert_eq!(report.file, 0);
+    assert_eq!(report.missing, 0);
+    assert_eq!(report.runtimes, vec!["bigquery".to_owned()]);
+    assert!(report.is_clean(), "every contract here is complete");
+
+    let ids: Vec<&str> = report.entries.iter().map(|e| e.concept.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec![
+            "computations/gross-margin-period",
+            "computations/revenue-ytd"
+        ]
+    );
+    // The parameters are the agent-facing half of §10, and the reason a listing
+    // beats a count: this is what you would be filling in.
+    assert_eq!(
+        report.entries[0].parameters,
+        vec!["period_start".to_owned(), "period_end".to_owned()]
+    );
+    assert_eq!(report.entries[0].language.as_deref(), Some("sql"));
+}
+
+/// **A bundle declaring no computations is clean, not failing.**
+///
+/// §10 is optional. Three of the four published bundles declare none, and a gate
+/// that failed them would be a gate nobody could turn on.
+#[test]
+fn a_bundle_with_no_computations_is_clean() {
+    let report = inspect::computation_report(&fixture("ga4")).expect("load the upstream bundle");
+    assert_eq!(report.computations, 0);
+    assert!(report.is_clean(), "declaring none is conformant");
+    assert_eq!(report.incomplete(), 0);
+}
+
+/// **`info` reports the same numbers as the commands it summarises.**
+///
+/// It composes their reports rather than deriving anything, and this is what
+/// holds it to that: a summary that could disagree with `trust`, `links` or
+/// `computations` would be worse than no summary, because it is the one people
+/// would quote.
+#[test]
+fn info_agrees_with_the_commands_it_summarises() {
+    let root = fixture("acme_retail");
+    let info = inspect::bundle_info(&root, Some("2026-12-31")).expect("load");
+    let trust = inspect::trust_summary(&root, Some("2026-12-31")).expect("load");
+    let links = inspect::link_report(&root).expect("load");
+    let computations = inspect::computation_report(&root).expect("load");
+
+    assert_eq!(info.concepts, trust.total);
+    assert_eq!(info.trust.human_reviewed, trust.human_reviewed);
+    assert_eq!(info.trust.stale, trust.stale);
+    assert_eq!(info.trust.today, trust.today);
+    assert_eq!(info.links, (links.links, links.broken.len()));
+    assert_eq!(
+        info.computations,
+        (computations.computations, computations.incomplete())
+    );
+    assert_eq!(info.runtimes, computations.runtimes);
+
+    // The status breakdown is `info`'s own, so it is pinned directly: this
+    // bundle carries one deprecated concept, which is what §5.4 exists for.
+    assert_eq!(
+        info.statuses,
+        vec![("deprecated".to_owned(), 1), ("stable".to_owned(), 8)]
+    );
 }

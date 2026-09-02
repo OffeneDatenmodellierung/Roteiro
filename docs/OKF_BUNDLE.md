@@ -291,6 +291,57 @@ upstream rather than encoding here:
   `acme_retail`, even though §5 states that *every* timestamp-valued key is an
   ISO 8601 datetime with an explicit UTC offset, and §5.5's own example is
   `2026-09-23T00:00:00Z`. This one is a bug in the tool, not in the spec.
+## The commands, and which of them gate
+
+Everything under `roteiro okf` **reads**. None of it writes to the graph, and none
+of it rewrites a bundle: `roteiro render okf` is the only writer, and
+`roteiro import --from okf` is the only path by which a peer's content enters the
+graph — with the consent gate above.
+
+| Command | Answers | Gates? |
+| --- | --- | --- |
+| `okf info` | What is this bundle — size, tiers, staleness, links, computations | never |
+| `okf validate` | Does it conform to OKF v0.2 | on any error |
+| `okf lint` | Is it hygienic — `L1`–`L12`, plus our `R1` | never |
+| `okf trust` | What does it claim about itself, and has any of it expired | `--check`, on staleness |
+| `okf links` | Do its internal links resolve | `--check` |
+| `okf syntax` | Does its fenced code parse | on any error |
+| `okf computations` | What Attested Computations does it declare (§10) | `--check`, on an incomplete contract |
+| `okf diff` | What changed between two bundles | never |
+| `okf view` | Serves it as a website (`okf-viewer` feature, ADR-0022) | n/a |
+
+Start with `info`; it composes the others' reports rather than deriving anything
+of its own, so it cannot disagree with the command that reports a number in
+detail.
+
+Two rules hold across all of them. **`--json` selects a format and never changes
+what is reported or whether the command gates** — settled on `main` by a bug where
+it did both. And **the bare command reports without gating**: reporting is what
+you want reading a stranger's bundle, gating is what you want in CI over your own,
+and a command that only did one would be wrong half the time.
+
+### Staleness is asked as of a day you name
+
+`okf trust` and `okf info` take `--today YYYY-MM-DD`. §5.4's rule is
+`now >= stale_after`, so the answer moves on its own — which makes the host clock
+an input, and an undeclared one.
+
+```
+$ roteiro okf trust okf/ --today 2026-12-31
+  human-reviewed 8, machine-confirmed 0, unverified 1
+  stale 7 (as of 2026-12-31)
+  human-reviewed     metrics/revenue — verified by human:alice [STALE since 2026-12-31T00:00:00Z]
+```
+
+Without it the host's UTC date is used and still printed, so a captured summary
+says what it was true *of*. A malformed value is **refused** rather than quietly
+replaced by today's date: the flag exists to make a run reproducible, and a typo
+that restored the clock would leave a pipeline green and meaningless.
+
+The combination worth looking for is the one above — **human-reviewed and stale**.
+The tier alone reads as reassurance, and it is a claim about when somebody last
+looked, not about whether it is still true.
+
 ## One place Roteiro guarantees more than the specification asks
 
 §11 says consumers **MUST NOT** reject a bundle for broken cross-links. Roteiro
