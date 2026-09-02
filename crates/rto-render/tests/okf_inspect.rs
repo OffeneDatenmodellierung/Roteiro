@@ -247,3 +247,121 @@ fn a_path_that_is_not_a_bundle_is_refused_by_name() {
         "the error must name the path the caller gave, not only the cause: {err}"
     );
 }
+
+/// The specification's own Attested Computations parse.
+///
+/// `acme_retail` is the only vendored bundle that has any — two — and they are
+/// `BigQuery` SQL with backtick-quoted identifiers, which is the shape that
+/// decided the SQL backend: `tree-sitter-sequel` rejects 78 of 78 real blocks
+/// over exactly this, `sqlparser` accepts them.
+#[test]
+fn the_specifications_own_computations_parse() {
+    let report = inspect::syntax_report(&fixture("acme_retail"), true).expect("acme_retail");
+    assert_eq!(report.scope, "computations");
+    assert_eq!(
+        report.checked, 2,
+        "both Attested Computations must be looked at: {report:?}"
+    );
+    assert_eq!(report.skipped, 0);
+    assert!(
+        report.passed(),
+        "the published bundle's computations must parse: {:?}",
+        report.findings
+    );
+}
+
+/// A bundle with no Attested Computations reports **nothing checked**, not a
+/// clean bill of health.
+///
+/// This is the whole reason `checked` and `skipped` are in the report. `ga4` has
+/// no computations, so the honest answer is "I did not look", and a caller that
+/// printed "all clear" here would be reporting a green that means "could not
+/// look".
+#[test]
+fn a_bundle_without_computations_says_it_checked_nothing() {
+    let report = inspect::syntax_report(&fixture("ga4"), true).expect("ga4");
+    assert_eq!(report.checked, 0, "{report:?}");
+    assert!(report.passed(), "no findings, but also nothing checked");
+}
+
+/// `--all-blocks` widens past the computations, and finds real content.
+#[test]
+fn widening_to_all_blocks_looks_at_more() {
+    let narrow = inspect::syntax_report(&fixture("acme_retail"), true).expect("narrow");
+    let wide = inspect::syntax_report(&fixture("acme_retail"), false).expect("wide");
+    assert_eq!(wide.scope, "all-blocks");
+    // Blocks *seen*, not blocks *checked*: the extra ones this fixture carries
+    // are untagged prose samples, so they widen `skipped` rather than `checked`.
+    // Asserting on `checked` would have been asserting that the fixture happens
+    // to tag its non-computation blocks, which is not the property.
+    assert!(
+        wide.checked + wide.skipped > narrow.checked + narrow.skipped,
+        "widening must see more blocks: {}+{} vs {}+{}",
+        wide.checked,
+        wide.skipped,
+        narrow.checked,
+        narrow.skipped
+    );
+    assert!(
+        wide.skipped > 0,
+        "and the widened set includes untagged blocks, which are skipped rather \
+         than silently passed: {wide:?}"
+    );
+}
+
+/// A block that does not parse is found, and named precisely enough to fix.
+#[test]
+fn a_broken_block_is_found_with_its_place() {
+    let root = std::env::temp_dir().join("rto-okf-syntax-broken");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("computations")).expect("mkdir");
+    std::fs::write(
+        root.join("index.md"),
+        "---\nokf_version: \"0.2\"\n---\n\n# Bundle\n",
+    )
+    .expect("index");
+    std::fs::write(
+        root.join("computations/broken.md"),
+        "---\ntype: Attested Computation\ntitle: Broken\nruntime: bigquery\n---\n\n\
+         # Computation\n\n```sql\nSELCT a FROM t;\n```\n",
+    )
+    .expect("concept");
+
+    let report = inspect::syntax_report(&root, true).expect("load");
+    assert_eq!(report.checked, 1, "{report:?}");
+    assert_eq!(report.findings.len(), 1, "{report:?}");
+    let f = &report.findings[0];
+    assert_eq!(f.language, "sql");
+    assert!(f.path.contains("broken.md"), "{f:?}");
+    assert!(!report.passed());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// An **indented** computation block carries no info string, and the
+/// specification's own example is written that way. The declared `runtime:` is
+/// what makes it checkable at all.
+#[test]
+fn an_indented_computation_is_read_through_its_runtime() {
+    let root = std::env::temp_dir().join("rto-okf-syntax-indented");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("computations")).expect("mkdir");
+    std::fs::write(
+        root.join("index.md"),
+        "---\nokf_version: \"0.2\"\n---\n\n# Bundle\n",
+    )
+    .expect("index");
+    std::fs::write(
+        root.join("computations/indented.md"),
+        "---\ntype: Attested Computation\ntitle: Indented\nruntime: bigquery\n---\n\n\
+         # Computation\n\n    SELCT a FROM t;\n",
+    )
+    .expect("concept");
+
+    let report = inspect::syntax_report(&root, true).expect("load");
+    assert_eq!(
+        report.checked, 1,
+        "an untagged block under `runtime: bigquery` is SQL: {report:?}"
+    );
+    assert_eq!(report.findings.len(), 1, "and it is broken: {report:?}");
+    let _ = std::fs::remove_dir_all(&root);
+}

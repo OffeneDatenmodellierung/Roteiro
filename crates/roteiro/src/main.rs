@@ -1238,6 +1238,37 @@ enum Command {
 /// will reappear here when they land.
 #[derive(Subcommand)]
 enum OkfAction {
+    /// Check that the code blocks in a bundle parse.
+    ///
+    /// **Not conformance**, and that separation is the point. Whether a fenced
+    /// `sql` block is valid SQL says nothing about whether the bundle is valid
+    /// OKF — a document full of pseudocode is perfectly conformant. Upstream's
+    /// validator folds the two together and pays for it: running its own SQL
+    /// arm over the four bundles published with the specification produces six
+    /// warnings, all on documentation *fragments* in `stackoverflow/references/`
+    /// that were never meant to be statements.
+    ///
+    /// So this is a separate command with a separate answer, and by default it
+    /// looks only at **Attested Computations** — the concepts that declare a
+    /// `runtime:` and that an agent is expected to actually run, where "does
+    /// this parse" is a question about the bundle rather than about its prose.
+    /// `--all-blocks` widens it to every fenced block, which is useful when
+    /// authoring and noisy when auditing.
+    ///
+    /// The report separates *checked* from *skipped*: a language with no
+    /// backend compiled into this build is not checked rather than clean, and
+    /// saying so is the difference between a result and a green that means
+    /// "could not look".
+    Syntax {
+        /// The bundle directory.
+        path: String,
+        /// Check every fenced code block, not just Attested Computations.
+        #[arg(long)]
+        all_blocks: bool,
+        /// Emit the findings as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// What the bundle claims about its own trustworthiness: §5.3's tier per
     /// concept, and who verified it.
     ///
@@ -6254,6 +6285,11 @@ fn okf_root_key(root: &std::path::Path) -> String {
 /// Dispatch a `roteiro okf` action.
 fn run_okf(action: OkfAction) -> anyhow::Result<()> {
     match action {
+        OkfAction::Syntax {
+            path,
+            all_blocks,
+            json,
+        } => run_okf_syntax(&path, all_blocks, json),
         OkfAction::Trust { path, json } => run_okf_trust(&path, json),
         OkfAction::Links {
             path,
@@ -6285,6 +6321,52 @@ fn okf_bundle_root(path: &str) -> anyhow::Result<&std::path::Path> {
 }
 
 /// `roteiro okf trust` — §5.3's tier per concept.
+/// `roteiro okf syntax` — do the bundle's code blocks parse?
+///
+/// Exits non-zero when something failed to parse. That is a deliberate contrast
+/// with `okf validate`: this command was asked an explicit question about code,
+/// so a failure is an answer rather than a soft-guidance deviation §11 tells a
+/// consumer to tolerate.
+fn run_okf_syntax(path: &str, all_blocks: bool, json: bool) -> anyhow::Result<()> {
+    let report = rto_render::okf::inspect::syntax_report(okf_bundle_root(path)?, !all_blocks)?;
+    if json {
+        emit_json(&report)?;
+        if !report.passed() {
+            exit_gate_failure();
+        }
+        return Ok(());
+    }
+    println!(
+        "{}: {} block(s) checked, {} skipped [{}]",
+        report.root, report.checked, report.skipped, report.scope
+    );
+    println!("  this build checks: {}", report.languages.join(", "));
+    if report.checked == 0 {
+        // Nothing was looked at, so "no findings" would be a green that means
+        // "could not look". Say which it is.
+        println!(
+            "  nothing to check — no block carried a language this build can parse{}",
+            if all_blocks {
+                ""
+            } else {
+                "; `--all-blocks` widens beyond Attested Computations"
+            }
+        );
+    }
+    for f in &report.findings {
+        println!("  {}:{} [{}] {}", f.path, f.line, f.concept, f.message);
+    }
+    if report.findings.is_empty() {
+        if report.checked > 0 {
+            println!("  all {} block(s) parse", report.checked);
+        }
+    } else {
+        println!("  {} block(s) did not parse", report.findings.len());
+        exit_gate_failure();
+    }
+    Ok(())
+}
+
 fn run_okf_trust(path: &str, json: bool) -> anyhow::Result<()> {
     let summary = rto_render::okf::inspect::trust_summary(okf_bundle_root(path)?)?;
     if json {

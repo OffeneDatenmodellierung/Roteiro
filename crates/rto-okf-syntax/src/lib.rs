@@ -113,7 +113,15 @@ use std::str::FromStr;
 /// The tag mapping is upstream's, including its aliases, so a bundle classifies
 /// identically here. Whether a variant can actually be *checked* depends on the
 /// features this build enabled — see [`is_checkable`].
+///
+/// `#[non_exhaustive]`, and this is the one place the crate deliberately differs
+/// from `okf_validator::syntax`. Upstream's enum is exhaustive; this one exists
+/// to gain variants, because adding a language is adding a backend and that is
+/// the crate's whole purpose. A consumer has no reason to match it exhaustively
+/// — [`check_syntax`] and [`is_checkable`] are the API — so closing it would
+/// promise a stability the design contradicts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
 pub enum Language {
     /// Python.
     Python,

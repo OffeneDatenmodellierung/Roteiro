@@ -27,6 +27,8 @@ rto-exec = { path = "crates/rto-exec", version = "5.2.0" }
 rto-faithful = { path = "crates/rto-faithful", version = "5.2.0" }
 rto-graph = { path = "crates/rto-graph", version = "5.2.0" }
 rto-llama = { path = "crates/rto-llama", version = "5.2.0" }
+# Versioned independently of the workspace — see its own manifest for why.
+rto-okf-syntax = { path = "crates/rto-okf-syntax", version = "0.1.0" }
 rto-remote = { path = "crates/rto-remote", version = "5.2.0" }
 rto-spec = { path = "crates/rto-spec", version = "5.2.0" }
 rto-render = { path = "crates/rto-render", version = "5.2.0" }

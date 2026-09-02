@@ -4489,6 +4489,7 @@ dependencies = [
  "rmcp",
  "rto-exec",
  "rto-graph",
+ "rto-okf-syntax",
  "rto-spec",
  "schemars",
  "serde",

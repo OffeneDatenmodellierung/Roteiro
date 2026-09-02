@@ -216,3 +216,61 @@ fn the_upstream_fixtures_stay_in_one_crate() {
          licence recorded beside them. A second copy would drift from the first"
     );
 }
+
+/// `okf syntax` gates on a block that does not parse, and says where.
+#[test]
+fn a_computation_that_does_not_parse_fails_the_command() {
+    let root = bundle(
+        "syntax-broken",
+        &[
+            ("index.md", "---\nokf_version: \"0.2\"\n---\n\n# Bundle\n"),
+            (
+                "computations/revenue.md",
+                "---\ntype: Attested Computation\ntitle: Revenue\nruntime: bigquery\n---\n\n\
+                 # Computation\n\n```sql\nSELCT total FROM `p.d.orders`;\n```\n",
+            ),
+        ],
+    );
+    let path = root.to_string_lossy().into_owned();
+    let out = roteiro(&["okf", "syntax", &path]);
+    assert!(
+        !out.status.success(),
+        "a computation that does not parse must fail the command"
+    );
+    let text = String::from_utf8(out.stdout).expect("utf-8");
+    assert!(text.contains("revenue.md"), "names the file: {text}");
+    assert!(text.contains("sql"), "names the language: {text}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A bundle with nothing to check says so, rather than reporting success.
+///
+/// The distinction this pins is the reason the report separates *checked* from
+/// *skipped*. "0 findings" over 0 blocks is not a pass, and a command that
+/// printed one would be the green that means "could not look".
+#[test]
+fn nothing_to_check_is_reported_as_nothing_rather_than_as_clean() {
+    let root = bundle(
+        "syntax-empty",
+        &[
+            ("index.md", "---\nokf_version: \"0.2\"\n---\n\n# Bundle\n"),
+            (
+                "metrics/prose.md",
+                "---\ntype: Metric\ntitle: Prose\n---\n\n# Definition\n\nNo code here.\n",
+            ),
+        ],
+    );
+    let path = root.to_string_lossy().into_owned();
+    let out = roteiro(&["okf", "syntax", &path]);
+    assert!(out.status.success(), "nothing wrong, so it must not gate");
+    let text = String::from_utf8(out.stdout).expect("utf-8");
+    assert!(
+        text.contains("0 block(s) checked"),
+        "the count is stated: {text}"
+    );
+    assert!(
+        text.contains("nothing to check"),
+        "and it is not dressed up as a pass: {text}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

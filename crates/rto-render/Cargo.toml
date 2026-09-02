@@ -78,6 +78,10 @@ serde_json = { workspace = true }
 # against *this* parser — a stronger proof than before, since this is the
 # parser a peer would actually read our bundles with.
 okf-core = "0.2.6"
+# Syntax checking for the code blocks in a bundle. Its own crate because it
+# is written to be given away (W4G1/okf#4), and because keeping it separate is
+# what lets its parsers be optional; see `crates/rto-okf-syntax`.
+rto-okf-syntax = { workspace = true }
 # `okf-validator` is deliberately NOT taken, though it is the obvious companion.
 #
 # It holds upstream's conformance checks and hygiene lints, which are genuinely

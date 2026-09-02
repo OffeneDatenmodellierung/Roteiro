@@ -339,3 +339,175 @@ pub fn diff_report(before: &Path, after: &Path) -> Result<DiffReport, InspectErr
         links_mended: pairs(d.mended_links),
     })
 }
+
+/// One code block that did not parse.
+#[derive(Debug, Clone, Serialize)]
+pub struct SyntaxFinding {
+    /// The concept the block belongs to.
+    pub concept: String,
+    /// The concept's file, relative to the bundle root.
+    pub path: String,
+    /// 1-indexed line of the block's opening fence within that file's body.
+    pub line: usize,
+    /// The language the block was tagged with, canonicalised.
+    pub language: String,
+    /// What the parser said.
+    pub message: String,
+}
+
+/// The result of syntax-checking a bundle's code blocks.
+///
+/// `checked` and `skipped` are both reported, deliberately. A language with no
+/// backend compiled in is *not checked* rather than *clean*, and a report that
+/// conflated the two would be a check that passes by not looking.
+#[derive(Debug, Clone, Serialize)]
+pub struct SyntaxReport {
+    /// The bundle root, as the caller named it.
+    pub root: String,
+    /// `computations` or `all-blocks` — what was looked at.
+    pub scope: &'static str,
+    /// Blocks a backend actually parsed.
+    pub checked: usize,
+    /// Blocks left alone: no language tag, or no backend for it in this build.
+    pub skipped: usize,
+    /// The languages this build can check, so a reader can tell why.
+    pub languages: Vec<String>,
+    /// Findings, in bundle order.
+    pub findings: Vec<SyntaxFinding>,
+}
+
+impl SyntaxReport {
+    /// `true` when nothing failed to parse.
+    #[must_use]
+    pub const fn passed(&self) -> bool {
+        self.findings.is_empty()
+    }
+}
+
+/// The language an untagged computation block should be read as.
+///
+/// Only `bigquery` is mapped, and only because the corpus justifies it: every
+/// `runtime:` in the four bundles published with the specification is
+/// `bigquery`, and the spec's own Attested Computation example writes its query
+/// as an *indented* block, which carries no info string. Without this the one
+/// case that matters most would never be checked.
+///
+/// Deliberately not a general runtime→language table. Inventing a mapping for
+/// runtimes nobody has written yet is how a reader ends up with a confident
+/// diagnostic about a language the author never claimed.
+fn language_for_runtime(runtime: Option<&str>) -> Option<&'static str> {
+    match runtime.map(str::trim) {
+        Some("bigquery") => Some("sql"),
+        _ => None,
+    }
+}
+
+/// Syntax-check the code blocks in a bundle.
+///
+/// With `computations_only`, just the bodies of Attested Computations — the
+/// concepts that declare a `runtime:` and that an agent is expected to *run*, so
+/// the ones where "does this parse" is a question about the bundle rather than
+/// about its prose. Otherwise every fenced block in every document.
+///
+/// Findings are the checker's, not conformance: a bundle can be perfectly
+/// conformant and contain a code sample that does not parse, which is why this
+/// is its own command rather than part of validation.
+///
+/// # Errors
+///
+/// [`InspectError::Unreadable`] if the path is not a loadable OKF bundle.
+pub fn syntax_report(root: &Path, computations_only: bool) -> Result<SyntaxReport, InspectError> {
+    let bundle = load(root)?;
+    let languages = rto_okf_syntax::checkable_languages()
+        .into_iter()
+        .map(|l| l.as_str().to_owned())
+        .collect();
+    let mut report = SyntaxReport {
+        root: root.display().to_string(),
+        scope: if computations_only {
+            "computations"
+        } else {
+            "all-blocks"
+        },
+        checked: 0,
+        skipped: 0,
+        languages,
+        findings: Vec::new(),
+    };
+
+    for concept in bundle.concepts() {
+        let rel = concept
+            .path
+            .strip_prefix(bundle.root())
+            .unwrap_or(&concept.path)
+            .display()
+            .to_string();
+
+        if computations_only {
+            let Some(computation) = concept.attested_computation() else {
+                continue;
+            };
+            let okf_core::ComputationSource::Inline(inline) = &computation.computation else {
+                // A `computation:` file reference is checked by whatever owns
+                // that file; reading outside the concept is the import layer's
+                // job, not this one's.
+                continue;
+            };
+            // An indented block carries no info string, so fall back to the
+            // declared runtime — see `language_for_runtime`.
+            let tag = inline
+                .language
+                .as_deref()
+                .or_else(|| language_for_runtime(computation.runtime.as_deref()))
+                .unwrap_or("");
+            record(
+                &mut report,
+                &concept.id.to_string(),
+                &rel,
+                1,
+                tag,
+                &inline.code,
+            );
+        } else {
+            for block in rto_okf_syntax::extract_fenced_code_blocks(&concept.document.body) {
+                let tag = block.language.as_deref().unwrap_or("");
+                record(
+                    &mut report,
+                    &concept.id.to_string(),
+                    &rel,
+                    block.start_line,
+                    tag,
+                    &block.code,
+                );
+            }
+        }
+    }
+
+    Ok(report)
+}
+
+/// Check one block and fold the outcome into the report.
+fn record(
+    report: &mut SyntaxReport,
+    concept: &str,
+    path: &str,
+    line: usize,
+    tag: &str,
+    code: &str,
+) {
+    let language = rto_okf_syntax::Language::from_tag(tag);
+    if !rto_okf_syntax::is_checkable(language) {
+        report.skipped += 1;
+        return;
+    }
+    report.checked += 1;
+    if let Err(err) = rto_okf_syntax::check_syntax(tag, code) {
+        report.findings.push(SyntaxFinding {
+            concept: concept.to_owned(),
+            path: path.to_owned(),
+            line,
+            language: err.language.clone(),
+            message: err.to_string(),
+        });
+    }
+}
