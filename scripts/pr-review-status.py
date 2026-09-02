@@ -143,17 +143,56 @@ def open_threads(repo: str, pr: int) -> list[dict]:
     return out
 
 
-def head_commit_time(repo: str, pr: int) -> str:
-    """When the pull request's newest commit was made.
+def last_answered_at(repo: str, pr: int) -> str:
+    """The latest moment at which a finding could have been answered.
 
-    The dividing line between a finding that is certainly still open and one
-    that a later push may already have fixed. Without it every suppressed
-    finding a pull request ever received counts forever, the exit code can
-    never return to zero, and a gate that is always red is a gate nobody reads.
+    The dividing line between a finding that is certainly still open and one a
+    later change may already have addressed. Without it, every suppressed
+    finding a pull request ever received counts forever, the exit code can never
+    return to zero, and a gate that is always red is a gate nobody reads.
+
+    **Three sources, not one.** The first version used the newest commit alone,
+    and reviewers also raise findings about the pull request's *description and
+    title* — "this PR adds a script the description doesn't mention". Those
+    cannot be answered by a commit, so such a finding stayed live for ever no
+    matter how thoroughly it had been dealt with. Editing the body and renaming
+    the title now count, which is what actually answers them.
+
+    Deliberately **not** `updatedAt`: that moves on every comment, including the
+    review that raised the finding, so it would mark everything answered the
+    moment it appeared.
     """
-    data = json.loads(gh("pr", "view", str(pr), "--repo", repo, "--json", "commits"))
-    commits = data.get("commits") or []
-    return commits[-1]["committedDate"] if commits else ""
+    owner, name = repo.split("/", 1)
+    query = """
+    query($owner:String!, $name:String!, $pr:Int!) {
+      repository(owner:$owner, name:$name) {
+        pullRequest(number:$pr) {
+          commits(last:1) { nodes { commit { committedDate } } }
+          userContentEdits(last:20) { nodes { editedAt } }
+          timelineItems(last:50, itemTypes:[RENAMED_TITLE_EVENT]) {
+            nodes { ... on RenamedTitleEvent { createdAt } }
+          }
+        }
+      }
+    }"""
+    data = json.loads(
+        gh(
+            "api", "graphql", "-f", f"query={query}",
+            "-F", f"owner={owner}", "-F", f"name={name}", "-F", f"pr={pr}",
+        )
+    )["data"]["repository"]["pullRequest"]
+
+    moments = []
+    for node in data["commits"]["nodes"]:
+        moments.append(node["commit"]["committedDate"])
+    for node in data["userContentEdits"]["nodes"] or []:
+        if node.get("editedAt"):
+            moments.append(node["editedAt"])
+    for node in data["timelineItems"]["nodes"] or []:
+        if node.get("createdAt"):
+            moments.append(node["createdAt"])
+    # ISO-8601 UTC throughout, so lexicographic order is chronological order.
+    return max(moments) if moments else ""
 
 
 def suppressed(repo: str, pr: int) -> list[dict]:
@@ -177,7 +216,7 @@ def suppressed(repo: str, pr: int) -> list[dict]:
     # concatenated documents. So this pattern is not general, and a future
     # endpoint added here needs the same check rather than the same assumption.
     reviews = json.loads(gh("api", "--paginate", f"repos/{repo}/pulls/{pr}/reviews"))
-    since = head_commit_time(repo, pr)
+    since = last_answered_at(repo, pr)
     out = []
     for review in reviews:
         body = review.get("body") or ""
@@ -210,9 +249,10 @@ def suppressed(repo: str, pr: int) -> list[dict]:
                     "when": review["submitted_at"],
                     "where": where.strip(),
                     "text": " ".join(text.split()),
-                    # A review submitted after the newest commit cannot have
-                    # been answered by it. Earlier ones might have been, so they
-                    # are shown but do not hold the exit code red.
+                    # A review submitted after the last commit, body edit or
+                    # rename cannot have been answered by any of them. Earlier
+                    # ones might have been, so they are shown but do not hold the
+                    # exit code red.
                     "live": bool(since) and review["submitted_at"] > since,
                 }
             )
@@ -280,14 +320,14 @@ def main() -> int:
 
     if live:
         print(
-            f"\nsuppressed findings ({len(live)}) — raised after the newest commit, "
-            "and in no thread:"
+            f"\nsuppressed findings ({len(live)}) — raised after the last change "
+            "to this PR, and in no thread:"
         )
         show(live)
     if earlier and not args.quiet:
         print(
             f"\nearlier suppressed findings ({len(earlier)}) — raised before the "
-            "newest commit, so a later push may already have answered them:"
+            "last commit, body edit or rename, so may already be answered:"
         )
         show(earlier)
 
