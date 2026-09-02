@@ -29,10 +29,18 @@ pub struct RenderedAdr {
 /// [`rewrite_doc_link`] used to derive a link's target from the link's own
 /// spelling — `../BUILD_PLAN_V2.md` → `../BUILD_PLAN_V2.html` — which is correct
 /// only while every document is served under its own stem. Site pages ended
-/// that: a page is published as its declared `site-page:` slug, and a slug is
-/// URL-safe by construction (`[a-z0-9-]+`), so `docs/BUILD_PLAN_V2.md` is served
-/// as `build-plan-v2.html`. The rewrite then pointed four correct repository
-/// links at a page that is never emitted — issue #446, live on roteiro.dev.
+/// that: a page is published as its declared `site-page:` slug, so
+/// `docs/history/BUILD_PLAN_V2.md` is served as whatever its slug says. The
+/// rewrite then pointed four correct repository links at a page that is never
+/// emitted — issue #446, live on roteiro.dev.
+///
+/// A slug may also name a **path** — `history/build-plan-v2` serves at
+/// `/history/build-plan-v2.html` — so a served name is not necessarily a bare
+/// filename. When it contains a `/` it is a path from the site root, and
+/// [`rewrite_doc_link`] replaces the link's own directory hops with the climb
+/// back to the root rather than keeping them; keeping them doubled the
+/// directory. A bare served name still keeps the link's hops, which is what
+/// every ADR-to-ADR link depends on.
 ///
 /// So the served name is *looked up* rather than guessed. The renderer is handed
 /// the index of what the site emits, which is the only thing that knows the
@@ -349,7 +357,7 @@ fn options() -> Options {
 /// recording here.
 ///
 /// So the divergence is left, documented, and the affected anchors were given
-/// explicit ids that neither rule touches (see `docs/BUILD_PLAN.md`). **Nothing
+/// explicit ids that neither rule touches (see `docs/history/BUILD_PLAN.md`). **Nothing
 /// currently checks an intra-document anchor** in either rendering — not
 /// `roteiro check`, not this crate. Issue #459 is where that check belongs.
 fn heading_ids(md: &str) -> Vec<String> {
@@ -430,8 +438,13 @@ fn rewrite_doc_link(
     let (path, frag) = dest
         .split_once('#')
         .map_or((dest, None), |(p, f)| (p, Some(f)));
-    // Only the final segment can differ between the repository and the site, so
-    // the link's own directory hops are kept verbatim; see [`PublishedPages`].
+    // Split so the two halves can be recombined differently depending on what the
+    // site serves. This *used* to be the whole rule — only the final segment could
+    // differ between repository and site, so the link's own directory hops were
+    // kept verbatim — and it is still what happens for a served name without a
+    // directory. It is no longer true in general: a slug may name a path, and for
+    // those the hops are replaced rather than kept. See the published-page branch
+    // below, and [`PublishedPages`].
     let (dir, file) = path.rsplit_once('/').map_or(("", path), |(d, f)| (d, f));
     // `strip_suffix` rather than `ends_with`: the extension is matched exactly as
     // it is written, which is the rule every document in this repository follows.
@@ -442,9 +455,20 @@ fn rewrite_doc_link(
     // First, so a document reached by a path that climbs out of its own
     // directory still lands on its page rather than being read as unpublished.
     if let Some(served) = is_markdown.then(|| pages.served(file)).flatten() {
+        // A served name containing `/` is a path from the **site root**
+        // (`history/build-plan-v2.html`), not a sibling of whatever directory
+        // the link happens to be written in. Keeping the link's own hops would
+        // double the directory — `../history/` + `history/…` — so for those the
+        // hops are replaced by the climb back to the root. A bare filename keeps
+        // the previous behaviour exactly, which every ADR-to-ADR link relies on.
+        let prefix = if served.contains('/') {
+            "../".repeat(depth)
+        } else {
+            format!("{dir}{sep}")
+        };
         return Some(match frag {
-            Some(frag) => format!("{dir}{sep}{served}#{frag}"),
-            None => format!("{dir}{sep}{served}"),
+            Some(frag) => format!("{prefix}{served}#{frag}"),
+            None => format!("{prefix}{served}"),
         });
     }
 
@@ -489,8 +513,12 @@ pub fn render_adr(
     let body = strip_frontmatter(markdown);
     let title = first_heading(body).unwrap_or_else(|| fallback_title.to_owned());
     let content = render_markdown(body, "", pages, source, 1);
+    // The Build Plan used to sit here. It was archived in 2026-09 and is no
+    // longer current; a nav is for where a reader should go next, not for
+    // everything that exists. The document is still served, still on the ADR
+    // index, and still cited by the ADRs it sequenced.
     let nav = "<p class=\"nav\"><a href=\"../\">← Roteiro home</a> · \
-               <a href=\"./\">All ADRs</a> · <a href=\"../build-plan.html\">Build Plan</a></p>";
+               <a href=\"./\">All ADRs</a></p>";
     let html = page(&format!("{title} — Roteiro"), "../", nav, &content);
     RenderedAdr { title, html }
 }
@@ -507,12 +535,42 @@ pub fn render_doc(
     pages: &PublishedPages,
     source: Option<&SourceBase>,
 ) -> RenderedAdr {
+    render_doc_at(markdown, fallback_title, pages, source, 0)
+}
+
+/// [`render_doc`] for a page that does **not** sit at the site root.
+///
+/// `depth` is how many directories down it is served — 1 for
+/// `history/build-plan.html`. Everything pointing out of the page is relative to
+/// where it sits, so a lifetime document that has been archived into a
+/// subdirectory still finds the theme, the ADR index and its siblings.
+///
+/// Split from [`render_doc`] rather than adding a parameter to it: twelve
+/// callers render at the root and should not have to say so.
+#[must_use]
+pub fn render_doc_at(
+    markdown: &str,
+    fallback_title: &str,
+    pages: &PublishedPages,
+    source: Option<&SourceBase>,
+    depth: usize,
+) -> RenderedAdr {
     let body = strip_frontmatter(markdown);
     let title = first_heading(body).unwrap_or_else(|| fallback_title.to_owned());
-    let content = render_markdown(body, "adr/", pages, source, 0);
-    let nav = "<p class=\"nav\"><a href=\"./\">← Roteiro home</a> · \
-               <a href=\"adr/\">ADRs</a></p>";
-    let html = page(&format!("{title} — Roteiro"), "./", nav, &content);
+    let up = "../".repeat(depth);
+    // Assets have always been `./favicon.svg` at the root, so depth 0 renders
+    // byte-identically to before.
+    let assets = if depth == 0 {
+        "./".to_owned()
+    } else {
+        up.clone()
+    };
+    let content = render_markdown(body, &format!("{up}adr/"), pages, source, depth);
+    let nav = format!(
+        "<p class=\"nav\"><a href=\"{assets}\">← Roteiro home</a> · \
+         <a href=\"{up}adr/\">ADRs</a></p>"
+    );
+    let html = page(&format!("{title} — Roteiro"), &assets, &nav, &content);
     RenderedAdr { title, html }
 }
 
@@ -539,9 +597,25 @@ pub fn render_site_page(
 ) -> RenderedAdr {
     let body = strip_frontmatter(markdown);
     let title = first_heading(body).unwrap_or_else(|| fallback_title.to_owned());
-    let content = render_markdown(body, "adr/", pages, source, 0);
-    let bar = render_nav(nav, current_href);
-    let html = page(&format!("{title} — Roteiro"), "./", &bar, &content);
+    // A site page's slug may name a path (`history/build-plan-v2`), so the page
+    // is not necessarily at the root any more. Everything pointing *out* of it —
+    // theme assets, the ADR directory, the nav — is relative to where it sits,
+    // and that is derivable from the href rather than something a caller should
+    // have to pass in and get wrong.
+    //
+    // The two prefixes differ at depth 0 on purpose: assets have always been
+    // `./favicon.svg` and nav entries have always been bare `build.html`, so a
+    // root-level page renders byte-identically to before.
+    let depth = current_href.matches('/').count();
+    let assets = if depth == 0 {
+        "./".to_owned()
+    } else {
+        "../".repeat(depth)
+    };
+    let up = "../".repeat(depth);
+    let content = render_markdown(body, &format!("{up}adr/"), pages, source, depth);
+    let bar = render_nav(nav, current_href, &up);
+    let html = page(&format!("{title} — Roteiro"), &assets, &bar, &content);
     RenderedAdr { title, html }
 }
 
@@ -552,7 +626,11 @@ pub fn render_site_page(
 /// navigation bar that needs JavaScript to be a navigation bar would be the
 /// first thing on this site that does.
 #[must_use]
-pub fn render_nav(nav: &[NavEntry], current_href: &str) -> String {
+/// `root` is the climb from the page being rendered back to the site root:
+/// `""` for a root-level page, `"../"` for one a directory down. Nav hrefs are
+/// stored root-relative, so a nested page has to prefix them or every entry
+/// resolves beside the page rather than beside the root.
+pub fn render_nav(nav: &[NavEntry], current_href: &str, root: &str) -> String {
     let mut out = String::from("<nav class=\"sitenav\">");
     for entry in nav {
         if entry.href == current_href {
@@ -564,7 +642,8 @@ pub fn render_nav(nav: &[NavEntry], current_href: &str) -> String {
         } else {
             let _ = write!(
                 out,
-                "<a href=\"{}\">{}</a>",
+                "<a href=\"{}{}\">{}</a>",
+                escape_attr(root),
                 escape_attr(&entry.href),
                 escape_html(&entry.label)
             );
@@ -614,7 +693,9 @@ pub fn replace_site_nav(html: &str, nav: &[NavEntry], current_href: &str) -> Opt
     let close = html[open..].find("</nav>")? + open + "</nav>".len();
     let mut out = String::with_capacity(html.len());
     out.push_str(&html[..open]);
-    out.push_str(&render_nav(nav, current_href));
+    // The hand-written page this rewrites is the site root, so its nav hrefs
+    // need no climb.
+    out.push_str(&render_nav(nav, current_href, ""));
     out.push_str(&html[close..]);
     Some(out)
 }
@@ -1057,11 +1138,11 @@ mod tests {
             },
         ];
         let lifetime = [IndexEntry {
-            href: "../build-plan.html".into(),
+            href: "../history/build-plan.html".into(),
             title: "Build Plan".into(),
         }];
         let html = render_adr_index(&lifetime, &entries);
-        assert!(html.contains("<a href=\"../build-plan.html\">Build Plan</a>"));
+        assert!(html.contains("<a href=\"../history/build-plan.html\">Build Plan</a>"));
         assert!(html.contains("<a href=\"0001-x.html\">First &amp; &lt;best&gt;</a>"));
         assert!(html.contains("<a href=\"0002-y.html\">Second</a>"));
         // First entry precedes second (order preserved).
@@ -1349,7 +1430,7 @@ mod tests {
 
     #[test]
     fn the_bar_is_plain_anchors_and_escapes_its_labels() {
-        let bar = render_nav(&nav(), "nothing.html");
+        let bar = render_nav(&nav(), "nothing.html", "");
         assert!(bar.starts_with("<nav class=\"sitenav\">"), "{bar}");
         // Nothing marked when the current page is not in the bar — a preview of
         // an unlisted page, not an error.
@@ -1361,23 +1442,67 @@ mod tests {
 
     #[test]
     fn a_link_resolves_to_the_page_the_site_actually_serves() {
-        // Issue #446: four ADRs link `../BUILD_PLAN_V2.md`, which is correct in
-        // the repository. Published under a `site-page:` slug, that document is
-        // served as `build-plan-v2.html` — so rewriting the link to its own stem
-        // aims it at a page that is never emitted.
+        // Issue #446: four ADRs link `../history/BUILD_PLAN_V2.md`, which is
+        // correct in the repository. Published under a `site-page:` slug, the
+        // document is served somewhere else entirely, so rewriting the link to
+        // its own stem aims it at a page that is never emitted.
+        //
+        // Two substitution rules are covered here, and the difference between
+        // them is whether the served name contains a directory.
         let mut pages = PublishedPages::new();
-        pages.publish("BUILD_PLAN_V2.md", "build-plan-v2.html");
-        let html = render_markdown("See [V2](../BUILD_PLAN_V2.md).\n", "", &pages, None, 0);
-        assert!(
-            html.contains("href=\"../build-plan-v2.html\""),
-            "served name, and the link's own hop kept: {html}"
+        pages.publish("BUILD_PLAN_V2.md", "history/build-plan-v2.html");
+
+        // A served name with a directory is a path from the **site root**, so
+        // the link's own hops are dropped: this page is at the root, so no climb.
+        let html = render_markdown(
+            "See [V2](../history/BUILD_PLAN_V2.md).\n",
+            "",
+            &pages,
+            None,
+            0,
         );
-        // A fragment survives the substitution.
-        let frag = render_markdown("[s](../BUILD_PLAN_V2.md#stage-21)\n", "", &pages, None, 0);
         assert!(
-            frag.contains("href=\"../build-plan-v2.html#stage-21\""),
+            html.contains("href=\"history/build-plan-v2.html\""),
+            "root-relative, hops replaced rather than doubled: {html}"
+        );
+
+        // The same link from a page one directory down climbs back first.
+        let deep = render_markdown(
+            "See [V2](../history/BUILD_PLAN_V2.md).\n",
+            "",
+            &pages,
+            None,
+            1,
+        );
+        assert!(
+            deep.contains("href=\"../history/build-plan-v2.html\""),
+            "one climb for one level of depth: {deep}"
+        );
+
+        // A fragment survives the substitution.
+        let frag = render_markdown(
+            "[s](../history/BUILD_PLAN_V2.md#stage-21)\n",
+            "",
+            &pages,
+            None,
+            0,
+        );
+        assert!(
+            frag.contains("href=\"history/build-plan-v2.html#stage-21\""),
             "{frag}"
         );
+
+        // A **bare** served name keeps the link's own hops, which is what every
+        // ADR-to-ADR link depends on. This is the rule the directory case must
+        // not have broken.
+        let mut flat = PublishedPages::new();
+        flat.publish("0002-x.md", "0002-x.html");
+        let sibling = render_markdown("[a](0002-x.md)\n", "", &flat, None, 1);
+        assert!(
+            sibling.contains("href=\"0002-x.html\""),
+            "sibling link stays a sibling: {sibling}"
+        );
+
         // An unpublished document still falls back to its stem, unchanged.
         let other = render_markdown("[x](../REVIEW_CHECKLIST.md)\n", "", &pages, None, 0);
         assert!(
@@ -1538,18 +1663,18 @@ mod tests {
         // path that climbs out of its own directory still lands on the page the
         // site publishes it as, rather than being handed to the repository.
         let mut pages = PublishedPages::new();
-        pages.publish("BUILD_PLAN_V2.md", "build-plan-v2.html");
+        pages.publish("BUILD_PLAN_V2.md", "history/build-plan-v2.html");
         let base = source("website/pages");
         let html = render_markdown(
-            "[v2](../../docs/BUILD_PLAN_V2.md)\n",
+            "[v2](../../docs/history/BUILD_PLAN_V2.md)\n",
             "adr/",
             &pages,
             Some(&base),
             0,
         );
         assert!(
-            html.contains("href=\"../../docs/build-plan-v2.html\""),
-            "still the site's page: {html}"
+            html.contains("href=\"history/build-plan-v2.html\""),
+            "still the site's page, and at the path the site serves it from: {html}"
         );
         assert!(!html.contains("github.com"), "{html}");
     }

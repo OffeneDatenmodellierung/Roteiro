@@ -27,7 +27,7 @@ confluence-url:
 
 ## Reference
 
-Governs the **authoring pillar** (`roteiro spec`, Stage 13) of [[docs/adr/0001-build-roteiro-unified-codebase-knowledge-graph.md]] — the "spec-store v2" intent-confirmation front door ADR-0001 always envisioned but left as a stub. Extends the tiered, offline-first model machinery decided in [[docs/adr/0003-pluggable-embedding-models.md]] from *embedding* to *generative* models. See `docs/BUILD_PLAN.md` Stage 13.
+Governs the **authoring pillar** (`roteiro spec`, Stage 13) of [[docs/adr/0001-build-roteiro-unified-codebase-knowledge-graph.md]] — the "spec-store v2" intent-confirmation front door ADR-0001 always envisioned but left as a stub. Extends the tiered, offline-first model machinery decided in [[docs/adr/0003-pluggable-embedding-models.md]] from *embedding* to *generative* models. See `docs/history/BUILD_PLAN.md` Stage 13.
 
 ## Summary
 

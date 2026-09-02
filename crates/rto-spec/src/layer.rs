@@ -312,7 +312,10 @@ mod tests {
                 "docs/REVIEW_CHECKLIST.md",
                 "# Review checklist\n\nInternal.\n",
             ),
-            ("docs/BUILD_PLAN_V2.md", "# Build Plan V2\n\nInternal.\n"),
+            (
+                "docs/history/BUILD_PLAN_V2.md",
+                "# Build Plan V2\n\nInternal.\n",
+            ),
         ]);
         let published: Vec<&str> = layer.site.iter().map(|p| p.path.as_str()).collect();
         assert_eq!(published, ["docs/OFFLINE_SETUP.md"]);

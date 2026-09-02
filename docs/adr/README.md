@@ -39,4 +39,4 @@
 > fact gets its own artifact store, and never borrows the graph's trust.* 0012, 0013
 > and 0015 apply that rule to analyzer findings, to agent memory, and to
 > generatively-produced media content; 0014 decides how analyzers are executed.
-> Their execution sequence is [BUILD_PLAN_V2](../BUILD_PLAN_V2.md).
+> Their execution sequence is [BUILD_PLAN_V2](../history/BUILD_PLAN_V2.md).

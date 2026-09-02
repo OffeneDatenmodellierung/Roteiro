@@ -1,7 +1,34 @@
+---
+status: deprecated
+archived: 2026-09-02
+superseded-by: docs/history/BUILD_PLAN_V2.md
+---
+
 # Roteiro — Build Plan
 
-Status: Active · Owner: The Roteiro Project Team · Last-modified: 2026-08-09
-Governing decision: [ADR-0001](adr/0001-build-roteiro-unified-codebase-knowledge-graph.md)
+> [!IMPORTANT]
+> **Archived on 2026-09-02. Kept for links and history; no longer current.**
+>
+> This plan took Roteiro from the v0.0.1 scaffold to a dogfooded v1.0 and was
+> delivered. Its successor is
+> [BUILD_PLAN_V2](BUILD_PLAN_V2.md), which is itself archived — work is now
+> tracked in issues.
+>
+> Nothing here is maintained. Read it as a record of what was planned and
+> decided at the time, not as a description of the project today: version
+> numbers, stage lists, coverage figures and CI details were accurate when
+> written and have moved on. The `status: deprecated` above is OKF §5.4's
+> value, whose gloss is exactly this case — *"kept for links and history; no
+> longer current."*
+>
+> **One rule from this document is still in force** and has been rehomed so it
+> does not retire with the plan: *"stay on the current MSRV until a dependency
+> forces a move; any MSRV bump is an ADR-worthy decision."* That now lives in
+> [ADR-0001](../adr/0001-build-roteiro-unified-codebase-knowledge-graph.md),
+> which is where ADR-0001 v1.4 already cites it from.
+
+Status: **Archived** · Owner: The Roteiro Project Team · Last-modified: 2026-08-09 · Archived: 2026-09-02
+Governing decision: [ADR-0001](../adr/0001-build-roteiro-unified-codebase-knowledge-graph.md)
 
 This plan takes Roteiro from the initial v0.0.1 scaffold to a dogfooded v1.0. It
 is organised as sequenced **stages**, each ending in a shippable release cut by
@@ -25,8 +52,8 @@ delivered — the `v1.0.0` release has since shipped to crates.io (with `v1.1.0`
 gate) and Stage 17 (CLI-first `roteiro review` + tool-agnostic AGENTS.md) are
 ✅ delivered. **Newly decided
 (post-Stage-12, via ADRs — §5c):** **Stage 18** configuration file
-([ADR-0007](adr/0007-configuration-file.md)) → **Stage 19** local model serving
-([ADR-0006](adr/0006-local-model-serving.md), llama.cpp-backed, code-aware) →
+([ADR-0007](../adr/0007-configuration-file.md)) → **Stage 19** local model serving
+([ADR-0006](../adr/0006-local-model-serving.md), llama.cpp-backed, code-aware) →
 **Stage 20** inference-core direction (unify on llama.cpp) + coding/reasoning
 models. **A note on stage numbers:**
 they are labels, not execution order — Stage 15 shipped early, Stage 13 before
@@ -587,7 +614,7 @@ just node names, and extend ingestion to docs/PDFs/images.
   `ttf-parser` carries a scoped `deny` exception (opt-in feature only), and
   `pdf-text` occupies a distinct `EXTRACT_VERSION` namespace so a `pdf-text` build
   and a default build never serve each other stale PDF facts from a shared cache.
-- **Image scanning ([ADR-0005](adr/0005-image-ocr-vision-ingestion.md)) —
+- **Image scanning ([ADR-0005](../adr/0005-image-ocr-vision-ingestion.md)) —
   delivered (both tiers).** Two opt-in tiers, decided after a go/no-go de-risk
   spike. **Tier A — `image-ocr`:** pure-Rust OCR via `ocrs`/`rten` (no C++ FFI)
   OCRs `.png`/`.jpg`/`.jpeg` blobs into `meta.content` beside the prose/PDF paths
@@ -735,8 +762,9 @@ since been cut and published to crates.io (crates are now on `v1.1.0`).
   Python: a generic tree-sitter *tags* extractor covers **15 languages + SQL**
   (see the Stage 3 delivery note). Rust keeps its dedicated walker.
 - **Obsidian export quality — ✅ delivered.** The vault renderer
-  ([`rto-render/src/obsidian.rs`](../crates/rto-render/src/obsidian.rs)) emits a
-  generated **`_Home`** overview note (what was scanned, node/edge counts by kind,
+  (`rto-render/src/obsidian.rs` — **removed in 4.0.0**, when the vault renderer
+  was replaced by the OKF bundle; unlinked here because the file no longer
+  exists) emitted a generated **`_Home`** overview note (what was scanned, node/edge counts by kind,
   provenance breakdown, ADR statuses, intent-debt summary) plus per-node notes
   that carry frontmatter **`tags`** (`roteiro/kind/*`, `roteiro/lang/*`,
   `roteiro/status/*` — colourable/filterable in Obsidian's graph view), **surface
@@ -747,29 +775,29 @@ since been cut and published to crates.io (crates are now on `v1.1.0`).
   (`rto-graph`, `rto-spec`, `rto-render`, `rto-serve`, `rto-llama`, `roteiro`)
   ship a `README.md` wired via `readme = "README.md"` in their `Cargo.toml`.
 - **Perf — subtree pruning — ✅ delivered** (from the codegraph comparison):
-  [`sync`](../crates/rto-graph/src/sync.rs) is an incremental, content-addressed
+  [`sync`](../../crates/rto-graph/src/sync.rs) is an incremental, content-addressed
   engine — a committed sync diffs the last-synced tree oid against `HEAD`
   (`diff_trees`) and reuses unchanged blobs' cached fact sets, the git-native,
   content-hash (not mtime) version of "skip unchanged subtrees."
 - **`--json` schema freeze — ✅ delivered.** The output schemas are versioned
   (`roteiro.graph/v1`, `roteiro.query/v1`, `roteiro.review/v1`, `roteiro.oracle/v1`),
   asserted stable in tests, and documented with a compatibility policy in
-  [`docs/JSON_SCHEMA.md`](JSON_SCHEMA.md).
+  [`docs/JSON_SCHEMA.md`](../JSON_SCHEMA.md).
 - **CI artifact publish/fetch — ✅ delivered.** On merge to `main`,
-  [`.github/workflows/graph-artifact.yml`](../.github/workflows/graph-artifact.yml)
+  [`.github/workflows/graph-artifact.yml`](../../.github/workflows/graph-artifact.yml)
   publishes the content-addressed graph artifact to a rolling `graph-latest`
   release; the managed `post-checkout`/`post-merge` hooks
-  ([`init.rs`](../crates/roteiro/src/init.rs)) `gh release download graph-latest`
+  ([`init.rs`](../../crates/roteiro/src/init.rs)) `gh release download graph-latest`
   → `roteiro load` it (offline fallback: rebuild). `load` refuses an artifact
   whose tree does not match `HEAD`.
 - **Docs deploy — ✅ delivered.**
-  [`.github/workflows/website.yml`](../.github/workflows/website.yml) renders the
+  [`.github/workflows/website.yml`](../../.github/workflows/website.yml) renders the
   site and Direct-Uploads it to Cloudflare Pages
   (`CLOUDFLARE_API_TOKEN`/`CLOUDFLARE_ACCOUNT_ID`),
   off Cloudflare's build infra.
 - **`roteiro check` self-governs ADR-0001 — ✅ delivered.** ADR-0001 carries an
   **Implementation** section linking its decisions into the code via
-  `[[path#Symbol]]` (changelog 1.1), and [`check`](../crates/rto-spec/src/check.rs)
+  `[[path#Symbol]]` (changelog 1.1), and [`check`](../../crates/rto-spec/src/check.rs)
   validates those links against the derived graph, failing on drift.
 - **DoD — met:** clean clone → `init` → hook fetches the CI artifact → `check`
   green, offline; docs/vault reproducible in CI; the Obsidian vault gives a useful
@@ -871,7 +899,7 @@ Decisions taken after the original roadmap, each with its own ADR. Sequenced
 around the Stage 14 freeze: config is foundational (before 14), serving and
 acceleration are features (config first, since serving is configured through it).
 
-### Stage 18 — Configuration file ([ADR-0007](adr/0007-configuration-file.md))  → ✅ *core delivered (more sections as their consumers land)*
+### Stage 18 — Configuration file ([ADR-0007](../adr/0007-configuration-file.md))  → ✅ *core delivered (more sections as their consumers land)*
 **Goal:** a persistent, optional **`roteiro.toml`** so per-project preferences are
 set once, not retyped as flags — reproducible and shareable when committed.
 - **Delivered:** project `roteiro.toml` (at the repo root, alongside `.git`) + user
@@ -895,7 +923,7 @@ set once, not retyped as flags — reproducible and shareable when committed.
   deterministically; flags override it; no config is still a working default;
   `roteiro config` shows the merged result and each value's provenance.
 
-### Stage 19 — Local model serving ([ADR-0006](adr/0006-local-model-serving.md))  → ✅ *delivered (models + chat + streaming + graph tools + embeddings + vision)*
+### Stage 19 — Local model serving ([ADR-0006](../adr/0006-local-model-serving.md))  → ✅ *delivered (models + chat + streaming + graph tools + embeddings + vision)*
 **Goal:** reuse the models a user already pulled by exposing them over an
 **opt-in, loopback OpenAI-compatible endpoint** — offline, no second download —
 and make the served model **code-aware** by handing it Roteiro's graph tools.
@@ -1207,22 +1235,22 @@ sync effectively instant; `--json` queries sub-100ms on the dogfood graph.
 | v0.4.0 | 4 | Authored ADR/blueprint layer; `roteiro check` gates CI | ✅ v0.0.5 |
 | v0.5.0 | 5 | Query API + `--json`; `init` + git hooks | ✅ v0.0.6 |
 | v0.6.0 | 6 | Real docs-site + Obsidian renderers (retire shell stopgap) | ✅ v0.0.7 |
-| v0.7.0 | 7 | MCP `serve` (rmcp; stdio + HTTP, [ADR-0002](adr/0002-adopt-rmcp-for-networked-mcp-serving.md)) | ✅ v0.0.8 |
+| v0.7.0 | 7 | MCP `serve` (rmcp; stdio + HTTP, [ADR-0002](../adr/0002-adopt-rmcp-for-networked-mcp-serving.md)) | ✅ v0.0.8 |
 | — | 7+ | `roteiro path` + MCP `path` tool (follow-up) | ✅ v0.0.9 |
 | v0.8.0 | 8 | Inference layer (`inferred` + confidence) | ✅ offline core + candle local-models (`roteiro infer`/`model`); **ingestion → Stage 12** |
 | v0.9.0 | 9 | Importers (lat.md / Graphify / codegraph) + reports | ✅ Graphify shipped; lat.md + codegraph completed in Stage 11 |
 | v0.10.x | 10 | CI-canonical artifacts | 🚧 artifact `export`/`load` shipped (v0.0.10); **CI publish/fetch etc. → Stage 14** |
 | v0.11.x | 11 | Importers: lat.md + codegraph (completes 9) | ✅ durable+validated imports, lat.md importer, codegraph oracle (`compare_codegraph`) |
-| v0.12.x | 12 | Inference ingestion: content/PDF/image + semantic dedup (completes 8) | ✅ prose + PDF + **image OCR/vision** ([ADR-0005](adr/0005-image-ocr-vision-ingestion.md)) ingestion, semantic dedup (`roteiro duplicates`), dependency-aware context cache (`roteiro context`) |
+| v0.12.x | 12 | Inference ingestion: content/PDF/image + semantic dedup (completes 8) | ✅ prose + PDF + **image OCR/vision** ([ADR-0005](../adr/0005-image-ocr-vision-ingestion.md)) ingestion, semantic dedup (`roteiro duplicates`), dependency-aware context cache (`roteiro context`) |
 | v0.13.x | 13 | Spec/Blueprint authoring pillar (ADR-0004; tiered, graph-grounded) | ✅ ADR-0004; Tier 0 (`spec context`/`scaffold`) + Tier 1 (`spec draft`) — now **Qwen3** via a GGUF-arch-dispatching candle loader |
 | v0.x | 16 | Commit-time correctness gate: worktree-aware `check` + `pre-commit`/`post-commit` hooks | ✅ delivered (runs just before Stage 14; touches sync+check+init) |
 | v1.0.0 | 14 | v1.0 hardening (completes 10): CI artifacts, TS/JS+Python, deploy, `--json` freeze | ✅ shipped v1.0.0 (crates.io; v1.1.0 followed) |
 | v0.x | 15 | Intent-debt tracking: TODO/stub/deferred markers as `derived` facts + `roteiro debt` | ✅ `marker` nodes + `debt` query/CLI/MCP; `check` summary line |
 | post-1.0 | 17 | Tool-agnostic agent instructions (`AGENTS.md`) + context-aware review skill; MCP-for-review (investigate) | ⛔ after Stage 14 (standards must be v1.0-final) |
-| v0.x | 18 | Configuration file ([ADR-0007](adr/0007-configuration-file.md)): layered `roteiro.toml`, TOML-only | ✅ core — `roteiro config`, `[models]`/`[infer]`/`[duplicates]`/`[ingest]`, CLI>project>user>default |
-| v0.x | 19 | Local model serving ([ADR-0006](adr/0006-local-model-serving.md)): **llama.cpp**-backed, code-aware OpenAI `/v1` | ✅ opt-in `serve` — `/v1/models`+`chat`+streaming+`embeddings`+vision (`mtmd`), auto-registered graph tools |
+| v0.x | 18 | Configuration file ([ADR-0007](../adr/0007-configuration-file.md)): layered `roteiro.toml`, TOML-only | ✅ core — `roteiro config`, `[models]`/`[infer]`/`[duplicates]`/`[ingest]`, CLI>project>user>default |
+| v0.x | 19 | Local model serving ([ADR-0006](../adr/0006-local-model-serving.md)): **llama.cpp**-backed, code-aware OpenAI `/v1` | ✅ opt-in `serve` — `/v1/models`+`chat`+streaming+`embeddings`+vision (`mtmd`), auto-registered graph tools |
 | v0.x | 20 | Inference-core direction (unify on llama.cpp) + coding/reasoning models | ✅ **candle removed** — one `rto-llama` core for gen/embed/vision + serving (ADR-0003 v1.2); coding/reasoning `role` entries pull+run |
-| — | — | Shipped alongside Stage 12: curated low/mid/high **model matrix** ([ADR-0003](adr/0003-pluggable-embedding-models.md)) + streaming, checksum-verified model downloads | ✅ `roteiro model list` by section→tier; `download_verified` (constant memory) |
+| — | — | Shipped alongside Stage 12: curated low/mid/high **model matrix** ([ADR-0003](../adr/0003-pluggable-embedding-models.md)) + streaming, checksum-verified model downloads | ✅ `roteiro model list` by section→tier; `download_verified` (constant memory) |
 
 ---
 
@@ -1231,7 +1259,7 @@ sync effectively instant; `--json` queries sub-100ms on the dogfood graph.
 | Risk | Impact | Mitigation |
 |---|---|---|
 | Tree-sitter grammar licence incompatibility | Blocks a language | Verify licence before vendoring; `cargo deny` gate; drop/replace grammar if needed |
-| Offline embedding model size/licence (Stage 8) | Binary bloat or licence conflict | **Resolved by [ADR-0003](adr/0003-pluggable-embedding-models.md):** tiny static int8 default compiled in; GGUF local models opt-in behind `inference-local-models`; consent-gated fetch |
+| Offline embedding model size/licence (Stage 8) | Binary bloat or licence conflict | **Resolved by [ADR-0003](../adr/0003-pluggable-embedding-models.md):** tiny static int8 default compiled in; GGUF local models opt-in behind `inference-local-models`; consent-gated fetch |
 | Unmaintained YAML crate flagged by audit | `check` gate can't ship | **Resolved:** hand-parsed frontmatter in `rto-spec` (no `serde_yaml`) |
 | Non-deterministic extraction → cache churn | Cache/CI-diff noise | Sort all emitted facts; snapshot + idempotency tests from Stage 3 |
 | MSRV drift from a new dep | CI `msrv` job breaks | Pin (as with rusqlite); gate new deps on 1.96; ADR any bump |

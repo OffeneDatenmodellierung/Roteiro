@@ -16,7 +16,7 @@ pub mod mcp;
 
 pub use docs::{
     IndexEntry, NavEntry, PublishedPages, RenderedAdr, SourceBase, markdown_to_html, render_adr,
-    render_adr_index, render_doc, render_nav, render_site_page, replace_site_nav,
+    render_adr_index, render_doc, render_doc_at, render_nav, render_site_page, replace_site_nav,
 };
 
 /// A render target for the graph.

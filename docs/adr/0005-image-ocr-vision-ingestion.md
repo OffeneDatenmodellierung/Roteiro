@@ -27,7 +27,7 @@ confluence-url:
 
 ## Reference
 
-Governs the **image ingestion** item of Stage 12 (see `docs/BUILD_PLAN.md`) — the last remaining piece of "make `inferred` edges meaningful by embedding *real content*". It extends the content-ingestion pattern already shipped for prose and PDF text (their bodies land in `meta.content` and are embedded), and reuses the tiered, offline-first, consent-gated model machinery decided in [[docs/adr/0003-pluggable-embedding-models.md]]. It answers the item ADR-0001 and the Stage 12 plan flagged as "the one genuinely uncertain item in the backlog." See [[docs/adr/0001-build-roteiro-unified-codebase-knowledge-graph.md]].
+Governs the **image ingestion** item of Stage 12 (see `docs/history/BUILD_PLAN.md`) — the last remaining piece of "make `inferred` edges meaningful by embedding *real content*". It extends the content-ingestion pattern already shipped for prose and PDF text (their bodies land in `meta.content` and are embedded), and reuses the tiered, offline-first, consent-gated model machinery decided in [[docs/adr/0003-pluggable-embedding-models.md]]. It answers the item ADR-0001 and the Stage 12 plan flagged as "the one genuinely uncertain item in the backlog." See [[docs/adr/0001-build-roteiro-unified-codebase-knowledge-graph.md]].
 
 ## Summary
 

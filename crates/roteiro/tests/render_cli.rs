@@ -238,7 +238,7 @@ fn a_declared_site_page_is_emitted_with_the_shared_bar() {
     );
     write(
         &dir,
-        "docs/BUILD_PLAN_V2.md",
+        "docs/history/BUILD_PLAN_V2.md",
         "---\nsite-page: build-plan-v2\nsite-nav: Roadmap\nsite-order: 3\n---\n\n# Roadmap\n",
     );
     git(&dir, &["add", "."]);
@@ -304,7 +304,7 @@ fn a_declared_site_page_is_emitted_with_the_shared_bar() {
 
 #[test]
 fn a_source_link_is_aimed_at_the_repository_at_the_rendered_commit() {
-    // Issue #456: `docs/BUILD_PLAN.md` cites code as evidence for its claims.
+    // Issue #456: `docs/history/BUILD_PLAN.md` cites code as evidence for its claims.
     // That link is correct in a checkout and dead on the site, which publishes
     // documents and not source — so it is re-aimed at the repository's web view,
     // pinned to the commit the site was built from.
@@ -319,8 +319,8 @@ fn a_source_link_is_aimed_at_the_repository_at_the_rendered_commit() {
     );
     write(
         &dir,
-        "docs/BUILD_PLAN.md",
-        "# Build Plan\n\nEvidence: [sync](../crates/x/src/sync.rs).\n\n\
+        "docs/history/BUILD_PLAN.md",
+        "# Build Plan\n\nEvidence: [sync](../../crates/x/src/sync.rs).\n\n\
          Site link: [adrs](adr/).\n",
     );
     write(&dir, "crates/x/src/sync.rs", "pub fn f() {}\n");
@@ -346,7 +346,8 @@ fn a_source_link_is_aimed_at_the_repository_at_the_rendered_commit() {
         .expect("run render");
     assert!(out.status.success(), "render failed: {out:?}");
 
-    let plan = std::fs::read_to_string(dir.join("site/build-plan.html")).expect("plan page");
+    let plan =
+        std::fs::read_to_string(dir.join("site/history/build-plan.html")).expect("plan page");
     assert!(
         plan.contains(&format!(
             "href=\"https://github.com/o/r/blob/{sha}/crates/x/src/sync.rs\""
@@ -382,7 +383,7 @@ fn without_an_origin_remote_a_source_link_is_left_as_authored() {
     );
     write(
         &dir,
-        "docs/BUILD_PLAN.md",
+        "docs/history/BUILD_PLAN.md",
         "# Build Plan\n\nEvidence: [sync](../crates/x/src/sync.rs).\n",
     );
     git(&dir, &["add", "."]);
@@ -394,7 +395,8 @@ fn without_an_origin_remote_a_source_link_is_left_as_authored() {
         .output()
         .expect("run render");
     assert!(out.status.success(), "render failed: {out:?}");
-    let plan = std::fs::read_to_string(dir.join("site/build-plan.html")).expect("plan page");
+    let plan =
+        std::fs::read_to_string(dir.join("site/history/build-plan.html")).expect("plan page");
     assert!(!plan.contains("github.com"), "nothing invented: {plan}");
     assert!(
         plan.contains("href=\"../crates/x/src/sync.rs\""),
@@ -1481,4 +1483,71 @@ fn a_cross_repo_link_resolves_into_the_other_member() {
     );
 
     std::fs::remove_dir_all(&base).ok();
+}
+
+/// A `site-page:` slug may name a **path**, and the page it produces has to work
+/// from where it actually sits.
+///
+/// The unit tests cover the slug rule and the link rewrite separately; this is
+/// the one that would have caught them being right individually and wrong
+/// together — the directory has to be created, the theme and nav have to climb
+/// back to the root, and a link from an ADR has to land on it.
+#[test]
+fn a_slug_that_names_a_directory_is_served_from_it() {
+    let dir = fresh_dir("nestedslug");
+    git(&dir, &["init", "-q"]);
+    write(&dir, "website/public/index.html", "<h1>Home</h1>\n");
+    write(&dir, "website/public/style.css", "body{}\n");
+    write(
+        &dir,
+        "website/pages/modes.md",
+        "---\nsite-page: modes\nsite-nav: Modes\nsite-order: 1\n---\n\n# Modes\n",
+    );
+    write(
+        &dir,
+        "docs/history/BUILD_PLAN_V2.md",
+        "---\nsite-page: history/build-plan-v2\nsite-nav: Roadmap\nsite-order: 3\n---\n\n\
+         # Roadmap\n",
+    );
+    write(
+        &dir,
+        "docs/adr/0001-example.md",
+        "---\nadr-id: \"0001\"\nstatus: Accepted\n---\n\n# ADR-0001: Example\n\n\
+         Sequenced in [V2](../history/BUILD_PLAN_V2.md).\n",
+    );
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+
+    let out = Command::new(BIN)
+        .args(["render", "docs", "--out", "site"])
+        .current_dir(&dir)
+        .output()
+        .expect("run render");
+    assert!(out.status.success(), "render failed: {out:?}");
+    let site = dir.join("site");
+
+    // Served from the directory its slug names, not from the root.
+    let page = std::fs::read_to_string(site.join("history/build-plan-v2.html"))
+        .expect("page under history/");
+    assert!(
+        !site.join("build-plan-v2.html").exists(),
+        "and not also at the root"
+    );
+
+    // A page one level down climbs for everything outside it: theme, nav, ADRs.
+    assert!(
+        page.contains("href=\"../style.css\""),
+        "theme resolves from where the page sits: {page}"
+    );
+    assert!(
+        page.contains("href=\"../modes.html\""),
+        "nav entries are root-relative and must climb: {page}"
+    );
+
+    // And the ADR's repository-correct link lands on it.
+    let adr = std::fs::read_to_string(site.join("adr/0001-example.html")).expect("adr page");
+    assert!(
+        adr.contains("href=\"../history/build-plan-v2.html\""),
+        "the ADR link resolves to the served path: {adr}"
+    );
 }

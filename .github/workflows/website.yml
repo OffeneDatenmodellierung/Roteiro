@@ -18,14 +18,20 @@ on:
     paths:
       - "website/**"
       - "docs/adr/**"
-      - "docs/BUILD_PLAN.md"
+      # Both archived build plans are served, so watch the directory
+      # rather than one file — naming only BUILD_PLAN.md left an edit
+      # to BUILD_PLAN_V2.md unable to trigger a deploy.
+      - "docs/history/**"
       - ".github/workflows/website.yml"
   push:
     branches: [main]
     paths:
       - "website/**"
       - "docs/adr/**"
-      - "docs/BUILD_PLAN.md"
+      # Both archived build plans are served, so watch the directory
+      # rather than one file — naming only BUILD_PLAN.md left an edit
+      # to BUILD_PLAN_V2.md unable to trigger a deploy.
+      - "docs/history/**"
       - ".github/workflows/website.yml"
   workflow_dispatch:
 

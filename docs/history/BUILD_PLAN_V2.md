@@ -1,17 +1,34 @@
 ---
-site-page: build-plan-v2
+site-page: history/build-plan-v2
 site-nav: Roadmap
 site-order: 30
+status: deprecated
+archived: 2026-09-02
+superseded-by: issues
 ---
 
 # Roteiro — Build Plan V2
 
-Status: **Delivered — superseded by tracked issues** · Owner: The Roteiro Project Team · Last-modified: 2026-08-19
-Governing decisions: [ADR-0001](adr/0001-build-roteiro-unified-codebase-knowledge-graph.md),
-[ADR-0012](adr/0012-analyzer-findings-artifact-model.md),
-[ADR-0013](adr/0013-agent-memory-artifact-store.md),
-[ADR-0014](adr/0014-sandboxed-analyzer-execution.md),
-[ADR-0018](adr/0018-analyzer-coverage-matrix.md)
+> [!IMPORTANT]
+> **Archived on 2026-09-02. Kept for links and history; no longer current.**
+>
+> V2's stages were delivered and the work moved to tracked issues, which is
+> what supersedes this document. Its predecessor is
+> [BUILD_PLAN](BUILD_PLAN.md).
+>
+> Nothing here is maintained. In particular the **Baseline (start of V2)**
+> table is a point-in-time snapshot — it still records "Released v1.15.0, all
+> seven crates" against a project now past 5.x with nine — and is deliberately
+> left as written. The `status: deprecated` above is OKF §5.4's value, whose
+> gloss is exactly this case: *"kept for links and history; no longer
+> current."*
+
+Status: **Archived — delivered, then superseded by tracked issues** · Owner: The Roteiro Project Team · Last-modified: 2026-08-19
+Governing decisions: [ADR-0001](../adr/0001-build-roteiro-unified-codebase-knowledge-graph.md),
+[ADR-0012](../adr/0012-analyzer-findings-artifact-model.md),
+[ADR-0013](../adr/0013-agent-memory-artifact-store.md),
+[ADR-0014](../adr/0014-sandboxed-analyzer-execution.md),
+[ADR-0018](../adr/0018-analyzer-coverage-matrix.md)
 
 > ## This plan is finished, and it is a record rather than a roadmap
 >
@@ -207,7 +224,7 @@ migration.
 
 ---
 
-### Stage 21 — Analyzer contract & ingest ([ADR-0012](adr/0012-analyzer-findings-artifact-model.md), [ADR-0014](adr/0014-sandboxed-analyzer-execution.md)) → **v1.10.0** · effort **S** ✅ *delivered*
+### Stage 21 — Analyzer contract & ingest ([ADR-0012](../adr/0012-analyzer-findings-artifact-model.md), [ADR-0014](../adr/0014-sandboxed-analyzer-execution.md)) → **v1.10.0** · effort **S** ✅ *delivered*
 
 **Goal:** land the whole value of the findings design with **no analyzer and no
 sandbox** — the seam, the schema, and a working ingest path. This is the stage that
@@ -278,7 +295,7 @@ runner, honestly labelled.
 stages:
 
 **Coverage is a matrix, not an analyzer list**
-([ADR-0018](adr/0018-analyzer-coverage-matrix.md)). The requirement is findings
+([ADR-0018](../adr/0018-analyzer-coverage-matrix.md)). The requirement is findings
 for Rust, Python, SQL, Java and Node. The two analyzers named in Stage 22 deliver
 that **on the SAST axis only**; Stage 22b closed the dependency axis:
 
@@ -386,7 +403,7 @@ and because the SAST half is independently useful and independently reviewable.
   download-by-URL source. `AssetSource` is `#[non_exhaustive]` for that.
 - **The Rust overlap is now DECIDED — implement it, do not re-open it.**
   `osv-scanner` also reads `Cargo.lock` and OSV ingests RustSec, so the same Rust
-  advisory arrives twice under two finding keys. [ADR-0018](adr/0018-analyzer-coverage-matrix.md)
+  advisory arrives twice under two finding keys. [ADR-0018](../adr/0018-analyzer-coverage-matrix.md)
   **v1.1** resolves it: **keep both findings and cross-reference them at the
   reporting layer.** Neither layer is filtered or made conditional on the other.
   The join key needs no invention — OSV keys a RustSec-derived record by the
@@ -454,7 +471,7 @@ and because the SAST half is independently useful and independently reviewable.
   four-ecosystem lockfile tree, taken fully offline against pinned databases. The
   tool-dependent test self-skips visibly when no `osv-scanner` is on `PATH`.
 
-### Stage 23 — Agent memory, episodic tier ([ADR-0013](adr/0013-agent-memory-artifact-store.md)) → **v1.11.0** · effort **M** ✅ *delivered*
+### Stage 23 — Agent memory, episodic tier ([ADR-0013](../adr/0013-agent-memory-artifact-store.md)) → **v1.11.0** · effort **M** ✅ *delivered*
 
 **Goal:** stop losing what sessions learn. Write path only — no retrieval ranking,
 no graph integration.
@@ -521,7 +538,7 @@ should rank on this predicate (`AnchorState::applies`), not invent a second one.
 `search` integration — all Stage 25. Memory currently reaches `search` through no
 channel at all, which is asserted rather than assumed.
 
-### Stage 24 — boxlite sandboxed backend ([ADR-0014](adr/0014-sandboxed-analyzer-execution.md)) → **v1.13.0** · effort **L** ✅ *delivered*
+### Stage 24 — boxlite sandboxed backend ([ADR-0014](../adr/0014-sandboxed-analyzer-execution.md)) → **v1.13.0** · effort **L** ✅ *delivered*
 
 **Goal:** the reproducible, offline-capable local run — one command, pinned inputs,
 digest-level evidence.
@@ -1085,7 +1102,7 @@ warning path, which extraction cannot reach and so needed a unit test on
 output. The batched bump (§8b: Q2, Q10, cross-language edge resolution) remains
 unpaid and unblocked.
 
-### Stage 28 — Generated media content moves out of `derived` ([ADR-0015](adr/0015-generated-media-content-artifact-store.md)) → **v1.10.x** ✅ *delivered* *(independent track)*
+### Stage 28 — Generated media content moves out of `derived` ([ADR-0015](../adr/0015-generated-media-content-artifact-store.md)) → **v1.10.x** ✅ *delivered* *(independent track)*
 
 **Goal:** stop generative model output masquerading as deterministic extraction —
 without losing the ability to search it. Resolves #300.
@@ -1158,7 +1175,7 @@ the gate avoids. The gate **abstains**, and abstention is a pass, so those forma
 still reach the model. Whether to close that gap with structural parsing (no
 dependency) is tracked separately.
 
-### Stage 29 — Audio metadata as `derived` facts ([ADR-0016](adr/0016-audio-metadata-extraction.md)) → **v1.11.0** · effort **M** ✅ *delivered* *(independent track)*
+### Stage 29 — Audio metadata as `derived` facts ([ADR-0016](../adr/0016-audio-metadata-extraction.md)) → **v1.11.0** · effort **M** ✅ *delivered* *(independent track)*
 
 **Goal:** the complement of Stage 28. That stage took *generated* content out of
 `derived` because it is invented; this one puts *extracted* content in because it is
@@ -1228,7 +1245,7 @@ them, so the memory is already paid for.
 - **Not shippable as a default** until either llama.cpp's cross-batch-width numerics
   tighten or the divergence is judged acceptable as a product decision. That is an
   open question, not a task — see §9.
-### Stage 31 — Model lifecycle: resumable pulls, removal, high tier ([ADR-0003](adr/0003-pluggable-embedding-models.md)) → **v1.11.0** · effort **M** ✅ *delivered* *(independent track)*
+### Stage 31 — Model lifecycle: resumable pulls, removal, high tier ([ADR-0003](../adr/0003-pluggable-embedding-models.md)) → **v1.11.0** · effort **M** ✅ *delivered* *(independent track)*
 
 **Goal:** make a multi-gigabyte model store survivable. Nothing here touches the
 graph, the schema or `EXTRACT_VERSION` — it is the store and its CLI only, which
@@ -1350,7 +1367,7 @@ refusing to rewrite a graph whose store is newer than the binary, and it needs a
 than folded in.
 
 **Deliberately NOT done:** per-worktree databases. `findings`, `media_content`,
-`agent_memory` and `imports` all live inside `graph.db`, and [ADR-0013](adr/0013-agent-memory-artifact-store.md)
+`agent_memory` and `imports` all live inside `graph.db`, and [ADR-0013](../adr/0013-agent-memory-artifact-store.md)
 v1.1 depends on that store being **shared** — its scope rule (a memory applies
 wherever its anchor resolves, with no branch bookkeeping) was demonstrated with
 one row in one store giving opposite verdicts on two branches. Splitting the
@@ -1464,9 +1481,9 @@ byte-identical afterwards.
 
 ---
 
-### Stage 34 — Remote model tier ([ADR-0019](adr/0019-remote-model-tier.md)) → **v1.17.0** · effort **L** *(independent track)* ✅ *delivered in three parts: 1 the guard, 2a the transport, 2b the surface wiring*
+### Stage 34 — Remote model tier ([ADR-0019](../adr/0019-remote-model-tier.md)) → **v1.17.0** · effort **L** *(independent track)* ✅ *delivered in three parts: 1 the guard, 2a the transport, 2b the surface wiring*
 
-**Unblocked.** [ADR-0019](adr/0019-remote-model-tier.md) is **Accepted** (2026-08-17), so this stage has a settled contract to build against. It remains the largest posture change in the project: the first capability that sends repository content off the machine.
+**Unblocked.** [ADR-0019](../adr/0019-remote-model-tier.md) is **Accepted** (2026-08-17), so this stage has a settled contract to build against. It remains the largest posture change in the project: the first capability that sends repository content off the machine.
 
 **Cut in three, guard first, then the thing it guards, then the surfaces that use it.** Part 1 — the consent gate, the payload allow-list, the dry-run and the egress record — landed in a build that compiled **no backend and therefore could not send anything**. Part 2a is the `ureq` transport, the TTY form of the invocation grant, the response reader, and the README/website promise amendments that the transport makes necessary. Part 2b — **delivered here** — is the `model_choice` amendment and the `spec draft` / Ask wiring: it was cut out of 2a because it lands in a **shared** resolver that seven surfaces already read, and merging that with the first code in the project that can open a socket would put two unrelated risks in one review. See *What shipped* below.
 

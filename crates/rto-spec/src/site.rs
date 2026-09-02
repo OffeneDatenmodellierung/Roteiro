@@ -10,11 +10,12 @@
 //! `site-page:` slug**. Nothing about its location says so.
 //!
 //! That is deliberate. `docs/` mixes published material with internal material —
-//! `docs/REVIEW_CHECKLIST.md` and `docs/BUILD_PLAN_V2.md` are working documents,
-//! while `docs/BUILD_PLAN.md` is already rendered to the site — so the line was
-//! never a clean directory boundary and a path convention could only ever
-//! approximate it. A path rule also has to be *remembered*: it lives in a
-//! renderer someone has to go read, and the file itself gives no hint either way.
+//! `docs/REVIEW_CHECKLIST.md` and `docs/VENDORED_DEPENDENCIES.md` are working
+//! documents, while `docs/OFFLINE_SETUP.md` and both archived plans under
+//! `docs/history/` are rendered to the site — so the line was never a clean
+//! directory boundary and a path convention could only ever approximate it. A
+//! path rule also has to be *remembered*: it lives in a renderer someone has to
+//! go read, and the file itself gives no hint either way.
 //! A frontmatter marker puts the decision in the document, where the person
 //! writing or reviewing it is already looking, and makes "is this published?" a
 //! question the file answers about itself.
@@ -56,12 +57,17 @@ const DEFAULT_ORDER: u32 = 10_000;
 /// gate stayed green.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ParseError {
-    /// The `site-page` slug is not URL-safe (`[a-z0-9-]+`, not `-`-terminated).
+    /// The `site-page` slug is not URL-safe. Each `/`-separated segment must be
+    /// `[a-z0-9-]+` and must not start or end with `-`.
     ///
     /// Checked rather than slugified-on-the-fly: the slug *is* the published
     /// URL, so quietly rewriting `Getting Started` to `getting-started` would
     /// make the author's intended link the broken one.
-    #[error("site-page slug `{0}` is not URL-safe (expected lowercase a-z, 0-9 and `-`)")]
+    #[error(
+        "site-page slug `{0}` is not URL-safe (expected `/`-separated segments of \
+         lowercase a-z, 0-9 and `-`, none empty and none starting or ending with \
+         `-`)"
+    )]
     InvalidSlug(String),
     /// `site-order` was present but not a non-negative integer.
     #[error("site-order `{0}` is not a non-negative integer")]
@@ -295,15 +301,28 @@ fn field<'a>(text: &'a str, key: &str) -> Option<&'a str> {
     })
 }
 
-/// Whether `slug` is safe to use verbatim as a published filename: a non-empty
-/// run of `a-z`, `0-9` and `-`, not starting or ending with `-`.
+/// Whether `slug` is safe to use verbatim as a published path: one or more
+/// `/`-separated segments, each a non-empty run of `a-z`, `0-9` and `-` that
+/// neither starts nor ends with `-`.
 fn is_url_safe_slug(slug: &str) -> bool {
+    // A slug may name a *path*, not just a file: `history/build-plan-v2` serves
+    // at `/history/build-plan-v2.html`. That is a widening rather than a new
+    // concept — the doc above already says the slug **is** the URL, and a URL
+    // has directories. Each segment keeps the old rule exactly, so nothing that
+    // validated before stops validating.
+    //
+    // Empty segments are rejected, which covers a leading `/`, a trailing `/`
+    // and a doubled `//` in one condition. `..` cannot appear because `.` is not
+    // an allowed character, so a slug cannot climb out of the site root.
     !slug.is_empty()
-        && !slug.starts_with('-')
-        && !slug.ends_with('-')
-        && slug
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && slug.split('/').all(|seg| {
+            !seg.is_empty()
+                && !seg.starts_with('-')
+                && !seg.ends_with('-')
+                && seg
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        })
 }
 
 #[cfg(test)]
@@ -432,6 +451,30 @@ mod tests {
             );
         }
         assert!(parse_site_page("p.md", "---\nsite-page: cross-repo-2\n---\n# X\n").is_ok());
+    }
+
+    /// A slug may name a **path**, so an archived document can be served beside
+    /// its siblings (`history/build-plan-v2`) rather than at the site root.
+    ///
+    /// The per-segment rule is unchanged, which is what keeps the widening safe:
+    /// an empty segment is rejected, so a leading `/`, a trailing `/` and a
+    /// doubled `//` are all still drift, and `..` cannot appear at all because
+    /// `.` is not an allowed character — a slug cannot climb out of the site.
+    #[test]
+    fn a_slug_may_name_a_path_but_each_segment_keeps_the_old_rule() {
+        for good in ["history/build-plan-v2", "a/b/c", "history/notes-2"] {
+            let text = format!("---\nsite-page: {good}\n---\n# X\n");
+            let page = parse_site_page("p.md", &text).expect("slug naming a path");
+            assert_eq!(page.href(), format!("{good}.html"));
+        }
+        for bad in ["/lead", "trail/", "a//b", "a/-b", "a/b-", "a/B", "../up"] {
+            let text = format!("---\nsite-page: {bad}\n---\n# X\n");
+            assert_eq!(
+                parse_site_page("p.md", &text),
+                Err(ParseError::InvalidSlug(bad.to_owned())),
+                "slug `{bad}` must still be rejected"
+            );
+        }
     }
 
     #[test]

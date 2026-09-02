@@ -70,7 +70,7 @@ mod telemetry;
         One SQLite store holding structure, intent, and context as a single \
         provenance-tagged knowledge graph, queryable by humans and AI agents \
         alike. Subcommands are scaffolds while the graph core lands; see \
-        ADR-0001 and docs/BUILD_PLAN.md for the roadmap.",
+        ADR-0001 and docs/history/BUILD_PLAN.md for the roadmap.",
     arg_required_else_help = true,
     propagate_version = true
 )]
@@ -15468,7 +15468,7 @@ fn discover_site_sources(
         .collect();
     adrs.sort();
 
-    let build_plan = Some(root.join("docs/BUILD_PLAN.md")).filter(|p| p.is_file());
+    let build_plan = Some(root.join("docs/history/BUILD_PLAN.md")).filter(|p| p.is_file());
 
     // Blueprints live under docs/blueprint(s)/ (ADR-0004); the overall project
     // blueprint is one. Each is rendered to a root-level page like the Build Plan.
@@ -15498,7 +15498,7 @@ fn discover_site_sources(
 
     // What the site serves each source document as. A slug is URL-safe by
     // construction, so a page's published name need not resemble its file name —
-    // and rewriting `../BUILD_PLAN_V2.md` to `../BUILD_PLAN_V2.html` aimed four
+    // and rewriting `../history/BUILD_PLAN_V2.md` to `../BUILD_PLAN_V2.html` aimed four
     // correct repository links at a page that is never emitted (issue #446).
     let mut published = rto_render::PublishedPages::new();
     for path in &adrs {
@@ -15508,7 +15508,7 @@ fn discover_site_sources(
         );
     }
     if build_plan.is_some() {
-        published.publish("BUILD_PLAN.md", "build-plan.html");
+        published.publish("BUILD_PLAN.md", "history/build-plan.html");
     }
     for path in &blueprints {
         published.publish(
@@ -15610,18 +15610,27 @@ fn render_docs(out: Option<String>) -> anyhow::Result<()> {
     }
 
     // Render lifetime docs (the Build Plan and the house-style blueprints) as
-    // first-class root-level pages, and list them above the ADRs on the index.
-    // Their `[[docs/adr/…]]` links resolve into the `adr/` subdirectory (the
-    // `render_doc` prefix), which is correct for a root-level page.
+    // first-class pages, listed above the ADRs on the index.
+    //
+    // The blueprints are root-level, so their `[[docs/adr/…]]` links resolve into
+    // the `adr/` subdirectory and `render_doc`'s depth-0 prefix is right for
+    // them. The Build Plan is **not**: it was archived to `docs/history/` and is
+    // served from `history/`, so it goes through `render_doc_at` at depth 1 and
+    // climbs back to the root for the theme, the nav and `adr/`.
     let mut lifetime = Vec::new();
     if let Some(build_plan) = &src.build_plan {
         let md = std::fs::read_to_string(build_plan)?;
         let source = doc_source_base(src.blob_base.as_deref(), root, build_plan);
-        let rendered = rto_render::render_doc(&md, "Build Plan", &src.published, source.as_ref());
-        std::fs::write(out.join("build-plan.html"), &rendered.html)?;
+        let rendered =
+            rto_render::render_doc_at(&md, "Build Plan", &src.published, source.as_ref(), 1);
+        // Served under `history/` so the site's layout matches the repository's:
+        // the document lives in `docs/history/`, and a reader following a link
+        // from an ADR lands on the same shape either way.
+        std::fs::create_dir_all(out.join("history"))?;
+        std::fs::write(out.join("history/build-plan.html"), &rendered.html)?;
         lifetime.push(rto_render::IndexEntry {
             // The index lives under adr/, so link up one level.
-            href: "../build-plan.html".to_owned(),
+            href: "../history/build-plan.html".to_owned(),
             title: rendered.title,
         });
     }
@@ -15652,7 +15661,14 @@ fn render_docs(out: Option<String>) -> anyhow::Result<()> {
             &src.published,
             source.as_ref(),
         );
-        std::fs::write(out.join(&href), &rendered.html)?;
+        // A slug may name a path (`history/build-plan-v2`), so the directory
+        // may not exist yet. Created here rather than up front because the set
+        // of directories is whatever the pages declare.
+        let dest = out.join(&href);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(dest, &rendered.html)?;
     }
 
     std::fs::write(

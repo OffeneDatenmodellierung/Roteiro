@@ -442,7 +442,7 @@ must see both disappear.
 ## Status
 
 **Accepted** (2026-08-17), and implemented — Stages 22 and 22b (#322, #339), released in **v1.11.0** and **v1.11.x**. The semgrep and `cargo-audit` adapters, the subprocess runner and the
-`prefetch`/`status` provisioning landed in [BUILD_PLAN_V2](../BUILD_PLAN_V2.md)
+`prefetch`/`status` provisioning landed in [BUILD_PLAN_V2](../history/BUILD_PLAN_V2.md)
 Stage 22. **`osv-scanner` landed in Stage 22b**, and with it the dependency axis
 matches the SAST axis.
 

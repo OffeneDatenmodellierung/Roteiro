@@ -21,17 +21,28 @@ published as `<slug>.html`, listed in the navigation bar, and drift-checked by
 
 ```markdown
 ---
-site-page: modes        # the slug — publishes as modes.html; [a-z0-9-] only
+site-page: modes        # the slug — publishes as modes.html
+                        # `/`-separated segments, each [a-z0-9-], none
+                        # empty and none starting or ending with `-`;
+                        # `history/build-plan-v2` serves from a directory
 site-nav: Modes         # short label for the bar (defaults to the page title)
 site-order: 3           # position in the bar (unset sorts last, then by slug)
 ---
 ```
 
 Publication is **declared, never inferred from a path**, so a document can gain a
-public page *in place*: `docs/OFFLINE_SETUP.md`, `docs/BUILD_PLAN_V2.md` and
-`docs/JSON_SCHEMA.md` are published where they already were, keeping every
+public page *in place*: `docs/OFFLINE_SETUP.md`, `docs/JSON_SCHEMA.md` and
+`docs/OKF_BUNDLE.md` are published where they already were, keeping every
 existing link to their repository paths. The pages that were split out of the
 landing page live in `website/pages/`.
+
+The converse also holds, and `docs/history/` is the worked example: a slug may
+name a **path**, so a document that *does* move can be served from where it now
+lives rather than from the site root. Both archived build plans declare
+`history/…` slugs and are served under `/history/`, with `website/public/_redirects`
+keeping their previous URLs alive. Declared publication is what makes a move a
+choice rather than a breakage — but it does not make the repository path stable,
+and an archived document is exactly the kind that moves.
 
 A heading may carry an explicit anchor — `## Heading {#modes}` — which is how the
 sections that moved off the landing page kept the URLs that predate the move.

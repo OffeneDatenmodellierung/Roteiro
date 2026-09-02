@@ -473,7 +473,7 @@ execution is untested in CI** — an accepted, documented gap.
 
 ## Status
 
-**Accepted** (2026-08-17), and implemented — Stages 21, 22 and 24 (#293, #322, #352), the backend released in **v1.13.0**. Sequenced in [BUILD_PLAN_V2](../BUILD_PLAN_V2.md) and delivered in that order:
+**Accepted** (2026-08-17), and implemented — Stages 21, 22 and 24 (#293, #322, #352), the backend released in **v1.13.0**. Sequenced in [BUILD_PLAN_V2](../history/BUILD_PLAN_V2.md) and delivered in that order:
 the seam and ingest in Stage 21 (no boxlite), analyzers in Stage 22, and the
 boxlite backend in Stage 24 — which, publication having been verified, was a
 dependency addition rather than the packaging problem it was first reported to

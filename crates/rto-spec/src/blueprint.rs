@@ -204,7 +204,7 @@ mod tests {
     #[test]
     fn a_blueprint_heading_declaring_an_id_is_keyed_by_it() {
         let doc = parse_blueprint(
-            "docs/BUILD_PLAN.md",
+            "docs/history/BUILD_PLAN.md",
             "# Plan\n\n## Stage one {#s1}\n\n## Stage two\n",
         );
         let slugs: Vec<_> = doc.sections.iter().map(|s| s.slug.as_str()).collect();
