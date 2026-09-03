@@ -7021,13 +7021,111 @@ fn build_scaffold(
     }
     let (repo, mut store, cache) = open_graph()?;
     build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
-    let root = repo
-        .workdir()
-        .ok_or_else(|| anyhow::anyhow!("cannot scaffold in a bare repository"))?;
+    // Kept as a check though the path is no longer needed: a bare repository has
+    // no working tree to write into, and failing here says so, where failing
+    // later would say something about the authored layer instead.
+    if repo.workdir().is_none() {
+        anyhow::bail!("cannot scaffold in a bare repository");
+    }
     let ctx = rto_spec::context(&store, topic, 10)?;
 
     let (md, label) = if kind == "adr" {
-        let adr_id = next_adr_id(&root.join("docs/adr"));
+        // Asked of the repository's own ADRs rather than of a `docs/adr`
+        // directory it may not have. `Worktree` because an ADR scaffolded and
+        // saved a minute ago is not committed yet, and proposing its id again
+        // would be the obvious way to get this wrong.
+        // Markdown blobs only. `authored_docs` classifies the whole authored
+        // layer, which also scans every Rust file for annotations and
+        // conventions — work this caller throws away. Filtering first cannot
+        // lose an ADR, because the classifier requires `is_md` before anything
+        // else, and it goes through the *same* `authored_docs_from`, so there is
+        // still one classification rule rather than a second one that could
+        // disagree with the gate.
+        //
+        // Measured on this repository: 349 ms for the whole layer against 33 ms
+        // for the markdown alone, both finding the same 22 ADRs — a third of a
+        // second off a command that otherwise takes about a second.
+        let source = rto_graph::GraphSource::Worktree;
+        let markdown: Vec<_> = rto_spec::authored_blobs(&repo, source)?
+            .into_iter()
+            // The **same** predicate the classifier uses, not an approximation
+            // of it: `ends_with(".md")` was narrower, so a `README.MD` would
+            // have been filtered out here and found by the gate — the filter
+            // silently disagreeing with the rule it exists to pre-empt.
+            .filter(|blob| {
+                std::path::Path::new(&blob.path)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("md"))
+            })
+            .collect();
+        let docs = rto_spec::authored_docs_from(markdown, &|blob| repo.read_source(blob, source))?;
+        let home = rto_spec::adr_home(&docs.layer.docs);
+        let adr_id = home.next_id.clone();
+        // On stderr, and always — not folded into the label, which is printed
+        // only when `--out` is given, and this matters most in the common case
+        // where the scaffold goes to stdout to be redirected by hand. The id
+        // only means something beside the decisions it continues, and this is
+        // the one moment the tool knows where a reader should put it. stderr
+        // because stdout is the document.
+        // A document that declares `type: adr` but does not parse — no
+        // `adr-id`, say — never reaches `layer.docs`, so it is invisible to
+        // `adr_home`. Saying "no existing decisions found" over a repository
+        // full of broken ones is false, and proposing `0001` beside ADRs that
+        // already hold ids is the duplicate this whole function exists to
+        // avoid, arriving by a different route. Reported before anything else,
+        // because it changes what the next line is worth.
+        let unreadable: Vec<&str> = docs
+            .layer
+            .malformed
+            .iter()
+            .filter(|v| v.kind == rto_spec::ViolationKind::MalformedAdr)
+            .map(|v| v.message.as_str())
+            .collect();
+        if !unreadable.is_empty() {
+            // "could not be parsed", not "could not be read": these come from
+            // `layer.malformed`, which is a parse failure — a missing `adr-id`,
+            // say — and never an IO error. A reader chasing a permissions
+            // problem because of this wording would be chasing the wrong thing.
+            eprintln!(
+                "warning: {} document(s) declare themselves ADRs but could not be \
+                 parsed, so this id is proposed from an incomplete set and may \
+                 collide — run `roteiro check` for the detail:",
+                unreadable.len()
+            );
+            for message in &unreadable {
+                eprintln!("  {message}");
+            }
+        }
+        // Two sentences, because they are two different claims. "This repository
+        // keeps its decisions in X" is a statement about the repository, and
+        // making it about one that has no decisions would be inventing a
+        // convention and attributing it to them.
+        // Three cases, not two. A repository whose only ADRs are malformed has
+        // decisions — they just did not parse — so telling it there are none is
+        // false in the direction that matters: it is the repository most likely
+        // to be handed a colliding id, and the one being told there is nothing
+        // to collide with.
+        if home.followed {
+            eprintln!(
+                "note: this repository keeps its decisions in `{dir}/` — suggested \
+                 path `{dir}/{adr_id}-<slug>.md`",
+                dir = home.dir
+            );
+        } else if unreadable.is_empty() {
+            eprintln!(
+                "note: no existing decisions found, so there is nothing to follow; \
+                 `{dir}/{adr_id}-<slug>.md` is the conventional path",
+                dir = home.dir
+            );
+        } else {
+            eprintln!(
+                "note: every decision found failed to parse, so neither the id nor \
+                 the location could be read from them; `{dir}/{adr_id}-<slug>.md` \
+                 is the conventional path, and `{adr_id}` is a guess",
+                dir = home.dir
+            );
+        }
         (
             rto_spec::scaffold_adr(topic, title, &adr_id, &today_utc(), &ctx),
             format!("ADR-{adr_id}"),
@@ -7533,23 +7631,6 @@ fn run_spec_draft(
          and sends only what `roteiro remote dry-run` shows. \
          (`spec scaffold` works with no model at all.)"
     )
-}
-
-/// The next zero-padded ADR id: one past the highest `NNNN-*.md` under `adr_dir`
-/// (or `0001` if none/absent).
-fn next_adr_id(adr_dir: &std::path::Path) -> String {
-    let mut max = 0u32;
-    if let Ok(entries) = std::fs::read_dir(adr_dir) {
-        for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                let digits: String = name.chars().take_while(char::is_ascii_digit).collect();
-                if let Ok(n) = digits.parse::<u32>() {
-                    max = max.max(n);
-                }
-            }
-        }
-    }
-    format!("{:04}", max + 1)
 }
 
 /// Today's UTC date as `YYYY-MM-DD`, dependency-free (Hinnant's civil-from-days).
