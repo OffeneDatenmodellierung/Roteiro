@@ -11,7 +11,7 @@ architectural-significance: MEDIUM  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "0.1"
+version: "0.2"
 last-modified: 2026-09-03
 confluence-url:
 ---
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | Draft |
 | **Architectural Significance** | MEDIUM |
 | **Domain** | Developer Tooling |
-| **Document version** | 0.1 |
+| **Document version** | 0.2 |
 | **Related** | [[docs/adr/0015-generated-media-content-artifact-store.md]] · [[docs/adr/0017-dependency-security-policy.md]] · [[docs/adr/0021-open-knowledge-format-bundle.md]] |
 
 ## Reference
@@ -44,9 +44,10 @@ Roteiro already decodes text out of PDFs. It decodes nothing else binary, and �
 this is the part nobody had noticed — **it screens none of what it decodes**.
 
 Three decisions. Office documents join the formats that are decoded, on the same
-path and by the same rule that already admits PDFs. Everything that path decodes
-is screened before it becomes searchable content, closing a gap that is live
-today rather than hypothetical. And because opening a document somebody else
+path and by the same rule that already admits PDFs. **Text decoded out of a
+binary** is screened before it becomes searchable content, closing a gap that is
+live today rather than hypothetical — and prose is deliberately excluded, for a
+reason that was measured rather than argued (see Option D). And because opening a document somebody else
 wrote is the risky act, extraction per file is **a decision a person makes**, with
 a switch for the repositories that would rather not be asked.
 
@@ -95,8 +96,8 @@ adds is a floor rather than a ceiling.
 
 ## Recommended option
 
-Decode Office documents on the extract path, screen everything that path decodes,
-and gate extraction per file behind a remembered answer.
+Decode Office documents on the extract path, screen the text that path decodes
+**out of a binary**, and gate extraction per file behind a remembered answer.
 
 ## Options considered + consequences
 
@@ -115,6 +116,50 @@ Rejected. A single switch makes the choice all-or-nothing across a repository,
 and the risk is per file: the cost of parsing one hostile document is not reduced
 by having agreed to parse a thousand safe ones. It also gives an operator nowhere
 to record "this one, no" short of deleting the file.
+
+### Option D — screen everything the path decodes, prose included
+
+Rejected, and this is what the first draft of this ADR specified. It said the
+screen should run "after every branch… so it covers prose, PDF, OCR and any
+format added later without a second decision". One call site, no exceptions, and
+it reads well.
+
+**Measured over this repository's own 327 prose files before implementing it:**
+
+| file | class | admitted |
+|---|---|---|
+| `crates/rto-llama/Cargo.toml` | `model-directive` (chat-template-marker) | **nothing** |
+| `crates/rto-serve/src/tools.rs` | `model-directive` (fake-system-marker) | **nothing** |
+| `docs/REVIEW_CHECKLIST.md` | `hidden-presentation` (HTML comment) | partial |
+| `crates/rto-graph/CHANGELOG.md` | `hidden-presentation` (`<div>` with hidden) | partial |
+
+Eight files flagged, four of them meaningfully, **two losing their content
+entirely** — on a repository that has never seen a peer's bundle. And they are
+flagged for containing exactly what they exist to contain: `chat_template.rs` and
+`tools.rs` handle chat templates and tool system prompts, so a chat-template
+marker in them is the subject matter, not an attack. ADR-0024's control-token
+class will make this strictly worse, because those are the tokens those files
+are *about*.
+
+The rule that fixes it is already written down in this ADR's own Context, and the
+first draft simply failed to follow it:
+
+> **A binary is the input a human reviewer cannot check by eye.** The reason a
+> repository's own content is not screened is that a person reviewed it. That
+> argument is weakest exactly here: a reviewer approving a PR containing a DOCX
+> reviewed a *rendering*, not the bytes.
+
+That argument distinguishes prose from binaries, and it is the whole basis for
+screening the latter. Applying the screen to prose as well throws away the
+distinction that justified it: a reviewer approving a Markdown file *did* read
+those bytes as text, which is precisely why nothing else in the repository is
+screened either.
+
+It is also confirmed that this path never sees a peer's content — `file_node` is
+called only from within `extract.rs`, which runs over the repository's own blobs
+during sync, while an imported bundle goes through
+[[crates/rto-render/src/okf/read.rs#read_bundle]] and its six separate screen
+calls. So excluding prose here removes no protection from anything external.
 
 ### Option C — decoded, screened, and consented per file *(recommended)*
 
@@ -136,11 +181,14 @@ For contrast, `okf-validator` was refused because one dependency produced
 thirteen `cargo deny` failures across seven licence rejections and six
 unmaintained advisories. This is not that.
 
-**Screening.** The screen runs once, where content is assembled, after every
-branch and before `meta.content` is set — so it covers prose, PDF, OCR and any
-format added later without a second decision. `Screened::admit` already carries
-what may be stored, and `None` already means nothing may be, so the enforcement
-half exists.
+**Screening.** The screen runs where content is assembled, before `meta.content`
+is set, over **every branch that decodes text out of a binary** — PDF today, OCR
+today, Office documents when they land, and anything added later.
+`Screened::admit` already carries what may be stored, and `None` already means
+nothing may be, so the enforcement half exists.
+
+**Prose is not screened**, and the first draft of this ADR said it should be.
+That was wrong, and measurably so — see Option D.
 
 **The switch.** `[ingest] documents`, alongside the `prose`, `pdf` and `ocr`
 toggles it sits beside. Off is a supported answer.
@@ -184,9 +232,11 @@ never leave behind an answer a person did not give.
   four hundred questions on first sync; the switch is what makes that bearable,
   and the batch shape of the prompt is an implementation question this ADR does
   not settle.
-- **OCR is included in the screening change**, which is wider than documents. It
-  is one call site, and screening three of the four decoded sources while leaving
-  the fourth would be an odd rule to have to explain.
+- **OCR is included in the screening change**, which is wider than documents, and
+  prose is excluded, which is narrower than "the extract path". The line is not
+  the call site but the *input*: OCR reads out of an image a reviewer saw
+  rendered, so it belongs with PDF and DOCX; Markdown is bytes a reviewer read as
+  text, so it belongs with the rest of the unscreened repository.
 
 ## Implementation
 
@@ -217,3 +267,4 @@ has read.
 | Version | Date | Notes |
 |---------|------|-------|
 | 0.1 | 2026-09-03 | Draft. Office documents join the formats the extract path decodes, admitted by the membership rule ADR-0015 already wrote (decoded, not generated) rather than by a new principle. Everything that path decodes is **screened** before it becomes `meta.content`, closing a live gap: `screen_text` had exactly two callers, both on the OKF path, so OCR'd and PDF text reached a model unscreened. Extraction is gated per file by a remembered answer that lapses on a screen-class change, reusing `screen_fingerprint`, with `[ingest] documents` for repositories that would rather not be asked and ADR-0021's non-interactive rule when there is nobody to ask. Dependency cost measured rather than asserted: 9 net-new crates, every licence already on the allow-list, no new entries — against the thirteen `cargo deny` failures that refused `okf-validator`. |
+| 0.2 | 2026-09-03 | **Prose is no longer screened, and the first draft's rule was wrong by measurement.** It said the screen should run "after every branch… so it covers prose, PDF, OCR and any format added later". Run over this repository's own 327 prose files before implementing it, that flags eight and **withholds the content of two entirely** — `rto-llama/Cargo.toml` and `rto-serve/src/tools.rs`, both for a chat-template marker, which is the subject those files exist to handle. ADR-0024's control-token class would make it strictly worse. The rule that fixes it was already in this ADR's own Context and the draft failed to follow it: a binary is the input a human reviewer cannot check by eye, and that is the entire basis for screening it — a reviewer approving a Markdown file *did* read those bytes as text, which is why nothing else in the repository is screened either. The line is the **input**, not the call site: OCR reads out of an image a reviewer saw rendered, so it stays; Markdown does not. Also confirmed that this path never sees a peer's content — `file_node` is called only from `extract.rs` over the repository's own blobs, while an imported bundle goes through `read.rs` and its six separate screen calls — so excluding prose removes no protection from anything external. |
