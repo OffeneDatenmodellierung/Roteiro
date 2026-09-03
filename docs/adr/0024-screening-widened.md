@@ -46,8 +46,7 @@ deliberately does not attempt. An external contributor — the author of
 `okf-guard`, which the screen credits as prior art — asked in issue #723 whether
 those could be covered.
 
-**Four are closed, one becomes a report rather than an extraction, and one stays
-refused.** The two that are not simply closed are the decisions; the rest is work.
+**Four are closed, one becomes a report *and* a screen, and one stays refused.** The two that are not simply closed are the decisions; the rest is work.
 
 The sharpest correction came from outside the exclusion list. It said "a bundle
 is markdown", and a bundle is not: `okf-core` resolves a frontmatter path to any
@@ -86,9 +85,9 @@ was defending against a strawman of its own construction.
 
 ## Recommended option
 
-Close four gaps natively, inventory what cannot be screened, keep refusing
-semantic judgement, and make the two that can grow **configurable but never
-weakenable**.
+Close four gaps natively, inventory everything a bundle carries, screen whatever
+can be read out of it, keep refusing semantic judgement, and make the two that can
+grow **configurable but never weakenable**.
 
 ## Options considered + consequences
 
@@ -146,10 +145,27 @@ it carries three PDFs. A person reads "0 violations", decides the source is
 trustworthy, and the binaries were never in scope of the thing they read. That is
 the gap, and it is a reporting gap rather than an extraction one.
 
-Extraction is still refused *for now*: a PDF parser is a dependency with real
-weight under ADR-0017, and the media pipeline that already exists
-(`image-ocr`, `audio-transcribe`) is the place it would belong if it is ever
-wanted. Refusing to extract is defensible. Refusing to *mention* was not.
+**Extraction is not refused, and the first draft's reason for refusing it was
+false twice over.** It said a PDF parser is dependency weight under ADR-0017, and
+that the media pipeline is where it would belong "if it is ever wanted".
+Roteiro has extracted PDF text since before this ADR: `pdf-extract` is a declared
+optional dependency, gated behind the `pdf-text` feature, and
+[[crates/rto-graph/src/extract.rs#pdf_content]] runs it size-bounded at 20 MiB
+and panic-guarded, feeding a file node's embeddable content. The trade was made
+and paid for; the ADR argued against making it.
+
+The stronger correction is the one that follows from that. **Refusing to extract
+is refusing to screen.** A binary is unscreenable *because* nothing reads it —
+that is a consequence of the decision, not a fact about the format. An inventory
+says a bundle carries three PDFs; extraction plus [`screen_text`] says one of
+them carries a hidden instruction, which is the question the screen exists to
+answer.
+
+So the inventory is the floor rather than the ceiling: what a bundle carries is
+always reported, and what can be read is read and then screened like any other
+text. Which formats those are, and who decides per file, is
+[[docs/adr/0025-document-extraction-consent.md]] — extraction is an *ingestion*
+question, and this ADR is about what the screen does with text once it has it.
 
 ### Option C — close what applies, and say why the rest does not *(recommended)*
 
@@ -160,7 +176,7 @@ wanted. Refusing to extract is defensible. Refusing to *mention* was not.
 | non-English directives | **reshape** | control tokens first; phrases via an optional dictionary |
 | CSS cascade | **close, bounded** | same-document `<style>` only; no specificity, no inheritance |
 | semantic judgement | **refuse** | unchanged — whether text *is* an attack is not decided here |
-| binary files | **report, do not extract** | a bundle *can* carry them, and nothing said so |
+| binary files | **report always; screen whatever can be read** | a bundle *can* carry them, and nothing said so |
 | serving one | **`Content-Disposition: attachment`** | a bundle does not choose how its bytes are presented |
 
 #### Binary files: an inventory, in every report that describes a bundle
@@ -264,4 +280,4 @@ maintainer's backlog.
 
 | Version | Date | Notes |
 |---------|------|-------|
-| 0.1 | 2026-09-02 | Draft. Records that "a bundle is markdown" was false — `okf-core` resolves a frontmatter path to any file, so a peer can cite a hijacked PDF and every report would call the bundle clean without mentioning it; binary files are therefore **inventoried** in every bundle report and in the consent prompt, and `/f/` will set `Content-Disposition: attachment` for anything outside the image allow-list — the response typed them but never said how they should be presented, and "served as an attachment" described a behaviour no header asked for. Extraction stays refused on ADR-0017 grounds. Closes four of the screen's stated exclusions, reshapes the non-English one around language-independent control tokens plus additive dictionaries, and refuses binary extraction and semantic judgement. `decode_depth` defaults to 5 and is configurable; dictionaries may only ever *add* patterns, because a screen whose configuration can weaken it fails silently in the repository that weakened it. Records that the homoglyph exclusion argued against "contains Cyrillic" rather than against UTS #39's mixed-script rule. |
+| 0.1 | 2026-09-02 | Draft. Records that "a bundle is markdown" was false — `okf-core` resolves a frontmatter path to any file, so a peer can cite a hijacked PDF and every report would call the bundle clean without mentioning it; binary files are therefore **inventoried** in every bundle report and in the consent prompt, and `/f/` will set `Content-Disposition: attachment` for anything outside the image allow-list — the response typed them but never said how they should be presented, and "served as an attachment" described a behaviour no header asked for. Extraction is **not** refused: the first draft refused it on the grounds that a PDF parser is dependency weight and the media pipeline is where it would belong "if ever wanted", and Roteiro has extracted PDF text since before this ADR — `pdf-extract`, gated behind `pdf-text`, size-bounded and panic-guarded in `extract.rs`. The stronger correction is that **refusing to extract is refusing to screen**: a binary is unscreenable because nothing reads it, so the inventory is a floor and not a ceiling. Which formats can be read, and who decides per file, moves to ADR-0025. Closes four of the screen's stated exclusions, reshapes the non-English one around language-independent control tokens plus additive dictionaries, and refuses only semantic judgement. `decode_depth` defaults to 5 and is configurable; dictionaries may only ever *add* patterns, because a screen whose configuration can weaken it fails silently in the repository that weakened it. Records that the homoglyph exclusion argued against "contains Cyrillic" rather than against UTS #39's mixed-script rule. |
