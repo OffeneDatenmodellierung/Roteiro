@@ -815,7 +815,7 @@ fn decoded_content(text: &str, classes: &mut Vec<&'static str>) -> String {
         return capped;
     }
     let screened = crate::screen::screen_text(&capped);
-    if screened.findings.is_empty() {
+    if screened.is_clean() {
         return capped;
     }
     classes.extend(screened.classes());
