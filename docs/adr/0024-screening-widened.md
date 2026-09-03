@@ -32,11 +32,11 @@ Affected code: [[crates/rto-graph/src/screen.rs#screen_text]],
 [[crates/rto-graph/src/screen.rs#Verdict]], [[crates/rto-graph/src/screen.rs#FindingKind]],
 [[crates/rto-render/src/okf/read.rs#read_bundle]].
 
-**Id note.** `0023` is reserved by #749, which is unmerged, so the graph cannot
-see it and `spec scaffold` proposes it here. Taken as `0024` by hand. This is the
-one case that command cannot get right — an id allocated in a branch is not a
-fact about the repository yet — and it is worth recording rather than treating as
-a bug in the tool.
+**Id note.** When this was scaffolded, `0023` was held by an unmerged branch
+(#749, since merged), so the graph could not see it and `spec scaffold` proposed
+it here. Taken as `0024` by hand. This is the one case that command cannot get
+right — an id allocated in a branch is not yet a fact about the repository — and
+it is worth recording rather than filing as a bug against the tool.
 
 ## Summary
 
@@ -123,8 +123,22 @@ x-content-type-options: nosniff
 
 Two things are already sound: the viewer **refuses to link** a non-markdown file
 — only images resolve to `/f/`, so a markdown link to a PDF renders as refused
-text — and `roteiro import` reads no binary at all. The bytes are served as an
-attachment, sandboxed, with `nosniff`.
+text — and `roteiro import` reads no binary at all.
+
+Serving one is *nearly* sound, and the gap is worth naming precisely rather than
+glossed. The response carries a content type from a closed allow-list, the
+file-scoped `default-src 'none'; sandbox` policy, and `nosniff` — so an unknown
+extension is typed `application/octet-stream` and cannot be sniffed into
+something executable. It does **not** carry `Content-Disposition: attachment`.
+Most browsers download `application/octet-stream` rather than rendering it, but
+that is convention rather than something the response asks for, and "it is served
+as an attachment" was the wrong description of what these headers do.
+
+So the inventory below comes with one header: **`/f/` will set
+`Content-Disposition: attachment` for anything outside the image allow-list.**
+The same reasoning as the content type itself — a bundle does not get to choose
+how its bytes are presented — and it costs one header on a path that already
+decides, by extension, what each file is allowed to be.
 
 **What is missing is that nobody is told they exist.** `okf validate`, `lint`,
 `trust`, `links` and `info` all report on a bundle and none of them mentions that
@@ -147,6 +161,7 @@ wanted. Refusing to extract is defensible. Refusing to *mention* was not.
 | CSS cascade | **close, bounded** | same-document `<style>` only; no specificity, no inheritance |
 | semantic judgement | **refuse** | unchanged — whether text *is* an attack is not decided here |
 | binary files | **report, do not extract** | a bundle *can* carry them, and nothing said so |
+| serving one | **`Content-Disposition: attachment`** | a bundle does not choose how its bytes are presented |
 
 #### Binary files: an inventory, in every report that describes a bundle
 
@@ -225,11 +240,14 @@ safe, subtracting is not, so only adding is possible.
 
 Each lands separately, with its measurement over the four published bundles:
 
-1. **Control tokens** — smallest, highest signal, no new configuration.
-2. **Mixed-script confusables** — UTS #39, with the multilingual-prose case tested.
-3. **Encoded payloads** — `decode_depth`, defaulting to 5, with the plausibly-text guard.
-4. **Bounded CSS cascade** — same-document `<style>` only.
-5. **Directive dictionaries** — last, because additive-only is the property to get right.
+1. **The binary inventory and `Content-Disposition`** — first, because it is the
+   half of this ADR that is a reporting gap rather than a detection one, and the
+   only half that answers the scenario which prompted it.
+2. **Control tokens** — smallest, highest signal, no new configuration.
+3. **Mixed-script confusables** — UTS #39, with the multilingual-prose case tested.
+4. **Encoded payloads** — `decode_depth`, defaulting to 5, with the plausibly-text guard.
+5. **Bounded CSS cascade** — same-document `<style>` only.
+6. **Directive dictionaries** — last, because additive-only is the property to get right.
 
 ## Advice Received
 
@@ -246,4 +264,4 @@ maintainer's backlog.
 
 | Version | Date | Notes |
 |---------|------|-------|
-| 0.1 | 2026-09-02 | Draft. Records that "a bundle is markdown" was false — `okf-core` resolves a frontmatter path to any file, so a peer can cite a hijacked PDF and every report would call the bundle clean without mentioning it; binary files are therefore **inventoried** in every bundle report and in the consent prompt, while extraction stays refused on ADR-0017 grounds. Closes four of the screen's stated exclusions, reshapes the non-English one around language-independent control tokens plus additive dictionaries, and refuses binary extraction and semantic judgement. `decode_depth` defaults to 5 and is configurable; dictionaries may only ever *add* patterns, because a screen whose configuration can weaken it fails silently in the repository that weakened it. Records that the homoglyph exclusion argued against "contains Cyrillic" rather than against UTS #39's mixed-script rule. |
+| 0.1 | 2026-09-02 | Draft. Records that "a bundle is markdown" was false — `okf-core` resolves a frontmatter path to any file, so a peer can cite a hijacked PDF and every report would call the bundle clean without mentioning it; binary files are therefore **inventoried** in every bundle report and in the consent prompt, and `/f/` will set `Content-Disposition: attachment` for anything outside the image allow-list — the response typed them but never said how they should be presented, and "served as an attachment" described a behaviour no header asked for. Extraction stays refused on ADR-0017 grounds. Closes four of the screen's stated exclusions, reshapes the non-English one around language-independent control tokens plus additive dictionaries, and refuses binary extraction and semantic judgement. `decode_depth` defaults to 5 and is configurable; dictionaries may only ever *add* patterns, because a screen whose configuration can weaken it fails silently in the repository that weakened it. Records that the homoglyph exclusion argued against "contains Cyrillic" rather than against UTS #39's mixed-script rule. |
