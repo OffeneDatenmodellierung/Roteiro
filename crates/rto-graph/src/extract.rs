@@ -101,7 +101,18 @@ pub(crate) const EXTRACT_VERSION: u32 = EXTRACT_BASE_VERSION
 /// its bytes happen to change, which for a deployment repo pinning a stable
 /// version is precisely when it does not. Unconditional and namespace-free: this
 /// is a base-version change across every feature combination.
-pub(crate) const EXTRACT_BASE_VERSION: u32 = 13;
+///
+/// **13 → 14** (ADR-0025): text decoded out of a binary is now screened before
+/// it becomes `meta.content`, so a PDF or image whose text was cached before
+/// this keeps serving that text **unscreened** until its bytes happen to change
+/// — and the bytes of a committed PDF are exactly what does not change. The
+/// defect this bump exists to prevent is therefore the very defect the screen
+/// was added to fix, surviving in cache. Nodes can also now carry `meta.screen`,
+/// which a stale fact set would omit. Unconditional and namespace-free: the
+/// screen runs in every feature combination, because `pdf_content` and
+/// `image_content` are always compiled, merely returning `None` without their
+/// features.
+pub(crate) const EXTRACT_BASE_VERSION: u32 = 14;
 
 /// The stride between feature namespaces above. Each of the three
 /// extraction-affecting features occupies a distinct power-of-ten *bit* slot

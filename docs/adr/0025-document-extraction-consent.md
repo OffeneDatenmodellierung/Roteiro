@@ -76,11 +76,12 @@ panic-guarded, degrading a hostile document to a plain file node rather than
 aborting a sync. Nothing about Office formats is a harder question than the one
 already answered.
 
-**Nothing Roteiro extracts is screened.** `screen_text` has exactly two callers,
-both on the OKF path: the importer and the viewer. Text that OCR reads out of an
-image, and text `pdf_content` reads out of a PDF, go into `meta.content` — which
-search hands to a model — without passing the screen at all. That is a live gap,
-not a future one.
+**Nothing Roteiro extracted was screened.** When this was written, `screen_text`
+had exactly two callers, both on the OKF path: the importer and the viewer. Text
+that OCR read out of an image, and text `pdf_content` read out of a PDF, went
+into `meta.content` — which search hands to a model — without passing the screen
+at all. That was a live gap, not a future one, and it is the half of this ADR
+that has since been built: `extract.rs::decoded_content` is the third caller.
 
 **A binary is the input a human reviewer cannot check by eye.** The reason a
 repository's own content is not screened is that a person reviewed it. That
