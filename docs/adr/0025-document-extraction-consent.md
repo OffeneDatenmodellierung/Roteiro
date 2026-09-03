@@ -164,9 +164,19 @@ never leave behind an answer a person did not give.
   path is a behaviour change for PDF and OCR content that is already stored.
   Existing content is not re-screened retroactively; the first sync after this
   lands is what re-reads it.
-- **Nine crates, and a new parser reachable from `--all-features`.** ADR-0017's
-  gate runs without `--all-features`, so the feature must be exercised in CI or
-  the licence and advisory check will not see it.
+- **Nine crates, and a new parser — but the licence and advisory gates need no
+  help to see them.** `cargo audit` reads `Cargo.lock`, which lists optional
+  dependencies whatever features are on, and CI runs `cargo deny --all-features
+  check`, which ADR-0017 §3 decided precisely so that a feature-gated dependency
+  cannot hide from it. `pdf-text` is the worked example in that decision and in
+  the CI comment beside it, which makes this the least excusable place to have
+  assumed otherwise.
+
+  What neither gate measures is the thing that actually matters here: **a parser's
+  behaviour on input designed to break it.** `cargo deny` checks licences and
+  advisories, not robustness. That is why the bounds and the panic guard below are
+  the load-bearing part of admitting a new format, and why they are stated as
+  requirements rather than as implementation detail.
 - **ZIP formats bring an attack surface PDF does not**: a decompression bomb.
   A size cap on the archive is not sufficient, so the extractor bounds the
   *expanded* size and the compression ratio, and refuses rather than expanding.
