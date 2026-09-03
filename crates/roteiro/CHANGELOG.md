@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.7.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.6.0...roteiro-v5.7.0) - 2026-09-03
+
+### Added
+
+- *(spec)* scaffold follows the repository's decisions, not this one's layout
+
+### Fixed
+
+- *(spec)* a repository whose decisions all fail to parse is not one with none
+- *(spec)* warn when an ADR exists but could not be read
+- *(spec)* root-level decisions, an absurd id, and a claim about a repo
+
+### Other
+
+- *(spec)* classify only the markdown when scaffolding, and trim the id
+
 ## [5.5.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.4.0...roteiro-v5.5.0) - 2026-09-02
 
 ### Added
