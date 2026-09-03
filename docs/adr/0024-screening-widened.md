@@ -11,8 +11,8 @@ architectural-significance: MEDIUM  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "0.1"
-last-modified: 2026-09-02
+version: "0.2"
+last-modified: 2026-09-03
 confluence-url:
 ---
 
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | Draft |
 | **Architectural Significance** | MEDIUM |
 | **Domain** | Developer Tooling |
-| **Document version** | 0.1 |
+| **Document version** | 0.2 |
 | **Related** | [[docs/adr/0021-open-knowledge-format-bundle.md]] · [[docs/adr/0017-dependency-security-policy.md]] · [[docs/adr/0019-remote-model-tier.md]] |
 
 ## Reference
@@ -55,10 +55,8 @@ all-markdown is a fact about those four bundles. A peer can hand over a valid
 bundle citing a hijacked PDF, and **every report we produce would call it clean
 without mentioning the PDF exists**.
 
-Nothing here shells out. Issue #723 proposed invoking `okfguard` as a
-subprocess, and the reason not to is neither language nor licence: a subprocess
-per concept over a 9,511-concept bundle, and a Python runtime as a hard
-dependency of `import`.
+Nothing here shells out, and the reason is the **shape of the interface** rather
+than its cost — see Option A, whose first draft got that wrong and said so.
 
 ## Context
 
@@ -91,12 +89,52 @@ grow **configurable but never weakenable**.
 
 ## Options considered + consequences
 
-### Option A — shell out to `okfguard`
+### Option A — consult `okfguard` at the ingestion boundary
 
-Rejected. A subprocess per concept is the wrong shape at bundle scale, and it
-makes a Python runtime a hard dependency of `roteiro import`. ADR-0017 refused
-`okf-validator` for a related reason: a dependency admitted to close a gap has to
-be paid for by everyone who builds the tool, not only by those who hit the gap.
+Rejected, **but the first version of this section rejected it for two reasons
+that were false**, and the correction is worth keeping rather than quietly
+replacing.
+
+It said the integration would mean "a subprocess per concept over a
+9,511-concept bundle" and "a Python runtime as a hard dependency of `import`".
+Neither describes what was proposed. Reading the CLI rather than assuming it:
+`okfguard scan -r <dir>` is **one process over a tree**, `--json` is
+newline-delimited **per file** rather than a single aggregate, and a standalone
+binary consulted when present is an **optional integration point**, not a
+dependency anyone building Roteiro has to pay for. Both objections were
+answered, correctly, on issue #723.
+
+Three reasons survive, and all three are about what the interface can express:
+
+1. **The screen is per *field*, not per file.** A concept is one file carrying a
+   body, a title and a description, and [[crates/rto-render/src/okf/read.rs#read_bundle]]
+   screens all three separately — then deliberately *downgrades* a `Block` on the
+   title or description, because a title that does not survive falls back to the
+   filename while a body has no such fallback. A per-file verdict cannot express
+   "block this body, keep this title", which is the outcome the importer actually
+   produces.
+2. **The screen returns admissible *text*, not a label.** This is the
+   `clean_text` observation the module already credits okf-guard for, and it is
+   the load-bearing one. [`Screened::admit`] is what may be stored: byte-identical
+   on `Pass`; the prose with invisible codepoints and presentation-hidden regions
+   removed on a `Quarantine` with no directive; and `None` on a quarantined
+   directive, because the words *are* the payload and redacting a phrase leaves a
+   sentence that still reads as one. `c.body = body.admit.unwrap_or_default()` is
+   what reaches `meta.content`. An exit code — and per-file JSON findings too —
+   give a judgement, not the bytes, so the screen would still have to run to
+   produce them.
+3. **"Consulted when available" is a screen that is absent, silently, wherever it
+   is not installed.** The dictionary rule below makes additive-only
+   configuration load-bearing for exactly this reason: a screen whose
+   configuration can weaken it is off in the repository where somebody found it
+   inconvenient, and the failure is quiet. An optional external scanner is
+   subtraction by omission — the same failure reached by not installing something
+   rather than by editing a file.
+
+ADR-0017's refusal of `okf-validator` is a *related* argument about cost, and it
+is not this one. It is cited here only to mark the difference: that dependency
+was refused because everyone building the tool would pay for it, and this option
+is refused although almost nobody would.
 
 ### Option B — close everything okf-guard covers, including binary extraction
 
@@ -267,9 +305,15 @@ Each lands separately, with its measurement over the four published bundles:
 
 ## Advice Received
 
-Issue #723, from the author of `okf-guard`. The proposal was a subprocess; the
-useful part was the question behind it, which was whether the exclusions were
-principled or merely unimplemented. Four of them were unimplemented.
+Issue #723, from the author of `okf-guard`. The proposal was to consult their
+CLI at the ingestion boundary; the useful part was the question behind it, which
+was whether the exclusions were principled or merely unimplemented. Four of them
+were unimplemented.
+
+They also corrected this ADR's first characterisation of that proposal, which had
+invented a per-concept subprocess and a hard runtime dependency out of neither.
+Option A now records what was actually proposed and rejects it on the interface,
+which is the argument that was there to be made.
 
 The depth default of 5 and the dictionary mechanism were both directed rather
 than proposed: the first because one level only defeats the laziest nesting, the
@@ -281,3 +325,4 @@ maintainer's backlog.
 | Version | Date | Notes |
 |---------|------|-------|
 | 0.1 | 2026-09-02 | Draft. Records that "a bundle is markdown" was false — `okf-core` resolves a frontmatter path to any file, so a peer can cite a hijacked PDF and every report would call the bundle clean without mentioning it; binary files are therefore **inventoried** in every bundle report and in the consent prompt, and `/f/` will set `Content-Disposition: attachment` for anything outside the image allow-list — the response typed them but never said how they should be presented, and "served as an attachment" described a behaviour no header asked for. Extraction is **not** refused: the first draft refused it on the grounds that a PDF parser is dependency weight and the media pipeline is where it would belong "if ever wanted", and Roteiro has extracted PDF text since before this ADR — `pdf-extract`, gated behind `pdf-text`, size-bounded and panic-guarded in `extract.rs`. The stronger correction is that **refusing to extract is refusing to screen**: a binary is unscreenable because nothing reads it, so the inventory is a floor and not a ceiling. Which formats can be read, and who decides per file, moves to ADR-0025. Closes four of the screen's stated exclusions, reshapes the non-English one around language-independent control tokens plus additive dictionaries, and refuses only semantic judgement. `decode_depth` defaults to 5 and is configurable; dictionaries may only ever *add* patterns, because a screen whose configuration can weaken it fails silently in the repository that weakened it. Records that the homoglyph exclusion argued against "contains Cyrillic" rather than against UTS #39's mixed-script rule. |
+| 0.2 | 2026-09-03 | **Option A rejected the external scanner for two reasons that were false, and they are replaced rather than removed.** It claimed "a subprocess per concept over a 9,511-concept bundle" and "a Python runtime as a hard dependency of `import`"; `okfguard scan -r` is one process over a tree, `--json` is per-file NDJSON, and a standalone binary consulted when present is optional. Both were answered on #723 before this ADR was corrected, so the record and the public answer disagreed until now. The decision stands on three reasons about what the interface can express: the screen is per **field** rather than per file, and downgrades a `Block` on a title because a title falls back to its filename while a body does not; `Screened::admit` returns admissible **text** rather than a label, so an exit code cannot supply what lands in `meta.content`; and a screen consulted only when installed is absent, silently, wherever it is not — subtraction by omission, which is the failure the additive-only dictionary rule exists to prevent. |
