@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.8.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v5.7.0...rto-graph-v5.8.0) - 2026-09-04
+
+### Added
+
+- *(graph)* screen text decoded out of a binary before it becomes content
+
+### Fixed
+
+- *(graph)* bump EXTRACT_BASE_VERSION — a cached PDF kept its unscreened text
+
+### Other
+
+- *(graph)* use Screened::is_clean rather than reaching into findings
+
 ## [5.4.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v5.3.0...rto-graph-v5.4.0) - 2026-09-02
 
 ### Fixed
