@@ -617,3 +617,87 @@ fn info_agrees_with_the_commands_it_summarises() {
         vec![("deprecated".to_owned(), 1), ("stable".to_owned(), 8)]
     );
 }
+
+/// **A bundle's non-markdown files are inventoried, and nothing is opened.**
+///
+/// "A bundle is markdown" was false: `okf-core`'s `resolve_path_field` resolves a
+/// frontmatter path to any file, and §10's `computation:` names one, so a
+/// conformant bundle can cite a document nothing here can read. Every report we
+/// produced described only the part it could see (ADR-0024).
+#[test]
+fn a_bundles_non_markdown_files_are_inventoried() {
+    let root = scratch("files");
+    for (rel, bytes) in [
+        (
+            "index.md",
+            b"---\nokf_version: \"0.2\"\n---\n\n# B\n".as_slice(),
+        ),
+        ("metrics/revenue.md", b"---\ntype: Metric\n---\n\n# R\n"),
+        ("docs/policy.PDF", b"%PDF-1.4 not really"),
+        ("img/logo.svg", b"<svg/>"),
+        ("data/rows", b"no extension at all"),
+    ] {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&path, bytes).expect("write");
+    }
+
+    let files = inspect::bundle_files(&root);
+    let listed: Vec<(&str, u64, &str)> = files
+        .iter()
+        .map(|f| (f.path.as_str(), f.bytes, f.extension.as_str()))
+        .collect();
+    assert_eq!(
+        listed,
+        vec![
+            ("data/rows", 19, ""),
+            ("docs/policy.PDF", 19, "pdf"),
+            ("img/logo.svg", 6, "svg"),
+        ],
+        "markdown is excluded, everything else is listed with its size, the \
+         extension is lowercased so `.PDF` and `.pdf` are one kind, a file \
+         without one reports an empty string rather than being skipped, and the \
+         order is by path so two reads of one bundle agree"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **A bundle declaring only markdown inventories nothing, and says so by
+/// returning an empty list rather than by being unable to answer.**
+#[test]
+fn an_all_markdown_bundle_inventories_nothing() {
+    assert!(
+        inspect::bundle_files(&fixture("acme_retail")).is_empty(),
+        "the published bundles are all markdown, which is a fact about them \
+         rather than about the format"
+    );
+}
+
+/// **The inventory does not follow a symlinked directory.**
+///
+/// It walks a directory somebody else controls, so `loop -> ..` inside a bundle
+/// must not send it round for ever — the same rule, for the same reason, as the
+/// viewer's cache stamp.
+#[cfg(unix)]
+#[test]
+fn the_inventory_does_not_follow_a_symlinked_directory() {
+    use std::os::unix::fs::symlink;
+    let root = scratch("files-loop");
+    std::fs::create_dir_all(root.join("img")).expect("mkdir");
+    std::fs::write(
+        root.join("index.md"),
+        "---\nokf_version: \"0.2\"\n---\n\n# B\n",
+    )
+    .expect("write");
+    std::fs::write(root.join("img/logo.svg"), "<svg/>").expect("write");
+    symlink("..", root.join("loop")).expect("symlink to the parent");
+
+    let files = inspect::bundle_files(&root);
+    let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        vec!["img/logo.svg", "loop"],
+        "the link is counted as the file it is, and never recursed into"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

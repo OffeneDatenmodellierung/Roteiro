@@ -780,6 +780,77 @@ pub fn computation_report(root: &Path) -> Result<ComputationReport, InspectError
     Ok(report)
 }
 
+/// A file a bundle carries that is not one of its concepts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BundleFile {
+    /// Bundle-relative path.
+    pub path: String,
+    /// Size in bytes.
+    pub bytes: u64,
+    /// Lowercased extension, or `""` when the file has none.
+    pub extension: String,
+}
+
+/// Every file in the bundle that is not markdown.
+///
+/// **Nothing here is opened.** The path, the size and the extension come from
+/// the directory entry and its metadata; the bytes are never read, so this adds
+/// no parser and no attack surface of its own.
+///
+/// It exists because a bundle is **not** markdown, whatever the four published
+/// ones happen to contain: `okf-core`'s `resolve_path_field` resolves a
+/// frontmatter path to any file with `is_file()` and no extension filter, and
+/// §10's `computation:` names a file. So a conformant bundle can cite a document
+/// nobody here can read — and until now every report we produced would call that
+/// bundle clean without mentioning the document existed (ADR-0024).
+///
+/// Symlinked directories are **not** followed: this walks a directory somebody
+/// else controls, and `loop -> ..` inside one would otherwise recurse until the
+/// stack ran out. Entries are classified with `file_type()`, which reads the
+/// directory entry rather than the link's target, and a symlink is counted as
+/// the file it is.
+#[must_use]
+pub fn bundle_files(root: &Path) -> Vec<BundleFile> {
+    fn walk(dir: &Path, root: &Path, out: &mut Vec<BundleFile>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if kind.is_dir() {
+                walk(&path, root, out);
+                continue;
+            }
+            let extension = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(str::to_ascii_lowercase)
+                .unwrap_or_default();
+            if extension == "md" {
+                continue;
+            }
+            out.push(BundleFile {
+                path: path
+                    .strip_prefix(root)
+                    .unwrap_or(&path)
+                    .display()
+                    .to_string(),
+                bytes: std::fs::symlink_metadata(&path).map_or(0, |m| m.len()),
+                extension,
+            });
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    // Sorted so two reads of one bundle, and two bundles with the same contents,
+    // report identically — the same determinism `render okf` guarantees.
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    out
+}
+
 /// What a bundle is, in one answer.
 ///
 /// Composed from the reports the other commands already produce rather than
@@ -808,6 +879,12 @@ pub struct BundleInfo {
     pub computations: (usize, usize),
     /// Every distinct computation `runtime`, sorted.
     pub runtimes: Vec<String>,
+    /// Files the bundle carries that are not concepts — see [`bundle_files`].
+    ///
+    /// Reported whether or not there are any, because "no unscreenable files" is
+    /// information and a line that appears only sometimes is one a reader learns
+    /// to stop looking for.
+    pub files: Vec<BundleFile>,
 }
 
 /// Summarise the bundle at `root`.
@@ -840,6 +917,7 @@ pub fn bundle_info(root: &Path, today: Option<&str>) -> Result<BundleInfo, Inspe
         links: (links.links, links.broken.len()),
         computations: (computations.computations, computations.incomplete()),
         runtimes: computations.runtimes,
+        files: bundle_files(root),
     })
 }
 

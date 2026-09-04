@@ -592,3 +592,35 @@ fn the_note_carries_the_screening_summary_the_prompt_would_show() {
     let _ = spoke;
     std::fs::remove_dir_all(&base).ok();
 }
+
+/// **A bundle carrying files that are not concepts says so where the decision is
+/// made.**
+///
+/// "Screened clean" is a claim about the concepts, and a bundle is not markdown:
+/// `okf-core` resolves a frontmatter path to any file, so a conformant bundle can
+/// cite a PDF nothing here reads (ADR-0024). This note is the moment somebody
+/// decides whether to trust the source, and it has to say that the screen's
+/// verdict did not cover everything in front of them.
+#[test]
+fn the_note_says_when_a_bundle_carries_files_that_were_not_screened() {
+    let (base, hub, spoke, home) = workspace("unscreened", "Ordinary prose.\n");
+    // Written after `publish_bundle`, which clears the directory.
+    write(&spoke.join("okf/docs/policy.pdf"), "%PDF-1.4 not really\n");
+    sync_all(&hub, &spoke);
+
+    let out = in_workspace(&hub, &home, &["links", "--write", "--workspace-name", "ws"]);
+    assert!(out.status.success(), "links failed: {out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        stderr.contains("screened clean"),
+        "the concepts are still reported as screened: {stderr}"
+    );
+    assert!(
+        stderr.contains("1 file(s) that are not concepts and were not screened [pdf]"),
+        "and the file the screen could not see is named by kind, beside that \
+         claim rather than somewhere else: {stderr}"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}

@@ -6829,6 +6829,25 @@ fn run_okf_info(path: &str, today: Option<&str>, json: bool) -> anyhow::Result<(
     if !info.runtimes.is_empty() {
         println!("  runtimes: {}", info.runtimes.join(", "));
     }
+    // Always printed, including the zero. A bundle is not markdown — `okf-core`
+    // resolves a frontmatter path to any file — so a conformant bundle can cite a
+    // document nothing here can read, and a report that said "0 violations"
+    // without mentioning it would be describing only the part it could see
+    // (ADR-0024). Nothing is opened: path, size and extension come from the
+    // directory entry.
+    if info.files.is_empty() {
+        println!("  other files: none — every file in this bundle is markdown");
+    } else {
+        let total: u64 = info.files.iter().map(|f| f.bytes).sum();
+        println!(
+            "  other files: {} ({}), not markdown and not screened:",
+            info.files.len(),
+            human_bytes(total)
+        );
+        for f in &info.files {
+            println!("      {} ({})", f.path, human_bytes(f.bytes));
+        }
+    }
     // Named rather than implied: this command reports, and which one to reach
     // for next is the question it exists to answer.
     //
