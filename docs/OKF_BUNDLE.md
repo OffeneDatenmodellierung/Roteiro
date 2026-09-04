@@ -300,7 +300,7 @@ graph — with the consent gate above.
 
 | Command | Answers | Gates? |
 | --- | --- | --- |
-| `okf info` | What is this bundle — size, tiers, staleness, links, computations | never |
+| `okf info` | What is this bundle — size, tiers, staleness, links, computations, and the files it carries that are **not** concepts | never |
 | `okf validate` | Does it conform to OKF v0.2 | on any error |
 | `okf lint` | Is it hygienic — `L1`–`L12`, plus our `R1` | never |
 | `okf trust` | What does it claim about itself, and has any of it expired | `--check`, on staleness |
@@ -319,6 +319,40 @@ what is reported or whether the command gates** — settled on `main` by a bug w
 it did both. And **the bare command reports without gating**: reporting is what
 you want reading a stranger's bundle, gating is what you want in CI over your own,
 and a command that only did one would be wrong half the time.
+
+### A bundle is not only markdown, and the report says what else is in it
+
+`okf-core` resolves a frontmatter path to **any** file — `is_file()`, no extension
+filter — and §10's `computation:` names one. So a conformant bundle can cite a
+document nothing here reads, and until ADR-0024 every report described only the
+part it could see: you read "0 violations", concluded the source was
+trustworthy, and the PDFs were never in scope of the thing you read.
+
+`okf info` therefore inventories them, and prints the answer either way:
+
+```
+$ roteiro okf info okf/
+  other files: 2 (4.0 KiB), not markdown and not screened:
+      docs/policy.pdf (4.0 KiB)
+      img/logo.svg (6 B)
+```
+
+**Nothing is opened.** The path, the size and the extension come from the
+directory entry, so this adds no parser and no attack surface of its own — and a
+symlinked directory is never recursed into, because this walks a directory
+somebody else controls.
+
+The same line rides the **consent prompt**, which is the moment a person decides
+whether to trust a source: "screened clean" is a claim about the *concepts*, and
+it has to be visible that the screen's verdict did not cover everything in front
+of them.
+
+Serving one is a separate decision. `okf view`'s `/f/` route types a file from a
+closed allow-list under a `default-src 'none'; sandbox` policy with `nosniff`, and
+now sets **`Content-Disposition: attachment`** for anything outside the image
+allow-list. A bundle does not get to choose how its bytes are presented, any more
+than it chooses what they are. Images are excluded because the viewer embeds them
+with `<img>`.
 
 ### Staleness is asked as of a day you name
 

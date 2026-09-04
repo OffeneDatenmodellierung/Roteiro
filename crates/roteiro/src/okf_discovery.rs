@@ -153,8 +153,8 @@ impl Discovered {
     /// 3 concepts with hidden control characters" is.
     #[must_use]
     pub fn summary(&self) -> String {
-        match &self.screened {
-            Err(e) => format!("unreadable: {e}"),
+        let concepts = match &self.screened {
+            Err(e) => return format!("unreadable: {e}"),
             Ok(r) if r.concepts_quarantined > 0 || r.concepts_blocked > 0 => format!(
                 "{} concept(s), {} quarantined, {} blocked by the content screen [{}]",
                 r.concepts_read,
@@ -163,7 +163,35 @@ impl Discovered {
                 r.screen_classes.join(", ")
             ),
             Ok(r) => format!("{} concept(s), screened clean", r.concepts_read),
+        };
+        // "Screened clean" is a claim about the concepts, and a bundle can carry
+        // files that are not concepts — `okf-core` resolves a frontmatter path to
+        // any file, so a conformant bundle can cite a PDF nothing here reads.
+        // This is the moment a person decides whether to trust the source, so it
+        // is the moment they have to be told that the screen's verdict did not
+        // cover everything in front of them (ADR-0024).
+        let files = rto_render::okf::inspect::bundle_files(&self.bundle.bundle);
+        if files.is_empty() {
+            return concepts;
         }
+        let mut kinds: Vec<&str> = files
+            .iter()
+            .map(|f| {
+                if f.extension.is_empty() {
+                    "no extension"
+                } else {
+                    f.extension.as_str()
+                }
+            })
+            .collect();
+        kinds.sort_unstable();
+        kinds.dedup();
+        format!(
+            "{concepts}; also {} file(s) that are not concepts and were not \
+             screened [{}]",
+            files.len(),
+            kinds.join(", ")
+        )
     }
 }
 
