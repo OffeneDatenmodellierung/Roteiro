@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.8.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.7.0...roteiro-v5.8.0) - 2026-09-06
+
+### Added
+
+- *(okf)* inventory what a bundle carries besides its concepts
+
+### Fixed
+
+- *(okf)* the inventory swallowed two more failures, and said director(y/ies)
+- *(okf)* the inventory walked recursively, swallowed IO errors, and used \
+
 ## [5.7.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.6.0...roteiro-v5.7.0) - 2026-09-03
 
 ### Added
