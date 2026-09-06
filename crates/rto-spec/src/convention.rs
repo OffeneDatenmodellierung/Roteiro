@@ -137,13 +137,14 @@ fn carries_reason(lines: &[&str], i: usize) -> bool {
     const MAX_SPAN: usize = 40;
 
     let mut depth = 0i32;
+    let mut in_block = false;
     for line in lines.iter().skip(i).take(MAX_SPAN) {
         // Comments are neither structure nor the field: cutting them keeps a
         // stray bracket from holding the scan open, and keeps prose from being
         // read as a `reason`. A trailing comment is a justification by its own
         // path anyway, so nothing is lost by ignoring it here.
-        let code = line.split_once("//").map_or(*line, |(before, _)| before);
-        if has_reason_field(code) {
+        let code = strip_comments(line, &mut in_block);
+        if has_reason_field(&code) {
             return true;
         }
         for c in code.chars() {
@@ -158,6 +159,61 @@ fn carries_reason(lines: &[&str], i: usize) -> bool {
         }
     }
     false
+}
+
+/// `line` with its comments removed, carrying `in_block` across lines.
+///
+/// Both flavours, because both are legal inside an attribute and either can hide
+/// an unbalanced bracket: `#[allow(a, /* note [1 */ b)]` is ordinary Rust. The
+/// `//` case was found first and fixed alone; a reviewer pointed out that `/* */`
+/// has the identical shape, which it does — so the two are handled in one place
+/// rather than as a rule and an exception.
+///
+/// Not a Rust lexer, and does not need to be. It does not know that `//` inside a
+/// string literal is not a comment, so `reason = "see http://x"` loses its tail —
+/// which costs nothing, because `reason` and its `=` come first and the match has
+/// already succeeded by then. Every way this is wrong truncates a line, and
+/// truncation can only *lose* a justification, never invent one: the safe
+/// direction for a rule whose failure mode is silence.
+fn strip_comments(line: &str, in_block: &mut bool) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    loop {
+        if *in_block {
+            match rest.find("*/") {
+                Some(at) => {
+                    *in_block = false;
+                    rest = &rest[at + 2..];
+                }
+                None => return out,
+            }
+        }
+        let line_at = rest.find("//");
+        let block_at = rest.find("/*");
+        // Whichever opens first wins: `/* // */` is a block, `// /*` is a line.
+        let opens_block = match (line_at, block_at) {
+            (Some(l), Some(b)) => b < l,
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        if opens_block {
+            let b = block_at.expect("a block opener, by the match above");
+            out.push_str(&rest[..b]);
+            *in_block = true;
+            rest = &rest[b + 2..];
+            continue;
+        }
+        match line_at {
+            Some(l) => {
+                out.push_str(&rest[..l]);
+                return out;
+            }
+            None => {
+                out.push_str(rest);
+                return out;
+            }
+        }
+    }
 }
 
 /// Whether `line` contains a `reason` **field**: the bare word, followed by `=`.
@@ -467,6 +523,36 @@ mod tests {
         let h = hits(text);
         assert_eq!(h.len(), 1, "the bare allow is still reported: {h:?}");
         assert!(h[0].contains("src/x.rs:1:"), "{}", h[0]);
+    }
+
+    /// **A block comment hides a bracket just as well as a line comment does.**
+    ///
+    /// `#[allow(a, /* note [1 */ b)]` is ordinary Rust, and the unbalanced `[`
+    /// inside it held the span open exactly as the `//` case did — a reviewer
+    /// pointed out that the first fix handled one flavour and not the other,
+    /// which was true.
+    ///
+    /// Both directions are asserted: the bare allow is still reported, and a
+    /// genuine reason on a *multi-line* attribute carrying a block comment is
+    /// still found. Only the first would pass if the fix were "give up whenever a
+    /// comment appears".
+    #[test]
+    fn a_block_comment_does_not_hide_the_end_of_the_attribute() {
+        let overrun = "#[allow(\n    clippy::a, /* note [1 */\n)]\nfn f() {}\n\n\
+                       #[allow(clippy::b, reason = \"stated\")]\nfn g() {}\n";
+        let h = hits(overrun);
+        assert_eq!(h.len(), 1, "the bare allow is still reported: {h:?}");
+        assert!(h[0].contains("src/x.rs:1:"), "{}", h[0]);
+
+        // A block comment spanning lines does not swallow the reason after it.
+        assert!(
+            hits(
+                "#[allow(\n    clippy::a, /* a note\n       still the note */\n    \
+                 reason = \"stated\"\n)]\nfn f() {}\n"
+            )
+            .is_empty(),
+            "a real reason after a multi-line block comment still counts"
+        );
     }
 
     /// **Prose is not the field.**
