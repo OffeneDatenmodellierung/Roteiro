@@ -6835,17 +6835,31 @@ fn run_okf_info(path: &str, today: Option<&str>, json: bool) -> anyhow::Result<(
     // without mentioning it would be describing only the part it could see
     // (ADR-0024). Nothing is opened: path, size and extension come from the
     // directory entry.
-    if info.files.is_empty() {
+    if info.files.files.is_empty() {
         println!("  other files: none — every file in this bundle is markdown");
     } else {
-        let total: u64 = info.files.iter().map(|f| f.bytes).sum();
+        let total: u64 = info.files.files.iter().map(|f| f.bytes).sum();
         println!(
             "  other files: {} ({}), not markdown and not screened:",
-            info.files.len(),
+            info.files.files.len(),
             human_bytes(total)
         );
-        for f in &info.files {
+        for f in &info.files.files {
             println!("      {} ({})", f.path, human_bytes(f.bytes));
+        }
+    }
+    // Said even when the list above was empty, and said as a warning rather than
+    // a footnote: "none" and "the walk could not finish" are different answers,
+    // and printing the first when the second holds recreates the very gap this
+    // inventory exists to close.
+    if !info.files.is_complete() {
+        println!(
+            "  warning: {} director(y/ies) could not be listed, so the inventory \
+             above is incomplete:",
+            info.files.unreadable.len()
+        );
+        for dir in &info.files.unreadable {
+            println!("      {dir}");
         }
     }
     // Named rather than implied: this command reports, and which one to reach

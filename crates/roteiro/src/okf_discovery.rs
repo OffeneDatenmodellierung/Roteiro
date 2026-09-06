@@ -170,11 +170,26 @@ impl Discovered {
         // This is the moment a person decides whether to trust the source, so it
         // is the moment they have to be told that the screen's verdict did not
         // cover everything in front of them (ADR-0024).
-        let files = rto_render::okf::inspect::bundle_files(&self.bundle.bundle);
-        if files.is_empty() {
-            return concepts;
+        let contents = rto_render::okf::inspect::bundle_files(&self.bundle.bundle);
+        // A directory that would not open is said **first**, and even when the
+        // inventory came back empty: "no files that are not concepts" and "the
+        // walk could not finish" are different answers, and reporting the first
+        // when the second is true is the same false reassurance this line exists
+        // to remove.
+        let note = if contents.is_complete() {
+            String::new()
+        } else {
+            format!(
+                "; {} director(y/ies) could not be listed, so what follows is \
+                 incomplete",
+                contents.unreadable.len()
+            )
+        };
+        if contents.files.is_empty() {
+            return format!("{concepts}{note}");
         }
-        let mut kinds: Vec<&str> = files
+        let mut kinds: Vec<&str> = contents
+            .files
             .iter()
             .map(|f| {
                 if f.extension.is_empty() {
@@ -187,9 +202,9 @@ impl Discovered {
         kinds.sort_unstable();
         kinds.dedup();
         format!(
-            "{concepts}; also {} file(s) that are not concepts and were not \
+            "{concepts}{note}; also {} file(s) that are not concepts and were not \
              screened [{}]",
-            files.len(),
+            contents.files.len(),
             kinds.join(", ")
         )
     }

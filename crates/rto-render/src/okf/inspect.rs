@@ -791,6 +791,29 @@ pub struct BundleFile {
     pub extension: String,
 }
 
+/// What a bundle carries that is not one of its concepts.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct BundleContents {
+    /// Every non-markdown file, ordered by path.
+    pub files: Vec<BundleFile>,
+    /// Directories that could not be listed, so the inventory above is
+    /// **incomplete**.
+    ///
+    /// Reported rather than swallowed. An inventory that answers "none" because a
+    /// directory would not open is the same false reassurance this feature exists
+    /// to remove — a reader would take silence for absence, which is precisely
+    /// what "0 violations" over an unread PDF did.
+    pub unreadable: Vec<String>,
+}
+
+impl BundleContents {
+    /// Whether the walk saw everything it tried to.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.unreadable.is_empty()
+    }
+}
+
 /// Every file in the bundle that is not markdown.
 ///
 /// **Nothing here is opened.** The path, the size and the extension come from
@@ -804,16 +827,25 @@ pub struct BundleFile {
 /// nobody here can read — and until now every report we produced would call that
 /// bundle clean without mentioning the document existed (ADR-0024).
 ///
-/// Symlinked directories are **not** followed: this walks a directory somebody
-/// else controls, and `loop -> ..` inside one would otherwise recurse until the
-/// stack ran out. Entries are classified with `file_type()`, which reads the
-/// directory entry rather than the link's target, and a symlink is counted as
-/// the file it is.
+/// Symlinked directories are **not** followed: this walks a directory a peer
+/// controls, and `loop -> ..` inside one would otherwise never terminate.
+/// Entries are classified with `file_type()`, which reads the directory entry
+/// rather than the link's target, and a symlink is counted as the file it is.
+///
+/// The walk keeps its own stack rather than recursing. Review raised a deep-tree
+/// stack overflow, and it does **not** reproduce — `PATH_MAX` caps the depth an
+/// attacker can build (509 here) and `Bundle::load` refuses such a tree before
+/// this ever runs, with `File name too long`. It is iterative anyway, because
+/// "bounded by the filesystem's path limit" is a platform accident rather than a
+/// property of this function, and an explicit stack costs nothing to make it one.
 #[must_use]
-pub fn bundle_files(root: &Path) -> Vec<BundleFile> {
-    fn walk(dir: &Path, root: &Path, out: &mut Vec<BundleFile>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
+pub fn bundle_files(root: &Path) -> BundleContents {
+    let mut out = BundleContents::default();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            out.unreadable.push(relative(root, &dir));
+            continue;
         };
         for entry in entries.flatten() {
             let Ok(kind) = entry.file_type() else {
@@ -821,7 +853,7 @@ pub fn bundle_files(root: &Path) -> Vec<BundleFile> {
             };
             let path = entry.path();
             if kind.is_dir() {
-                walk(&path, root, out);
+                stack.push(path);
                 continue;
             }
             let extension = path
@@ -832,23 +864,41 @@ pub fn bundle_files(root: &Path) -> Vec<BundleFile> {
             if extension == "md" {
                 continue;
             }
-            out.push(BundleFile {
-                path: path
-                    .strip_prefix(root)
-                    .unwrap_or(&path)
-                    .display()
-                    .to_string(),
+            out.files.push(BundleFile {
+                path: relative(root, &path),
                 bytes: std::fs::symlink_metadata(&path).map_or(0, |m| m.len()),
                 extension,
             });
         }
     }
-    let mut out = Vec::new();
-    walk(root, root, &mut out);
     // Sorted so two reads of one bundle, and two bundles with the same contents,
-    // report identically — the same determinism `render okf` guarantees.
-    out.sort_by(|a, b| a.path.cmp(&b.path));
+    // report identically — the same determinism `render okf` guarantees. The
+    // stack alone gives no order at all, since it pops depth-first in whatever
+    // order the filesystem returned each directory.
+    out.files.sort_by(|a, b| a.path.cmp(&b.path));
+    out.unreadable.sort();
     out
+}
+
+/// A bundle-relative path, with `/` separators on every platform.
+///
+/// `Path::display()` alone emits `\` on Windows, and this string is compared
+/// against the `/`-separated paths a bundle's own frontmatter and links use — so
+/// on Windows an inventory entry would not match the document that cited it.
+///
+/// A path that is somehow **not** under `root` is rendered as the bare file name
+/// rather than falling back to the whole path: the fallback would print an
+/// absolute path from the host into a report about a peer's bundle, which is a
+/// small disclosure to make in a message whose subject is what a stranger can
+/// see.
+fn relative(root: &Path, path: &Path) -> String {
+    let rel = path
+        .strip_prefix(root)
+        .unwrap_or_else(|_| Path::new(path.file_name().unwrap_or(std::ffi::OsStr::new("?"))));
+    rel.components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// What a bundle is, in one answer.
@@ -879,12 +929,13 @@ pub struct BundleInfo {
     pub computations: (usize, usize),
     /// Every distinct computation `runtime`, sorted.
     pub runtimes: Vec<String>,
-    /// Files the bundle carries that are not concepts — see [`bundle_files`].
+    /// Files the bundle carries that are not concepts, and any directory the
+    /// walk could not list — see [`bundle_files`].
     ///
     /// Reported whether or not there are any, because "no unscreenable files" is
     /// information and a line that appears only sometimes is one a reader learns
     /// to stop looking for.
-    pub files: Vec<BundleFile>,
+    pub files: BundleContents,
 }
 
 /// Summarise the bundle at `root`.

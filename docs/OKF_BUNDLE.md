@@ -342,6 +342,19 @@ directory entry, so this adds no parser and no attack surface of its own — and
 symlinked directory is never recursed into, because this walks a directory
 somebody else controls.
 
+**A directory that will not open is reported**, and reported even when nothing
+else was found:
+
+```
+  other files: none — every file in this bundle is markdown
+  warning: 1 director(y/ies) could not be listed, so the inventory above is incomplete:
+      locked
+```
+
+"None" and "the walk could not finish" are different answers, and printing the
+first when the second is true would be the same silence-taken-for-absence this
+inventory exists to remove.
+
 The same line rides the **consent prompt**, which is the moment a person decides
 whether to trust a source: "screened clean" is a claim about the *concepts*, and
 it has to be visible that the screen's verdict did not cover everything in front

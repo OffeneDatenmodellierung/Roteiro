@@ -642,8 +642,10 @@ fn a_bundles_non_markdown_files_are_inventoried() {
         std::fs::write(&path, bytes).expect("write");
     }
 
-    let files = inspect::bundle_files(&root);
-    let listed: Vec<(&str, u64, &str)> = files
+    let contents = inspect::bundle_files(&root);
+    assert!(contents.is_complete(), "{:?}", contents.unreadable);
+    let listed: Vec<(&str, u64, &str)> = contents
+        .files
         .iter()
         .map(|f| (f.path.as_str(), f.bytes, f.extension.as_str()))
         .collect();
@@ -667,7 +669,9 @@ fn a_bundles_non_markdown_files_are_inventoried() {
 #[test]
 fn an_all_markdown_bundle_inventories_nothing() {
     assert!(
-        inspect::bundle_files(&fixture("acme_retail")).is_empty(),
+        inspect::bundle_files(&fixture("acme_retail"))
+            .files
+            .is_empty(),
         "the published bundles are all markdown, which is a fact about them \
          rather than about the format"
     );
@@ -692,12 +696,64 @@ fn the_inventory_does_not_follow_a_symlinked_directory() {
     std::fs::write(root.join("img/logo.svg"), "<svg/>").expect("write");
     symlink("..", root.join("loop")).expect("symlink to the parent");
 
-    let files = inspect::bundle_files(&root);
-    let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+    let paths: Vec<String> = inspect::bundle_files(&root)
+        .files
+        .into_iter()
+        .map(|f| f.path)
+        .collect();
     assert_eq!(
         paths,
         vec!["img/logo.svg", "loop"],
         "the link is counted as the file it is, and never recursed into"
     );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **A directory that will not open is reported, not swallowed.**
+///
+/// The inventory exists because "0 violations" over an unread PDF was silence
+/// taken for absence. An inventory that answered "none" because a directory
+/// refused to open would be the same failure inside the fix — so the walk says
+/// what it could not see, and says it even when it found nothing else.
+#[cfg(unix)]
+#[test]
+fn a_directory_that_cannot_be_listed_is_reported() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = scratch("files-unreadable");
+    std::fs::create_dir_all(root.join("locked")).expect("mkdir");
+    std::fs::write(
+        root.join("index.md"),
+        "---\nokf_version: \"0.2\"\n---\n\n# B\n",
+    )
+    .expect("write");
+    std::fs::write(root.join("locked/secret.pdf"), "%PDF").expect("write");
+    std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o000))
+        .expect("chmod");
+
+    // Skipped rather than failed when the mode does not actually bite — a run as
+    // root ignores it, and a test that asserted otherwise would be a test about
+    // who is running it. Asked of the **filesystem**, not of the result under
+    // test: keying the skip on `is_complete()` would make it indistinguishable
+    // from the defect, and it was — an injection that swallowed the failure left
+    // this test green, because "root" and "the bug" produce the same answer.
+    if std::fs::read_dir(root.join("locked")).is_ok() {
+        std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o755)).ok();
+        let _ = std::fs::remove_dir_all(&root);
+        return;
+    }
+
+    let contents = inspect::bundle_files(&root);
+    assert_eq!(
+        contents.unreadable,
+        vec!["locked".to_owned()],
+        "the directory is named, relative to the bundle"
+    );
+    assert!(
+        contents.files.is_empty(),
+        "and nothing inside it was invented: {:?}",
+        contents.files
+    );
+
+    std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o755)).ok();
     let _ = std::fs::remove_dir_all(&root);
 }
