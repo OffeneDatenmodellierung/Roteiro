@@ -369,9 +369,17 @@ impl DebtConfig {
     /// naming the pattern and what it actually does.
     ///
     /// The matcher implements `**`, `*` and `?` and nothing else, so anything
-    /// outside those is treated as a **literal path segment** — `!vendor` becomes
-    /// a directory name no repository has, and the pattern quietly matches
-    /// nothing. Reported rather than refused at load, which is
+    /// outside those is **matched literally**: `!vendor` is a directory whose name
+    /// begins with `!`, and `[v]endor` is one called `[v]endor`.
+    ///
+    /// Measured, because the first draft of this said such a pattern "matches
+    /// nothing" and that is false — a repository holding a directory literally
+    /// named `[v]endor` has it excluded, and the count moves. What is true is
+    /// narrower and worth stating exactly: the construct is not *interpreted*, so
+    /// the pattern excludes only a path that literally contains those characters,
+    /// which is almost never what its author meant.
+    ///
+    /// Reported rather than refused at load, which is
     /// [`ModelsConfig::resolve`]'s rule in this file: a bad value fails where it
     /// is *consumed*, so `roteiro config` can report it rather than being the one
     /// command a bad entry stops.
@@ -397,6 +405,13 @@ impl DebtConfig {
 
 /// [`DebtConfig::problems`] over an already-resolved pattern list.
 ///
+/// Syntactic, and deliberately so: it reports what the *pattern* cannot express,
+/// not what it happens to match in one repository. Testing against the tree would
+/// make the answer depend on which repository asked, and would go quiet on
+/// exactly the directory an author is about to create — while the belief being
+/// corrected, "my exclusion is in force", is wrong whether or not a
+/// literally-named path exists today.
+///
 /// The commands that *apply* the list hold the merged `Vec<String>` rather than
 /// the table it came from, and they are where this has to be said: a pattern is
 /// usually written once and read never again, so a report only `roteiro config`
@@ -407,22 +422,22 @@ pub fn ignore_problems(patterns: &[String]) -> Vec<String> {
         .iter()
         .filter_map(|pattern| {
             let unsupported = if pattern.starts_with('!') {
-                "negation (a leading `!`) is not supported — use `ignore_reset` to \
-                 drop inherited patterns, which cannot fail quietly the way a \
+                "negation (a leading `!`) is not interpreted — use `ignore_reset` \
+                 to drop inherited patterns, which cannot fail quietly the way a \
                  mistyped negation does"
             } else if pattern.contains('{') || pattern.contains('}') {
-                "brace expansion is not supported — write one pattern per branch"
+                "brace expansion is not interpreted — write one pattern per branch"
             } else if pattern.contains('[') || pattern.contains(']') {
-                "character classes are not supported — use `?`, or write the \
+                "character classes are not interpreted — use `?`, or write the \
                  patterns out"
             } else {
                 return None;
             };
             Some(format!(
                 "`[debt] ignore` pattern {pattern:?}: {unsupported}. Patterns are \
-                 matched with `**`, `*` and `?` only, and anything else is treated \
-                 as a literal path segment — so this pattern matches nothing and \
-                 changes no result."
+                 matched with `**`, `*` and `?` only, and every other character is \
+                 matched literally — so this excludes only a path whose name really \
+                 contains those characters, and almost certainly nothing at all."
             ))
         })
         .collect()
@@ -3746,7 +3761,7 @@ mod tests {
     ///
     /// The matcher implements `**`, `*` and `?`; anything else becomes a literal
     /// path segment, so `!vendor` is a directory name no repository has and the
-    /// pattern quietly matches nothing. Every row here was measured against
+    /// pattern almost never matches. Every row here was measured against
     /// `roteiro debt` on a two-marker fixture before this existed: the control
     /// reported 2, `vendor/**` reported 1, and all three unsupported forms
     /// reported 2 — the user's edit changing nothing and saying nothing.
@@ -3780,7 +3795,7 @@ mod tests {
         // they would have had without it.
         for pattern in ["!a", "{a,b}", "[a]"] {
             assert!(
-                problems(pattern)[0].contains("matches nothing and changes no result"),
+                problems(pattern)[0].contains("every other character is matched literally"),
                 "{pattern}"
             );
         }

@@ -3911,15 +3911,20 @@ fn print_debt_section(loaded: &config::Loaded) {
             sources.len()
         );
         for (pattern, layer) in sources {
-            // A dead pattern is marked **in the listing**, not only in the notes
-            // below it. The listing is what a reader scans to answer "is my
-            // exclusion in force", and an inert pattern printed identically to a
-            // live one answers yes when the answer is no (issue #754).
+            // Marked **in the listing**, not only in the notes below it. The
+            // listing is what a reader scans to answer "is my exclusion in
+            // force", and such a pattern printed identically to a live one
+            // answers yes when the answer is no (issue #754).
+            //
+            // "matched literally", not "matches nothing": a directory really
+            // named `[v]endor` *is* excluded by `[v]endor/**` — measured — so the
+            // mark says what the pattern does rather than claiming a result this
+            // command cannot see.
             let dead =
                 if config::ignore_problems(std::slice::from_ref(&pattern.to_owned())).is_empty() {
                     ""
                 } else {
-                    "  ** matches nothing"
+                    "  ** matched literally"
                 };
             println!("    {pattern:?}  ({layer}){dead}");
         }

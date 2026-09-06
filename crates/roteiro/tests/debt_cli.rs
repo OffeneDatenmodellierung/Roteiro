@@ -142,7 +142,7 @@ fn an_inert_ignore_pattern_is_warned_about_where_it_is_applied() {
         "the dead pattern is named, by construct: {stderr}"
     );
     assert!(
-        stderr.contains("matches nothing and changes no result"),
+        stderr.contains("every other character is matched literally"),
         "and says the consequence, which is the half a reader acts on: {stderr}"
     );
     assert!(
@@ -156,6 +156,57 @@ fn an_inert_ignore_pattern_is_warned_about_where_it_is_applied() {
     assert_eq!(
         report["total"], 1,
         "and the negation really is inert — `docs/keep.md` is still excluded: {report}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// **An unsupported construct is matched literally, not ignored** — which is why
+/// the warning says "matched literally" and not "matches nothing".
+///
+/// The first draft of that message claimed the pattern changed no result. It is
+/// false, and this is the input that shows it: a directory really named
+/// `[v]endor` is excluded by `[v]endor/**`, because the class is never
+/// interpreted and the characters are compared as themselves.
+///
+/// Pinned because the wrong claim is the tempting one — it is what the author of
+/// such a pattern assumes, and it reads as a stronger warning. A warning that
+/// overstates is one a reader catches out once and then stops believing.
+#[test]
+fn an_unsupported_construct_is_matched_literally() {
+    let dir = fresh_dir_tagged("literal");
+    git(&dir, &["init", "-q"]);
+    write(
+        &dir,
+        "[v]endor/a.rs",
+        "// TODO: literally-named tree\npub struct A;\n",
+    );
+    write(&dir, "src/b.rs", "// TODO: ordinary\npub struct B;\n");
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+
+    let total = |out: &std::process::Output| -> u64 {
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).expect("debt --json is valid JSON")
+            ["total"]
+            .as_u64()
+            .expect("total")
+    };
+    assert_eq!(total(&roteiro(&dir, &["debt", "--json"])), 2, "control");
+
+    write(&dir, "roteiro.toml", "[debt]\nignore = [\"[v]endor/**\"]\n");
+    let out = roteiro(&dir, &["debt", "--json"]);
+    assert_eq!(
+        total(&out),
+        1,
+        "the class is not interpreted, so the pattern matched the directory that \
+         literally bears that name — the count moves, and any warning claiming \
+         otherwise is false"
+    );
+    // Still reported: the pattern cannot express what its author meant, whether or
+    // not some path happens to satisfy it literally.
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("character classes are not interpreted"),
+        "a pattern that happens to match is still not doing what was meant"
     );
 
     std::fs::remove_dir_all(&dir).ok();
