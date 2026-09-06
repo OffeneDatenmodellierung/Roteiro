@@ -740,10 +740,11 @@ async fn file(State(v): State<Viewer>, UrlPath(path): UrlPath<String>) -> Respon
         Some("gif") => "image/gif",
         Some("webp") => "image/webp",
         Some("svg") => "image/svg+xml",
-        // Anything else is served as bytes to download rather than rendered.
+        // Anything else is bytes to download rather than render.
         _ => "application/octet-stream",
     };
-    (
+
+    let mut response = (
         [
             (header::CONTENT_TYPE, mime),
             (header::CONTENT_SECURITY_POLICY, FILE_CSP),
@@ -751,7 +752,30 @@ async fn file(State(v): State<Viewer>, UrlPath(path): UrlPath<String>) -> Respon
         ],
         bytes,
     )
-        .into_response()
+        .into_response();
+
+    // Anything outside the image allow-list is **asked** for as an attachment.
+    //
+    // The type is already chosen from a closed list, so a bundle does not get to
+    // say what its bytes *are*; this says what they are *for*, which is the same
+    // decision made once more. Without it the response relied on browsers
+    // happening to download `application/octet-stream` — a convention they follow
+    // rather than something the response requested. ADR-0024's first draft
+    // described that as "served as an attachment", which no header said (#750),
+    // and the fix for a document describing a header that does not exist is the
+    // header.
+    //
+    // Images are excluded because the viewer embeds them with `<img>`: an
+    // attachment disposition there would break every concept page that shows one,
+    // and an image the browser renders inside a page is not a file the reader is
+    // being handed.
+    if mime == "application/octet-stream" {
+        response.headers_mut().insert(
+            header::CONTENT_DISPOSITION,
+            header::HeaderValue::from_static("attachment"),
+        );
+    }
+    response
 }
 
 async fn stylesheet() -> Response {
@@ -939,6 +963,60 @@ mod tests {
         let (status, body) = get_(&root, "", "/c/metrics/nope").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(body.contains("no concept"), "{body}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A file the viewer will not render is asked for as an attachment.**
+    ///
+    /// The type already comes from a closed allow-list, so a bundle cannot say
+    /// what its bytes *are*; this says what they are *for*. Without it the
+    /// response relied on browsers happening to download
+    /// `application/octet-stream` — their convention, not something the response
+    /// requested, and ADR-0024's first draft described that as "served as an
+    /// attachment" when no header said so.
+    ///
+    /// The image case is the half worth pinning: the viewer embeds those with
+    /// `<img>`, so an attachment disposition there would break every concept page
+    /// that shows one.
+    #[tokio::test]
+    async fn a_file_outside_the_image_allow_list_is_offered_as_an_attachment() {
+        let root = fixture(
+            "disposition",
+            &[
+                ("index.md", "---\nokf_version: \"0.2\"\n---\n\n# B\n"),
+                ("img/logo.svg", "<svg/>"),
+                ("docs/policy.pdf", "%PDF-1.4 not really"),
+            ],
+        );
+        let disposition = |uri: &'static str| {
+            let root = root.clone();
+            async move {
+                let response = router(root, "")
+                    .oneshot(
+                        Request::builder()
+                            .uri(uri)
+                            .body(Body::empty())
+                            .expect("req"),
+                    )
+                    .await
+                    .expect("response");
+                response
+                    .headers()
+                    .get(header::CONTENT_DISPOSITION)
+                    .map(|v| v.to_str().expect("ascii").to_owned())
+            }
+        };
+
+        assert_eq!(
+            disposition("/f/docs/policy.pdf").await.as_deref(),
+            Some("attachment"),
+            "a type the viewer will not render is handed over, not shown"
+        );
+        assert_eq!(
+            disposition("/f/img/logo.svg").await,
+            None,
+            "an image the viewer embeds is not an attachment"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

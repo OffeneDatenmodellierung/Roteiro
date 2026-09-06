@@ -780,6 +780,178 @@ pub fn computation_report(root: &Path) -> Result<ComputationReport, InspectError
     Ok(report)
 }
 
+/// A file a bundle carries that is not one of its concepts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BundleFile {
+    /// Bundle-relative path.
+    pub path: String,
+    /// Size in bytes, or `None` when it could not be read.
+    ///
+    /// Distinguished from zero rather than conflated with it, because an empty
+    /// file and an unstattable one are different facts and only one of them is
+    /// reassuring — the same reason the walk reports what it could not open. A
+    /// caller summing sizes treats `None` as contributing nothing; a caller
+    /// printing one says so.
+    pub bytes: Option<u64>,
+    /// Lowercased extension, or `""` when the file has none.
+    pub extension: String,
+}
+
+/// What a bundle carries that is not one of its concepts.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct BundleContents {
+    /// Every non-markdown file, ordered by path.
+    pub files: Vec<BundleFile>,
+    /// Everything the walk could not inspect, so the inventory above is
+    /// **incomplete**.
+    ///
+    /// Reported rather than swallowed. An inventory that answers "none" because
+    /// something would not open is the same false reassurance this feature exists
+    /// to remove — a reader would take silence for absence, which is precisely
+    /// what "0 violations" over an unread PDF did.
+    ///
+    /// Three failures land here, not one: a directory that will not list, a
+    /// directory entry that will not yield, and an entry whose type cannot be
+    /// read. The first was the obvious case and the other two are the same defect
+    /// one level in — `entries.flatten()` and a `let Ok(kind) = … else continue`
+    /// each discard an error and leave `is_complete()` saying the walk saw
+    /// everything.
+    ///
+    /// A file whose **size** cannot be read is not here: the file itself was
+    /// seen, named and reported, so the inventory is complete. See
+    /// [`BundleFile::bytes`].
+    pub unreadable: Vec<String>,
+}
+
+impl BundleContents {
+    /// Whether the walk saw everything it tried to.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.unreadable.is_empty()
+    }
+}
+
+/// Every file in the bundle that is not markdown.
+///
+/// **Nothing here is opened.** The path, the size and the extension come from
+/// the directory entry and its metadata; the bytes are never read, so this adds
+/// no parser and no attack surface of its own.
+///
+/// It exists because a bundle is **not** markdown, whatever the four published
+/// ones happen to contain: `okf-core`'s `resolve_path_field` resolves a
+/// frontmatter path to any file with `is_file()` and no extension filter, and
+/// §10's `computation:` names a file. So a conformant bundle can cite a document
+/// nobody here can read — and until now every report we produced would call that
+/// bundle clean without mentioning the document existed (ADR-0024).
+///
+/// **What it costs**, because it looks cheaper than it is and has more than one
+/// caller: one walk of this repository's own 9,633-file bundle measures **5.9 ms
+/// warm** (40 ms cold), against the `Bundle::load` of the same bundle at
+/// **1.29 s** — which every caller has already paid before reaching here, since
+/// there is nothing to report about a bundle that did not load. Two walks in a
+/// run is under one percent of what the run already spent, so this is not cached.
+/// If that ratio changes, cache it then and put the new number here.
+///
+/// Symlinked directories are **not** followed: this walks a directory a peer
+/// controls, and `loop -> ..` inside one would otherwise never terminate.
+/// Entries are classified with `file_type()`, which reads the directory entry
+/// rather than the link's target, and a symlink is counted as the file it is.
+///
+/// The walk keeps its own stack rather than recursing. Review raised a deep-tree
+/// stack overflow, and it does **not** reproduce — `PATH_MAX` caps the depth an
+/// attacker can build (509 here) and `Bundle::load` refuses such a tree before
+/// this ever runs, with `File name too long`. It is iterative anyway, because
+/// "bounded by the filesystem's path limit" is a platform accident rather than a
+/// property of this function, and an explicit stack costs nothing to make it one.
+#[must_use]
+pub fn bundle_files(root: &Path) -> BundleContents {
+    let mut out = BundleContents::default();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            out.unreadable.push(relative(root, &dir));
+            continue;
+        };
+        for entry in entries {
+            // Both of these were `flatten()` and `else continue`, which discard
+            // an error and then let `is_complete()` claim the walk saw
+            // everything — the swallowed-failure defect this type exists to
+            // report, one level further in.
+            let Ok(entry) = entry else {
+                out.unreadable.push(relative(root, &dir));
+                continue;
+            };
+            let path = entry.path();
+            let Ok(kind) = entry.file_type() else {
+                out.unreadable.push(relative(root, &path));
+                continue;
+            };
+            if kind.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let extension = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(str::to_ascii_lowercase)
+                .unwrap_or_default();
+            if extension == "md" {
+                continue;
+            }
+            out.files.push(BundleFile {
+                path: relative(root, &path),
+                bytes: std::fs::symlink_metadata(&path).map(|m| m.len()).ok(),
+                extension,
+            });
+        }
+    }
+    // Sorted so two reads of one bundle, and two bundles with the same contents,
+    // report identically — the same determinism `render okf` guarantees. The
+    // stack alone gives no order at all, since it pops depth-first in whatever
+    // order the filesystem returned each directory.
+    out.files.sort_by(|a, b| a.path.cmp(&b.path));
+    // A directory that failed to yield several entries names itself once per
+    // failure, and the count is not information a reader can act on.
+    out.unreadable.sort();
+    out.unreadable.dedup();
+    out
+}
+
+/// A bundle-relative path, with `/` separators on every platform.
+///
+/// `Path::display()` alone emits `\` on Windows, and this string is compared
+/// against the `/`-separated paths a bundle's own frontmatter and links use — so
+/// on Windows an inventory entry would not match the document that cited it.
+///
+/// A path that is somehow **not** under `root` is rendered as the bare file name
+/// rather than falling back to the whole path: the fallback would print an
+/// absolute path from the host into a report about a peer's bundle, which is a
+/// small disclosure to make in a message whose subject is what a stranger can
+/// see.
+///
+/// The **root itself** renders as `"."`, never as the empty string. It reaches
+/// here when the bundle root is the thing that will not list, and `strip_prefix`
+/// against itself yields an empty path — so the report read `1 entry could not be
+/// inspected:` followed by a blank line, which is a worse failure than the one
+/// being reported, in the one message whose whole job is to say what could not be
+/// seen. `"."` is the spelling `AdrHome::dir` already uses for "the root" here.
+fn relative(root: &Path, path: &Path) -> String {
+    let rel = path
+        .strip_prefix(root)
+        .unwrap_or_else(|_| Path::new(path.file_name().unwrap_or(std::ffi::OsStr::new("?"))));
+    let joined = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    // The root itself yields an empty path from `strip_prefix` against itself.
+    if joined.is_empty() {
+        ".".to_owned()
+    } else {
+        joined
+    }
+}
+
 /// What a bundle is, in one answer.
 ///
 /// Composed from the reports the other commands already produce rather than
@@ -808,6 +980,13 @@ pub struct BundleInfo {
     pub computations: (usize, usize),
     /// Every distinct computation `runtime`, sorted.
     pub runtimes: Vec<String>,
+    /// Files the bundle carries that are not concepts, and any directory the
+    /// walk could not list — see [`bundle_files`].
+    ///
+    /// Reported whether or not there are any, because "no unscreenable files" is
+    /// information and a line that appears only sometimes is one a reader learns
+    /// to stop looking for.
+    pub files: BundleContents,
 }
 
 /// Summarise the bundle at `root`.
@@ -840,6 +1019,7 @@ pub fn bundle_info(root: &Path, today: Option<&str>) -> Result<BundleInfo, Inspe
         links: (links.links, links.broken.len()),
         computations: (computations.computations, computations.incomplete()),
         runtimes: computations.runtimes,
+        files: bundle_files(root),
     })
 }
 

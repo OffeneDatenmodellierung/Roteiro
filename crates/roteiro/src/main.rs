@@ -6829,6 +6829,46 @@ fn run_okf_info(path: &str, today: Option<&str>, json: bool) -> anyhow::Result<(
     if !info.runtimes.is_empty() {
         println!("  runtimes: {}", info.runtimes.join(", "));
     }
+    // Always printed, including the zero. A bundle is not markdown — `okf-core`
+    // resolves a frontmatter path to any file — so a conformant bundle can cite a
+    // document nothing here can read, and a report that said "0 violations"
+    // without mentioning it would be describing only the part it could see
+    // (ADR-0024). Nothing is opened: path, size and extension come from the
+    // directory entry.
+    if info.files.files.is_empty() {
+        println!("  other files: none — every file in this bundle is markdown");
+    } else {
+        // A size that could not be read contributes nothing to the total rather
+        // than being counted as zero — the file is still listed, and its own line
+        // says the size is unknown.
+        let total: u64 = info.files.files.iter().filter_map(|f| f.bytes).sum();
+        println!(
+            "  other files: {} ({}), not markdown and not screened:",
+            info.files.files.len(),
+            human_bytes(total)
+        );
+        for f in &info.files.files {
+            let size = f
+                .bytes
+                .map_or_else(|| "size unreadable".to_owned(), human_bytes);
+            println!("      {} ({size})", f.path);
+        }
+    }
+    // Said even when the list above was empty, and said as a warning rather than
+    // a footnote: "none" and "the walk could not finish" are different answers,
+    // and printing the first when the second holds recreates the very gap this
+    // inventory exists to close.
+    if !info.files.is_complete() {
+        println!(
+            "  warning: {} {} could not be inspected, so the inventory above is \
+             incomplete:",
+            info.files.unreadable.len(),
+            plural(info.files.unreadable.len(), "entry", "entries")
+        );
+        for dir in &info.files.unreadable {
+            println!("      {dir}");
+        }
+    }
     // Named rather than implied: this command reports, and which one to reach
     // for next is the question it exists to answer.
     //
@@ -13705,9 +13745,13 @@ fn scanned_roots_note(effective: &[rto_graph::ResolvedWorkspace]) -> Vec<String>
         .collect()
 }
 
-/// `one`/`many` chosen by `n`. A local helper so the depth notes read as English
-/// rather than as `subdirector(y/ies)`.
-#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+/// `one`/`many` chosen by `n`. A local helper so notes read as English rather
+/// than as `subdirector(y/ies)`.
+///
+/// No longer feature-gated: `okf info` ships in a stock build and calls it, so
+/// the gate would now be the ADR-0014 shape it was added to avoid — an item
+/// whose callers are *not* all compiled out, carrying a `cfg` that claims they
+/// are. The rule it encodes is the repository's, not one feature's.
 fn plural(n: usize, one: &'static str, many: &'static str) -> &'static str {
     if n == 1 { one } else { many }
 }

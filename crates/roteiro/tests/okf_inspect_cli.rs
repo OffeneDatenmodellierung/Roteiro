@@ -734,3 +734,74 @@ fn the_named_gates_are_the_commands_that_actually_gate() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// **`okf info` says what a bundle carries that it could not screen, and says it
+/// either way.**
+///
+/// The zero is printed too. "No unscreenable files" is information, and a line
+/// that appears only sometimes is one a reader learns to stop looking for — which
+/// would leave them unable to tell "this bundle carries none" from "this build
+/// does not report them".
+#[test]
+fn info_inventories_the_files_that_are_not_concepts() {
+    let carrying = bundle(
+        "info-files",
+        &[
+            ("index.md", "---\nokf_version: \"0.2\"\n---\n\n# Bundle\n"),
+            (
+                "metrics/revenue.md",
+                "---\ntype: Metric\ntitle: Revenue\n---\n\n# Revenue\n",
+            ),
+            ("docs/policy.pdf", "%PDF-1.4 not really\n"),
+        ],
+    );
+    let stdout = String::from_utf8_lossy(
+        &roteiro(&[
+            "okf",
+            "info",
+            &carrying.to_string_lossy(),
+            "--today",
+            "2026-09-03",
+        ])
+        .stdout,
+    )
+    .into_owned();
+    assert!(
+        stdout.contains("not markdown and not screened"),
+        "the inventory must say the screen did not cover these; got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("docs/policy.pdf"),
+        "and must name the file rather than only counting it; got:\n{stdout}"
+    );
+
+    let plain = bundle(
+        "info-no-files",
+        &[
+            ("index.md", "---\nokf_version: \"0.2\"\n---\n\n# Bundle\n"),
+            (
+                "metrics/revenue.md",
+                "---\ntype: Metric\ntitle: Revenue\n---\n\n# Revenue\n",
+            ),
+        ],
+    );
+    let stdout = String::from_utf8_lossy(
+        &roteiro(&[
+            "okf",
+            "info",
+            &plain.to_string_lossy(),
+            "--today",
+            "2026-09-03",
+        ])
+        .stdout,
+    )
+    .into_owned();
+    assert!(
+        stdout.contains("other files: none"),
+        "an all-markdown bundle still reports the answer; got:\n{stdout}"
+    );
+
+    for root in [carrying, plain] {
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
