@@ -3911,8 +3911,21 @@ fn print_debt_section(loaded: &config::Loaded) {
             sources.len()
         );
         for (pattern, layer) in sources {
-            println!("    {pattern:?}  ({layer})");
+            // A dead pattern is marked **in the listing**, not only in the notes
+            // below it. The listing is what a reader scans to answer "is my
+            // exclusion in force", and an inert pattern printed identically to a
+            // live one answers yes when the answer is no (issue #754).
+            let dead =
+                if config::ignore_problems(std::slice::from_ref(&pattern.to_owned())).is_empty() {
+                    ""
+                } else {
+                    "  ** matches nothing"
+                };
+            println!("    {pattern:?}  ({layer}){dead}");
         }
+    }
+    for problem in loaded.effective.debt.problems() {
+        println!("  ** {problem}");
     }
     if loaded.effective.debt.ignore_reset.declared() == Some(true) {
         println!("  ignore_reset = true  (inherited patterns dropped)");
@@ -4608,6 +4621,7 @@ fn run_check(
             report.violations.len(),
         );
         // Report intent debt alongside drift (a summary, not a gate).
+        warn_dead_ignore_patterns(debt_ignore);
         println!(
             "{}",
             debt_summary(&rto_graph::debt(&store, &[], debt_ignore)?)
@@ -8851,6 +8865,7 @@ fn run_debt(
     build_graph(&repo, &mut store, &cache, ingest, source.source())?;
     source.announce();
 
+    warn_dead_ignore_patterns(debt_ignore);
     let report = rto_graph::debt(&store, kinds, debt_ignore)?;
     if json {
         emit_json(&report)?;
@@ -8866,6 +8881,24 @@ fn run_debt(
         println!("{}", debt_summary(&report));
     }
     Ok(())
+}
+
+/// Warn on stderr about `[debt] ignore` patterns that match nothing.
+///
+/// Called wherever the list is **applied**, not only from `roteiro config`. A
+/// pattern is written once and read never again, so a report only that command
+/// prints is one nobody sees at the moment the number is wrong — and the
+/// dangerous direction is invisible in the number itself: a `docs/**` exclusion
+/// alongside an inert `!docs/keep.md` hides that file's debt behind a config that
+/// appears to account for it, which looks exactly like the file having none
+/// (issue #754).
+///
+/// stderr, so a piped `roteiro debt` still emits only its listing, and a warning
+/// never lands in what a caller parses.
+fn warn_dead_ignore_patterns(debt_ignore: &[String]) {
+    for problem in config::ignore_problems(debt_ignore) {
+        eprintln!("warning: {problem}");
+    }
 }
 
 /// A one-line summary of a [`rto_graph::DebtReport`], e.g.
@@ -8912,6 +8945,7 @@ fn run_debt_density(
     // set from `rto_graph::DensityOrder` itself (`parse_density_order`), which a
     // clap value parser would replace with its own wording.
     let order = parse_density_order(&rank.order)?;
+    warn_dead_ignore_patterns(debt_ignore);
     let (repo, mut store, cache) = open_graph()?;
     build_graph(&repo, &mut store, &cache, ingest, source.source())?;
     source.announce();
