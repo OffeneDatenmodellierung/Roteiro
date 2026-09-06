@@ -77,6 +77,12 @@ fn is_comment(line: &str) -> bool {
 /// else, and treating it as a justification would make the rule pass on
 /// coincidence.
 fn is_justified(lines: &[&str], i: usize) -> bool {
+    // The language's own field, checked first because it is the form Rust
+    // stabilised for exactly this and the one Clippy's
+    // `allow_attributes_without_reason` requires.
+    if carries_reason(lines, i) {
+        return true;
+    }
     // A trailing comment on the attribute's own line, after its closing `]`.
     if let Some((_, tail)) = lines[i].rsplit_once(']')
         && tail.contains("//")
@@ -88,6 +94,66 @@ fn is_justified(lines: &[&str], i: usize) -> bool {
         j -= 1;
     }
     j > 0 && is_comment(lines[j - 1])
+}
+
+/// Whether the attribute opening at `lines[i]` carries a `reason = "…"` field.
+///
+/// Spans the attribute rather than reading one line, because the multi-line form
+/// is the ordinary one once a reason is long enough to be worth writing:
+///
+/// ```text
+/// #[allow(
+///     clippy::too_many_lines,
+///     reason = "one scanner home; splitting would re-fork the copies this deletes"
+/// )]
+/// ```
+///
+/// The scan ends where the attribute's brackets balance, and is bounded so a
+/// `]` inside the reason string cannot make it run to the end of the file. The
+/// bound only ever *loses* a justification, never invents one.
+///
+/// Matched on a **token** boundary and on the `=` that follows, so a lint named
+/// `…::unreasonable` and prose containing the word "reason" in a trailing comment
+/// are not mistaken for the field. That precision matters more here than in the
+/// comment paths: those require a human to have written something, while this one
+/// reads structure.
+fn carries_reason(lines: &[&str], i: usize) -> bool {
+    /// Attribute lines scanned before giving up.
+    const MAX_SPAN: usize = 40;
+
+    let mut depth = 0i32;
+    for line in lines.iter().skip(i).take(MAX_SPAN) {
+        if has_reason_field(line) {
+            return true;
+        }
+        for c in line.chars() {
+            match c {
+                '[' => depth += 1,
+                ']' => depth -= 1,
+                _ => {}
+            }
+        }
+        if depth <= 0 {
+            break;
+        }
+    }
+    false
+}
+
+/// Whether `line` contains a `reason` **field**: the bare word, followed by `=`.
+fn has_reason_field(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    line.match_indices("reason").any(|(at, _)| {
+        let before_ok = at == 0 || !is_ident_byte(bytes[at - 1]);
+        let after = line[at + "reason".len()..].trim_start();
+        // Not `==`: that is a comparison, and this is a field assignment.
+        before_ok && after.starts_with('=') && !after.starts_with("==")
+    })
+}
+
+/// Whether `b` can appear inside a Rust identifier.
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
 }
 
 /// Every lossy string conversion in `text` that feeds a hash, as violations.
@@ -227,7 +293,7 @@ pub fn scan_unjustified_allows(rel_path: &str, text: &str) -> Vec<Violation> {
             kind: ViolationKind::UnjustifiedAllow,
             message: format!(
                 "{rel_path}:{}: `#[allow(…)]` carries no justification — AGENTS.md \
-                 asks that an allow be justified in a comment, so a reader can tell \
+                 asks for a `reason = \"…\"` field or a comment, so a reader can tell \
                  a considered exception from a silenced warning",
                 i + 1
             ),
@@ -329,6 +395,71 @@ mod tests {
             hits("// unrelated prose\n\n#[allow(clippy::foo)]\nfn f() {}\n").len(),
             1
         );
+    }
+
+    /// **The language's own `reason` field is a justification** (issue #753).
+    ///
+    /// This was the rule's largest defect: 183 false positives and 0 true
+    /// positives on a workspace that mandates the attribute form. Worse, such a
+    /// workspace could not satisfy both gates — Clippy's
+    /// `allow_attributes_without_reason` *requires* the field this rule rejected,
+    /// so every allow Clippy accepted, `roteiro check` refused. A gate in that
+    /// state is one people pass with `--no-verify`, and the reporter was.
+    ///
+    /// The principle was already written down in [`is_comment`]: the convention
+    /// asks for "a justification a reader will find", and rejecting the form that
+    /// sits closest to the allow was inventing a stricter rule than the one
+    /// `AGENTS.md` states.
+    #[test]
+    fn a_reason_field_is_a_justification() {
+        assert!(
+            hits("#[allow(clippy::foo, reason = \"counts stay under 2^53\")]\nfn f() {}\n")
+                .is_empty()
+        );
+        // The multi-line form, which is the ordinary one once the reason is long
+        // enough to be worth writing — and the one a single-line scan misses.
+        assert!(
+            hits(
+                "#[allow(\n    clippy::too_many_lines,\n    reason = \"one home; splitting \
+                 would re-fork the copies this deletes\"\n)]\nfn f() {}\n"
+            )
+            .is_empty()
+        );
+        // Inner attributes take the field too.
+        assert!(hits("#![allow(dead_code, reason = \"test support\")]\nfn f() {}\n").is_empty());
+    }
+
+    /// **A bare allow is still a violation**, which is the half that makes the
+    /// rule worth having at all.
+    ///
+    /// Asserted beside the accepting case rather than alone: a fix that accepted
+    /// everything would satisfy the test above and nothing else, and this is the
+    /// assertion that separates "reads the attribute" from "gave up".
+    #[test]
+    fn accepting_a_reason_does_not_accept_a_bare_allow() {
+        let text = "#[allow(clippy::a, reason = \"stated\")]\nfn f() {}\n\n\
+                    #[allow(clippy::b)]\nfn g() {}\n";
+        let h = hits(text);
+        assert_eq!(h.len(), 1, "only the bare one is reported: {h:?}");
+        assert!(h[0].contains("src/x.rs:4:"), "{}", h[0]);
+    }
+
+    /// **The word alone is not the field.**
+    ///
+    /// `reason` is matched on a token boundary and on the `=` that follows, so a
+    /// lint whose name merely contains it does not silence the rule. This one is
+    /// worth pinning because the failure is invisible: an allow that looked
+    /// justified and was not would leave the gate reporting nothing, which reads
+    /// exactly like a clean repository.
+    #[test]
+    fn a_word_containing_reason_is_not_the_field() {
+        assert_eq!(
+            hits("#[allow(clippy::unreasonable_x)]\nfn f() {}\n").len(),
+            1
+        );
+        assert_eq!(hits("#[allow(some::reasoning)]\nfn f() {}\n").len(), 1);
+        // A comparison is not an assignment.
+        assert_eq!(hits("#[allow(cfg(reason == 1))]\nfn f() {}\n").len(), 1);
     }
 
     #[test]
