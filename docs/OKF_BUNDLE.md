@@ -347,7 +347,7 @@ else was found:
 
 ```
   other files: none — every file in this bundle is markdown
-  warning: 1 director(y/ies) could not be listed, so the inventory above is incomplete:
+  warning: 1 entry could not be inspected, so the inventory above is incomplete:
       locked
 ```
 

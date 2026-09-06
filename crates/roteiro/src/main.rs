@@ -6838,14 +6838,20 @@ fn run_okf_info(path: &str, today: Option<&str>, json: bool) -> anyhow::Result<(
     if info.files.files.is_empty() {
         println!("  other files: none — every file in this bundle is markdown");
     } else {
-        let total: u64 = info.files.files.iter().map(|f| f.bytes).sum();
+        // A size that could not be read contributes nothing to the total rather
+        // than being counted as zero — the file is still listed, and its own line
+        // says the size is unknown.
+        let total: u64 = info.files.files.iter().filter_map(|f| f.bytes).sum();
         println!(
             "  other files: {} ({}), not markdown and not screened:",
             info.files.files.len(),
             human_bytes(total)
         );
         for f in &info.files.files {
-            println!("      {} ({})", f.path, human_bytes(f.bytes));
+            let size = f
+                .bytes
+                .map_or_else(|| "size unreadable".to_owned(), human_bytes);
+            println!("      {} ({size})", f.path);
         }
     }
     // Said even when the list above was empty, and said as a warning rather than
@@ -6854,9 +6860,10 @@ fn run_okf_info(path: &str, today: Option<&str>, json: bool) -> anyhow::Result<(
     // inventory exists to close.
     if !info.files.is_complete() {
         println!(
-            "  warning: {} director(y/ies) could not be listed, so the inventory \
-             above is incomplete:",
-            info.files.unreadable.len()
+            "  warning: {} {} could not be inspected, so the inventory above is \
+             incomplete:",
+            info.files.unreadable.len(),
+            plural(info.files.unreadable.len(), "entry", "entries")
         );
         for dir in &info.files.unreadable {
             println!("      {dir}");
@@ -13738,9 +13745,13 @@ fn scanned_roots_note(effective: &[rto_graph::ResolvedWorkspace]) -> Vec<String>
         .collect()
 }
 
-/// `one`/`many` chosen by `n`. A local helper so the depth notes read as English
-/// rather than as `subdirector(y/ies)`.
-#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+/// `one`/`many` chosen by `n`. A local helper so notes read as English rather
+/// than as `subdirector(y/ies)`.
+///
+/// No longer feature-gated: `okf info` ships in a stock build and calls it, so
+/// the gate would now be the ADR-0014 shape it was added to avoid — an item
+/// whose callers are *not* all compiled out, carrying a `cfg` that claims they
+/// are. The rule it encodes is the repository's, not one feature's.
 fn plural(n: usize, one: &'static str, many: &'static str) -> &'static str {
     if n == 1 { one } else { many }
 }

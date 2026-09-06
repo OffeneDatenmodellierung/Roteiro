@@ -785,8 +785,14 @@ pub fn computation_report(root: &Path) -> Result<ComputationReport, InspectError
 pub struct BundleFile {
     /// Bundle-relative path.
     pub path: String,
-    /// Size in bytes.
-    pub bytes: u64,
+    /// Size in bytes, or `None` when it could not be read.
+    ///
+    /// Distinguished from zero rather than conflated with it, because an empty
+    /// file and an unstattable one are different facts and only one of them is
+    /// reassuring — the same reason the walk reports what it could not open. A
+    /// caller summing sizes treats `None` as contributing nothing; a caller
+    /// printing one says so.
+    pub bytes: Option<u64>,
     /// Lowercased extension, or `""` when the file has none.
     pub extension: String,
 }
@@ -796,13 +802,24 @@ pub struct BundleFile {
 pub struct BundleContents {
     /// Every non-markdown file, ordered by path.
     pub files: Vec<BundleFile>,
-    /// Directories that could not be listed, so the inventory above is
+    /// Everything the walk could not inspect, so the inventory above is
     /// **incomplete**.
     ///
-    /// Reported rather than swallowed. An inventory that answers "none" because a
-    /// directory would not open is the same false reassurance this feature exists
+    /// Reported rather than swallowed. An inventory that answers "none" because
+    /// something would not open is the same false reassurance this feature exists
     /// to remove — a reader would take silence for absence, which is precisely
     /// what "0 violations" over an unread PDF did.
+    ///
+    /// Three failures land here, not one: a directory that will not list, a
+    /// directory entry that will not yield, and an entry whose type cannot be
+    /// read. The first was the obvious case and the other two are the same defect
+    /// one level in — `entries.flatten()` and a `let Ok(kind) = … else continue`
+    /// each discard an error and leave `is_complete()` saying the walk saw
+    /// everything.
+    ///
+    /// A file whose **size** cannot be read is not here: the file itself was
+    /// seen, named and reported, so the inventory is complete. See
+    /// [`BundleFile::bytes`].
     pub unreadable: Vec<String>,
 }
 
@@ -847,11 +864,20 @@ pub fn bundle_files(root: &Path) -> BundleContents {
             out.unreadable.push(relative(root, &dir));
             continue;
         };
-        for entry in entries.flatten() {
-            let Ok(kind) = entry.file_type() else {
+        for entry in entries {
+            // Both of these were `flatten()` and `else continue`, which discard
+            // an error and then let `is_complete()` claim the walk saw
+            // everything — the swallowed-failure defect this type exists to
+            // report, one level further in.
+            let Ok(entry) = entry else {
+                out.unreadable.push(relative(root, &dir));
                 continue;
             };
             let path = entry.path();
+            let Ok(kind) = entry.file_type() else {
+                out.unreadable.push(relative(root, &path));
+                continue;
+            };
             if kind.is_dir() {
                 stack.push(path);
                 continue;
@@ -866,7 +892,7 @@ pub fn bundle_files(root: &Path) -> BundleContents {
             }
             out.files.push(BundleFile {
                 path: relative(root, &path),
-                bytes: std::fs::symlink_metadata(&path).map_or(0, |m| m.len()),
+                bytes: std::fs::symlink_metadata(&path).map(|m| m.len()).ok(),
                 extension,
             });
         }
@@ -876,7 +902,10 @@ pub fn bundle_files(root: &Path) -> BundleContents {
     // stack alone gives no order at all, since it pops depth-first in whatever
     // order the filesystem returned each directory.
     out.files.sort_by(|a, b| a.path.cmp(&b.path));
+    // A directory that failed to yield several entries names itself once per
+    // failure, and the count is not information a reader can act on.
     out.unreadable.sort();
+    out.unreadable.dedup();
     out
 }
 

@@ -644,7 +644,7 @@ fn a_bundles_non_markdown_files_are_inventoried() {
 
     let contents = inspect::bundle_files(&root);
     assert!(contents.is_complete(), "{:?}", contents.unreadable);
-    let listed: Vec<(&str, u64, &str)> = contents
+    let listed: Vec<(&str, Option<u64>, &str)> = contents
         .files
         .iter()
         .map(|f| (f.path.as_str(), f.bytes, f.extension.as_str()))
@@ -652,9 +652,9 @@ fn a_bundles_non_markdown_files_are_inventoried() {
     assert_eq!(
         listed,
         vec![
-            ("data/rows", 19, ""),
-            ("docs/policy.PDF", 19, "pdf"),
-            ("img/logo.svg", 6, "svg"),
+            ("data/rows", Some(19), ""),
+            ("docs/policy.PDF", Some(19), "pdf"),
+            ("img/logo.svg", Some(6), "svg"),
         ],
         "markdown is excluded, everything else is listed with its size, the \
          extension is lowercased so `.PDF` and `.pdf` are one kind, a file \
@@ -746,7 +746,7 @@ fn a_directory_that_cannot_be_listed_is_reported() {
     assert_eq!(
         contents.unreadable,
         vec!["locked".to_owned()],
-        "the directory is named, relative to the bundle"
+        "the directory is named, relative to the bundle, and named once"
     );
     assert!(
         contents.files.is_empty(),
@@ -755,5 +755,73 @@ fn a_directory_that_cannot_be_listed_is_reported() {
     );
 
     std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o755)).ok();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **A file whose size cannot be read is still listed, and the inventory is
+/// still complete.**
+///
+/// The two are different facts and the distinction is the point: the file *was*
+/// seen and named, so nothing is missing from the inventory — only its size is
+/// unknown. Reporting it as `0` would say an empty file, and adding it to
+/// `unreadable` would say the walk missed something. Both would be false.
+///
+/// Reached deterministically rather than by racing the filesystem: a directory
+/// with read but **not** execute permission lists its entries and refuses to
+/// stat them. Verified — `readdir` returns `f.pdf`, `d_type` says it is a file,
+/// and `lstat` gives `EACCES`.
+#[cfg(unix)]
+#[test]
+fn a_file_whose_size_is_unreadable_is_still_inventoried() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = scratch("files-nostat");
+    std::fs::create_dir_all(root.join("listable")).expect("mkdir");
+    std::fs::write(
+        root.join("index.md"),
+        "---\nokf_version: \"0.2\"\n---\n\n# B\n",
+    )
+    .expect("write");
+    std::fs::write(root.join("listable/policy.pdf"), "%PDF").expect("write");
+    // r-x-, so names are readable and `stat` is refused.
+    std::fs::set_permissions(
+        root.join("listable"),
+        std::fs::Permissions::from_mode(0o444),
+    )
+    .expect("chmod");
+
+    let contents = inspect::bundle_files(&root);
+    let restore = |root: &std::path::Path| {
+        std::fs::set_permissions(
+            root.join("listable"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .ok();
+    };
+    // A run as root ignores the mode, and a test asserting otherwise would be a
+    // test about who is running it. Asked of the filesystem, never of the result
+    // under test — keying the skip on the result would make "root" and "the bug"
+    // the same answer.
+    if std::fs::metadata(root.join("listable/policy.pdf")).is_ok() {
+        restore(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        return;
+    }
+
+    assert_eq!(
+        contents
+            .files
+            .iter()
+            .map(|f| (f.path.as_str(), f.bytes))
+            .collect::<Vec<_>>(),
+        vec![("listable/policy.pdf", None)],
+        "the file is named and typed; only its size is unknown"
+    );
+    assert!(
+        contents.is_complete(),
+        "the walk saw everything, so the inventory is complete: {:?}",
+        contents.unreadable
+    );
+
+    restore(&root);
     let _ = std::fs::remove_dir_all(&root);
 }

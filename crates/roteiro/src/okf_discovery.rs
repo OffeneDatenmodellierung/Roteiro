@@ -180,9 +180,13 @@ impl Discovered {
             String::new()
         } else {
             format!(
-                "; {} director(y/ies) could not be listed, so what follows is \
-                 incomplete",
-                contents.unreadable.len()
+                "; {} {} could not be inspected, so what follows is incomplete",
+                contents.unreadable.len(),
+                if contents.unreadable.len() == 1 {
+                    "entry"
+                } else {
+                    "entries"
+                }
             )
         };
         if contents.files.is_empty() {
