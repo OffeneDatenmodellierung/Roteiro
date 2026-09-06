@@ -825,3 +825,37 @@ fn a_file_whose_size_is_unreadable_is_still_inventoried() {
     restore(&root);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// **A bundle root that will not list names itself, not nothing.**
+///
+/// `strip_prefix` of the root against itself yields an empty path, so the report
+/// read `1 entry could not be inspected:` followed by a blank line — a worse
+/// failure than the one being reported, and in the one message whose whole job is
+/// to say what could not be seen.
+#[cfg(unix)]
+#[test]
+fn a_root_that_cannot_be_listed_names_itself() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = scratch("files-root-locked");
+    std::fs::create_dir_all(&root).expect("mkdir");
+    std::fs::write(root.join("policy.pdf"), "%PDF").expect("write");
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+
+    // Asked of the filesystem, never of the result under test.
+    if std::fs::read_dir(&root).is_ok() {
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).ok();
+        let _ = std::fs::remove_dir_all(&root);
+        return;
+    }
+
+    let contents = inspect::bundle_files(&root);
+    assert_eq!(
+        contents.unreadable,
+        vec![".".to_owned()],
+        "the root names itself as `.`, and never as an empty string"
+    );
+    assert!(!contents.is_complete());
+
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).ok();
+    let _ = std::fs::remove_dir_all(&root);
+}
