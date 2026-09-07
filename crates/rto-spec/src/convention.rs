@@ -44,7 +44,7 @@ fn is_attribute(line: &str) -> bool {
 
 /// Whether `line` is a comment that can *justify* an `#[allow(…)]`.
 ///
-/// Every comment except an **outer** doc comment (`///`). A `///` belongs to the
+/// Every **line** comment except an **outer** doc comment (`///`). A `///` belongs to the
 /// item below it and says nothing about why a lint is silenced, so counting it
 /// made this rule satisfiable by accident: every `#[allow]` written under
 /// ordinary docs — which is where most attributes sit — was exempt whatever
@@ -67,6 +67,13 @@ fn is_attribute(line: &str) -> bool {
 ///
 /// `////` and beyond are plain comments to rustc rather than docs, so the test
 /// is `///` *not* followed by another `/`.
+///
+/// **Block comments are not recognised.** A `/* … */` above an allow reads as a
+/// justification to a person and not to this rule, which would report the allow
+/// as unjustified — a false positive, and this rule's worth is that it stays
+/// silent on correct uses. Left as it is because it costs nothing today: the
+/// whole of `crates/` contains one block-comment line and no allow justified by
+/// one. Worth revisiting the moment that stops being true.
 fn is_justifying_comment(line: &str) -> bool {
     let t = line.trim_start();
     if !t.starts_with("//") {
