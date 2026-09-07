@@ -605,9 +605,10 @@ mod tests {
     #[test]
     fn a_long_attribute_still_finds_its_reason_and_the_bound_still_bounds() {
         let long = |lints: usize| {
+            use std::fmt::Write as _;
             let mut src = String::from("#[allow(\n");
             for n in 0..lints {
-                src.push_str(&format!("    clippy::lint_{n},\n"));
+                let _ = writeln!(src, "    clippy::lint_{n},");
             }
             src.push_str("    reason = \"stated\"\n)]\nfn f() {}\n");
             src
