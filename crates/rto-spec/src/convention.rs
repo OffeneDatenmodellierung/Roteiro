@@ -42,12 +42,6 @@ fn is_attribute(line: &str) -> bool {
     t.starts_with("#[") || t.starts_with("#![")
 }
 
-/// Whether `line` is a comment of any flavour: `//`, `///` or `//!`.
-///
-/// A doc comment counts. The convention asks for a justification a reader will
-/// find, and `AGENTS.md` does not distinguish — several existing allows are
-/// justified by the doc comment of the item they sit on, and calling those
-/// unjustified would be inventing a stricter rule than the one written down.
 /// Whether `line` is a comment that can *justify* an `#[allow(…)]`.
 ///
 /// Every comment except an **outer** doc comment (`///`). A `///` belongs to the
@@ -57,6 +51,13 @@ fn is_attribute(line: &str) -> bool {
 /// those docs said, and the rule could not tell "a considered exception from a
 /// silenced warning", the exact distinction its own message claims to enforce.
 /// See issue #770.
+///
+/// **This was a deliberate choice before, and it is being reversed knowingly.**
+/// The removed `is_comment` argued that "`AGENTS.md` does not distinguish", and
+/// on the letter that was true — so the convention has been tightened alongside
+/// this change rather than the rule quietly outrunning it. It also predicted the
+/// cost: "several existing allows are justified by the doc comment of the item
+/// they sit on". Measured, that is exactly three, all now carrying a real reason.
 ///
 /// **`//!` still counts**, and that is not an oversight. An inner
 /// `#![allow(…)]` sits at the top of a file where module prose is the only place

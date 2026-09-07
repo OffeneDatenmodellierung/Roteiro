@@ -91,7 +91,11 @@ CI (`.github/workflows/ci.yml`) enforces these; run them locally before pushing.
   preferred, because it sits closer to the allow than any comment can and is what
   Clippy's `allow_attributes_without_reason` asks for; a comment above the
   attribute counts too, and so does one above the attributes that sit between it
-  and the item.
+  and the item. A **doc comment does not** — `///` describes the item, not the
+  allow, so it cannot say why the lint is silenced, and counting it made the gate
+  satisfiable by any attribute that happened to sit under ordinary docs. `//!`
+  does count: an inner `#![allow(…)]` sits where module prose is the only place
+  its reason can live.
 - `cargo test --workspace --all-features` — green. **`--all-features` includes
   `exec-boxlite`.** That builds without a pre-step now: `boxlite` fetches the
   runtime archive over TLS and `rto-exec`'s build script verifies **every
