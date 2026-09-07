@@ -109,18 +109,22 @@ fn is_justified(lines: &[&str], i: usize) -> bool {
 /// ```
 ///
 /// The scan ends where the attribute's brackets balance, counting **code only**:
-/// a `//` comment is cut from each line first. Without that, one unbalanced `[`
-/// in an inline comment kept the scan open and let a *later* attribute's reason
-/// justify this one — measured, and the failure runs the dangerous way, since the
-/// rule going quiet reads exactly like a clean file:
+/// [`strip_comments`] removes both flavours — `//` and `/* … */`, the latter
+/// counting nesting — before a line is measured. Without that, one unbalanced `[`
+/// inside a comment kept the scan open and let a *later* attribute's reason
+/// justify this one. All three shapes were measured, and each reported **0**
+/// violations where 1 is right, because the failure runs the dangerous way: the
+/// rule going quiet reads exactly like a clean file.
 ///
 /// ```text
 /// #[allow(
-///     clippy::a, // see note [1
+///     clippy::a, // see note [1                 ← a line comment
+///     clippy::b, /* see note [1 */              ← a block comment
+///     clippy::c, /* see /* note */ [1 */        ← a nested block comment
 /// )]
 /// fn f() {}          // ← reported before, silently accepted after
 ///
-/// #[allow(clippy::b, reason = "stated")]
+/// #[allow(clippy::d, reason = "stated")]
 /// ```
 ///
 /// It is bounded as well, so a `]` inside the reason string cannot make it run to
