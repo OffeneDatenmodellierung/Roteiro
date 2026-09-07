@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.8.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.7.0...roteiro-v5.8.0) - 2026-09-07
+
+### Added
+
+- *(okf)* inventory what a bundle carries besides its concepts
+
+### Fixed
+
+- *(config)* `check --json` was the one command a dead pattern could not reach
+- *(config)* an unmatched brace is a filename, and two wording fixes
+- *(config)* "matches nothing" was false — an unsupported construct is
+- *(config)* a `[debt] ignore` pattern that matches nothing now says so ([#754](https://github.com/OffeneDatenmodellierung/Roteiro/pull/754))
+- *(okf)* the inventory swallowed two more failures, and said director(y/ies)
+- *(okf)* the inventory walked recursively, swallowed IO errors, and used \
+
+### Other
+
+- *(config)* ask the singular form, now that there is one
+
 ## [5.7.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.6.0...roteiro-v5.7.0) - 2026-09-03
 
 ### Added
