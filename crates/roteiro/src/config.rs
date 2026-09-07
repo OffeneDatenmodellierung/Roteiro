@@ -418,29 +418,48 @@ impl DebtConfig {
 /// prints is one nobody sees at the moment the number is wrong.
 #[must_use]
 pub fn ignore_problems(patterns: &[String]) -> Vec<String> {
-    patterns
-        .iter()
-        .filter_map(|pattern| {
-            let unsupported = if pattern.starts_with('!') {
-                "negation (a leading `!`) is not interpreted — use `ignore_reset` \
-                 to drop inherited patterns, which cannot fail quietly the way a \
-                 mistyped negation does"
-            } else if pattern.contains('{') || pattern.contains('}') {
-                "brace expansion is not interpreted — write one pattern per branch"
-            } else if pattern.contains('[') || pattern.contains(']') {
-                "character classes are not interpreted — use `?`, or write the \
-                 patterns out"
-            } else {
-                return None;
-            };
-            Some(format!(
-                "`[debt] ignore` pattern {pattern:?}: {unsupported}. Patterns are \
-                 matched with `**`, `*` and `?` only, and every other character is \
-                 matched literally — so this excludes only a path whose name really \
-                 contains those characters, and almost certainly nothing at all."
-            ))
-        })
-        .collect()
+    patterns.iter().filter_map(|p| ignore_problem(p)).collect()
+}
+
+/// What one `[debt] ignore` pattern cannot express, or `None` when it is fine.
+///
+/// Split from [`ignore_problems`] so a caller asking about a **single** pattern —
+/// `roteiro config`, marking each row of its listing — can ask directly instead
+/// of building a one-element slice to feed the plural form.
+///
+/// A brace or a class is reported only when the pattern carries **both**
+/// delimiters, in that order. An unmatched `{` cannot be a brace expansion in any
+/// syntax, so an author who wrote one did not mean expansion — they meant a
+/// filename with a brace in it, and that is matched literally and works exactly
+/// as written. Warning about it would be noise, and a noisy check is one people
+/// stop reading, which is the state issue #753 found `unjustified-allow` in.
+///
+/// A leading `!` needs no such pairing: it is the whole construct.
+#[must_use]
+pub fn ignore_problem(pattern: &str) -> Option<String> {
+    let paired = |open: char, close: char| {
+        pattern
+            .find(open)
+            .is_some_and(|at| pattern[at + open.len_utf8()..].contains(close))
+    };
+    let unsupported = if pattern.starts_with('!') {
+        "negation (a leading `!`) is not interpreted — use `ignore_reset` \
+         to drop inherited patterns, which cannot fail quietly the way a \
+         mistyped negation does"
+    } else if paired('{', '}') {
+        "brace expansion is not interpreted — write one pattern per branch"
+    } else if paired('[', ']') {
+        "character classes are not interpreted — use `?`, or write the \
+         patterns out"
+    } else {
+        return None;
+    };
+    Some(format!(
+        "`[debt] ignore` pattern {pattern:?}: {unsupported}. Patterns are \
+         matched with `**`, `*` and `?` only, and every other character is \
+         matched literally — so this excludes only a path whose name really \
+         contains those characters, and almost certainly nothing at all."
+    ))
 }
 
 /// `[remote]` — the optional, **default-off** remote model tier (ADR-0019), and
@@ -3799,6 +3818,33 @@ mod tests {
                 "{pattern}"
             );
         }
+    }
+
+    /// **An unmatched delimiter is a filename, not a construct.**
+    ///
+    /// A lone `{` cannot be a brace expansion in any syntax, so an author who
+    /// wrote one meant a filename with a brace in it — which is matched literally
+    /// and works exactly as written. Warning about it would be noise, and a noisy
+    /// check is one people stop reading, which is the state issue #753 found
+    /// `unjustified-allow` in.
+    ///
+    /// The order matters as well as the pairing: `}` before `{` closes nothing.
+    #[test]
+    fn an_unmatched_delimiter_is_a_filename_rather_than_a_construct() {
+        for literal in ["docs/oh{/**", "docs/x}.md", "docs/[draft/**", "docs/x].md"] {
+            assert!(
+                super::ignore_problem(literal).is_none(),
+                "`{literal}` is a path with an odd character in it, not a construct"
+            );
+        }
+        assert!(
+            super::ignore_problem("docs/}x{/**").is_none(),
+            "closed before opened"
+        );
+
+        // And the genuine constructs are still caught.
+        assert!(super::ignore_problem("{a,b}/**").is_some());
+        assert!(super::ignore_problem("[ab]/**").is_some());
     }
 
     /// **A `!` inside a pattern is not a negation**, and is left alone.

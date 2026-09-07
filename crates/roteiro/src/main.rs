@@ -3920,12 +3920,11 @@ fn print_debt_section(loaded: &config::Loaded) {
             // named `[v]endor` *is* excluded by `[v]endor/**` — measured — so the
             // mark says what the pattern does rather than claiming a result this
             // command cannot see.
-            let dead =
-                if config::ignore_problems(std::slice::from_ref(&pattern.to_owned())).is_empty() {
-                    ""
-                } else {
-                    "  ** matched literally"
-                };
+            let dead = if config::ignore_problem(pattern).is_some() {
+                "  ** matched literally"
+            } else {
+                ""
+            };
             println!("    {pattern:?}  ({layer}){dead}");
         }
     }
@@ -8888,7 +8887,14 @@ fn run_debt(
     Ok(())
 }
 
-/// Warn on stderr about `[debt] ignore` patterns that match nothing.
+/// Warn on stderr about `[debt] ignore` patterns the matcher cannot interpret.
+///
+/// Not "patterns that match nothing", which the earlier wording here claimed and
+/// which is false: every other character is matched **literally**, so
+/// `[v]endor/**` really does exclude a directory named `[v]endor` — measured, and
+/// asserted by `an_unsupported_construct_is_matched_literally`. What is true is
+/// that the construct is not interpreted, so the pattern almost never excludes
+/// what its author meant.
 ///
 /// Called wherever the list is **applied**, not only from `roteiro config`. A
 /// pattern is written once and read never again, so a report only that command
