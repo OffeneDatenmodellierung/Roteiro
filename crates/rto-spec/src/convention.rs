@@ -127,9 +127,11 @@ fn is_justified(lines: &[&str], i: usize) -> bool {
 /// #[allow(clippy::d, reason = "stated")]
 /// ```
 ///
-/// It is bounded as well, so a `]` inside the reason string cannot make it run to
-/// the end of the file. The bound only ever *loses* a justification, never
-/// invents one — the safe direction for a rule whose failure is silence.
+/// It is bounded as well, so an unbalanced bracket inside a *string* cannot make
+/// it run to the end of the file. That bound is a runaway backstop rather than a
+/// formatting limit — see `MAX_SPAN`, which is set two orders of magnitude above
+/// the longest attribute in this repository, because hitting it reads as "no
+/// reason found" and that is the false positive this rule was retired for.
 ///
 /// Matched on a **token** boundary and on the `=` that follows, so a lint named
 /// `…::unreasonable` and prose containing the word "reason" in a trailing comment
@@ -138,7 +140,19 @@ fn is_justified(lines: &[&str], i: usize) -> bool {
 /// reads structure.
 fn carries_reason(lines: &[&str], i: usize) -> bool {
     /// Attribute lines scanned before giving up.
-    const MAX_SPAN: usize = 40;
+    ///
+    /// A **runaway backstop**, not a formatting limit, and the difference is why
+    /// it is 200 rather than the 40 it started at. Hitting it means "no reason
+    /// found", which is a false positive — the failure this whole rule was
+    /// retired for — so the bound must sit far above any attribute anyone writes.
+    /// Measured on this repository: the longest `#[allow(…)]` here spans **4**
+    /// lines, and the other twenty-two are one.
+    ///
+    /// It is still needed. Comments no longer hold the scan open, but an
+    /// unbalanced `[` inside a *string* can — `#[doc = "["]` leaves depth at one —
+    /// and without a bound such an attribute would carry the scan to the end of
+    /// the file, where any later `reason` would justify it.
+    const MAX_SPAN: usize = 200;
 
     let mut depth = 0i32;
     let mut comment_depth = 0usize;
@@ -574,6 +588,38 @@ mod tests {
             )
             .is_empty(),
             "a real reason after a multi-line block comment still counts"
+        );
+    }
+
+    /// **A long attribute still finds its reason.**
+    ///
+    /// The scan is bounded, and hitting the bound reads as "no reason found" — a
+    /// false positive, which is the failure this whole rule was retired for. At
+    /// the original 40 lines an `#[allow(…)]` listing many lints with its reason
+    /// last would have been flagged despite carrying one.
+    ///
+    /// Both sides are asserted: the reason is found at 120 lines, and the bound is
+    /// still a bound at 400. Only the first would pass if `MAX_SPAN` were removed
+    /// altogether, which would let one unbalanced bracket in a string carry the
+    /// scan to the end of the file.
+    #[test]
+    fn a_long_attribute_still_finds_its_reason_and_the_bound_still_bounds() {
+        let long = |lints: usize| {
+            let mut src = String::from("#[allow(\n");
+            for n in 0..lints {
+                src.push_str(&format!("    clippy::lint_{n},\n"));
+            }
+            src.push_str("    reason = \"stated\"\n)]\nfn f() {}\n");
+            src
+        };
+        assert!(
+            hits(&long(120)).is_empty(),
+            "a reason 120 lines down is still a reason"
+        );
+        assert_eq!(
+            hits(&long(400)).len(),
+            1,
+            "and past the backstop the scan gives up, which is what the backstop is"
         );
     }
 
