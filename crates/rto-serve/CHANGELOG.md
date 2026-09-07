@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.8.2](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v5.8.0...rto-serve-v5.8.2) - 2026-09-07
+
+### Fixed
+
+- *(serve)* saturate the reported total, and drop a comment that was false
+- *(serve)* say whether a tool is large by its prose or by its schema
+- *(serve)* measure every tool before naming the oversized ones
+- *(serve)* an oversized `tools` array now names what to cut ([#578](https://github.com/OffeneDatenmodellierung/Roteiro/pull/578))
+
+### Other
+
+- release v5.8.1
+- *(serve)* an ordering assert must not pass on a name that is absent
+- *(serve)* name the behaviour the new test pins, not the PR
+
 ## [5.8.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v5.8.0...rto-serve-v5.8.1) - 2026-09-07
 
 ### Fixed
