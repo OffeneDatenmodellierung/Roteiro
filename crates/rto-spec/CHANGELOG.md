@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.8.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v5.7.0...rto-spec-v5.8.0) - 2026-09-07
+
+### Fixed
+
+- *(spec)* the long-attribute fixture failed clippy
+- *(spec)* the 40-line scan bound was itself a false positive
+- *(spec)* a nested block comment ended the scan early
+- *(spec)* a block comment hid the end of the attribute too
+- *(spec)* a bracket in a comment carried the reason scan into the next
+- *(spec)* `reason = "…"` is a justification ([#753](https://github.com/OffeneDatenmodellierung/Roteiro/pull/753))
+
+### Other
+
+- *(spec)* carries_reason still said only `//` comments were stripped
+- *(spec)* fold strip_comments' tail into one return
+
 ## [5.7.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v5.6.0...rto-spec-v5.7.0) - 2026-09-03
 
 ### Added
