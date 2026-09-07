@@ -436,14 +436,22 @@ fn client_tools_from(specs: Vec<ToolSpec>) -> Result<Vec<ToolDef>, String> {
         // model calling tools whose arguments no longer match what the client
         // will execute — corrupting exactly the correlation the `tool_call_id`
         // handling elsewhere is careful to preserve.
-        if advertised_bytes > MAX_CLIENT_TOOL_BYTES {
-            return Err(oversized_tools_message(&sizes, MAX_CLIENT_TOOL_BYTES));
-        }
         client_tools.push(ToolDef {
             name,
             description,
             parameters,
         });
+    }
+    // Checked **after** the loop, not inside it. Returning at the first tool that
+    // crossed the line would leave `sizes` holding only the prefix processed so
+    // far — under-reporting the total and naming whichever tools happened to come
+    // early rather than the ones actually worth cutting. A surface whose one
+    // expensive tool sits last would be diagnosed entirely wrongly.
+    //
+    // Costs nothing a caller can abuse: `MAX_CLIENT_TOOLS` capped the array at
+    // 128 before the loop began, and each iteration was already doing this work.
+    if advertised_bytes > MAX_CLIENT_TOOL_BYTES {
+        return Err(oversized_tools_message(&sizes, MAX_CLIENT_TOOL_BYTES));
     }
     Ok(client_tools)
 }
@@ -954,6 +962,45 @@ mod tests {
         assert!(
             tied.find("`aaa`") < tied.find("`bbb`"),
             "equal sizes list by name: {tied}"
+        );
+    }
+
+    #[test]
+    fn the_worst_tool_is_named_even_when_it_arrives_after_the_overflow() {
+        // The bound is crossed by tool 4, and the tool actually worth cutting is
+        // tool 6. Deciding *while* measuring would have reported only the four
+        // that happened to come first — naming the cheap padding as the culprit
+        // and under-reporting the total by more than the whale itself. Found in
+        // review of #766; the earlier test missed it because its largest tools
+        // were also its last.
+        let pad = "x".repeat(8 * 1024);
+        let whale = "w".repeat(20 * 1024);
+        let mut specs: Vec<serde_json::Value> =
+            (0..5).map(|i| tool(&format!("pad-{i}"), &pad)).collect();
+        specs.push(tool("whale", &whale));
+
+        let err = with_tools(&serde_json::Value::Array(specs)).expect_err("must be rejected");
+
+        assert!(
+            err.contains("`whale`"),
+            "the tool worth cutting is named even though the bound broke before it: {err}"
+        );
+        assert!(
+            err.find("`whale`") < err.find("`pad-"),
+            "and it is named first, being the largest: {err}"
+        );
+        // Every tool measured, so the total is the whole array — not the prefix
+        // that happened to reach the threshold. Each tool also carries the
+        // defaulted empty schema, which is counted because the client would send
+        // it and the model would be given it.
+        let empty_schema = r#"{"type":"object"}"#.len();
+        let total = 5 * (8 * 1024 + "pad-0".len() + empty_schema)
+            + 20 * 1024
+            + "whale".len()
+            + empty_schema;
+        assert!(
+            err.contains(&total.to_string()),
+            "the total counts all six tools ({total}): {err}"
         );
     }
 
