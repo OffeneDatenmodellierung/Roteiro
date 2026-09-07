@@ -203,16 +203,10 @@ fn strip_comments(line: &str, in_block: &mut bool) -> String {
             rest = &rest[b + 2..];
             continue;
         }
-        match line_at {
-            Some(l) => {
-                out.push_str(&rest[..l]);
-                return out;
-            }
-            None => {
-                out.push_str(rest);
-                return out;
-            }
-        }
+        // No block opener ahead, so the line ends here: at a `//` if there is
+        // one, otherwise at its end.
+        out.push_str(&rest[..line_at.unwrap_or(rest.len())]);
+        return out;
     }
 }
 
