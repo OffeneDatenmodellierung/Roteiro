@@ -14808,6 +14808,21 @@ type SharedToolRegistry = std::sync::Arc<dyn rto_serve::ToolRegistry>;
 #[cfg(feature = "serve")]
 type WorkspaceToolRegistries = std::collections::HashMap<String, SharedToolRegistry>;
 
+#[cfg(feature = "serve")]
+/// The operator-set request bounds `[serve]` produces, for the served router.
+///
+/// **Both** arms take these. A server with no graph registry still accepts a
+/// *client's* `tools` array — it returns the tool calls rather than running them
+/// — so `[serve] tools = false` must not silently drop the operator's bound.
+fn serve_limits(cfg: &config::Config) -> rto_serve::Limits {
+    rto_serve::Limits {
+        max_client_tool_bytes: cfg
+            .serve
+            .max_client_tool_bytes
+            .unwrap_or(config::DEFAULT_MAX_CLIENT_TOOL_BYTES),
+    }
+}
+
 /// Assemble the graph tools and serve the endpoint: `/v1` alone, or — with
 /// `--mcp` — `/v1` **and** `/mcp` merged on one port (ADR-0008). Blocks until
 /// shutdown.
@@ -14903,9 +14918,12 @@ fn serve_v1_tail(
     // `/mcp` are just axum path prefixes, so the routers merge. Serving the router
     // directly is equivalent to `serve_blocking[_with_tools]` (they build the same
     // app), so this path also covers the plain (`/v1`-only) case.
+    let limits = serve_limits(cfg);
     let router = match tools {
-        Some(tools) => rto_serve::app_with_workspace_tools(engine, tools, workspace_tools),
-        None => rto_serve::app(engine),
+        Some(tools) => {
+            rto_serve::app_with_workspace_tools_limited(engine, tools, workspace_tools, limits)
+        }
+        None => rto_serve::app_limited(engine, limits),
     };
 
     // With the explorer UI compiled in (`--features serve,explorer`), a

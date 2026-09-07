@@ -42,9 +42,11 @@ pub use openai_params::{Forward, Mention, OPENAI_CHAT_PARAMS, Param, Support, ch
 pub use rto_llama::{
     ChatRequest, Completion, CompletionStats, Engine, EngineError, FinishReason, Message, ModelInfo,
 };
+// The request-path bounds an operator sets, re-exported alongside the `app_*`
+// constructors that take them so a caller needs one import, not two.
 pub use server::{
-    app, app_with_tools, app_with_workspace_tools, serve_blocking, serve_blocking_router,
-    serve_blocking_with_tools,
+    app, app_limited, app_with_tools, app_with_workspace_tools, app_with_workspace_tools_limited,
+    serve_blocking, serve_blocking_router, serve_blocking_with_tools,
 };
 #[cfg(feature = "tls")]
 pub use server::{serve_blocking_router_tls, serve_blocking_tls};
@@ -52,3 +54,4 @@ pub use tools::{
     ClientToolCall, ToolDef, ToolLoopOutcome, ToolRegistry, advertised_system_prompt,
     chat_with_client_tools, chat_with_tools,
 };
+pub use types::{DEFAULT_MAX_CLIENT_TOOL_BYTES, Limits};

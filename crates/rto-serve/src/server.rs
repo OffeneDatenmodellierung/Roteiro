@@ -79,6 +79,9 @@ struct AppState {
     /// unless the caller built one ([`app_with_workspace_tools`]); the unscoped and
     /// `/v1/{project}/…` routes never consult it, so the default paths are untouched.
     workspaces: std::collections::HashMap<String, Arc<dyn ToolRegistry>>,
+    /// Operator-set request bounds. [`crate::types::Limits::default`] unless the
+    /// caller built the router with [`app_with_workspace_tools_limited`].
+    limits: crate::types::Limits,
 }
 type Shared = Arc<AppState>;
 
@@ -88,6 +91,23 @@ pub fn app(engine: Arc<dyn Engine>) -> Router {
         engine,
         tools: None,
         workspaces: std::collections::HashMap::new(),
+        limits: crate::types::Limits::default(),
+    }))
+}
+
+/// As [`app`], but with operator-set request bounds rather than the built-in
+/// defaults.
+///
+/// The untooled router still needs these. A server with no graph registry does
+/// not stop accepting a **client's** `tools` array — it just returns the tool
+/// calls for the client to execute instead of running them itself — so the
+/// oversized-`tools` bound applies on this path exactly as on the tooled one.
+pub fn app_limited(engine: Arc<dyn Engine>, limits: crate::types::Limits) -> Router {
+    router(Arc::new(AppState {
+        engine,
+        tools: None,
+        workspaces: std::collections::HashMap::new(),
+        limits,
     }))
 }
 
@@ -98,6 +118,7 @@ pub fn app_with_tools(engine: Arc<dyn Engine>, tools: Arc<dyn ToolRegistry>) -> 
         engine,
         tools: Some(tools),
         workspaces: std::collections::HashMap::new(),
+        limits: crate::types::Limits::default(),
     }))
 }
 
@@ -121,6 +142,33 @@ pub fn app_with_workspace_tools(
         engine,
         tools: Some(tools),
         workspaces,
+        limits: crate::types::Limits::default(),
+    }))
+}
+
+/// As [`app_with_workspace_tools`], but with operator-set request bounds rather
+/// than the built-in defaults.
+///
+/// Separate from [`app_with_workspace_tools`] so that adding a bound cannot
+/// silently change what an existing caller enforces: a caller that has not been
+/// updated keeps [`crate::types::Limits::default`], which is what it had before
+/// the parameter existed.
+// Allowed for the reason its unlimited twin above gives: the map is moved
+// straight into `AppState`, which fixes the default hasher, and every caller
+// builds it with the std default — so generalising over `BuildHasher` would add
+// a type parameter for no benefit.
+#[allow(clippy::implicit_hasher)]
+pub fn app_with_workspace_tools_limited(
+    engine: Arc<dyn Engine>,
+    tools: Arc<dyn ToolRegistry>,
+    workspaces: std::collections::HashMap<String, Arc<dyn ToolRegistry>>,
+    limits: crate::types::Limits,
+) -> Router {
+    router(Arc::new(AppState {
+        engine,
+        tools: Some(tools),
+        workspaces,
+        limits,
     }))
 }
 
@@ -418,7 +466,7 @@ async fn chat_completions_workspace_scoped(
 /// path, carrying the tool scope for the tool loop.
 async fn run_chat(state: Shared, body: ChatCompletionRequest, scope: ChatScope) -> Response {
     let stream = body.stream == Some(true);
-    let normalised = match body.normalise() {
+    let normalised = match body.normalise(state.limits) {
         Ok(n) => n,
         Err(msg) => return error(StatusCode::BAD_REQUEST, msg, "invalid_request_error"),
     };
@@ -1014,6 +1062,53 @@ mod tests {
     async fn body_json(resp: axum::response::Response) -> serde_json::Value {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// `[serve] tools = false` builds the untooled router, and that router still
+    /// accepts a *client's* `tools` array — it returns the tool calls instead of
+    /// running them. So the operator's bound has to reach this path too. It did
+    /// not: `limits` was read from config and then only passed on the tooled arm,
+    /// so `max_client_tool_bytes` was silently the built-in whenever graph tools
+    /// were off. Raised in review of #769.
+    #[tokio::test]
+    async fn the_untooled_router_enforces_the_operator_s_bound() {
+        let router = super::app_limited(
+            std::sync::Arc::new(MockEngine),
+            crate::types::Limits {
+                max_client_tool_bytes: 512,
+            },
+        );
+        // Comfortably under the 32 KiB built-in, so only the configured bound can
+        // refuse it — the assertion is vacuous against `Limits::default()`.
+        let body = serde_json::json!({
+            "model": "echo",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{
+                "type": "function",
+                "function": {"name": "wordy", "description": "z".repeat(1_024)},
+            }],
+        });
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let msg = body_json(resp).await["error"]["message"]
+            .as_str()
+            .expect("an error message")
+            .to_owned();
+        assert!(
+            msg.contains("512 byte limit"),
+            "the bound in force is the operator's, not the built-in: {msg}"
+        );
     }
 
     #[tokio::test]
