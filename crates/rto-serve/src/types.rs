@@ -80,9 +80,18 @@ const MAX_CLIENT_TOOLS: usize = 128;
 /// clamps `window_for_request`, so where an operator has set that, the
 /// allocation is bounded whatever arrives here.
 ///
-/// Raising this is not free even when it is safe: every advertised byte is
-/// prompt on *every* request. At a 26k-token window, 32 KiB of tools is already
-/// about a third of it before a word of conversation.
+/// **Raising it makes the bound reachable, not the surface affordable, and #578
+/// lists raising it as an explicit non-goal.** There is no prefix cache, so the
+/// whole advertised surface is re-prefilled on every turn. Measured there on
+/// `qwen3.8-27b`: 4.94 bytes per token and 3.13 ms per prompt token, which puts
+/// the default's own 32 KiB at ~6,600 tokens and **~21 s of prefill per turn**,
+/// and 128 KiB at **~83 s**. A raised bound therefore buys a slow session in
+/// place of a hard refusal; it does not buy a fast one. Cutting the surface is
+/// what makes a large client affordable, and a prefix cache (#578) is what would
+/// make it unnecessary.
+///
+/// The key exists because that trade is the operator's to make and was not
+/// theirs to reach, not because the trade is a good one at every size.
 pub const DEFAULT_MAX_CLIENT_TOOL_BYTES: usize = 32 * 1024;
 
 /// Operator-set bounds the request path enforces.

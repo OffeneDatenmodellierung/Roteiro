@@ -1327,8 +1327,15 @@ pub struct ServeConfig {
     ///
     /// It is a backstop, not the only guard: `max_context_tokens` clamps the
     /// window directly, so where that is set the allocation is bounded whatever
-    /// arrives here. And raising it is never free even when it is safe, because
-    /// every advertised byte is prompt on every request.
+    /// arrives here.
+    ///
+    /// **Before raising it, read #578, which lists raising it as a non-goal.**
+    /// There is no prefix cache, so the whole surface is re-prefilled every turn:
+    /// measured on `qwen3.8-27b` at 4.94 bytes/token and 3.13 ms/prompt token,
+    /// the 32 KiB default already costs ~21 s per turn and 128 KiB costs ~83 s.
+    /// Raising this trades a hard refusal for a slow session. It is the
+    /// operator's trade to make — which is why the key exists — but it is not a
+    /// good trade at every size.
     pub max_client_tool_bytes: Option<usize>,
     pub tls_cert: Option<String>,
     /// PEM private-key file paired with `tls_cert` (PKCS#8 or RSA).
