@@ -444,7 +444,7 @@ pub fn scan_unjustified_allows(rel_path: &str, text: &str) -> Vec<Violation> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ViolationKind, scan_lossy_identity};
+    use super::{ViolationKind, scan_lossy_identity, scan_unjustified_allows};
 
     /// The defect issue #770 records: a doc comment belongs to the item, not to
     /// the attribute, so counting it made this rule satisfiable by accident —
@@ -547,8 +547,6 @@ mod tests {
         let md = "Call `sha256_hex(p.to_string_lossy().as_bytes())` to hash a path.\n";
         assert!(scan_lossy_identity("docs/guide.md", md).is_empty());
     }
-
-    use super::scan_unjustified_allows;
 
     fn hits(text: &str) -> Vec<String> {
         scan_unjustified_allows("src/x.rs", text)
