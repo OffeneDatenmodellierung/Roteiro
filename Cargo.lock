@@ -4460,7 +4460,7 @@ dependencies = [
  "okf-core",
  "serde_json",
  "sqlparser",
- "syn 2.0.119",
+ "syn 3.0.4",
  "tree-sitter",
  "tree-sitter-bash",
  "tree-sitter-javascript",

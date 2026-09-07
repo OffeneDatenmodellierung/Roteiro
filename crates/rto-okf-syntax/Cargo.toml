@@ -111,7 +111,7 @@ sql = ["dep:sqlparser"]
 # be a test rather than a comment. It is already in the workspace lockfile, so it
 # costs nothing.
 [dev-dependencies]
-syn = { version = "2", features = ["full", "parsing"] }
+syn = { version = "3", features = ["full", "parsing"] }
 
 [lints]
 workspace = true
