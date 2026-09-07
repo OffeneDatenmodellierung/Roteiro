@@ -3786,7 +3786,7 @@ mod tests {
     /// reported 2 — the user's edit changing nothing and saying nothing.
     #[test]
     fn an_unsupported_ignore_pattern_is_reported_by_construct() {
-        let problems = |p: &str| super::ignore_problems(std::slice::from_ref(&p.to_owned()));
+        let problems = |p: &str| super::ignore_problem(p).into_iter().collect::<Vec<_>>();
 
         assert!(
             problems("vendor/**").is_empty(),
