@@ -364,6 +364,104 @@ pub struct DebtConfig {
     pub ignore_reset: NotInherited<bool>,
 }
 
+impl DebtConfig {
+    /// Every `ignore` pattern that cannot do what its author meant, as a sentence
+    /// naming the pattern and what it actually does.
+    ///
+    /// The matcher implements `**`, `*` and `?` and nothing else, so anything
+    /// outside those is **matched literally**: `!vendor` is a directory whose name
+    /// begins with `!`, and `[v]endor` is one called `[v]endor`.
+    ///
+    /// Measured, because the first draft of this said such a pattern "matches
+    /// nothing" and that is false — a repository holding a directory literally
+    /// named `[v]endor` has it excluded, and the count moves. What is true is
+    /// narrower and worth stating exactly: the construct is not *interpreted*, so
+    /// the pattern excludes only a path that literally contains those characters,
+    /// which is almost never what its author meant.
+    ///
+    /// Reported rather than refused at load, which is
+    /// [`ModelsConfig::resolve`]'s rule in this file: a bad value fails where it
+    /// is *consumed*, so `roteiro config` can report it rather than being the one
+    /// command a bad entry stops.
+    ///
+    /// **The two failure directions are not symmetric, and the second is why this
+    /// is worth a check rather than a documentation note.** Under-ignoring
+    /// (`{a,b}/**`) leaves the inventory noisier than expected, which is visible
+    /// in the number. Over-ignoring — `docs/**` alongside `!docs/keep.md` — leaves
+    /// a file's debt hidden behind a config that appears to account for it, and
+    /// **nothing in the output distinguishes that from the file having no debt**.
+    ///
+    /// Negation is the case worth naming, because refusing it is not a gap:
+    /// [`Self::ignore_reset`] exists precisely so that an inherited pattern can be
+    /// removed, and its docstring already argues that `!` would be the wrong
+    /// spelling for it — "mistype `!vendour/**` and it matches no inherited
+    /// pattern, removes nothing, and says nothing". That is what this reports,
+    /// which the decision anticipated and the matcher never enforced.
+    #[must_use]
+    pub fn problems(&self) -> Vec<String> {
+        ignore_problems(self.ignore.as_deref().unwrap_or_default())
+    }
+}
+
+/// [`DebtConfig::problems`] over an already-resolved pattern list.
+///
+/// Syntactic, and deliberately so: it reports what the *pattern* cannot express,
+/// not what it happens to match in one repository. Testing against the tree would
+/// make the answer depend on which repository asked, and would go quiet on
+/// exactly the directory an author is about to create — while the belief being
+/// corrected, "my exclusion is in force", is wrong whether or not a
+/// literally-named path exists today.
+///
+/// The commands that *apply* the list hold the merged `Vec<String>` rather than
+/// the table it came from, and they are where this has to be said: a pattern is
+/// usually written once and read never again, so a report only `roteiro config`
+/// prints is one nobody sees at the moment the number is wrong.
+#[must_use]
+pub fn ignore_problems(patterns: &[String]) -> Vec<String> {
+    patterns.iter().filter_map(|p| ignore_problem(p)).collect()
+}
+
+/// What one `[debt] ignore` pattern cannot express, or `None` when it is fine.
+///
+/// Split from [`ignore_problems`] so a caller asking about a **single** pattern —
+/// `roteiro config`, marking each row of its listing — can ask directly instead
+/// of building a one-element slice to feed the plural form.
+///
+/// A brace or a class is reported only when the pattern carries **both**
+/// delimiters, in that order. An unmatched `{` cannot be a brace expansion in any
+/// syntax, so an author who wrote one did not mean expansion — they meant a
+/// filename with a brace in it, and that is matched literally and works exactly
+/// as written. Warning about it would be noise, and a noisy check is one people
+/// stop reading, which is the state issue #753 found `unjustified-allow` in.
+///
+/// A leading `!` needs no such pairing: it is the whole construct.
+#[must_use]
+pub fn ignore_problem(pattern: &str) -> Option<String> {
+    let paired = |open: char, close: char| {
+        pattern
+            .find(open)
+            .is_some_and(|at| pattern[at + open.len_utf8()..].contains(close))
+    };
+    let unsupported = if pattern.starts_with('!') {
+        "negation (a leading `!`) is not interpreted — use `ignore_reset` \
+         to drop inherited patterns, which cannot fail quietly the way a \
+         mistyped negation does"
+    } else if paired('{', '}') {
+        "brace expansion is not interpreted — write one pattern per branch"
+    } else if paired('[', ']') {
+        "character classes are not interpreted — use `?`, or write the \
+         patterns out"
+    } else {
+        return None;
+    };
+    Some(format!(
+        "`[debt] ignore` pattern {pattern:?}: {unsupported}. Patterns are \
+         matched with `**`, `*` and `?` only, and every other character is \
+         matched literally — so this excludes only a path whose name really \
+         contains those characters, and almost certainly nothing at all."
+    ))
+}
+
 /// `[remote]` — the optional, **default-off** remote model tier (ADR-0019), and
 /// the one table in this file whose precedence is not the one the module docs
 /// describe.
@@ -3675,5 +3773,109 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// **An unsupported pattern is reported, and a supported one is not**
+    /// (issue #754).
+    ///
+    /// The matcher implements `**`, `*` and `?`; anything else becomes a literal
+    /// path segment, so `!vendor` is a directory name no repository has and the
+    /// pattern almost never matches. Every row here was measured against
+    /// `roteiro debt` on a two-marker fixture before this existed: the control
+    /// reported 2, `vendor/**` reported 1, and all three unsupported forms
+    /// reported 2 — the user's edit changing nothing and saying nothing.
+    #[test]
+    fn an_unsupported_ignore_pattern_is_reported_by_construct() {
+        let problems = |p: &str| super::ignore_problem(p).into_iter().collect::<Vec<_>>();
+
+        assert!(
+            problems("vendor/**").is_empty(),
+            "the three supported constructs are silent"
+        );
+        assert!(problems("**/*.rs").is_empty());
+        assert!(problems("src/a?c.rs").is_empty());
+
+        // Each construct names itself, so the message says what to write instead
+        // rather than only that something is wrong.
+        let negation = problems("!vendor/a.rs");
+        assert_eq!(negation.len(), 1);
+        assert!(negation[0].contains("negation"), "{}", negation[0]);
+        assert!(
+            negation[0].contains("ignore_reset"),
+            "and points at the key that does what a negation was reached for: {}",
+            negation[0]
+        );
+
+        assert!(problems("{vendor,src}/**")[0].contains("brace expansion"));
+        assert!(problems("[v]endor/**")[0].contains("character classes"));
+
+        // Every message says what the matcher actually does, which is the half a
+        // reader acts on. **Not** "the pattern is inert": every other character is
+        // matched literally, so a directory really named `[v]endor` is excluded by
+        // `[v]endor/**` — see `an_unsupported_construct_is_matched_literally`. The
+        // claim a reader needs is that the construct is not interpreted, so the
+        // pattern almost certainly excludes nothing they meant.
+        for pattern in ["!a", "{a,b}", "[a]"] {
+            assert!(
+                problems(pattern)[0].contains("every other character is matched literally"),
+                "{pattern}"
+            );
+        }
+    }
+
+    /// **An unmatched delimiter is a filename, not a construct.**
+    ///
+    /// A lone `{` cannot be a brace expansion in any syntax, so an author who
+    /// wrote one meant a filename with a brace in it — which is matched literally
+    /// and works exactly as written. Warning about it would be noise, and a noisy
+    /// check is one people stop reading, which is the state issue #753 found
+    /// `unjustified-allow` in.
+    ///
+    /// The order matters as well as the pairing: `}` before `{` closes nothing.
+    #[test]
+    fn an_unmatched_delimiter_is_a_filename_rather_than_a_construct() {
+        for literal in ["docs/oh{/**", "docs/x}.md", "docs/[draft/**", "docs/x].md"] {
+            assert!(
+                super::ignore_problem(literal).is_none(),
+                "`{literal}` is a path with an odd character in it, not a construct"
+            );
+        }
+        assert!(
+            super::ignore_problem("docs/}x{/**").is_none(),
+            "closed before opened"
+        );
+
+        // And the genuine constructs are still caught.
+        assert!(super::ignore_problem("{a,b}/**").is_some());
+        assert!(super::ignore_problem("[ab]/**").is_some());
+    }
+
+    /// **A `!` inside a pattern is not a negation**, and is left alone.
+    ///
+    /// Only a *leading* `!` is the construct users reach for, and a filename may
+    /// legitimately contain one. Reporting those would make the check noise, and a
+    /// noisy check is one people stop reading — which is the state this whole
+    /// issue found the `unjustified-allow` rule in.
+    #[test]
+    fn a_bang_that_is_not_a_leading_negation_is_left_alone() {
+        assert!(super::ignore_problems(&["docs/oh!/**".to_owned()]).is_empty());
+    }
+
+    /// **`DebtConfig::problems` reads the table's own list**, so `roteiro config`
+    /// and the commands that apply the list cannot disagree about what is dead.
+    #[test]
+    fn the_table_and_the_resolved_list_agree() {
+        let debt = super::DebtConfig {
+            ignore: Some(vec!["vendor/**".to_owned(), "!keep.md".to_owned()]),
+            ..super::DebtConfig::default()
+        };
+        assert_eq!(
+            debt.problems(),
+            super::ignore_problems(&debt.ignore.clone().unwrap())
+        );
+        assert_eq!(debt.problems().len(), 1);
+
+        // An absent list has nothing to be wrong with, and must not be an error.
+        assert!(super::DebtConfig::default().problems().is_empty());
     }
 }

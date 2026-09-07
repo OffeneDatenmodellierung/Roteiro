@@ -3911,8 +3911,25 @@ fn print_debt_section(loaded: &config::Loaded) {
             sources.len()
         );
         for (pattern, layer) in sources {
-            println!("    {pattern:?}  ({layer})");
+            // Marked **in the listing**, not only in the notes below it. The
+            // listing is what a reader scans to answer "is my exclusion in
+            // force", and such a pattern printed identically to a live one
+            // answers yes when the answer is no (issue #754).
+            //
+            // "matched literally", not "matches nothing": a directory really
+            // named `[v]endor` *is* excluded by `[v]endor/**` — measured — so the
+            // mark says what the pattern does rather than claiming a result this
+            // command cannot see.
+            let dead = if config::ignore_problem(pattern).is_some() {
+                "  ** matched literally"
+            } else {
+                ""
+            };
+            println!("    {pattern:?}  ({layer}){dead}");
         }
+    }
+    for problem in loaded.effective.debt.problems() {
+        println!("  ** {problem}");
     }
     if loaded.effective.debt.ignore_reset.declared() == Some(true) {
         println!("  ignore_reset = true  (inherited patterns dropped)");
@@ -4591,6 +4608,11 @@ fn run_check(
     let (repo, mut store, cache) = open_graph()?;
     let report = build_graph(&repo, &mut store, &cache, ingest, source.source())?;
     source.announce();
+    // Before the format branch, so `--json` selects a format and nothing else —
+    // this repository's own rule, and it had drifted here: the warning sat inside
+    // the human arm, so `check --json` was the one command a dead pattern could
+    // not reach. It goes to stderr, so a caller parsing stdout is unaffected.
+    warn_dead_ignore_patterns(debt_ignore);
 
     if json {
         emit_json(&report)?;
@@ -8851,6 +8873,7 @@ fn run_debt(
     build_graph(&repo, &mut store, &cache, ingest, source.source())?;
     source.announce();
 
+    warn_dead_ignore_patterns(debt_ignore);
     let report = rto_graph::debt(&store, kinds, debt_ignore)?;
     if json {
         emit_json(&report)?;
@@ -8866,6 +8889,31 @@ fn run_debt(
         println!("{}", debt_summary(&report));
     }
     Ok(())
+}
+
+/// Warn on stderr about `[debt] ignore` patterns the matcher cannot interpret.
+///
+/// Not "patterns that match nothing", which the earlier wording here claimed and
+/// which is false: every other character is matched **literally**, so
+/// `[v]endor/**` really does exclude a directory named `[v]endor` — measured, and
+/// asserted by `an_unsupported_construct_is_matched_literally`. What is true is
+/// that the construct is not interpreted, so the pattern almost never excludes
+/// what its author meant.
+///
+/// Called wherever the list is **applied**, not only from `roteiro config`. A
+/// pattern is written once and read never again, so a report only that command
+/// prints is one nobody sees at the moment the number is wrong — and the
+/// dangerous direction is invisible in the number itself: a `docs/**` exclusion
+/// alongside an inert `!docs/keep.md` hides that file's debt behind a config that
+/// appears to account for it, which looks exactly like the file having none
+/// (issue #754).
+///
+/// stderr, so a piped `roteiro debt` still emits only its listing, and a warning
+/// never lands in what a caller parses.
+fn warn_dead_ignore_patterns(debt_ignore: &[String]) {
+    for problem in config::ignore_problems(debt_ignore) {
+        eprintln!("warning: {problem}");
+    }
 }
 
 /// A one-line summary of a [`rto_graph::DebtReport`], e.g.
@@ -8912,6 +8960,7 @@ fn run_debt_density(
     // set from `rto_graph::DensityOrder` itself (`parse_density_order`), which a
     // clap value parser would replace with its own wording.
     let order = parse_density_order(&rank.order)?;
+    warn_dead_ignore_patterns(debt_ignore);
     let (repo, mut store, cache) = open_graph()?;
     build_graph(&repo, &mut store, &cache, ingest, source.source())?;
     source.announce();
