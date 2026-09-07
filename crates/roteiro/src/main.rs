@@ -7906,6 +7906,9 @@ fn audio_stream_lines(ex: &rto_graph::Explanation) -> Vec<String> {
 /// The channels are ranked separately and limited separately: opting in cannot
 /// displace a graph hit, and neither a generated nor a remembered hit can ever be
 /// read as an extracted fact.
+// Six flags, and Clippy is right that a struct would read better — but these
+// are CLI switches parsed straight off `Command::Search`, so a struct here
+// would be a second spelling of the same arguments, kept in step by hand.
 #[allow(clippy::fn_params_excessive_bools)]
 fn run_search(
     ingest: rto_graph::IngestConfig,
@@ -8369,6 +8372,9 @@ fn resolve_cache_budget(budget_mb: Option<u64>) -> anyhow::Result<u64> {
 /// Record one memory. `body` of `-` reads the prose from stdin, so something with
 /// newlines in it — a stack trace, a diff — does not have to be quoted onto one
 /// command line.
+// Same as `run_search`: the bools are CLI switches arriving from one
+// `Command` variant, so grouping them into a struct would duplicate the
+// argument list rather than replace it.
 #[allow(clippy::fn_params_excessive_bools)]
 fn run_memory_add(
     body: &str,
