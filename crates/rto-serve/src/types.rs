@@ -334,6 +334,92 @@ pub struct NormalisedChat {
     pub parallel_tool_calls: Option<bool>,
 }
 
+/// The rejection message for an oversized `tools` array, naming what to cut.
+///
+/// The old message said only "over 32768 bytes", which is true and unactionable:
+/// a bundle author sees a 400 with no indication of which of their forty tools is
+/// expensive, and the byte count is not something any client computes for itself.
+/// Diagnosing one real case took an hour of driving MCP servers over stdio by
+/// hand to sum their schemas — work the server had already done and thrown away.
+///
+/// What one advertised tool cost, kept so an overflow can be diagnosed.
+///
+/// Carries the schema separately from the total because the advice depends on
+/// it and no fixed advice is right: across this server's own sixteen MCP tools
+/// the schema share runs from 24% to 54% of a tool, so "shorten your
+/// descriptions" and "shorten your schemas" are each wrong about half the
+/// surface. Reporting the split lets the caller cut the half that is actually
+/// large.
+struct ToolSize {
+    bytes: usize,
+    name: String,
+    schema_bytes: usize,
+}
+
+impl ToolSize {
+    /// The schema's share of this tool, rounded, or 0 for a zero-byte tool.
+    fn schema_percent(&self) -> usize {
+        if self.bytes == 0 {
+            return 0;
+        }
+        // `* 100` before dividing: integer division the other way round is
+        // always 0. Saturating because nothing bounds a single tool —
+        // `MAX_CLIENT_TOOL_BYTES` is checked against the array's total, after
+        // this struct is built, so one tool may exceed it on its own.
+        self.schema_bytes.saturating_mul(100) / self.bytes
+    }
+}
+
+/// So it reports the total, the overage, and the largest contributors by name.
+/// **Naming them leaks nothing**: every byte here arrived in the caller's own
+/// request, so this tells them only what they just said.
+///
+/// It stays a refusal rather than becoming a trim — see the caller for why
+/// truncating a client's schemas corrupts the `tool_call_id` correlation.
+fn oversized_tools_message(sizes: &[ToolSize], limit: usize) -> String {
+    /// Tools named in the message before it starts summarising.
+    ///
+    /// Enough to act on — a surface is usually blown by a handful of verbose
+    /// tools rather than uniformly — and short enough that the message stays a
+    /// sentence rather than a dump of everything the caller sent.
+    const NAMED: usize = 5;
+
+    // Saturating, matching the caller's accumulation. `sum()` would panic in a
+    // debug build on overflow — on the error path, turning a rejection this
+    // function exists to explain into a crash that explains nothing.
+    let total: usize = sizes
+        .iter()
+        .fold(0usize, |acc, t| acc.saturating_add(t.bytes));
+    let mut worst: Vec<&ToolSize> = sizes.iter().collect();
+    // Descending by size, then by name so two equal-sized tools list in a stable
+    // order — an error message that reorders between identical requests is one
+    // people stop trusting.
+    worst.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.name.cmp(&b.name)));
+
+    let named: Vec<String> = worst
+        .iter()
+        .take(NAMED)
+        .map(|t| format!("`{}` {} B, {}% schema", t.name, t.bytes, t.schema_percent()))
+        .collect();
+    let rest = worst.len().saturating_sub(NAMED);
+    let and_more = if rest == 0 {
+        String::new()
+    } else {
+        format!(", and {rest} more")
+    };
+
+    format!(
+        "`tools` is too large: {total} bytes of tool names, descriptions and \
+         schemas, over the {limit} byte limit by {}. Largest: {}{and_more}. \
+         Advertise fewer tools, or shorten what each one advertises — a tool's \
+         description and its parameter schema are both counted, and the split \
+         above says which of the two to cut. The limit bounds how much context \
+         a caller can make this server allocate, so it is not raised.",
+        total.saturating_sub(limit),
+        named.join(", "),
+    )
+}
+
 /// Validate a client's `tools` array and convert it to the loop's [`ToolDef`]s.
 ///
 /// Enforces both bounds ([`MAX_CLIENT_TOOLS`], [`MAX_CLIENT_TOOL_BYTES`]) and the
@@ -351,6 +437,10 @@ fn client_tools_from(specs: Vec<ToolSpec>) -> Result<Vec<ToolDef>, String> {
         ));
     }
     let mut client_tools: Vec<ToolDef> = Vec::with_capacity(specs.len());
+    // `(bytes, name)` for every tool, kept so an overflow can name the tools
+    // worth cutting. Bounded work: `MAX_CLIENT_TOOLS` has already capped the
+    // array at 128, so measuring all of them adds no reach a caller can abuse.
+    let mut sizes: Vec<ToolSize> = Vec::with_capacity(specs.len());
     let mut advertised_bytes: usize = 0;
     for t in specs {
         // Only `function` exists in OpenAI's tool envelope. Anything else is
@@ -370,25 +460,37 @@ fn client_tools_from(specs: Vec<ToolSpec>) -> Result<Vec<ToolDef>, String> {
             .function
             .parameters
             .unwrap_or_else(|| serde_json::json!({"type": "object"}));
-        advertised_bytes = advertised_bytes
-            .saturating_add(name.len())
+        let schema_bytes = serde_json::to_string(&parameters).map_or(0, |p| p.len());
+        let tool_bytes = name
+            .len()
             .saturating_add(description.len())
-            .saturating_add(serde_json::to_string(&parameters).map_or(0, |p| p.len()));
+            .saturating_add(schema_bytes);
+        advertised_bytes = advertised_bytes.saturating_add(tool_bytes);
+        sizes.push(ToolSize {
+            bytes: tool_bytes,
+            name: name.clone(),
+            schema_bytes,
+        });
         // Refused, never truncated: trimming a client's schemas would leave the
         // model calling tools whose arguments no longer match what the client
         // will execute — corrupting exactly the correlation the `tool_call_id`
         // handling elsewhere is careful to preserve.
-        if advertised_bytes > MAX_CLIENT_TOOL_BYTES {
-            return Err(format!(
-                "`tools` is too large: over {MAX_CLIENT_TOOL_BYTES} bytes of tool \
-                 names, descriptions and schemas"
-            ));
-        }
         client_tools.push(ToolDef {
             name,
             description,
             parameters,
         });
+    }
+    // Checked **after** the loop, not inside it. Returning at the first tool that
+    // crossed the line would leave `sizes` holding only the prefix processed so
+    // far — under-reporting the total and naming whichever tools happened to come
+    // early rather than the ones actually worth cutting. A surface whose one
+    // expensive tool sits last would be diagnosed entirely wrongly.
+    //
+    // Costs nothing a caller can abuse: `MAX_CLIENT_TOOLS` capped the array at
+    // 128 before the loop began, and each iteration was already doing this work.
+    if advertised_bytes > MAX_CLIENT_TOOL_BYTES {
+        return Err(oversized_tools_message(&sizes, MAX_CLIENT_TOOL_BYTES));
     }
     Ok(client_tools)
 }
@@ -801,6 +903,47 @@ mod tests {
         })
     }
 
+    /// A tool whose weight is in its parameter schema rather than its prose.
+    fn schema_heavy_tool(name: &str, description: &str, filler: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": description,
+                "parameters": {"type": "object", "properties": {filler: {"type": "string"}}},
+            },
+        })
+    }
+
+    #[test]
+    fn the_message_says_whether_a_tool_is_large_by_prose_or_by_schema() {
+        // "Shorten your descriptions" is wrong for about half a real surface:
+        // across this server's own sixteen MCP tools the schema share runs from
+        // 24% to 54%. So the message reports the split rather than picking a
+        // half, and these two tools are the same size by opposite routes.
+        let big = "x".repeat(super::MAX_CLIENT_TOOL_BYTES / 2);
+        let err = with_tools(&serde_json::json!([
+            tool("all-prose", &big),
+            schema_heavy_tool("all-schema", "", &big),
+        ]))
+        .expect_err("must be rejected");
+
+        let prose_at = at(&err, "`all-prose`");
+        let schema_at = at(&err, "`all-schema`");
+        let share = |from: usize| {
+            err[from..]
+                .split_once("% schema")
+                .map(|(head, _)| head.rsplit(", ").next().unwrap_or("").to_owned())
+                .expect("each named tool reports its schema share")
+        };
+        assert_eq!(share(prose_at), "0", "prose-heavy tool, no schema: {err}");
+        assert_eq!(share(schema_at), "99", "schema-heavy tool: {err}");
+        assert!(
+            err.contains("which of the two to cut"),
+            "and the guidance points at the split rather than at descriptions: {err}"
+        );
+    }
+
     #[test]
     fn a_tool_type_other_than_function_is_rejected_not_coerced() {
         // `type` defaults to `function` when omitted, but an explicit unknown
@@ -851,6 +994,108 @@ mod tests {
             with_tools(&serde_json::Value::Array(spread))
                 .expect_err("the total is bounded, not the per-tool size")
                 .contains("too large")
+        );
+    }
+
+    /// **The rejection names what to cut.**
+    ///
+    /// The message used to say only "over 32768 bytes", which is true and
+    /// unactionable: a bundle author sees a 400 naming none of their forty tools,
+    /// and no client computes this byte count for itself. Diagnosing one real case
+    /// (issue #578) took an hour of driving MCP servers over stdio by hand to sum
+    /// schemas the server had already summed and discarded.
+    ///
+    /// Asserted on the parts a reader acts on — the total, the overage, and the
+    /// biggest tool by name — rather than on the whole sentence, so rewording the
+    /// prose does not fail the test while dropping a number would.
+    /// Where `needle` appears in `hay`, failing loudly when it does not.
+    ///
+    /// Ordering assertions must not be written `hay.find(a) < hay.find(b)`:
+    /// `str::find` returns an `Option`, `None < Some(_)`, and so that form
+    /// passes when `a` is missing from the message altogether — reporting the
+    /// order as correct for text that never named `a` at all. Raised in review
+    /// of the oversized-`tools` message, where every one of these assertions is
+    /// checking that the *culprit* was named first.
+    fn at(hay: &str, needle: &str) -> usize {
+        hay.find(needle)
+            .unwrap_or_else(|| panic!("{needle} must appear in: {hay}"))
+    }
+
+    #[test]
+    fn an_oversized_tools_array_names_its_largest_contributors() {
+        let big = "x".repeat(super::MAX_CLIENT_TOOL_BYTES / 2);
+        let small = "y".repeat(64);
+        let err = with_tools(&serde_json::json!([
+            tool("modest", &small),
+            tool("hefty", &big),
+            tool("heftier", &big),
+        ]))
+        .expect_err("must be rejected");
+
+        assert!(err.contains("`heftier`"), "the largest is named: {err}");
+        assert!(err.contains("`hefty`"), "and the next: {err}");
+        assert!(
+            err.contains(&super::MAX_CLIENT_TOOL_BYTES.to_string()),
+            "the limit is stated, not implied: {err}"
+        );
+        assert!(err.contains("over the"), "and the overage: {err}");
+        // The bound is a security bound, so the message must not read as a knob
+        // somebody can turn — see `MAX_CLIENT_TOOL_BYTES`.
+        assert!(err.contains("not raised"), "{err}");
+
+        // Ties order by name, so two identical requests produce identical text.
+        let tied = with_tools(&serde_json::json!([tool("bbb", &big), tool("aaa", &big),]))
+            .expect_err("must be rejected");
+        assert_eq!(
+            tied,
+            with_tools(&serde_json::json!([tool("aaa", &big), tool("bbb", &big)]))
+                .expect_err("must be rejected"),
+            "the same tools in a different order must give the same message"
+        );
+        assert!(
+            at(&tied, "`aaa`") < at(&tied, "`bbb`"),
+            "equal sizes list by name: {tied}"
+        );
+    }
+
+    #[test]
+    fn the_worst_tool_is_named_even_when_it_arrives_after_the_overflow() {
+        // The bound is crossed by tool 4, and the tool actually worth cutting is
+        // tool 6. Deciding *while* measuring would have reported only the four
+        // that happened to come first — naming the cheap padding as the culprit
+        // and under-reporting the total by more than the whale itself.
+        //
+        // Separate from `an_oversized_tools_array_names_its_largest_contributors`
+        // because that one cannot catch this: its largest tools are also its
+        // last, so a prefix of the array happens to contain them.
+        let pad = "x".repeat(8 * 1024);
+        let whale = "w".repeat(20 * 1024);
+        let mut specs: Vec<serde_json::Value> =
+            (0..5).map(|i| tool(&format!("pad-{i}"), &pad)).collect();
+        specs.push(tool("whale", &whale));
+
+        let err = with_tools(&serde_json::Value::Array(specs)).expect_err("must be rejected");
+
+        assert!(
+            err.contains("`whale`"),
+            "the tool worth cutting is named even though the bound broke before it: {err}"
+        );
+        assert!(
+            at(&err, "`whale`") < at(&err, "`pad-"),
+            "and it is named first, being the largest: {err}"
+        );
+        // Every tool measured, so the total is the whole array — not the prefix
+        // that happened to reach the threshold. Each tool also carries the
+        // defaulted empty schema, which is counted because the client would send
+        // it and the model would be given it.
+        let empty_schema = r#"{"type":"object"}"#.len();
+        let total = 5 * (8 * 1024 + "pad-0".len() + empty_schema)
+            + 20 * 1024
+            + "whale".len()
+            + empty_schema;
+        assert!(
+            err.contains(&total.to_string()),
+            "the total counts all six tools ({total}): {err}"
         );
     }
 
