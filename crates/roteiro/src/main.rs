@@ -14811,8 +14811,9 @@ type WorkspaceToolRegistries = std::collections::HashMap<String, SharedToolRegis
 #[cfg(feature = "serve")]
 /// The operator-set request bounds `[serve]` produces, for the served router.
 ///
-/// Only the tooled arm of the router takes these: the untooled arm serves no
-/// tools at all, so a client tool array is refused before any bound applies.
+/// **Both** arms take these. A server with no graph registry still accepts a
+/// *client's* `tools` array — it returns the tool calls rather than running them
+/// — so `[serve] tools = false` must not silently drop the operator's bound.
 fn serve_limits(cfg: &config::Config) -> rto_serve::Limits {
     rto_serve::Limits {
         max_client_tool_bytes: cfg
@@ -14922,7 +14923,7 @@ fn serve_v1_tail(
         Some(tools) => {
             rto_serve::app_with_workspace_tools_limited(engine, tools, workspace_tools, limits)
         }
-        None => rto_serve::app(engine),
+        None => rto_serve::app_limited(engine, limits),
     };
 
     // With the explorer UI compiled in (`--features serve,explorer`), a

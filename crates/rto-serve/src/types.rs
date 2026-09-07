@@ -402,7 +402,7 @@ impl ToolSize {
         }
         // `* 100` before dividing: integer division the other way round is
         // always 0. Saturating because nothing bounds a single tool —
-        // `MAX_CLIENT_TOOL_BYTES` is checked against the array's total, after
+        // The bound is checked against the array's total, after
         // this struct is built, so one tool may exceed it on its own.
         self.schema_bytes.saturating_mul(100) / self.bytes
     }
@@ -461,7 +461,8 @@ fn oversized_tools_message(sizes: &[ToolSize], limit: usize) -> String {
 
 /// Validate a client's `tools` array and convert it to the loop's [`ToolDef`]s.
 ///
-/// Enforces both bounds ([`MAX_CLIENT_TOOLS`], [`MAX_CLIENT_TOOL_BYTES`]) and the
+/// Enforces both bounds ([`MAX_CLIENT_TOOLS`], `max_bytes` — see
+/// [`Limits::max_client_tool_bytes`] and [`DEFAULT_MAX_CLIENT_TOOL_BYTES`]) and the
 /// tool kind. Every failure is a rejection rather than a repair: an oversized
 /// array is refused, not trimmed, and an unknown `type` is refused, not coerced.
 ///
@@ -1067,7 +1068,7 @@ mod tests {
     #[test]
     fn an_oversized_tools_array_is_rejected_rather_than_truncated() {
         // A caller must not be able to choose Roteiro's context allocation by
-        // sending arbitrarily large schemas — see `MAX_CLIENT_TOOL_BYTES` for why
+        // sending arbitrarily large schemas — see `DEFAULT_MAX_CLIENT_TOOL_BYTES` for why
         // that matters once the context window sizes to the prompt (#496).
         //
         // The refusal is the point: truncating would leave the model calling

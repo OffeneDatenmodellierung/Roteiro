@@ -95,6 +95,22 @@ pub fn app(engine: Arc<dyn Engine>) -> Router {
     }))
 }
 
+/// As [`app`], but with operator-set request bounds rather than the built-in
+/// defaults.
+///
+/// The untooled router still needs these. A server with no graph registry does
+/// not stop accepting a **client's** `tools` array — it just returns the tool
+/// calls for the client to execute instead of running them itself — so the
+/// oversized-`tools` bound applies on this path exactly as on the tooled one.
+pub fn app_limited(engine: Arc<dyn Engine>, limits: crate::types::Limits) -> Router {
+    router(Arc::new(AppState {
+        engine,
+        tools: None,
+        workspaces: std::collections::HashMap::new(),
+        limits,
+    }))
+}
+
 /// Build the `/v1` router over `engine` with `tools` auto-registered — the model
 /// may call them to query the graph while answering (ADR-0006).
 pub fn app_with_tools(engine: Arc<dyn Engine>, tools: Arc<dyn ToolRegistry>) -> Router {
@@ -1042,6 +1058,53 @@ mod tests {
     async fn body_json(resp: axum::response::Response) -> serde_json::Value {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// `[serve] tools = false` builds the untooled router, and that router still
+    /// accepts a *client's* `tools` array — it returns the tool calls instead of
+    /// running them. So the operator's bound has to reach this path too. It did
+    /// not: `limits` was read from config and then only passed on the tooled arm,
+    /// so `max_client_tool_bytes` was silently the built-in whenever graph tools
+    /// were off. Raised in review of #769.
+    #[tokio::test]
+    async fn the_untooled_router_enforces_the_operator_s_bound() {
+        let router = super::app_limited(
+            std::sync::Arc::new(MockEngine),
+            crate::types::Limits {
+                max_client_tool_bytes: 512,
+            },
+        );
+        // Comfortably under the 32 KiB built-in, so only the configured bound can
+        // refuse it — the assertion is vacuous against `Limits::default()`.
+        let body = serde_json::json!({
+            "model": "echo",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{
+                "type": "function",
+                "function": {"name": "wordy", "description": "z".repeat(1_024)},
+            }],
+        });
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let msg = body_json(resp).await["error"]["message"]
+            .as_str()
+            .expect("an error message")
+            .to_owned();
+        assert!(
+            msg.contains("512 byte limit"),
+            "the bound in force is the operator's, not the built-in: {msg}"
+        );
     }
 
     #[tokio::test]

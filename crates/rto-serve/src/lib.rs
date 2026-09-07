@@ -45,7 +45,7 @@ pub use rto_llama::{
 // The request-path bounds an operator sets, re-exported alongside the `app_*`
 // constructors that take them so a caller needs one import, not two.
 pub use server::{
-    app, app_with_tools, app_with_workspace_tools, app_with_workspace_tools_limited,
+    app, app_limited, app_with_tools, app_with_workspace_tools, app_with_workspace_tools_limited,
     serve_blocking, serve_blocking_router, serve_blocking_with_tools,
 };
 #[cfg(feature = "tls")]
