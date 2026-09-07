@@ -970,9 +970,11 @@ mod tests {
         // The bound is crossed by tool 4, and the tool actually worth cutting is
         // tool 6. Deciding *while* measuring would have reported only the four
         // that happened to come first — naming the cheap padding as the culprit
-        // and under-reporting the total by more than the whale itself. Found in
-        // review of #766; the earlier test missed it because its largest tools
-        // were also its last.
+        // and under-reporting the total by more than the whale itself.
+        //
+        // Separate from `an_oversized_tools_array_names_its_largest_contributors`
+        // because that one cannot catch this: its largest tools are also its
+        // last, so a prefix of the array happens to contain them.
         let pad = "x".repeat(8 * 1024);
         let whale = "w".repeat(20 * 1024);
         let mut specs: Vec<serde_json::Value> =
