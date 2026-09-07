@@ -4608,6 +4608,11 @@ fn run_check(
     let (repo, mut store, cache) = open_graph()?;
     let report = build_graph(&repo, &mut store, &cache, ingest, source.source())?;
     source.announce();
+    // Before the format branch, so `--json` selects a format and nothing else —
+    // this repository's own rule, and it had drifted here: the warning sat inside
+    // the human arm, so `check --json` was the one command a dead pattern could
+    // not reach. It goes to stderr, so a caller parsing stdout is unaffected.
+    warn_dead_ignore_patterns(debt_ignore);
 
     if json {
         emit_json(&report)?;
@@ -4625,7 +4630,6 @@ fn run_check(
             report.violations.len(),
         );
         // Report intent debt alongside drift (a summary, not a gate).
-        warn_dead_ignore_patterns(debt_ignore);
         println!(
             "{}",
             debt_summary(&rto_graph::debt(&store, &[], debt_ignore)?)

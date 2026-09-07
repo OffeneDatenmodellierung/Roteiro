@@ -211,3 +211,39 @@ fn an_unsupported_construct_is_matched_literally() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// **`--json` selects a format and does not silence the warning.**
+///
+/// It did: the call sat inside `run_check`'s human arm, so `check --json` was the
+/// one command a dead pattern could not reach — and a CI job is exactly where
+/// `--json` is used and exactly where nobody re-reads the config. Same drift as
+/// the `okf trust --check` gate that once lived past a `--json` early return; the
+/// rule is this repository's own, and it is worth a test rather than a comment.
+///
+/// Asserted on `check` though this file is about `debt`, because the fixture
+/// helpers are here and the defect is one line of `run_check`; splitting it into
+/// `check_cli.rs` would separate the assertion from the `[debt] ignore` fixture
+/// that produces it.
+#[test]
+fn check_json_still_warns_about_a_dead_pattern_and_keeps_stdout_parseable() {
+    let dir = fresh_dir_tagged("check-json");
+    git(&dir, &["init", "-q"]);
+    write(
+        &dir,
+        "src/lib.rs",
+        "// TODO: wire this up\npub struct Thing;\n",
+    );
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+    write(&dir, "roteiro.toml", "[debt]\nignore = [\"!src/lib.rs\"]\n");
+
+    let out = roteiro(&dir, &["check", "--json"]);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("negation (a leading `!`)"),
+        "the warning must survive `--json`: {out:?}"
+    );
+    serde_json::from_slice::<serde_json::Value>(&out.stdout)
+        .expect("stdout stays a single JSON document — the warning goes to stderr");
+
+    std::fs::remove_dir_all(&dir).ok();
+}

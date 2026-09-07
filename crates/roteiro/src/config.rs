@@ -3809,9 +3809,12 @@ mod tests {
         assert!(problems("{vendor,src}/**")[0].contains("brace expansion"));
         assert!(problems("[v]endor/**")[0].contains("character classes"));
 
-        // Every message says the consequence, which is the half a reader acts on:
-        // the pattern is inert, so the number they are looking at is the number
-        // they would have had without it.
+        // Every message says what the matcher actually does, which is the half a
+        // reader acts on. **Not** "the pattern is inert": every other character is
+        // matched literally, so a directory really named `[v]endor` is excluded by
+        // `[v]endor/**` — see `an_unsupported_construct_is_matched_literally`. The
+        // claim a reader needs is that the construct is not interpreted, so the
+        // pattern almost certainly excludes nothing they meant.
         for pattern in ["!a", "{a,b}", "[a]"] {
             assert!(
                 problems(pattern)[0].contains("every other character is matched literally"),
