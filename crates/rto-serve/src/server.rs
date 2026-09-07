@@ -153,6 +153,10 @@ pub fn app_with_workspace_tools(
 /// silently change what an existing caller enforces: a caller that has not been
 /// updated keeps [`crate::types::Limits::default`], which is what it had before
 /// the parameter existed.
+// Allowed for the reason its unlimited twin above gives: the map is moved
+// straight into `AppState`, which fixes the default hasher, and every caller
+// builds it with the std default — so generalising over `BuildHasher` would add
+// a type parameter for no benefit.
 #[allow(clippy::implicit_hasher)]
 pub fn app_with_workspace_tools_limited(
     engine: Arc<dyn Engine>,
