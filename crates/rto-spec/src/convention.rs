@@ -77,6 +77,12 @@ fn is_comment(line: &str) -> bool {
 /// else, and treating it as a justification would make the rule pass on
 /// coincidence.
 fn is_justified(lines: &[&str], i: usize) -> bool {
+    // The language's own field, checked first because it is the form Rust
+    // stabilised for exactly this and the one Clippy's
+    // `allow_attributes_without_reason` requires.
+    if carries_reason(lines, i) {
+        return true;
+    }
     // A trailing comment on the attribute's own line, after its closing `]`.
     if let Some((_, tail)) = lines[i].rsplit_once(']')
         && tail.contains("//")
@@ -88,6 +94,178 @@ fn is_justified(lines: &[&str], i: usize) -> bool {
         j -= 1;
     }
     j > 0 && is_comment(lines[j - 1])
+}
+
+/// Whether the attribute opening at `lines[i]` carries a `reason = "…"` field.
+///
+/// Spans the attribute rather than reading one line, because the multi-line form
+/// is the ordinary one once a reason is long enough to be worth writing:
+///
+/// ```text
+/// #[allow(
+///     clippy::too_many_lines,
+///     reason = "one scanner home; splitting would re-fork the copies this deletes"
+/// )]
+/// ```
+///
+/// The scan ends where the attribute's brackets balance, counting **code only**:
+/// [`strip_comments`] removes both flavours — `//` and `/* … */`, the latter
+/// counting nesting — before a line is measured. Without that, one unbalanced `[`
+/// inside a comment kept the scan open and let a *later* attribute's reason
+/// justify this one. All three shapes were measured, and each reported **0**
+/// violations where 1 is right, because the failure runs the dangerous way: the
+/// rule going quiet reads exactly like a clean file.
+///
+/// ```text
+/// #[allow(
+///     clippy::a, // see note [1                 ← a line comment
+///     clippy::b, /* see note [1 */              ← a block comment
+///     clippy::c, /* see /* note */ [1 */        ← a nested block comment
+/// )]
+/// fn f() {}          // ← reported before, silently accepted after
+///
+/// #[allow(clippy::d, reason = "stated")]
+/// ```
+///
+/// It is bounded as well, so an unbalanced bracket inside a *string* cannot make
+/// it run to the end of the file. That bound is a runaway backstop rather than a
+/// formatting limit — see `MAX_SPAN`, which is set two orders of magnitude above
+/// the longest attribute in this repository, because hitting it reads as "no
+/// reason found" and that is the false positive this rule was retired for.
+///
+/// Matched on a **token** boundary and on the `=` that follows, so a lint named
+/// `…::unreasonable` and prose containing the word "reason" in a trailing comment
+/// are not mistaken for the field. That precision matters more here than in the
+/// comment paths: those require a human to have written something, while this one
+/// reads structure.
+fn carries_reason(lines: &[&str], i: usize) -> bool {
+    /// Attribute lines scanned before giving up.
+    ///
+    /// A **runaway backstop**, not a formatting limit, and the difference is why
+    /// it is 200 rather than the 40 it started at. Hitting it means "no reason
+    /// found", which is a false positive — the failure this whole rule was
+    /// retired for — so the bound must sit far above any attribute anyone writes.
+    /// Measured on this repository: the longest `#[allow(…)]` here spans **4**
+    /// lines, and the other twenty-two are one.
+    ///
+    /// It is still needed. Comments no longer hold the scan open, but an
+    /// unbalanced `[` inside a *string* can — `#[doc = "["]` leaves depth at one —
+    /// and without a bound such an attribute would carry the scan to the end of
+    /// the file, where any later `reason` would justify it.
+    const MAX_SPAN: usize = 200;
+
+    let mut depth = 0i32;
+    let mut comment_depth = 0usize;
+    for line in lines.iter().skip(i).take(MAX_SPAN) {
+        // Comments are neither structure nor the field: cutting them keeps a
+        // stray bracket from holding the scan open, and keeps prose from being
+        // read as a `reason`. A trailing comment is a justification by its own
+        // path anyway, so nothing is lost by ignoring it here.
+        let code = strip_comments(line, &mut comment_depth);
+        if has_reason_field(&code) {
+            return true;
+        }
+        for c in code.chars() {
+            match c {
+                '[' => depth += 1,
+                ']' => depth -= 1,
+                _ => {}
+            }
+        }
+        if depth <= 0 {
+            break;
+        }
+    }
+    false
+}
+
+/// `line` with its comments removed, carrying the block-comment nesting `depth`
+/// across lines.
+///
+/// Both flavours, because both are legal inside an attribute and either can hide
+/// an unbalanced bracket: `#[allow(a, /* note [1 */ b)]` is ordinary Rust. The
+/// `//` case was found first and fixed alone; a reviewer pointed out that `/* */`
+/// has the identical shape, which it does — so the two are handled in one place
+/// rather than as a rule and an exception.
+///
+/// **Block comments nest** — `/* outer /* inner */ still outer */` is one comment
+/// in Rust, not two — so this counts depth rather than holding a flag. A flag
+/// leaves comment mode at the first `*/` and emits the outer comment's tail as
+/// code, which is how the bracket overrun above comes back: measured on
+/// `clippy::a, /* see /* note */ [1 */`, that reported **0** violations where 1
+/// is right.
+///
+/// Not a Rust lexer beyond that, and it does not need to be. It does not know that
+/// `//` inside a string literal is not a comment, so `reason = "see http://x"`
+/// loses its tail —
+/// which costs nothing, because `reason` and its `=` come first and the match has
+/// already succeeded by then. Every way this is wrong truncates a line, and
+/// truncation can only *lose* a justification, never invent one: the safe
+/// direction for a rule whose failure mode is silence.
+fn strip_comments(line: &str, depth: &mut usize) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    loop {
+        // Inside a block: the next `/*` or `*/`, whichever comes first, and
+        // nothing between them is code.
+        while *depth > 0 {
+            let open = rest.find("/*");
+            let close = rest.find("*/");
+            // A nested opener before the next closer deepens; otherwise the
+            // closer ends this level. Neither, and the comment runs past this
+            // line.
+            let opens_first = match (open, close) {
+                (Some(o), Some(c)) => o < c,
+                (Some(_), None) => true,
+                _ => false,
+            };
+            if opens_first {
+                let o = open.expect("an opener, by the match above");
+                *depth += 1;
+                rest = &rest[o + 2..];
+            } else if let Some(c) = close {
+                *depth -= 1;
+                rest = &rest[c + 2..];
+            } else {
+                return out;
+            }
+        }
+        let line_at = rest.find("//");
+        let block_at = rest.find("/*");
+        // Whichever opens first wins: `/* // */` is a block, `// /*` is a line.
+        let opens_block = match (line_at, block_at) {
+            (Some(l), Some(b)) => b < l,
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        if opens_block {
+            let b = block_at.expect("a block opener, by the match above");
+            out.push_str(&rest[..b]);
+            *depth = 1;
+            rest = &rest[b + 2..];
+            continue;
+        }
+        // No block opener ahead, so the line ends here: at a `//` if there is
+        // one, otherwise at its end.
+        out.push_str(&rest[..line_at.unwrap_or(rest.len())]);
+        return out;
+    }
+}
+
+/// Whether `line` contains a `reason` **field**: the bare word, followed by `=`.
+fn has_reason_field(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    line.match_indices("reason").any(|(at, _)| {
+        let before_ok = at == 0 || !is_ident_byte(bytes[at - 1]);
+        let after = line[at + "reason".len()..].trim_start();
+        // Not `==`: that is a comparison, and this is a field assignment.
+        before_ok && after.starts_with('=') && !after.starts_with("==")
+    })
+}
+
+/// Whether `b` can appear inside a Rust identifier.
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
 }
 
 /// Every lossy string conversion in `text` that feeds a hash, as violations.
@@ -227,7 +405,7 @@ pub fn scan_unjustified_allows(rel_path: &str, text: &str) -> Vec<Violation> {
             kind: ViolationKind::UnjustifiedAllow,
             message: format!(
                 "{rel_path}:{}: `#[allow(…)]` carries no justification — AGENTS.md \
-                 asks that an allow be justified in a comment, so a reader can tell \
+                 asks for a `reason = \"…\"` field or a comment, so a reader can tell \
                  a considered exception from a silenced warning",
                 i + 1
             ),
@@ -329,6 +507,196 @@ mod tests {
             hits("// unrelated prose\n\n#[allow(clippy::foo)]\nfn f() {}\n").len(),
             1
         );
+    }
+
+    /// **The language's own `reason` field is a justification** (issue #753).
+    ///
+    /// This was the rule's largest defect: 183 false positives and 0 true
+    /// positives on a workspace that mandates the attribute form. Worse, such a
+    /// workspace could not satisfy both gates — Clippy's
+    /// `allow_attributes_without_reason` *requires* the field this rule rejected,
+    /// so every allow Clippy accepted, `roteiro check` refused. A gate in that
+    /// state is one people pass with `--no-verify`, and the reporter was.
+    ///
+    /// The principle was already written down in [`is_comment`]: the convention
+    /// asks for "a justification a reader will find", and rejecting the form that
+    /// sits closest to the allow was inventing a stricter rule than the one
+    /// `AGENTS.md` states.
+    #[test]
+    fn a_reason_field_is_a_justification() {
+        assert!(
+            hits("#[allow(clippy::foo, reason = \"counts stay under 2^53\")]\nfn f() {}\n")
+                .is_empty()
+        );
+        // The multi-line form, which is the ordinary one once the reason is long
+        // enough to be worth writing — and the one a single-line scan misses.
+        assert!(
+            hits(
+                "#[allow(\n    clippy::too_many_lines,\n    reason = \"one home; splitting \
+                 would re-fork the copies this deletes\"\n)]\nfn f() {}\n"
+            )
+            .is_empty()
+        );
+        // Inner attributes take the field too.
+        assert!(hits("#![allow(dead_code, reason = \"test support\")]\nfn f() {}\n").is_empty());
+    }
+
+    /// **A stray bracket in a comment does not carry the scan into the next
+    /// attribute.**
+    ///
+    /// The span ends where the *code* brackets balance. Counting the comment too
+    /// left the scan open, and the next attribute's `reason` then justified this
+    /// one — so a bare allow was silently accepted. That is the dangerous
+    /// direction: the rule going quiet reads exactly like a clean file, whereas a
+    /// false positive at least argues with you.
+    ///
+    /// Measured before the fix: this fixture reported **0** violations where it
+    /// should report 1.
+    #[test]
+    fn a_bracket_in_a_comment_does_not_reach_the_next_attribute() {
+        let text = "#[allow(\n    clippy::a, // see note [1\n)]\nfn f() {}\n\n\
+                    #[allow(clippy::b, reason = \"stated\")]\nfn g() {}\n";
+        let h = hits(text);
+        assert_eq!(h.len(), 1, "the bare allow is still reported: {h:?}");
+        assert!(h[0].contains("src/x.rs:1:"), "{}", h[0]);
+    }
+
+    /// **A block comment hides a bracket just as well as a line comment does.**
+    ///
+    /// `#[allow(a, /* note [1 */ b)]` is ordinary Rust, and the unbalanced `[`
+    /// inside it held the span open exactly as the `//` case did — a reviewer
+    /// pointed out that the first fix handled one flavour and not the other,
+    /// which was true.
+    ///
+    /// Both directions are asserted: the bare allow is still reported, and a
+    /// genuine reason on a *multi-line* attribute carrying a block comment is
+    /// still found. Only the first would pass if the fix were "give up whenever a
+    /// comment appears".
+    #[test]
+    fn a_block_comment_does_not_hide_the_end_of_the_attribute() {
+        let overrun = "#[allow(\n    clippy::a, /* note [1 */\n)]\nfn f() {}\n\n\
+                       #[allow(clippy::b, reason = \"stated\")]\nfn g() {}\n";
+        let h = hits(overrun);
+        assert_eq!(h.len(), 1, "the bare allow is still reported: {h:?}");
+        assert!(h[0].contains("src/x.rs:1:"), "{}", h[0]);
+
+        // A block comment spanning lines does not swallow the reason after it.
+        assert!(
+            hits(
+                "#[allow(\n    clippy::a, /* a note\n       still the note */\n    \
+                 reason = \"stated\"\n)]\nfn f() {}\n"
+            )
+            .is_empty(),
+            "a real reason after a multi-line block comment still counts"
+        );
+    }
+
+    /// **A long attribute still finds its reason.**
+    ///
+    /// The scan is bounded, and hitting the bound reads as "no reason found" — a
+    /// false positive, which is the failure this whole rule was retired for. At
+    /// the original 40 lines an `#[allow(…)]` listing many lints with its reason
+    /// last would have been flagged despite carrying one.
+    ///
+    /// Both sides are asserted: the reason is found at 120 lines, and the bound is
+    /// still a bound at 400. Only the first would pass if `MAX_SPAN` were removed
+    /// altogether, which would let one unbalanced bracket in a string carry the
+    /// scan to the end of the file.
+    #[test]
+    fn a_long_attribute_still_finds_its_reason_and_the_bound_still_bounds() {
+        let long = |lints: usize| {
+            use std::fmt::Write as _;
+            let mut src = String::from("#[allow(\n");
+            for n in 0..lints {
+                let _ = writeln!(src, "    clippy::lint_{n},");
+            }
+            src.push_str("    reason = \"stated\"\n)]\nfn f() {}\n");
+            src
+        };
+        assert!(
+            hits(&long(120)).is_empty(),
+            "a reason 120 lines down is still a reason"
+        );
+        assert_eq!(
+            hits(&long(400)).len(),
+            1,
+            "and past the backstop the scan gives up, which is what the backstop is"
+        );
+    }
+
+    /// **A nested block comment is one comment, not two.**
+    ///
+    /// `/* outer /* inner */ still outer */` nests in Rust. A flag leaves comment
+    /// mode at the first `*/` and emits the outer comment's tail as code, which
+    /// brings back the bracket overrun the previous two fixes closed — the third
+    /// route to the same silent acceptance, so it is worth a test of its own
+    /// rather than trusting that the shape is now handled.
+    ///
+    /// Measured before the fix: this fixture reported **0** violations where 1 is
+    /// right.
+    #[test]
+    fn a_nested_block_comment_does_not_end_early() {
+        let overrun = "#[allow(\n    clippy::a, /* see /* note */ [1 */\n)]\nfn f() {}\n\n\
+                       #[allow(clippy::b, reason = \"stated\")]\nfn g() {}\n";
+        let h = hits(overrun);
+        assert_eq!(h.len(), 1, "the bare allow is still reported: {h:?}");
+        assert!(h[0].contains("src/x.rs:1:"), "{}", h[0]);
+
+        // And a nested comment does not swallow a real reason that follows it.
+        assert!(
+            hits(
+                "#[allow(\n    clippy::a, /* a /* nested */ note */\n    \
+                 reason = \"stated\"\n)]\nfn f() {}\n"
+            )
+            .is_empty(),
+            "a reason after a nested block comment still counts"
+        );
+    }
+
+    /// **Prose is not the field.**
+    ///
+    /// Cutting comments before the match is what makes this hold: a trailing
+    /// comment mentioning a reason justifies the allow by the *comment* path, so
+    /// nothing is lost — but a comment on a **neighbouring** attribute must not
+    /// silence a bare one below it.
+    #[test]
+    fn a_comment_mentioning_a_reason_is_not_the_field() {
+        // Blank line above, so the comment path cannot apply either.
+        let h = hits("// the reason = it was needed\n\n#[allow(clippy::a)]\nfn f() {}\n");
+        assert_eq!(h.len(), 1, "{h:?}");
+    }
+
+    /// **A bare allow is still a violation**, which is the half that makes the
+    /// rule worth having at all.
+    ///
+    /// Asserted beside the accepting case rather than alone: a fix that accepted
+    /// everything would satisfy the test above and nothing else, and this is the
+    /// assertion that separates "reads the attribute" from "gave up".
+    #[test]
+    fn accepting_a_reason_does_not_accept_a_bare_allow() {
+        let text = "#[allow(clippy::a, reason = \"stated\")]\nfn f() {}\n\n\
+                    #[allow(clippy::b)]\nfn g() {}\n";
+        let h = hits(text);
+        assert_eq!(h.len(), 1, "only the bare one is reported: {h:?}");
+        assert!(h[0].contains("src/x.rs:4:"), "{}", h[0]);
+    }
+
+    /// **The word alone is not the field.**
+    ///
+    /// `reason` is matched on a token boundary and on the `=` that follows, so a
+    /// lint whose name merely contains it does not silence the rule. This one is
+    /// worth pinning because the failure is invisible: an allow that looked
+    /// justified and was not would leave the gate reporting nothing, which reads
+    /// exactly like a clean repository.
+    #[test]
+    fn a_word_containing_reason_is_not_the_field() {
+        assert_eq!(
+            hits("#[allow(clippy::unreasonable_x)]\nfn f() {}\n").len(),
+            1
+        );
+        assert_eq!(hits("#[allow(some::reasoning)]\nfn f() {}\n").len(), 1);
+        // A comparison is not an assignment.
+        assert_eq!(hits("#[allow(cfg(reason == 1))]\nfn f() {}\n").len(), 1);
     }
 
     #[test]
