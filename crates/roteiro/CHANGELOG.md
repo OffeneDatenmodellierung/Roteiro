@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.9.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.8.1...roteiro-v5.9.0) - 2026-09-07
+
+### Added
+
+- *(serve)* let the operator set the client `tools` bound
+
+### Fixed
+
+- *(serve)* apply the operator's bound on the untooled router too
+
+### Other
+
+- *(serve)* price the raised bound, and name #578's non-goal
+
 ## [5.8.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.7.0...roteiro-v5.8.0) - 2026-09-07
 
 ### Added
