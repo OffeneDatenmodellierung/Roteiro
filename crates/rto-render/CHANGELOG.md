@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.8.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v5.7.0...rto-render-v5.8.0) - 2026-09-07
+
+### Added
+
+- *(okf)* inventory what a bundle carries besides its concepts
+
+### Fixed
+
+- *(okf)* an unlistable bundle root reported a blank line
+- *(okf)* the inventory swallowed two more failures, and said director(y/ies)
+- *(okf)* the inventory walked recursively, swallowed IO errors, and used \
+
 ## [5.5.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v5.4.0...rto-render-v5.5.0) - 2026-09-02
 
 ### Added
