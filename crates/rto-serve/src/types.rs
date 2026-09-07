@@ -363,7 +363,9 @@ impl ToolSize {
             return 0;
         }
         // `* 100` before dividing: integer division the other way round is
-        // always 0. Cannot overflow — `MAX_CLIENT_TOOL_BYTES` bounds `bytes`.
+        // always 0. Saturating because nothing bounds a single tool —
+        // `MAX_CLIENT_TOOL_BYTES` is checked against the array's total, after
+        // this struct is built, so one tool may exceed it on its own.
         self.schema_bytes.saturating_mul(100) / self.bytes
     }
 }
@@ -382,7 +384,12 @@ fn oversized_tools_message(sizes: &[ToolSize], limit: usize) -> String {
     /// sentence rather than a dump of everything the caller sent.
     const NAMED: usize = 5;
 
-    let total: usize = sizes.iter().map(|t| t.bytes).sum();
+    // Saturating, matching the caller's accumulation. `sum()` would panic in a
+    // debug build on overflow — on the error path, turning a rejection this
+    // function exists to explain into a crash that explains nothing.
+    let total: usize = sizes
+        .iter()
+        .fold(0usize, |acc, t| acc.saturating_add(t.bytes));
     let mut worst: Vec<&ToolSize> = sizes.iter().collect();
     // Descending by size, then by name so two equal-sized tools list in a stable
     // order — an error message that reorders between identical requests is one
