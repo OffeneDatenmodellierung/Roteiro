@@ -334,6 +334,58 @@ pub struct NormalisedChat {
     pub parallel_tool_calls: Option<bool>,
 }
 
+/// The rejection message for an oversized `tools` array, naming what to cut.
+///
+/// The old message said only "over 32768 bytes", which is true and unactionable:
+/// a bundle author sees a 400 with no indication of which of their forty tools is
+/// expensive, and the byte count is not something any client computes for itself.
+/// Diagnosing one real case took an hour of driving MCP servers over stdio by
+/// hand to sum their schemas — work the server had already done and thrown away.
+///
+/// So it reports the total, the overage, and the largest contributors by name.
+/// **Naming them leaks nothing**: every byte here arrived in the caller's own
+/// request, so this tells them only what they just said.
+///
+/// It stays a refusal rather than becoming a trim — see the caller for why
+/// truncating a client's schemas corrupts the `tool_call_id` correlation.
+fn oversized_tools_message(sizes: &[(usize, String)], limit: usize) -> String {
+    /// Tools named in the message before it starts summarising.
+    ///
+    /// Enough to act on — a surface is usually blown by a handful of verbose
+    /// tools rather than uniformly — and short enough that the message stays a
+    /// sentence rather than a dump of everything the caller sent.
+    const NAMED: usize = 5;
+
+    let total: usize = sizes.iter().map(|(b, _)| *b).sum();
+    let mut worst: Vec<&(usize, String)> = sizes.iter().collect();
+    // Descending by size, then by name so two equal-sized tools list in a stable
+    // order — an error message that reorders between identical requests is one
+    // people stop trusting.
+    worst.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+
+    let named: Vec<String> = worst
+        .iter()
+        .take(NAMED)
+        .map(|(b, n)| format!("`{n}` {b} B"))
+        .collect();
+    let rest = worst.len().saturating_sub(NAMED);
+    let and_more = if rest == 0 {
+        String::new()
+    } else {
+        format!(", and {rest} more")
+    };
+
+    format!(
+        "`tools` is too large: {total} bytes of tool names, descriptions and \
+         schemas, over the {limit} byte limit by {}. Largest: {}{and_more}. \
+         Advertise fewer tools, or shorten their descriptions — the limit bounds \
+         how much context a caller can make this server allocate, so it is not \
+         raised.",
+        total.saturating_sub(limit),
+        named.join(", "),
+    )
+}
+
 /// Validate a client's `tools` array and convert it to the loop's [`ToolDef`]s.
 ///
 /// Enforces both bounds ([`MAX_CLIENT_TOOLS`], [`MAX_CLIENT_TOOL_BYTES`]) and the
@@ -351,6 +403,10 @@ fn client_tools_from(specs: Vec<ToolSpec>) -> Result<Vec<ToolDef>, String> {
         ));
     }
     let mut client_tools: Vec<ToolDef> = Vec::with_capacity(specs.len());
+    // `(bytes, name)` for every tool, kept so an overflow can name the tools
+    // worth cutting. Bounded work: `MAX_CLIENT_TOOLS` has already capped the
+    // array at 128, so measuring all of them adds no reach a caller can abuse.
+    let mut sizes: Vec<(usize, String)> = Vec::with_capacity(specs.len());
     let mut advertised_bytes: usize = 0;
     for t in specs {
         // Only `function` exists in OpenAI's tool envelope. Anything else is
@@ -370,19 +426,18 @@ fn client_tools_from(specs: Vec<ToolSpec>) -> Result<Vec<ToolDef>, String> {
             .function
             .parameters
             .unwrap_or_else(|| serde_json::json!({"type": "object"}));
-        advertised_bytes = advertised_bytes
-            .saturating_add(name.len())
+        let tool_bytes = name
+            .len()
             .saturating_add(description.len())
             .saturating_add(serde_json::to_string(&parameters).map_or(0, |p| p.len()));
+        advertised_bytes = advertised_bytes.saturating_add(tool_bytes);
+        sizes.push((tool_bytes, name.clone()));
         // Refused, never truncated: trimming a client's schemas would leave the
         // model calling tools whose arguments no longer match what the client
         // will execute — corrupting exactly the correlation the `tool_call_id`
         // handling elsewhere is careful to preserve.
         if advertised_bytes > MAX_CLIENT_TOOL_BYTES {
-            return Err(format!(
-                "`tools` is too large: over {MAX_CLIENT_TOOL_BYTES} bytes of tool \
-                 names, descriptions and schemas"
-            ));
+            return Err(oversized_tools_message(&sizes, MAX_CLIENT_TOOL_BYTES));
         }
         client_tools.push(ToolDef {
             name,
@@ -851,6 +906,54 @@ mod tests {
             with_tools(&serde_json::Value::Array(spread))
                 .expect_err("the total is bounded, not the per-tool size")
                 .contains("too large")
+        );
+    }
+
+    /// **The rejection names what to cut.**
+    ///
+    /// The message used to say only "over 32768 bytes", which is true and
+    /// unactionable: a bundle author sees a 400 naming none of their forty tools,
+    /// and no client computes this byte count for itself. Diagnosing one real case
+    /// (issue #578) took an hour of driving MCP servers over stdio by hand to sum
+    /// schemas the server had already summed and discarded.
+    ///
+    /// Asserted on the parts a reader acts on — the total, the overage, and the
+    /// biggest tool by name — rather than on the whole sentence, so rewording the
+    /// prose does not fail the test while dropping a number would.
+    #[test]
+    fn an_oversized_tools_array_names_its_largest_contributors() {
+        let big = "x".repeat(super::MAX_CLIENT_TOOL_BYTES / 2);
+        let small = "y".repeat(64);
+        let err = with_tools(&serde_json::json!([
+            tool("modest", &small),
+            tool("hefty", &big),
+            tool("heftier", &big),
+        ]))
+        .expect_err("must be rejected");
+
+        assert!(err.contains("`heftier`"), "the largest is named: {err}");
+        assert!(err.contains("`hefty`"), "and the next: {err}");
+        assert!(
+            err.contains(&super::MAX_CLIENT_TOOL_BYTES.to_string()),
+            "the limit is stated, not implied: {err}"
+        );
+        assert!(err.contains("over the"), "and the overage: {err}");
+        // The bound is a security bound, so the message must not read as a knob
+        // somebody can turn — see `MAX_CLIENT_TOOL_BYTES`.
+        assert!(err.contains("not raised"), "{err}");
+
+        // Ties order by name, so two identical requests produce identical text.
+        let tied = with_tools(&serde_json::json!([tool("bbb", &big), tool("aaa", &big),]))
+            .expect_err("must be rejected");
+        assert_eq!(
+            tied,
+            with_tools(&serde_json::json!([tool("aaa", &big), tool("bbb", &big)]))
+                .expect_err("must be rejected"),
+            "the same tools in a different order must give the same message"
+        );
+        assert!(
+            tied.find("`aaa`") < tied.find("`bbb`"),
+            "equal sizes list by name: {tied}"
         );
     }
 
