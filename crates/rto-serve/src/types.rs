@@ -928,6 +928,19 @@ mod tests {
     /// Asserted on the parts a reader acts on — the total, the overage, and the
     /// biggest tool by name — rather than on the whole sentence, so rewording the
     /// prose does not fail the test while dropping a number would.
+    /// Where `needle` appears in `hay`, failing loudly when it does not.
+    ///
+    /// Ordering assertions must not be written `hay.find(a) < hay.find(b)`:
+    /// `str::find` returns an `Option`, `None < Some(_)`, and so that form
+    /// passes when `a` is missing from the message altogether — reporting the
+    /// order as correct for text that never named `a` at all. Raised in review
+    /// of the oversized-`tools` message, where every one of these assertions is
+    /// checking that the *culprit* was named first.
+    fn at(hay: &str, needle: &str) -> usize {
+        hay.find(needle)
+            .unwrap_or_else(|| panic!("{needle} must appear in: {hay}"))
+    }
+
     #[test]
     fn an_oversized_tools_array_names_its_largest_contributors() {
         let big = "x".repeat(super::MAX_CLIENT_TOOL_BYTES / 2);
@@ -960,7 +973,7 @@ mod tests {
             "the same tools in a different order must give the same message"
         );
         assert!(
-            tied.find("`aaa`") < tied.find("`bbb`"),
+            at(&tied, "`aaa`") < at(&tied, "`bbb`"),
             "equal sizes list by name: {tied}"
         );
     }
@@ -988,7 +1001,7 @@ mod tests {
             "the tool worth cutting is named even though the bound broke before it: {err}"
         );
         assert!(
-            err.find("`whale`") < err.find("`pad-"),
+            at(&err, "`whale`") < at(&err, "`pad-"),
             "and it is named first, being the largest: {err}"
         );
         // Every tool measured, so the total is the whole array — not the prefix
