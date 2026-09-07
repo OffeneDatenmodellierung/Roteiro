@@ -81,21 +81,22 @@ const KV_BYTES_PER_TOKEN: usize = 64 * 1024;
 const RECURRENT_BYTES_APPROX: usize = 150 * 1024 * 1024;
 const N_CTX: u32 = 4096;
 
-/// One backend for the whole binary.
+/// llama.cpp's backend is a process-global: `LlamaBackend::init()` fails with
+/// `BackendAlreadyInitialized` while one is live (issue #296).
 ///
-/// llama.cpp's backend is a process-global — the second `LlamaBackend::init()`
-/// in a process returns `BackendAlreadyInitialized` (issue #296, and the reason
-/// `shared_backend.rs` exists). Both tests here need one and the harness runs
-/// them in the same process, so initialising per test fails whichever runs
-/// second. `context_window.rs` has the same shape and only works because its
-/// instruments are run one at a time.
-fn backend() -> &'static LlamaBackend {
-    static BACKEND: std::sync::OnceLock<LlamaBackend> = std::sync::OnceLock::new();
-    BACKEND.get_or_init(|| LlamaBackend::init().expect("backend initialises once"))
-}
-
-/// Two 27B loads must not overlap on one machine, and the harness would happily
-/// run these concurrently.
+/// Both tests here need one, and the harness runs them **in parallel by
+/// default** — which is what actually breaks, not the process lifetime.
+/// `LlamaBackend`'s `Drop` clears the flag and calls `llama_backend_free`, so a
+/// second `init()` succeeds once the first backend is gone. Serialising is
+/// therefore enough, and each test can own its backend and let it drop while
+/// still holding this lock.
+///
+/// That is better than caching one in a `static`: the backend would then live
+/// until process exit, against the teardown ordering `backend.rs` documents
+/// (#291/#292), where the backend must be freed *after* everything borrowing it.
+/// Here nothing outlives the test that made it.
+///
+/// It also keeps two 27B model loads from overlapping on one machine.
 static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn model_gguf(name: &str) -> Option<PathBuf> {
@@ -165,17 +166,19 @@ fn measure_whether_the_sequence_state_includes_the_recurrent_module() {
         eprintln!("SKIP: need `{BIG_MODEL}` under ~/.roteiro/models");
         return;
     };
+    // Backend created *inside* the lock and dropped before it is released, so it
+    // never outlives the test that owns it.
     let _serial = SERIAL
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let backend = backend();
-    let model = LlamaModel::load_from_file(backend, &path, &LlamaModelParams::default())
+    let backend = LlamaBackend::init().expect("backend");
+    let model = LlamaModel::load_from_file(&backend, &path, &LlamaModelParams::default())
         .expect("model loads");
     let prompt = model
         .str_to_token(&"the quick brown fox. ".repeat(40), AddBos::Always)
         .expect("tokenises");
     let mut ctx = model
-        .new_context(backend, context_params())
+        .new_context(&backend, context_params())
         .expect("context builds");
     feed(&mut ctx, &prompt, 0);
 
@@ -217,11 +220,13 @@ fn a_restored_sequence_state_continues_identically() {
         eprintln!("SKIP: need `{BIG_MODEL}` under ~/.roteiro/models");
         return;
     };
+    // Backend created *inside* the lock and dropped before it is released, so it
+    // never outlives the test that owns it.
     let _serial = SERIAL
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let backend = backend();
-    let model = LlamaModel::load_from_file(backend, &path, &LlamaModelParams::default())
+    let backend = LlamaBackend::init().expect("backend");
+    let model = LlamaModel::load_from_file(&backend, &path, &LlamaModelParams::default())
         .expect("model loads");
 
     // A byte-identical preamble, then a turn-specific suffix — the shape #578 is
@@ -242,7 +247,7 @@ fn a_restored_sequence_state_continues_identically() {
     // Baseline: one context, whole prompt, greedy continuation.
     let baseline = {
         let mut ctx = model
-            .new_context(backend, context_params())
+            .new_context(&backend, context_params())
             .expect("context builds");
         let whole: Vec<LlamaToken> = preamble.iter().chain(&suffix).copied().collect();
         feed(&mut ctx, &whole, 0);
@@ -254,7 +259,7 @@ fn a_restored_sequence_state_continues_identically() {
     // Snapshot after the preamble only, in one context.
     let snapshot = {
         let mut ctx = model
-            .new_context(backend, context_params())
+            .new_context(&backend, context_params())
             .expect("context builds");
         feed(&mut ctx, &preamble, 0);
         ctx.state_seq_get(0, LlamaStateSeqFlags::empty())
@@ -264,7 +269,7 @@ fn a_restored_sequence_state_continues_identically() {
     // Restore into a *fresh* context, feed only the suffix, continue.
     let restored = {
         let mut ctx = model
-            .new_context(backend, context_params())
+            .new_context(&backend, context_params())
             .expect("context builds");
         ctx.state_seq_set(&snapshot, 0)
             .expect("sequence state is restorable");
