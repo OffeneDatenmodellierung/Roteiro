@@ -137,13 +137,13 @@ fn carries_reason(lines: &[&str], i: usize) -> bool {
     const MAX_SPAN: usize = 40;
 
     let mut depth = 0i32;
-    let mut in_block = false;
+    let mut comment_depth = 0usize;
     for line in lines.iter().skip(i).take(MAX_SPAN) {
         // Comments are neither structure nor the field: cutting them keeps a
         // stray bracket from holding the scan open, and keeps prose from being
         // read as a `reason`. A trailing comment is a justification by its own
         // path anyway, so nothing is lost by ignoring it here.
-        let code = strip_comments(line, &mut in_block);
+        let code = strip_comments(line, &mut comment_depth);
         if has_reason_field(&code) {
             return true;
         }
@@ -161,7 +161,8 @@ fn carries_reason(lines: &[&str], i: usize) -> bool {
     false
 }
 
-/// `line` with its comments removed, carrying `in_block` across lines.
+/// `line` with its comments removed, carrying the block-comment nesting `depth`
+/// across lines.
 ///
 /// Both flavours, because both are legal inside an attribute and either can hide
 /// an unbalanced bracket: `#[allow(a, /* note [1 */ b)]` is ordinary Rust. The
@@ -169,23 +170,46 @@ fn carries_reason(lines: &[&str], i: usize) -> bool {
 /// has the identical shape, which it does — so the two are handled in one place
 /// rather than as a rule and an exception.
 ///
-/// Not a Rust lexer, and does not need to be. It does not know that `//` inside a
-/// string literal is not a comment, so `reason = "see http://x"` loses its tail —
+/// **Block comments nest** — `/* outer /* inner */ still outer */` is one comment
+/// in Rust, not two — so this counts depth rather than holding a flag. A flag
+/// leaves comment mode at the first `*/` and emits the outer comment's tail as
+/// code, which is how the bracket overrun above comes back: measured on
+/// `clippy::a, /* see /* note */ [1 */`, that reported **0** violations where 1
+/// is right.
+///
+/// Not a Rust lexer beyond that, and it does not need to be. It does not know that
+/// `//` inside a string literal is not a comment, so `reason = "see http://x"`
+/// loses its tail —
 /// which costs nothing, because `reason` and its `=` come first and the match has
 /// already succeeded by then. Every way this is wrong truncates a line, and
 /// truncation can only *lose* a justification, never invent one: the safe
 /// direction for a rule whose failure mode is silence.
-fn strip_comments(line: &str, in_block: &mut bool) -> String {
+fn strip_comments(line: &str, depth: &mut usize) -> String {
     let mut out = String::with_capacity(line.len());
     let mut rest = line;
     loop {
-        if *in_block {
-            match rest.find("*/") {
-                Some(at) => {
-                    *in_block = false;
-                    rest = &rest[at + 2..];
-                }
-                None => return out,
+        // Inside a block: the next `/*` or `*/`, whichever comes first, and
+        // nothing between them is code.
+        while *depth > 0 {
+            let open = rest.find("/*");
+            let close = rest.find("*/");
+            // A nested opener before the next closer deepens; otherwise the
+            // closer ends this level. Neither, and the comment runs past this
+            // line.
+            let opens_first = match (open, close) {
+                (Some(o), Some(c)) => o < c,
+                (Some(_), None) => true,
+                _ => false,
+            };
+            if opens_first {
+                let o = open.expect("an opener, by the match above");
+                *depth += 1;
+                rest = &rest[o + 2..];
+            } else if let Some(c) = close {
+                *depth -= 1;
+                rest = &rest[c + 2..];
+            } else {
+                return out;
             }
         }
         let line_at = rest.find("//");
@@ -199,7 +223,7 @@ fn strip_comments(line: &str, in_block: &mut bool) -> String {
         if opens_block {
             let b = block_at.expect("a block opener, by the match above");
             out.push_str(&rest[..b]);
-            *in_block = true;
+            *depth = 1;
             rest = &rest[b + 2..];
             continue;
         }
@@ -546,6 +570,35 @@ mod tests {
             )
             .is_empty(),
             "a real reason after a multi-line block comment still counts"
+        );
+    }
+
+    /// **A nested block comment is one comment, not two.**
+    ///
+    /// `/* outer /* inner */ still outer */` nests in Rust. A flag leaves comment
+    /// mode at the first `*/` and emits the outer comment's tail as code, which
+    /// brings back the bracket overrun the previous two fixes closed — the third
+    /// route to the same silent acceptance, so it is worth a test of its own
+    /// rather than trusting that the shape is now handled.
+    ///
+    /// Measured before the fix: this fixture reported **0** violations where 1 is
+    /// right.
+    #[test]
+    fn a_nested_block_comment_does_not_end_early() {
+        let overrun = "#[allow(\n    clippy::a, /* see /* note */ [1 */\n)]\nfn f() {}\n\n\
+                       #[allow(clippy::b, reason = \"stated\")]\nfn g() {}\n";
+        let h = hits(overrun);
+        assert_eq!(h.len(), 1, "the bare allow is still reported: {h:?}");
+        assert!(h[0].contains("src/x.rs:1:"), "{}", h[0]);
+
+        // And a nested comment does not swallow a real reason that follows it.
+        assert!(
+            hits(
+                "#[allow(\n    clippy::a, /* a /* nested */ note */\n    \
+                 reason = \"stated\"\n)]\nfn f() {}\n"
+            )
+            .is_empty(),
+            "a reason after a nested block comment still counts"
         );
     }
 
