@@ -342,13 +342,39 @@ pub struct NormalisedChat {
 /// Diagnosing one real case took an hour of driving MCP servers over stdio by
 /// hand to sum their schemas — work the server had already done and thrown away.
 ///
+/// What one advertised tool cost, kept so an overflow can be diagnosed.
+///
+/// Carries the schema separately from the total because the advice depends on
+/// it and no fixed advice is right: across this server's own sixteen MCP tools
+/// the schema share runs from 24% to 54% of a tool, so "shorten your
+/// descriptions" and "shorten your schemas" are each wrong about half the
+/// surface. Reporting the split lets the caller cut the half that is actually
+/// large.
+struct ToolSize {
+    bytes: usize,
+    name: String,
+    schema_bytes: usize,
+}
+
+impl ToolSize {
+    /// The schema's share of this tool, rounded, or 0 for a zero-byte tool.
+    fn schema_percent(&self) -> usize {
+        if self.bytes == 0 {
+            return 0;
+        }
+        // `* 100` before dividing: integer division the other way round is
+        // always 0. Cannot overflow — `MAX_CLIENT_TOOL_BYTES` bounds `bytes`.
+        self.schema_bytes.saturating_mul(100) / self.bytes
+    }
+}
+
 /// So it reports the total, the overage, and the largest contributors by name.
 /// **Naming them leaks nothing**: every byte here arrived in the caller's own
 /// request, so this tells them only what they just said.
 ///
 /// It stays a refusal rather than becoming a trim — see the caller for why
 /// truncating a client's schemas corrupts the `tool_call_id` correlation.
-fn oversized_tools_message(sizes: &[(usize, String)], limit: usize) -> String {
+fn oversized_tools_message(sizes: &[ToolSize], limit: usize) -> String {
     /// Tools named in the message before it starts summarising.
     ///
     /// Enough to act on — a surface is usually blown by a handful of verbose
@@ -356,17 +382,17 @@ fn oversized_tools_message(sizes: &[(usize, String)], limit: usize) -> String {
     /// sentence rather than a dump of everything the caller sent.
     const NAMED: usize = 5;
 
-    let total: usize = sizes.iter().map(|(b, _)| *b).sum();
-    let mut worst: Vec<&(usize, String)> = sizes.iter().collect();
+    let total: usize = sizes.iter().map(|t| t.bytes).sum();
+    let mut worst: Vec<&ToolSize> = sizes.iter().collect();
     // Descending by size, then by name so two equal-sized tools list in a stable
     // order — an error message that reorders between identical requests is one
     // people stop trusting.
-    worst.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    worst.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.name.cmp(&b.name)));
 
     let named: Vec<String> = worst
         .iter()
         .take(NAMED)
-        .map(|(b, n)| format!("`{n}` {b} B"))
+        .map(|t| format!("`{}` {} B, {}% schema", t.name, t.bytes, t.schema_percent()))
         .collect();
     let rest = worst.len().saturating_sub(NAMED);
     let and_more = if rest == 0 {
@@ -378,9 +404,10 @@ fn oversized_tools_message(sizes: &[(usize, String)], limit: usize) -> String {
     format!(
         "`tools` is too large: {total} bytes of tool names, descriptions and \
          schemas, over the {limit} byte limit by {}. Largest: {}{and_more}. \
-         Advertise fewer tools, or shorten their descriptions — the limit bounds \
-         how much context a caller can make this server allocate, so it is not \
-         raised.",
+         Advertise fewer tools, or shorten what each one advertises — a tool's \
+         description and its parameter schema are both counted, and the split \
+         above says which of the two to cut. The limit bounds how much context \
+         a caller can make this server allocate, so it is not raised.",
         total.saturating_sub(limit),
         named.join(", "),
     )
@@ -406,7 +433,7 @@ fn client_tools_from(specs: Vec<ToolSpec>) -> Result<Vec<ToolDef>, String> {
     // `(bytes, name)` for every tool, kept so an overflow can name the tools
     // worth cutting. Bounded work: `MAX_CLIENT_TOOLS` has already capped the
     // array at 128, so measuring all of them adds no reach a caller can abuse.
-    let mut sizes: Vec<(usize, String)> = Vec::with_capacity(specs.len());
+    let mut sizes: Vec<ToolSize> = Vec::with_capacity(specs.len());
     let mut advertised_bytes: usize = 0;
     for t in specs {
         // Only `function` exists in OpenAI's tool envelope. Anything else is
@@ -426,12 +453,17 @@ fn client_tools_from(specs: Vec<ToolSpec>) -> Result<Vec<ToolDef>, String> {
             .function
             .parameters
             .unwrap_or_else(|| serde_json::json!({"type": "object"}));
+        let schema_bytes = serde_json::to_string(&parameters).map_or(0, |p| p.len());
         let tool_bytes = name
             .len()
             .saturating_add(description.len())
-            .saturating_add(serde_json::to_string(&parameters).map_or(0, |p| p.len()));
+            .saturating_add(schema_bytes);
         advertised_bytes = advertised_bytes.saturating_add(tool_bytes);
-        sizes.push((tool_bytes, name.clone()));
+        sizes.push(ToolSize {
+            bytes: tool_bytes,
+            name: name.clone(),
+            schema_bytes,
+        });
         // Refused, never truncated: trimming a client's schemas would leave the
         // model calling tools whose arguments no longer match what the client
         // will execute — corrupting exactly the correlation the `tool_call_id`
@@ -862,6 +894,47 @@ mod tests {
             "type": "function",
             "function": {"name": name, "description": description},
         })
+    }
+
+    /// A tool whose weight is in its parameter schema rather than its prose.
+    fn schema_heavy_tool(name: &str, description: &str, filler: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": description,
+                "parameters": {"type": "object", "properties": {filler: {"type": "string"}}},
+            },
+        })
+    }
+
+    #[test]
+    fn the_message_says_whether_a_tool_is_large_by_prose_or_by_schema() {
+        // "Shorten your descriptions" is wrong for about half a real surface:
+        // across this server's own sixteen MCP tools the schema share runs from
+        // 24% to 54%. So the message reports the split rather than picking a
+        // half, and these two tools are the same size by opposite routes.
+        let big = "x".repeat(super::MAX_CLIENT_TOOL_BYTES / 2);
+        let err = with_tools(&serde_json::json!([
+            tool("all-prose", &big),
+            schema_heavy_tool("all-schema", "", &big),
+        ]))
+        .expect_err("must be rejected");
+
+        let prose_at = at(&err, "`all-prose`");
+        let schema_at = at(&err, "`all-schema`");
+        let share = |from: usize| {
+            err[from..]
+                .split_once("% schema")
+                .map(|(head, _)| head.rsplit(", ").next().unwrap_or("").to_owned())
+                .expect("each named tool reports its schema share")
+        };
+        assert_eq!(share(prose_at), "0", "prose-heavy tool, no schema: {err}");
+        assert_eq!(share(schema_at), "99", "schema-heavy tool: {err}");
+        assert!(
+            err.contains("which of the two to cut"),
+            "and the guidance points at the split rather than at descriptions: {err}"
+        );
     }
 
     #[test]
