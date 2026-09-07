@@ -87,12 +87,26 @@ impl ConfigGrant {
     /// value. A project grant never appears here, because it never becomes
     /// effective; [`ConfigGrant::project_grant_ignored`] is how it is reported
     /// instead.
+    ///
+    /// Delegates the rule itself to [`rto_graph::layering::Grant`], the
+    /// workspace's one implementation of ADR-0007 v1.4's inversion. This type and
+    /// `rto_remote::ConfigGrant` had each carried a private copy of it — the third
+    /// copy is the decay ADR-0007 §111 names by name — and they now differ only in
+    /// which key they describe. The predicates below stay here because they report
+    /// what this *file* said, which is a `bool`-shaped question, not a layering one.
     #[must_use]
     pub fn as_effective(self) -> Option<bool> {
-        if self.project_denied {
-            return Some(false);
+        // `false` is the built-in: an unset `[lint] allow_unsandboxed` is no grant.
+        rto_graph::layering::Grant::from_layers(self.project(), self.user, false).as_effective()
+    }
+
+    /// The project layer's literal value, reassembled from the two flags stored.
+    fn project(self) -> Option<bool> {
+        match (self.project_denied, self.project_grant_ignored) {
+            (true, _) => Some(false),
+            (_, true) => Some(true),
+            _ => None,
         }
-        self.user
     }
 
     /// Whether a committed project file tried to grant host execution and was

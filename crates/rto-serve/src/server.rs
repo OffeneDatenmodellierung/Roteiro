@@ -79,6 +79,9 @@ struct AppState {
     /// unless the caller built one ([`app_with_workspace_tools`]); the unscoped and
     /// `/v1/{project}/…` routes never consult it, so the default paths are untouched.
     workspaces: std::collections::HashMap<String, Arc<dyn ToolRegistry>>,
+    /// Operator-set request bounds. [`crate::types::Limits::default`] unless the
+    /// caller built the router with [`app_with_workspace_tools_limited`].
+    limits: crate::types::Limits,
 }
 type Shared = Arc<AppState>;
 
@@ -88,6 +91,7 @@ pub fn app(engine: Arc<dyn Engine>) -> Router {
         engine,
         tools: None,
         workspaces: std::collections::HashMap::new(),
+        limits: crate::types::Limits::default(),
     }))
 }
 
@@ -98,6 +102,7 @@ pub fn app_with_tools(engine: Arc<dyn Engine>, tools: Arc<dyn ToolRegistry>) -> 
         engine,
         tools: Some(tools),
         workspaces: std::collections::HashMap::new(),
+        limits: crate::types::Limits::default(),
     }))
 }
 
@@ -121,6 +126,29 @@ pub fn app_with_workspace_tools(
         engine,
         tools: Some(tools),
         workspaces,
+        limits: crate::types::Limits::default(),
+    }))
+}
+
+/// As [`app_with_workspace_tools`], but with operator-set request bounds rather
+/// than the built-in defaults.
+///
+/// Separate from [`app_with_workspace_tools`] so that adding a bound cannot
+/// silently change what an existing caller enforces: a caller that has not been
+/// updated keeps [`crate::types::Limits::default`], which is what it had before
+/// the parameter existed.
+#[allow(clippy::implicit_hasher)]
+pub fn app_with_workspace_tools_limited(
+    engine: Arc<dyn Engine>,
+    tools: Arc<dyn ToolRegistry>,
+    workspaces: std::collections::HashMap<String, Arc<dyn ToolRegistry>>,
+    limits: crate::types::Limits,
+) -> Router {
+    router(Arc::new(AppState {
+        engine,
+        tools: Some(tools),
+        workspaces,
+        limits,
     }))
 }
 
@@ -418,7 +446,7 @@ async fn chat_completions_workspace_scoped(
 /// path, carrying the tool scope for the tool loop.
 async fn run_chat(state: Shared, body: ChatCompletionRequest, scope: ChatScope) -> Response {
     let stream = body.stream == Some(true);
-    let normalised = match body.normalise() {
+    let normalised = match body.normalise(state.limits) {
         Ok(n) => n,
         Err(msg) => return error(StatusCode::BAD_REQUEST, msg, "invalid_request_error"),
     };

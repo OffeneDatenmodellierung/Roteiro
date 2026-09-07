@@ -1203,6 +1203,53 @@ impl MediaConfig {
     }
 }
 
+/// The `[serve]` table the config layers jointly produce.
+///
+/// Extracted from [`Config::overlaid_with`] because one of its keys does not
+/// take ordinary precedence — see [`max_client_tool_bytes_effective`] — and a
+/// table with one inverted key is worth reading in one place.
+fn serve_overlaid(user: &ServeConfig, over: &ServeConfig) -> ServeConfig {
+    ServeConfig {
+        addr: over.addr.clone().or(user.addr.clone()),
+        models: over.models.clone().or(user.models.clone()),
+        tools: over.tools.or(user.tools),
+        memory_budget_mb: over.memory_budget_mb.or(user.memory_budget_mb),
+        // Ordinary precedence — a value, not a capability (ADR-0007
+        // v1.4): the default already grants each model's full trained
+        // window, so this key can only lower it.
+        max_context_tokens: over.max_context_tokens.or(user.max_context_tokens),
+        max_client_tool_bytes: max_client_tool_bytes_effective(
+            user.max_client_tool_bytes,
+            over.max_client_tool_bytes,
+        ),
+        tls_cert: over.tls_cert.clone().or(user.tls_cert.clone()),
+        tls_key: over.tls_key.clone().or(user.tls_key.clone()),
+    }
+}
+
+/// The `[serve] max_client_tool_bytes` the config layers jointly produce.
+///
+/// **Inverted precedence — a capability, not a value** (ADR-0007 v1.4): the
+/// project layer may lower this and never raise it. Named here rather than
+/// inlined into `overlaid_with` for the reason [`remote_enabled_effective`] is,
+/// and delegating to [`rto_graph::layering::Grant`] rather than re-deriving the
+/// rule, because ADR-0007 §111 requires declaring a key a capability and getting
+/// its precedence right to be one act rather than two.
+fn max_client_tool_bytes_effective(user: Option<usize>, project: Option<usize>) -> Option<usize> {
+    rto_graph::layering::Grant::from_layers(project, user, DEFAULT_MAX_CLIENT_TOOL_BYTES)
+        .as_effective()
+}
+
+/// The built-in for [`ServeConfig::max_client_tool_bytes`].
+///
+/// Duplicated from `rto_serve::DEFAULT_MAX_CLIENT_TOOL_BYTES` rather than
+/// imported, because `rto-serve` is an optional dependency and the config layer
+/// resolves this key in builds without it — a config shared with a fuller build
+/// must never be rejected by a leaner one (ADR-0007's forward-compatibility
+/// rule). `the_serve_default_matches_the_server` holds the two in step wherever
+/// the feature is on.
+pub const DEFAULT_MAX_CLIENT_TOOL_BYTES: usize = 32 * 1024;
+
 /// `[serve]` — the opt-in local OpenAI-compatible model endpoint (ADR-0006).
 #[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
@@ -1261,6 +1308,28 @@ pub struct ServeConfig {
     /// and `serve --models` terminates HTTPS itself (needs `--features serve`);
     /// set **neither** and it serves plain HTTP (front with a proxy for TLS).
     /// Setting exactly one is a startup error.
+    /// Total bytes of client tool names, descriptions and schemas one request may
+    /// advertise in `tools` (default 32,768 — [`DEFAULT_MAX_CLIENT_TOOL_BYTES`]).
+    ///
+    /// **A capability, not a value, under ADR-0007 v1.4** — and the mirror image
+    /// of [`ServeConfig::max_context_tokens`] above, which is a value for the
+    /// opposite reason. That key's built-in already grants each model's whole
+    /// trained window, so a project file can only ever spend *less*. This one's
+    /// built-in denies everything above 32 KiB, so a project file raising it
+    /// causes something that would not otherwise happen and spends materially
+    /// more of the machine — clause 4. The project layer may therefore **lower**
+    /// this and never raise it, which [`rto_graph::layering::Grant`] enforces.
+    ///
+    /// Raising it is a decision about *this machine*, which is why it belongs to
+    /// the user layer: the bound exists because a client supplies its own tool
+    /// definitions, so the prompt — and the context sized to it — is partly an
+    /// outside party's input. A caller can never raise it, whatever any file says.
+    ///
+    /// It is a backstop, not the only guard: `max_context_tokens` clamps the
+    /// window directly, so where that is set the allocation is bounded whatever
+    /// arrives here. And raising it is never free even when it is safe, because
+    /// every advertised byte is prompt on every request.
+    pub max_client_tool_bytes: Option<usize>,
     pub tls_cert: Option<String>,
     /// PEM private-key file paired with `tls_cert` (PKCS#8 or RSA).
     pub tls_key: Option<String>,
@@ -1509,21 +1578,7 @@ impl Config {
                 image_variance: over.media.image_variance.or(self.media.image_variance),
             },
             mcp: self.mcp.overlaid_with(&over.mcp),
-            serve: ServeConfig {
-                addr: over.serve.addr.clone().or(self.serve.addr.clone()),
-                models: over.serve.models.clone().or(self.serve.models.clone()),
-                tools: over.serve.tools.or(self.serve.tools),
-                memory_budget_mb: over.serve.memory_budget_mb.or(self.serve.memory_budget_mb),
-                // Ordinary precedence — a value, not a capability (ADR-0007
-                // v1.4): the default already grants each model's full trained
-                // window, so this key can only lower it.
-                max_context_tokens: over
-                    .serve
-                    .max_context_tokens
-                    .or(self.serve.max_context_tokens),
-                tls_cert: over.serve.tls_cert.clone().or(self.serve.tls_cert.clone()),
-                tls_key: over.serve.tls_key.clone().or(self.serve.tls_key.clone()),
-            },
+            serve: serve_overlaid(&self.serve, &over.serve),
             // `[debt] ignore` is the one list-valued key that **merges** rather
             // than replaces; see `merge_ignore` for why, and why the other lists
             // deliberately do not.
@@ -3549,6 +3604,67 @@ mod tests {
     /// Its counterpart in `main.rs` pins the *gate* to the same type, so the
     /// value this report echoes and the value that decides a run are the same
     /// value without either test needing the other's internals.
+    /// `[serve] max_client_tool_bytes` is a capability, so the project layer may
+    /// lower it and never raise it — the inverse of every other `[serve]` key,
+    /// and the reason it does not use `.or()` like its neighbours.
+    #[test]
+    fn a_project_file_may_lower_the_client_tool_bound_but_never_raise_it() {
+        let merged = |project, user| {
+            let base = super::Config {
+                serve: super::ServeConfig {
+                    max_client_tool_bytes: user,
+                    ..super::ServeConfig::default()
+                },
+                ..super::Config::default()
+            };
+            let over = super::Config {
+                serve: super::ServeConfig {
+                    max_client_tool_bytes: project,
+                    ..super::ServeConfig::default()
+                },
+                ..super::Config::default()
+            };
+            base.overlaid_with(&over).serve.max_client_tool_bytes
+        };
+
+        // The committed file cannot spend the machine on everyone's behalf.
+        assert_eq!(
+            merged(Some(1 << 20), None),
+            None,
+            "a project raise is discarded, leaving the built-in"
+        );
+        assert_eq!(
+            merged(Some(1 << 20), Some(64 * 1024)),
+            Some(64 * 1024),
+            "and cannot ride on a user raise either"
+        );
+
+        // It may tighten — for everyone, including over a user raise.
+        assert_eq!(merged(Some(8 * 1024), None), Some(8 * 1024));
+        assert_eq!(
+            merged(Some(16 * 1024), Some(128 * 1024)),
+            Some(16 * 1024),
+            "a project may narrow what the machine owner widened"
+        );
+
+        // The user layer alone is the ordinary way to raise it.
+        assert_eq!(merged(None, Some(128 * 1024)), Some(128 * 1024));
+        assert_eq!(merged(None, None), None, "unset stays unset, not defaulted");
+    }
+
+    /// The config layer carries its own copy of the built-in because `rto-serve`
+    /// is optional; this is what stops the two drifting.
+    #[cfg(feature = "serve")]
+    #[test]
+    fn the_serve_default_matches_the_server() {
+        assert_eq!(
+            super::DEFAULT_MAX_CLIENT_TOOL_BYTES,
+            rto_serve::DEFAULT_MAX_CLIENT_TOOL_BYTES,
+            "the config layer resolves this key in builds without `rto-serve`, so \
+             the number is duplicated — it must not also diverge"
+        );
+    }
+
     #[cfg(feature = "exec-subprocess")]
     #[test]
     fn the_lint_merge_delegates_the_inversion_rather_than_repeating_it() {

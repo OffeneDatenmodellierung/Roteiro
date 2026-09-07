@@ -70,10 +70,39 @@ const MAX_CLIENT_TOOLS: usize = 128;
 /// itself.
 ///
 /// 32 KiB is roughly 8k tokens, which keeps the tool surface's contribution to
-/// `prompt_tokens` about 32x below that ceiling. Raising it re-opens the same
-/// hole in proportion, so treat it as a security bound rather than a tuning
-/// knob.
-const MAX_CLIENT_TOOL_BYTES: usize = 32 * 1024;
+/// `prompt_tokens` about 32x below that ceiling.
+///
+/// **The default, not the only value** (`[serve] max_client_tool_bytes`). The
+/// operator may raise it; a *caller* still cannot, which is the distinction the
+/// paragraph above is actually about — the hole it describes is one an outside
+/// party opens, and a bound the machine's owner sets is not that. It stays a
+/// backstop rather than the only guard: `[serve] max_context_tokens` already
+/// clamps `window_for_request`, so where an operator has set that, the
+/// allocation is bounded whatever arrives here.
+///
+/// Raising this is not free even when it is safe: every advertised byte is
+/// prompt on *every* request. At a 26k-token window, 32 KiB of tools is already
+/// about a third of it before a word of conversation.
+pub const DEFAULT_MAX_CLIENT_TOOL_BYTES: usize = 32 * 1024;
+
+/// Operator-set bounds the request path enforces.
+///
+/// A struct rather than a bare `usize` so a second bound does not have to churn
+/// [`ChatCompletionRequest::normalise`]'s signature and every call site again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    /// Total bytes of client tool names, descriptions and schemas one request
+    /// may advertise. See [`DEFAULT_MAX_CLIENT_TOOL_BYTES`].
+    pub max_client_tool_bytes: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_client_tool_bytes: DEFAULT_MAX_CLIENT_TOOL_BYTES,
+        }
+    }
+}
 
 /// A `POST /v1/chat/completions` request body.
 #[derive(Debug, Clone, Deserialize)]
@@ -414,7 +443,8 @@ fn oversized_tools_message(sizes: &[ToolSize], limit: usize) -> String {
          Advertise fewer tools, or shorten what each one advertises — a tool's \
          description and its parameter schema are both counted, and the split \
          above says which of the two to cut. The limit bounds how much context \
-         a caller can make this server allocate, so it is not raised.",
+         a caller can make this server allocate, so no request raises it: only \
+         this server's operator can, with `[serve] max_client_tool_bytes`.",
         total.saturating_sub(limit),
         named.join(", "),
     )
@@ -429,7 +459,7 @@ fn oversized_tools_message(sizes: &[ToolSize], limit: usize) -> String {
 /// # Errors
 /// Returns a human-readable message when the array is over either bound or
 /// carries a tool whose `type` is not `function`.
-fn client_tools_from(specs: Vec<ToolSpec>) -> Result<Vec<ToolDef>, String> {
+fn client_tools_from(specs: Vec<ToolSpec>, max_bytes: usize) -> Result<Vec<ToolDef>, String> {
     if specs.len() > MAX_CLIENT_TOOLS {
         return Err(format!(
             "too many tools: {} (max {MAX_CLIENT_TOOLS})",
@@ -489,8 +519,8 @@ fn client_tools_from(specs: Vec<ToolSpec>) -> Result<Vec<ToolDef>, String> {
     //
     // Costs nothing a caller can abuse: `MAX_CLIENT_TOOLS` capped the array at
     // 128 before the loop began, and each iteration was already doing this work.
-    if advertised_bytes > MAX_CLIENT_TOOL_BYTES {
-        return Err(oversized_tools_message(&sizes, MAX_CLIENT_TOOL_BYTES));
+    if advertised_bytes > max_bytes {
+        return Err(oversized_tools_message(&sizes, max_bytes));
     }
     Ok(client_tools)
 }
@@ -536,7 +566,7 @@ impl ChatCompletionRequest {
     /// # Errors
     /// Returns a human-readable message if there are no messages or an
     /// `image_url` cannot be decoded.
-    pub fn normalise(self) -> Result<NormalisedChat, String> {
+    pub fn normalise(self, limits: Limits) -> Result<NormalisedChat, String> {
         if self.messages.is_empty() {
             return Err("`messages` must not be empty".to_owned());
         }
@@ -552,7 +582,8 @@ impl ChatCompletionRequest {
         // `check_declared` so the declared boundary keeps first refusal: a
         // request that is refused outright has no budget worth resolving.
         let max_tokens = crate::openai_params::generation_budget(self.max_tokens, &self.extra)?;
-        let client_tools = client_tools_from(self.tools.unwrap_or_default())?;
+        let client_tools =
+            client_tools_from(self.tools.unwrap_or_default(), limits.max_client_tool_bytes)?;
         let (tool_choice, parallel_tool_calls) = (self.tool_choice, self.parallel_tool_calls);
         // Images are placed at the last `user` turn (where the vision path inserts
         // the media markers), so images may only appear there — anywhere else the
@@ -868,7 +899,7 @@ mod tests {
                 {"function": {"name": "no_type"}},
             ],
         }));
-        let normalised = req.normalise().expect("normalised");
+        let normalised = req.normalise(super::Limits::default()).expect("normalised");
         let names: Vec<&str> = normalised
             .client_tools
             .iter()
@@ -893,7 +924,7 @@ mod tests {
             "messages": [{"role": "user", "content": "hi"}],
             "tools": tools.clone(),
         }))
-        .normalise()
+        .normalise(super::Limits::default())
     }
 
     fn tool(name: &str, description: &str) -> serde_json::Value {
@@ -921,7 +952,7 @@ mod tests {
         // across this server's own sixteen MCP tools the schema share runs from
         // 24% to 54%. So the message reports the split rather than picking a
         // half, and these two tools are the same size by opposite routes.
-        let big = "x".repeat(super::MAX_CLIENT_TOOL_BYTES / 2);
+        let big = "x".repeat(super::DEFAULT_MAX_CLIENT_TOOL_BYTES / 2);
         let err = with_tools(&serde_json::json!([
             tool("all-prose", &big),
             schema_heavy_tool("all-schema", "", &big),
@@ -941,6 +972,57 @@ mod tests {
         assert!(
             err.contains("which of the two to cut"),
             "and the guidance points at the split rather than at descriptions: {err}"
+        );
+    }
+
+    #[test]
+    fn a_raised_limit_accepts_the_array_the_default_refuses() {
+        // The point of the key: the same request that a stock server refuses is
+        // served by one whose operator raised the bound. Without this, the key
+        // could be threaded to a place that reads it and does nothing.
+        let big = "x".repeat(super::DEFAULT_MAX_CLIENT_TOOL_BYTES);
+        let tools = serde_json::json!([tool("hefty", &big)]);
+
+        let refused = with_tools(&tools).expect_err("the default refuses it");
+        assert!(refused.contains("`hefty`"), "{refused}");
+
+        let raised = super::Limits {
+            max_client_tool_bytes: super::DEFAULT_MAX_CLIENT_TOOL_BYTES * 4,
+        };
+        let served = parse(serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": tools,
+        }))
+        .normalise(raised)
+        .expect("a raised bound serves it");
+        assert_eq!(
+            served.client_tools.len(),
+            1,
+            "and the tool survives whole rather than being trimmed"
+        );
+        assert_eq!(served.client_tools[0].name, "hefty");
+    }
+
+    #[test]
+    fn a_lowered_limit_refuses_an_array_the_default_would_serve() {
+        // The other direction, which is the one a project file is allowed to take:
+        // a bound below the built-in has to actually bind, or `Grant`'s inversion
+        // would be protecting a number nothing reads.
+        let modest = tool("modest", &"y".repeat(1_024));
+        let lowered = super::Limits {
+            max_client_tool_bytes: 512,
+        };
+        let err = parse(serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [modest],
+        }))
+        .normalise(lowered)
+        .expect_err("a lowered bound refuses it");
+        assert!(
+            err.contains("512 byte limit"),
+            "and the message states the bound in force, not the built-in: {err}"
         );
     }
 
@@ -981,13 +1063,13 @@ mod tests {
         //
         // The refusal is the point: truncating would leave the model calling
         // tools whose arguments no longer match what the client will run.
-        let huge = "x".repeat(super::MAX_CLIENT_TOOL_BYTES + 1);
+        let huge = "x".repeat(super::DEFAULT_MAX_CLIENT_TOOL_BYTES + 1);
         let err =
             with_tools(&serde_json::json!([tool("big", &huge)])).expect_err("must be rejected");
         assert!(err.contains("too large"), "{err}");
 
         // Spread across many tools, the *total* is what is bounded — not each one.
-        let chunk = "y".repeat(super::MAX_CLIENT_TOOL_BYTES / 4);
+        let chunk = "y".repeat(super::DEFAULT_MAX_CLIENT_TOOL_BYTES / 4);
         let spread: Vec<serde_json::Value> =
             (0..5).map(|i| tool(&format!("t{i}"), &chunk)).collect();
         assert!(
@@ -1023,7 +1105,7 @@ mod tests {
 
     #[test]
     fn an_oversized_tools_array_names_its_largest_contributors() {
-        let big = "x".repeat(super::MAX_CLIENT_TOOL_BYTES / 2);
+        let big = "x".repeat(super::DEFAULT_MAX_CLIENT_TOOL_BYTES / 2);
         let small = "y".repeat(64);
         let err = with_tools(&serde_json::json!([
             tool("modest", &small),
@@ -1035,13 +1117,22 @@ mod tests {
         assert!(err.contains("`heftier`"), "the largest is named: {err}");
         assert!(err.contains("`hefty`"), "and the next: {err}");
         assert!(
-            err.contains(&super::MAX_CLIENT_TOOL_BYTES.to_string()),
+            err.contains(&super::DEFAULT_MAX_CLIENT_TOOL_BYTES.to_string()),
             "the limit is stated, not implied: {err}"
         );
         assert!(err.contains("over the"), "and the overage: {err}");
-        // The bound is a security bound, so the message must not read as a knob
-        // somebody can turn — see `MAX_CLIENT_TOOL_BYTES`.
-        assert!(err.contains("not raised"), "{err}");
+        // The bound is a security bound *against the caller*, and the message has
+        // to keep those two apart now that an operator can raise it: a client
+        // reading this must not conclude that retrying will help, and an operator
+        // must be able to find the key. See `DEFAULT_MAX_CLIENT_TOOL_BYTES`.
+        assert!(
+            err.contains("no request raises it"),
+            "the caller learns retrying cannot help: {err}"
+        );
+        assert!(
+            err.contains("`[serve] max_client_tool_bytes`"),
+            "and the operator learns which key is theirs to set: {err}"
+        );
 
         // Ties order by name, so two identical requests produce identical text.
         let tied = with_tools(&serde_json::json!([tool("bbb", &big), tool("aaa", &big),]))
@@ -1111,7 +1202,7 @@ mod tests {
             "tool_choice": {"type": "function", "function": {"name": "get_weather"}},
             "parallel_tool_calls": true,
         }));
-        let normalised = req.normalise().expect("normalised");
+        let normalised = req.normalise(super::Limits::default()).expect("normalised");
         assert_eq!(
             normalised
                 .tool_choice
@@ -1140,7 +1231,11 @@ mod tests {
                 {"role": "tool", "tool_call_id": "call_0", "content": "{\"temp\":21}"},
             ],
         }));
-        let turns = req.normalise().expect("normalised").request.messages;
+        let turns = req
+            .normalise(super::Limits::default())
+            .expect("normalised")
+            .request
+            .messages;
         assert!(turns.iter().all(|m| m.role != "tool"), "{turns:?}");
         assert_eq!(turns[1].role, "assistant");
         assert_eq!(
@@ -1157,7 +1252,7 @@ mod tests {
     fn budget_of(body: &serde_json::Value) -> Result<u32, String> {
         serde_json::from_value::<super::ChatCompletionRequest>(body.clone())
             .expect("the body parses; the budget is resolved after deserialisation, not during it")
-            .normalise()
+            .normalise(super::Limits::default())
             .map(|n| n.request.max_tokens)
     }
 

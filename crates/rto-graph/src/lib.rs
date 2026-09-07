@@ -44,6 +44,7 @@ mod findings;
 mod git;
 #[cfg(feature = "inference")]
 mod infer;
+pub mod layering;
 mod links;
 mod markers;
 // Generated media content (ADR-0015): ASR transcripts and VLM descriptions. Like
