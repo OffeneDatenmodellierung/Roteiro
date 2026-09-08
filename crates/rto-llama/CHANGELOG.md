@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.9.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v5.8.1...rto-llama-v5.9.0) - 2026-09-08
+
+### Other
+
+- *(llama)* own the backend per test instead of caching one forever
+- *(llama)* prove a saved sequence state carries the recurrent half
+
 ## [4.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v4.0.0...rto-llama-v4.1.0) - 2026-09-01
 
 ### Added

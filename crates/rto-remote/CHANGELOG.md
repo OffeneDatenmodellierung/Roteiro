@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.9.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-remote-v5.8.1...rto-remote-v5.9.0) - 2026-09-08
+
+### Added
+
+- *(serve)* let the operator set the client `tools` bound
+
 ## [1.26.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-remote-v1.26.0...rto-remote-v1.26.1) - 2026-08-19
 
 ### Other
