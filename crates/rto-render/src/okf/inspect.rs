@@ -238,7 +238,12 @@ pub fn summarise_trust(bundle: &Bundle, root: &str, today: okf_core::Date) -> Tr
     summary
 }
 
-/// A markdown link that names a concept the bundle does not contain.
+/// A markdown link whose target the bundle does not contain **at all**.
+///
+/// Not "names no concept", which is what this meant before issue #778 and is a
+/// weaker claim: a link to a diagram sitting in the bundle names no concept and
+/// is not thereby broken. A target that is present but is not a concept is a
+/// [`NonConceptLink`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BrokenLink {
     /// The concept whose body carries the link.
@@ -339,8 +344,16 @@ pub fn link_report(root: &Path) -> Result<LinkReport, InspectError> {
             Some(found) => non_concept.push(NonConceptLink {
                 from: from.to_string(),
                 target,
+                // Stripped against **`bundle.root()`**, not the `root` this
+                // function was handed. They are usually the same and need not
+                // be: a library caller may pass `.` where the bundle stored an
+                // absolute path, and then the strip would silently fail and the
+                // field would contradict its own documentation. `bundle.root()`
+                // is by construction the prefix `resolve_path_field` joined, so
+                // this is right by the same reasoning the path was built with.
+                // Raised in review of #778.
                 path: found
-                    .strip_prefix(root)
+                    .strip_prefix(bundle.root())
                     .unwrap_or(&found)
                     .display()
                     .to_string(),

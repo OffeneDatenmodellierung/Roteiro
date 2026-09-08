@@ -245,12 +245,25 @@ fn an_asset_or_reserved_file_the_bundle_contains_is_not_a_broken_link() {
     std::fs::write(root.join("dashboard.json"), "{}\n").expect("asset");
     std::fs::write(
         root.join("widget.md"),
-        "---\ntype: Reference\ntitle: Widget\nstatus: stable\n---\n\n         # Widget\n\n         See [the diagram](diagram.png) and [the dashboard](dashboard.json).\n\n         Navigation is in [index](index.md); changes in [log](log.md).\n",
+        "---\ntype: Reference\ntitle: Widget\nstatus: stable\n---\n\n# Widget\n\nSee [the diagram](diagram.png) and [the dashboard](dashboard.json).\n\nNavigation is in [index](index.md); changes in [log](log.md).\n",
     )
     .expect("concept");
 
     let report = inspect::link_report(&root).expect("load");
 
+    // The same guard `a_published_bundle_has_no_broken_internal_links` carries,
+    // and this fixture is why it earns its place here: an earlier draft of it
+    // carried nine leading spaces on every body line — rustfmt collapses a
+    // `\`-continued literal into visible runs of spaces — which makes the whole
+    // body an indented code block. It passed anyway, because okf-core skips
+    // *fenced* code and inline spans but not indented blocks. Had it skipped
+    // them, every assertion below would have been satisfied by a report of
+    // nothing, and this test would have gone green while testing nothing.
+    assert_eq!(
+        report.links, 4,
+        "the fixture's links must actually be extracted, or the assertions below \
+         are satisfied by an empty report: {report:?}"
+    );
     assert_eq!(
         report.broken,
         Vec::new(),
@@ -298,12 +311,16 @@ fn a_target_the_bundle_does_not_contain_is_still_broken() {
     std::fs::write(root.join("diagram.png"), "not really a png\n").expect("asset");
     std::fs::write(
         root.join("widget.md"),
-        "---\ntype: Reference\ntitle: Widget\nstatus: stable\n---\n\n         # Widget\n\n         See [the diagram](diagram.png), and [a note](never-written.md) that does          not exist.\n",
+        "---\ntype: Reference\ntitle: Widget\nstatus: stable\n---\n\n# Widget\n\nSee [the diagram](diagram.png), and [a note](never-written.md) that does not exist.\n",
     )
     .expect("concept");
 
     let report = inspect::link_report(&root).expect("load");
 
+    assert_eq!(
+        report.links, 2,
+        "both links must be extracted before either verdict means anything: {report:?}"
+    );
     assert_eq!(
         report.broken.len(),
         1,
