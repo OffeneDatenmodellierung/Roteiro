@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.9.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v5.8.1...rto-spec-v5.9.0) - 2026-09-08
+
+### Fixed
+
+- *(spec)* an outer doc comment no longer justifies an `#[allow]`
+
+### Other
+
+- *(spec)* say 'line comment', because that is what it checks
+- *(spec)* import the scanner once, at the top of the test module
+- *(spec)* remove the doc block the deleted function left behind
+
 ## [5.8.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v5.7.0...rto-spec-v5.8.0) - 2026-09-07
 
 ### Fixed
