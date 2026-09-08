@@ -319,8 +319,9 @@ small entry: 256 holds roughly one preamble, 1024 roughly three, and anything
 below ~200 stores nothing at all.
 
 Several preambles for one model coexist, so two clients with different system
-prompts each get their own — an entry is only displaced when a new one it is a
-prefix of arrives, or when the budget forces a least-recently-used eviction.
+prompts each get their own — an entry is only displaced when a new one
+that it is a prefix of arrives, or when the budget forces a least-recently-used
+eviction.
 
 **What to expect.** The boundary is learned by comparing consecutive prompts, so
 the first two turns pay full price and reuse begins at the third. Measured end to

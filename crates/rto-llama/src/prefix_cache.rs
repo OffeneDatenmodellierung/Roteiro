@@ -212,13 +212,22 @@ impl<S> PrefixCache<S> {
             return;
         }
         self.tick = self.tick.saturating_add(1);
-        // Drop only what this entry genuinely supersedes: an entry whose tokens
-        // are a prefix of the new one can only be hit by prompts the new one also
-        // matches, so keeping it would spend ~150 MiB on an entry that can never
-        // win. Comparing *lengths* would have been wrong — two preambles of
-        // similar size are usually different conversations, not one superseding
-        // the other, and dropping by length evicted a still-useful entry. Raised
-        // in review of #578; the justification was right and the test was not.
+        // Drop the entries this one grew out of: those whose tokens are a prefix
+        // of it. Comparing *lengths* here would be wrong — two preambles of
+        // similar size are usually different conversations rather than one
+        // superseding the other — so the test is the prefix relation.
+        //
+        // This is a **trade, not a strict improvement**, and an earlier version of
+        // this comment overstated it. A dropped 600-token entry is not merely
+        // redundant against a new 900-token one: a prompt diverging at token 700
+        // matches the short entry and not the long one, so dropping it does lose a
+        // hit that was available. It is still the right default, for two reasons.
+        // An entry costs a fixed ~150 MiB, so keeping every ancestor of a growing
+        // preamble spends the whole budget on one conversation. And the loss is
+        // self-healing: a client that really diverges at 700 has 700 as its own
+        // learned boundary, `boundary_for` finds no entry covering its prompts,
+        // and it is snapshotted again at the cost of one full prefill. Raised in
+        // review of #578.
         self.entries
             .retain(|(m, e)| m != model || !tokens.starts_with(&e.tokens));
         while self.used_bytes().saturating_add(bytes) > self.budget_bytes {
@@ -244,14 +253,21 @@ impl<S> PrefixCache<S> {
         ));
     }
 
-    /// Drop the entry for `model` covering `covered` tokens.
+    /// Drop the entry for `model` whose tokens are exactly `tokens`.
     ///
     /// For a state llama.cpp declined to restore: keeping it would re-offer the
     /// same refusal on every subsequent turn, turning one wasted copy into a
     /// permanent one.
-    pub fn forget(&mut self, model: &str, covered: usize) {
+    ///
+    /// **By identity, not by length.** Several preambles for one model coexist and
+    /// nothing stops two of them being the same length, so dropping by length
+    /// would let one refused restore evict an unrelated conversation's entry — a
+    /// 150 MiB loss and a full re-prefill for a client that did nothing wrong.
+    /// Raised in review of #578, and the third place in this module where a length
+    /// stood in for an identity.
+    pub fn forget(&mut self, model: &str, tokens: &[i32]) {
         self.entries
-            .retain(|(m, e)| m != model || e.tokens.len() != covered);
+            .retain(|(m, e)| m != model || e.tokens != tokens);
     }
 
     /// What the cache is holding, in bytes.
@@ -499,6 +515,32 @@ mod tests {
             c.boundary_for("m", &prompt(&other, 5, 2)),
             Some(other.len()),
             "a longer entry that cannot match this prompt does not cover it"
+        );
+    }
+
+    /// A refused restore must drop exactly the entry that was refused.
+    ///
+    /// Two preambles of one model may be the same length — nothing prevents it,
+    /// and the cache explicitly holds several per model — so identifying an entry
+    /// by its length would let one refusal evict an unrelated conversation.
+    #[test]
+    fn forgetting_a_refused_entry_leaves_a_same_length_sibling_alone() {
+        let mut c: PrefixCache<Vec<u8>> = PrefixCache::new(1 << 30);
+        let a: Vec<i32> = (0..600).collect();
+        let b: Vec<i32> = (0..600).map(|i| i + 5_000).collect();
+        assert_eq!(a.len(), b.len(), "the case only exists at equal lengths");
+        c.store("m", a.clone(), vec![1u8; 1], 100);
+        c.store("m", b.clone(), vec![2u8; 1], 100);
+
+        c.forget("m", &a);
+
+        assert_eq!(c.len(), 1, "only the refused entry goes");
+        let mut ask_b = b.clone();
+        ask_b.push(-1);
+        assert_eq!(
+            c.longest_prefix("m", &ask_b).map(|(s, _)| s),
+            Some(vec![2u8; 1]),
+            "the sibling still serves its own client"
         );
     }
 

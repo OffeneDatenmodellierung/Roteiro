@@ -745,7 +745,7 @@ impl LlamaEngine {
                 self.prefixes
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .forget(model_id, covered);
+                    .forget(model_id, &ids[..covered]);
                 0
             }
         }
