@@ -81,7 +81,8 @@ const MAX_CLIENT_TOOLS: usize = 128;
 /// allocation is bounded whatever arrives here.
 ///
 /// **Raising it makes the bound reachable, not the surface affordable, and #578
-/// lists raising it as an explicit non-goal.** There is no prefix cache, so the
+/// lists raising it as an explicit non-goal.** Without `[serve] prefix_cache_mb`
+/// — unset by default — nothing is reused, so the
 /// whole advertised surface is re-prefilled on every turn. Measured there on
 /// `qwen3.8-27b`: 4.94 bytes per token and 3.13 ms per prompt token, which puts
 /// the default's own 32 KiB at ~6,600 tokens and **~21 s of prefill per turn**,

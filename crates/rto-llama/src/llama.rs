@@ -67,6 +67,7 @@ use std::sync::{Arc, Mutex};
 
 use llama_cpp_2::ChatTemplateError;
 use llama_cpp_2::context::LlamaContext;
+use llama_cpp_2::context::session::{LlamaStateSeqFlags, SeqState};
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
@@ -75,6 +76,7 @@ use llama_cpp_2::mtmd::{
     MtmdBitmap, MtmdContext, MtmdContextParams, MtmdInputText, mtmd_default_marker,
 };
 use llama_cpp_2::sampling::LlamaSampler;
+use llama_cpp_2::token::LlamaToken;
 use llama_cpp_2::{LogOptions, send_logs_to_tracing};
 
 use crate::engine::{
@@ -223,6 +225,12 @@ pub struct Served {
 /// outstanding.
 pub struct LlamaEngine {
     cache: Mutex<ModelCache>,
+    /// Saved preamble states, so a multi-turn client stops re-prefilling the part
+    /// of its prompt that did not change (#578). Empty and inert unless
+    /// [`LlamaEngine::with_prefix_cache_bytes`] turns it on. Native state — it
+    /// holds llama.cpp-owned bytes — but bytes only: nothing here borrows a
+    /// context or a model, so it carries no teardown ordering of its own.
+    prefixes: Mutex<crate::prefix_cache::PrefixCache<SeqState>>,
     served: Vec<Served>,
     /// The **ceiling** a per-request context may grow to, not the size every
     /// context is built at (issue #486). `0` — the default — means "the window
@@ -451,6 +459,10 @@ impl LlamaEngine {
                 budget_bytes,
                 loaded: Vec::new(),
             }),
+            // Off unless an operator turns it on: an entry costs a fixed
+            // ~149.6 MiB (see `prefix_cache`), so a default-on cache would spend
+            // hundreds of megabytes on a machine whose owner never asked for it.
+            prefixes: Mutex::new(crate::prefix_cache::PrefixCache::new(0)),
         })
     }
 
@@ -663,6 +675,126 @@ impl LlamaEngine {
     /// The window is passed in rather than read from the engine because it is a
     /// property of the *request* now, not of the engine (issue #486); callers
     /// get it from [`LlamaEngine::request_window`].
+    /// Turn preamble reuse on with a byte budget, or off with `0` (#578).
+    ///
+    /// Off by default: an entry costs a fixed ~149.6 MiB whatever it covers, so a
+    /// cache nobody asked for would quietly claim hundreds of megabytes. The
+    /// budget is what an operator is choosing to spend to stop re-prefilling —
+    /// see `[serve] prefix_cache_mb`.
+    #[must_use]
+    pub fn with_prefix_cache_bytes(self, bytes: usize) -> Self {
+        *self
+            .prefixes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            crate::prefix_cache::PrefixCache::new(bytes);
+        self
+    }
+
+    /// What preamble reuse has saved on this engine: cached entries and the bytes
+    /// they hold. For `roteiro serve`'s own reporting; `(0, 0)` when off.
+    #[must_use]
+    pub fn prefix_cache_stats(&self) -> (usize, usize) {
+        let c = self
+            .prefixes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (c.len(), c.used_bytes())
+    }
+
+    /// Restore a cached preamble into `decoder`, returning how many leading
+    /// tokens it accounts for — `0` when nothing applies.
+    ///
+    /// The restore is whole and at position 0, never trimmed: on a hybrid model
+    /// the 48 recurrent layers cannot be rewound, so a partial restore would be
+    /// silently wrong (see [`crate::prefix_cache`]).
+    ///
+    /// A failed `state_seq_set` is **not** an error to the caller. The state is a
+    /// cache, so the honest fallback is the path that needed no cache: drop the
+    /// entry, report `0`, and let the prompt prefill in full. Failing the request
+    /// would turn an optimisation into a new way to lose one.
+    fn restore_preamble(&self, decoder: &mut Decoder<'_>, model_id: &str, ids: &[i32]) -> usize {
+        let Some(ctx) = decoder.plain_mut() else {
+            return 0;
+        };
+        let mut cache = self
+            .prefixes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some((state, covered)) = cache.longest_prefix(model_id, ids) else {
+            return 0;
+        };
+        match ctx.state_seq_set(state, 0) {
+            Ok(()) => covered,
+            Err(e) => {
+                tracing::debug!(
+                    model = model_id,
+                    covered,
+                    error = %e,
+                    "preamble restore refused; prefilling in full"
+                );
+                cache.forget(model_id, covered);
+                0
+            }
+        }
+    }
+
+    /// Prefill this prompt's preamble as its own batch and snapshot it, returning
+    /// how many tokens that covered — `0` when there is nothing worth taking.
+    ///
+    /// Splitting the prompt into two batches decodes exactly the same tokens, so
+    /// this costs one extra `decode` boundary and the copy, not extra prefill.
+    fn capture_preamble(
+        &self,
+        decoder: &mut Decoder<'_>,
+        model_id: &str,
+        tokens: &[LlamaToken],
+        ids: &[i32],
+    ) -> Result<usize, EngineError> {
+        let boundary = {
+            let mut cache = self
+                .prefixes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            cache.boundary_for(model_id, ids)
+        };
+        // A boundary at or past the end would leave the main batch with no token
+        // to carry logits, so the prompt must extend strictly beyond it.
+        let Some(boundary) = boundary.filter(|b| *b < tokens.len()) else {
+            return Ok(0);
+        };
+        let Some(ctx) = decoder.plain_mut() else {
+            return Ok(0);
+        };
+
+        // No logits: this batch exists to build state, and the token that answers
+        // the request is in the batch after it.
+        let mut batch = LlamaBatch::new(boundary, 1);
+        for (i, token) in tokens.iter().enumerate().take(boundary) {
+            let pos = i32::try_from(i).unwrap_or(i32::MAX);
+            batch
+                .add(*token, pos, &[0], false)
+                .map_err(|e| EngineError::Inference(format!("preamble batch: {e}")))?;
+        }
+        ctx.decode(&mut batch)
+            .map_err(|e| EngineError::Inference(format!("preamble decode: {e}")))?;
+
+        let bytes = ctx.state_seq_get_size_ext(0, LlamaStateSeqFlags::empty());
+        match ctx.state_seq_get(0, LlamaStateSeqFlags::empty()) {
+            Ok(state) => {
+                self.prefixes
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .store(model_id, ids[..boundary].to_vec(), state, bytes);
+                tracing::debug!(model = model_id, boundary, bytes, "preamble cached");
+            }
+            // Same reasoning as a failed restore: the tokens are decoded either
+            // way, so a snapshot that cannot be taken costs this request nothing.
+            Err(e) => tracing::debug!(model = model_id, error = %e, "preamble snapshot refused"),
+        }
+        Ok(boundary)
+    }
+
     fn new_context<'m>(
         &self,
         model: &'m LlamaModel,
@@ -810,10 +942,26 @@ impl LlamaEngine {
             "prompt",
         )?;
 
+        // Reuse the part of this prompt a previous turn already prefilled (#578).
+        // `reused` is how many leading tokens the restored state accounts for, so
+        // they are not batched; it is `0` on a miss, with the cache off, or under
+        // speculative decoding, and the code below is then exactly what it was.
+        let ids: Vec<i32> = tokens.iter().map(|t| t.0).collect();
+        let reused = match self.restore_preamble(&mut decoder, &req.model, &ids) {
+            // A hit: those tokens are already in the context and must not be
+            // batched again.
+            n if n > 0 => n,
+            // A miss. If this prompt and the last one share a preamble worth
+            // keeping, prefill up to that boundary as its own batch and snapshot
+            // it — the same tokens are decoded either way, so the only new cost is
+            // the copy, and the next turn skips all of it.
+            _ => self.capture_preamble(&mut decoder, &req.model, &tokens, &ids)?,
+        };
+
         // Prime the batch with the prompt; only the last token needs logits.
-        let mut batch = LlamaBatch::new(tokens.len().max(1), 1);
+        let mut batch = LlamaBatch::new(tokens.len().saturating_sub(reused).max(1), 1);
         let last = tokens.len().saturating_sub(1);
-        for (i, token) in tokens.iter().enumerate() {
+        for (i, token) in tokens.iter().enumerate().skip(reused) {
             let pos = i32::try_from(i).unwrap_or(i32::MAX);
             batch
                 .add(*token, pos, &[0], i == last)
@@ -986,6 +1134,20 @@ impl<'m> Decoder<'m> {
         match self {
             Self::Plain(ctx) => ctx,
             Self::Speculative(mtp) => mtp.target(),
+        }
+    }
+
+    /// The plain context, mutably — `None` for a speculative pair.
+    ///
+    /// Preamble reuse (#578) needs `&mut`, and only the plain decoder gets it: a
+    /// speculative generation runs a target *and* a draft context whose states
+    /// are not independent, and restoring one without the other would be a
+    /// mismatch this module could not detect. Returning `None` is what makes the
+    /// cache inert under speculative decoding rather than subtly wrong.
+    fn plain_mut(&mut self) -> Option<&mut LlamaContext<'m>> {
+        match self {
+            Self::Plain(ctx) => Some(ctx),
+            Self::Speculative(_) => None,
         }
     }
 }

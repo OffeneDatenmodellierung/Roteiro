@@ -20,6 +20,9 @@ pub mod chat_template;
 pub mod engine;
 /// Reading a GGUF's embedded chat template without loading the model (#492).
 pub mod gguf;
+/// Preamble state reuse (#578) — the policy half, which needs no model and no
+/// `llama` feature, so it is compiled and tested unconditionally.
+pub mod prefix_cache;
 
 // The process's single llama.cpp backend (issue #296): every engine holds a
 // handle to it, and it is freed only once no engine borrows it any more.

@@ -1222,6 +1222,7 @@ fn serve_overlaid(user: &ServeConfig, over: &ServeConfig) -> ServeConfig {
             user.max_client_tool_bytes,
             over.max_client_tool_bytes,
         ),
+        prefix_cache_mb: prefix_cache_mb_effective(user.prefix_cache_mb, over.prefix_cache_mb),
         tls_cert: over.tls_cert.clone().or(user.tls_cert.clone()),
         tls_key: over.tls_key.clone().or(user.tls_key.clone()),
     }
@@ -1235,6 +1236,16 @@ fn serve_overlaid(user: &ServeConfig, over: &ServeConfig) -> ServeConfig {
 /// and delegating to [`rto_graph::layering::Grant`] rather than re-deriving the
 /// rule, because ADR-0007 §111 requires declaring a key a capability and getting
 /// its precedence right to be one act rather than two.
+/// The `[serve] prefix_cache_mb` the config layers jointly produce.
+///
+/// The second capability key in this table, and the reason `Grant` was worth
+/// generalising: declaring it a capability and getting its precedence right is
+/// one act. Built-in `0` — off — so a project file may lower it and never raise
+/// it (ADR-0007 v1.4, clause 4).
+fn prefix_cache_mb_effective(user: Option<u64>, project: Option<u64>) -> Option<u64> {
+    rto_graph::layering::Grant::from_layers(project, user, 0).as_effective()
+}
+
 fn max_client_tool_bytes_effective(user: Option<usize>, project: Option<usize>) -> Option<usize> {
     rto_graph::layering::Grant::from_layers(project, user, DEFAULT_MAX_CLIENT_TOOL_BYTES)
         .as_effective()
@@ -1330,13 +1341,36 @@ pub struct ServeConfig {
     /// arrives here.
     ///
     /// **Before raising it, read #578, which lists raising it as a non-goal.**
-    /// There is no prefix cache, so the whole surface is re-prefilled every turn:
+    /// Unless `[serve] prefix_cache_mb` is set, the whole surface is re-prefilled
+    /// every turn:
     /// measured on `qwen3.8-27b` at 4.94 bytes/token and 3.13 ms/prompt token,
     /// the 32 KiB default already costs ~21 s per turn and 128 KiB costs ~83 s.
     /// Raising this trades a hard refusal for a slow session. It is the
     /// operator's trade to make — which is why the key exists — but it is not a
     /// good trade at every size.
     pub max_client_tool_bytes: Option<usize>,
+    /// Memory, in MiB, that preamble reuse may hold (#578). Unset/`0` — the
+    /// default — turns it off.
+    ///
+    /// `serve` builds a context per generation and prefills the whole prompt each
+    /// time, so a multi-turn agent client re-prefills its system prompt and its
+    /// `tools` array on every turn: measured at 3.13 ms per prompt token, about
+    /// 21 s per turn for a 32 KiB tool surface. With this set, a shared preamble
+    /// is prefilled once and restored thereafter — measured 5.80 s to 2.11 s on a
+    /// 1,462-token prompt, with byte-identical output.
+    ///
+    /// **Size it in whole entries, not in headroom.** Each cached preamble costs a
+    /// fixed ~150 MiB *plus* 64 KiB per token, because a hybrid model's recurrent
+    /// state serialises whole whatever the prompt length. So 256 covers roughly
+    /// one preamble, 1024 roughly three, and anything below ~200 stores nothing at
+    /// all — there is no such thing as a small entry here.
+    ///
+    /// **A capability, not a value, under ADR-0007 v1.4**, for the same reason as
+    /// [`ServeConfig::max_client_tool_bytes`] and by the same clause: the built-in
+    /// denies, so a committed project file raising it causes something that would
+    /// not otherwise happen and spends materially more of every teammate's
+    /// machine — clause 4. The project layer may lower it and never raise it.
+    pub prefix_cache_mb: Option<u64>,
     pub tls_cert: Option<String>,
     /// PEM private-key file paired with `tls_cert` (PKCS#8 or RSA).
     pub tls_key: Option<String>,
@@ -3657,6 +3691,54 @@ mod tests {
         // The user layer alone is the ordinary way to raise it.
         assert_eq!(merged(None, Some(128 * 1024)), Some(128 * 1024));
         assert_eq!(merged(None, None), None, "unset stays unset, not defaulted");
+    }
+
+    /// The second capability key in `[serve]`, and the one that proves `Grant`
+    /// generalises rather than merely compiles: same inversion, different width,
+    /// no second implementation.
+    #[test]
+    fn a_project_file_may_lower_the_prefix_cache_budget_but_never_raise_it() {
+        let merged = |project, user| {
+            let base = super::Config {
+                serve: super::ServeConfig {
+                    prefix_cache_mb: user,
+                    ..super::ServeConfig::default()
+                },
+                ..super::Config::default()
+            };
+            let over = super::Config {
+                serve: super::ServeConfig {
+                    prefix_cache_mb: project,
+                    ..super::ServeConfig::default()
+                },
+                ..super::Config::default()
+            };
+            base.overlaid_with(&over).serve.prefix_cache_mb
+        };
+
+        // A committed file cannot claim gigabytes on every teammate's machine.
+        assert_eq!(
+            merged(Some(4096), None),
+            None,
+            "a project raise is discarded"
+        );
+        assert_eq!(
+            merged(Some(4096), Some(1024)),
+            Some(1024),
+            "and cannot ride on a user raise"
+        );
+
+        // It may turn the cache down, or off, for everyone.
+        assert_eq!(merged(Some(256), Some(1024)), Some(256));
+        assert_eq!(
+            merged(Some(0), Some(1024)),
+            Some(0),
+            "`0` is off, and a project may always deny"
+        );
+
+        // The user layer is the ordinary way to turn it on.
+        assert_eq!(merged(None, Some(1024)), Some(1024));
+        assert_eq!(merged(None, None), None, "unset stays unset");
     }
 
     /// The config layer carries its own copy of the built-in because `rto-serve`
