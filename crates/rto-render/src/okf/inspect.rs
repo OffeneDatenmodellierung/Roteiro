@@ -247,6 +247,22 @@ pub struct BrokenLink {
     pub target: String,
 }
 
+/// A link whose target the bundle contains, but not as a concept.
+///
+/// An asset — a diagram, a dashboard definition — or one of the reserved
+/// `index.md` / `log.md`, which are bundle files with defined meaning that prose
+/// is expected to point at.
+#[derive(Debug, Clone, Serialize)]
+pub struct NonConceptLink {
+    /// The concept whose body carries the link.
+    pub from: String,
+    /// The link target, exactly as written.
+    pub target: String,
+    /// Where it resolved, relative to the bundle root — the evidence that this
+    /// is not a dead link.
+    pub path: String,
+}
+
 /// Whether an emitted bundle's internal links resolve.
 ///
 /// Roteiro's own link checking (`roteiro check`) covers the **graph** and the
@@ -261,12 +277,31 @@ pub struct LinkReport {
     pub concepts: usize,
     /// Internal concept links found across every body.
     pub links: usize,
-    /// Those that resolve to no concept in the bundle.
+    /// Targets the bundle does not contain **at all** — dead links, and the only
+    /// thing `--check` gates on.
     pub broken: Vec<BrokenLink>,
+    /// Targets the bundle *does* contain, but which are not concepts: an asset
+    /// such as a diagram or a data file, or one of the reserved `index.md` /
+    /// `log.md`. Reported, never gated — see [`LinkReport::is_clean`].
+    pub non_concept: Vec<NonConceptLink>,
 }
 
 impl LinkReport {
-    /// `true` when every internal link resolves.
+    /// `true` when every internal link names something the bundle contains.
+    ///
+    /// **Not "every link resolves to a concept"**, which is what this used to
+    /// mean and was the defect in issue #778. A bundle of any size links to its
+    /// own diagrams and data files; those resolve to no *concept*, so gating on
+    /// that made `--check` fail on every such bundle. On one real bundle it
+    /// reported 17 broken links of which all 17 existed on disk, and the single
+    /// genuinely dead link was indistinguishable in the output — which is the
+    /// failure worth avoiding, because a gate that cries wolf gets switched off
+    /// and takes the real dead link with it.
+    ///
+    /// So a present-but-not-a-concept target is reported in
+    /// [`LinkReport::non_concept`] and does not fail the gate, which also lines
+    /// this command up with `okf info` (which already lists those files as
+    /// bundle contents) and `okf validate` (which already rates them *info*).
     #[must_use]
     pub const fn is_clean(&self) -> bool {
         self.broken.is_empty()
@@ -285,18 +320,44 @@ pub fn link_report(root: &Path) -> Result<LinkReport, InspectError> {
         .iter()
         .map(|c| bundle.links_from(&c.id).len())
         .sum();
+    // okf-core's `exists` means "resolves to a concept", which is the right
+    // question for *it* and the wrong one for a gate: a link to a diagram beside
+    // the concept resolves to no concept and is not thereby dead. Split the two
+    // apart by asking the bundle where the raw target actually lands.
+    //
+    // `resolve_path_field` is okf-core's own resolver for frontmatter fields that
+    // "routinely point at non-markdown files", which is exactly this shape. Reused
+    // rather than reimplemented because the edge cases live in the resolution:
+    // it strips anchors, tries both the concept-relative and root-relative
+    // readings the spec uses, and — the part worth not rewriting — returns nothing
+    // when `..` walks off the top of the bundle, so a link cannot claim a file
+    // outside the bundle as evidence that it resolves.
+    let mut broken = Vec::new();
+    let mut non_concept = Vec::new();
+    for (from, target) in bundle.broken_links() {
+        match bundle.resolve_path_field(&from, &target) {
+            Some(found) => non_concept.push(NonConceptLink {
+                from: from.to_string(),
+                target,
+                path: found
+                    .strip_prefix(root)
+                    .unwrap_or(&found)
+                    .display()
+                    .to_string(),
+            }),
+            None => broken.push(BrokenLink {
+                from: from.to_string(),
+                target,
+            }),
+        }
+    }
+
     Ok(LinkReport {
         root: root.display().to_string(),
         concepts: bundle.concepts().len(),
         links,
-        broken: bundle
-            .broken_links()
-            .into_iter()
-            .map(|(from, target)| BrokenLink {
-                from: from.to_string(),
-                target,
-            })
-            .collect(),
+        broken,
+        non_concept,
     })
 }
 

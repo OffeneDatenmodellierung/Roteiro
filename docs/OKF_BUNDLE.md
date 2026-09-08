@@ -304,7 +304,7 @@ graph — with the consent gate above.
 | `okf validate` | Does it conform to OKF v0.2 | on any error |
 | `okf lint` | Is it hygienic — `L1`–`L12`, plus our `R1` | never |
 | `okf trust` | What does it claim about itself, and has any of it expired | `--check`, on staleness |
-| `okf links` | Do its internal links resolve | `--check` |
+| `okf links` | Do its internal links name something the bundle contains — a concept, an asset, or a reserved file | `--check`, on a target the bundle does not contain at all |
 | `okf syntax` | Does its fenced code parse | on any error |
 | `okf computations` | What Attested Computations does it declare (§10) | `--check`, on an incomplete contract |
 | `okf diff` | What changed between two bundles | never |
@@ -313,6 +313,15 @@ graph — with the consent gate above.
 Start with `info`; it composes the others' reports rather than deriving anything
 of its own, so it cannot disagree with the command that reports a number in
 detail.
+
+That promise was broken once and is worth knowing about, because the shape
+recurs. Issue #778: `links --check` gated on "resolves to a **concept**", so a
+link to a diagram sitting in the bundle was reported broken and failed CI, while
+`info` listed that same diagram under *other files* in the same run. A gate that
+cries wolf gets switched off — and on a real bundle 17 of 17 reported breakages
+existed on disk, with the one genuinely dead link indistinguishable among them.
+All three commands now ask whether the bundle **contains** the target, and only a
+target it does not contain at all fails the gate.
 
 Two rules hold across all of them. **`--json` selects a format and never changes
 what is reported or whether the command gates** — settled on `main` by a bug where

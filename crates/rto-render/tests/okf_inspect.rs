@@ -222,6 +222,106 @@ fn a_published_bundle_has_no_broken_internal_links() {
     assert!(report.is_clean());
 }
 
+/// A link to a file the bundle *contains* is not a broken link, whatever the
+/// file is (issue #778).
+///
+/// The defect gated `--check` on "resolves to a concept", so a bundle that links
+/// to its own diagrams failed on every one of them. On a real bundle that was 17
+/// reported breakages of which all 17 existed on disk — and the one genuinely
+/// dead link was indistinguishable in the output, which is how a gate that cries
+/// wolf gets switched off and takes the real failure with it.
+#[test]
+fn an_asset_or_reserved_file_the_bundle_contains_is_not_a_broken_link() {
+    let root = scratch("assets");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("mkdir");
+    std::fs::write(
+        root.join("index.md"),
+        "---\nokf_version: \"0.2\"\n---\n\n# Bundle\n\n- [Widget](widget.md)\n",
+    )
+    .expect("index");
+    std::fs::write(root.join("log.md"), "# Update log\n").expect("log");
+    std::fs::write(root.join("diagram.png"), "not really a png\n").expect("asset");
+    std::fs::write(root.join("dashboard.json"), "{}\n").expect("asset");
+    std::fs::write(
+        root.join("widget.md"),
+        "---\ntype: Reference\ntitle: Widget\nstatus: stable\n---\n\n         # Widget\n\n         See [the diagram](diagram.png) and [the dashboard](dashboard.json).\n\n         Navigation is in [index](index.md); changes in [log](log.md).\n",
+    )
+    .expect("concept");
+
+    let report = inspect::link_report(&root).expect("load");
+
+    assert_eq!(
+        report.broken,
+        Vec::new(),
+        "every one of these targets exists in the bundle: {report:?}"
+    );
+    assert!(
+        report.is_clean(),
+        "so `--check` must pass rather than gate on them: {report:?}"
+    );
+    // Reported, though — silently dropping them would trade one wrong answer for
+    // another, and `okf info` already lists these files as bundle contents.
+    let mut named: Vec<&str> = report
+        .non_concept
+        .iter()
+        .map(|l| l.target.as_str())
+        .collect();
+    named.sort_unstable();
+    assert_eq!(
+        named,
+        ["dashboard.json", "diagram.png", "index.md", "log.md"],
+        "both assets and the two reserved files are reported: {report:?}"
+    );
+    assert!(
+        report.non_concept.iter().all(|l| !l.path.is_empty()),
+        "each carries where it resolved, which is the evidence it is not dead"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// And the gate still catches the thing it exists for.
+///
+/// The other half of #778: relaxing "broken" must not relax it into uselessness.
+/// A target the bundle does not contain **at all** stays broken and still fails
+/// `--check`, standing beside assets that do not.
+#[test]
+fn a_target_the_bundle_does_not_contain_is_still_broken() {
+    let root = scratch("dead-link");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("mkdir");
+    std::fs::write(
+        root.join("index.md"),
+        "---\nokf_version: \"0.2\"\n---\n\n# Bundle\n",
+    )
+    .expect("index");
+    std::fs::write(root.join("diagram.png"), "not really a png\n").expect("asset");
+    std::fs::write(
+        root.join("widget.md"),
+        "---\ntype: Reference\ntitle: Widget\nstatus: stable\n---\n\n         # Widget\n\n         See [the diagram](diagram.png), and [a note](never-written.md) that does          not exist.\n",
+    )
+    .expect("concept");
+
+    let report = inspect::link_report(&root).expect("load");
+
+    assert_eq!(
+        report.broken.len(),
+        1,
+        "the dead link is still found: {report:?}"
+    );
+    assert_eq!(report.broken[0].target, "never-written.md");
+    assert!(
+        !report.is_clean(),
+        "and still fails the gate, alongside an asset that does not: {report:?}"
+    );
+    assert_eq!(
+        report.non_concept.len(),
+        1,
+        "the asset is classified separately rather than swept in: {report:?}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// A bundle diffed against itself reports no change.
 ///
 /// The floor for [`inspect::diff_report`], and the property ADR-0021 built

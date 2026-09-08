@@ -6921,8 +6921,21 @@ fn run_okf_links(path: &str, broken_only: bool, check: bool, json: bool) -> anyh
         for link in &report.broken {
             println!("  broken: {} -> {}", link.from, link.target);
         }
+        // Reported, not gated (issue #778): the bundle contains these, they are
+        // simply not concepts. Named separately rather than folded in with the
+        // dead links, because the whole point is that a reader can tell the two
+        // apart — and suppressed under `--broken-only`, which asks for the
+        // failures alone.
+        if !broken_only {
+            for link in &report.non_concept {
+                println!(
+                    "  not a concept (in the bundle): {} -> {} [{}]",
+                    link.from, link.target, link.path
+                );
+            }
+        }
         if report.is_clean() && !broken_only {
-            println!("  every internal link resolves");
+            println!("  every internal link names something the bundle contains");
         }
     }
     // `--check` is what makes this a gate; without it a broken link is reported
