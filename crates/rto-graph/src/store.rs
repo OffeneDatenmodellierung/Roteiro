@@ -2122,23 +2122,42 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A file-backed store takes WAL, so a reader is not shut out for the whole
-    /// of a writer's transaction.
+    /// A file-backed store takes WAL wherever the filesystem allows it, so a
+    /// reader is not shut out for the whole of a writer's transaction.
+    ///
+    /// Asserted **against what a plain connection gets on this same filesystem**
+    /// rather than against the literal `wal`, because `from_conn` treats WAL as
+    /// tolerated rather than required: it is refused on most network filesystems,
+    /// and a hard assertion would fail there for a store behaving exactly as
+    /// designed. Raised in review — the first version of this test contradicted
+    /// the tolerance documented by the code it tests.
+    ///
+    /// Still not vacuous, which is what an "assert the two agree" test has to
+    /// earn: the probe is a raw `Connection` that asks for WAL itself, so a
+    /// `from_conn` that stopped asking would leave the probe reporting `wal` and
+    /// the store reporting something else, and the two would disagree.
     #[test]
-    fn a_file_backed_store_runs_in_wal() {
+    fn a_file_backed_store_takes_whatever_wal_this_filesystem_allows() {
         let dir = std::env::temp_dir().join(format!("roteiro-store-wal-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
-        let path = dir.join("graph.db");
 
-        let store = Store::open(&path).expect("store opens");
+        let available: String = {
+            let probe = super::Connection::open(dir.join("probe.db")).expect("probe opens");
+            probe
+                .query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))
+                .expect("probe journal mode")
+        };
+
+        let store = Store::open(&dir.join("graph.db")).expect("store opens");
         let mode: String = store
             .conn
             .query_row("PRAGMA journal_mode", [], |r| r.get(0))
             .expect("journal mode");
+
         assert_eq!(
             mode.to_ascii_lowercase(),
-            "wal",
-            "file-backed stores take WAL"
+            available.to_ascii_lowercase(),
+            "a store must reach the same journal mode a plain connection does here"
         );
 
         drop(store);
