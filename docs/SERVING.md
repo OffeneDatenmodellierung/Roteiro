@@ -100,7 +100,8 @@ Three reasons this endpoint strips rather than forwarding:
   #487 settled that framing, and Ask's consumer wants the answer.
 * **Multi-turn callers echo assistant turns back as history**, so a block passed
   through is re-sent verbatim on *every* subsequent turn, against a prompt budget
-  with no prefix cache today (#578). The same compounding happens inside Roteiro's
+  with nothing reused unless `[serve] prefix_cache_mb` is set (#578). The same
+  compounding happens inside Roteiro's
   own tool loop, which is why the block is dropped before a turn is fed back into
   the next round.
 * **The rule now lives in one place.** `rto_llama::thinking` is shared by this
@@ -294,6 +295,55 @@ Your argument shape is the contract Roteiro hands back for you to execute, and a
 lossy summary of it would leave the model calling a tool whose arguments no
 longer match what you will run. That is the same failure the size bound refuses
 to truncate for.
+
+## Reusing a preamble instead of re-prefilling it
+
+A context is built per generation and the prompt is prefilled in full, so a
+multi-turn client re-pays for the part of its prompt that never changes — its
+system message and its `tools` array. Measured on `qwen3.8-27b` at **3.13 ms per
+prompt token**, a 32 KiB tool surface is about 21 s per turn, every turn.
+
+`[serve] prefix_cache_mb` stops that. Set it in `~/.roteiro/config.toml`:
+
+```toml
+[serve]
+prefix_cache_mb = 512
+```
+
+Unset — the default — nothing is cached and behaviour is exactly as before.
+
+**Size it in whole preambles.** An entry costs a fixed **~150 MiB** plus 64 KiB
+per token, because `qwen3.8-27b` is a hybrid attention/SSM model whose recurrent
+state serialises whole regardless of prompt length. There is no such thing as a
+small entry: 256 holds roughly one preamble, 1024 roughly three, and anything
+below ~200 stores nothing at all.
+
+Several preambles for one model coexist, so two clients with different system
+prompts each get their own — an entry is only displaced when a new one
+that it is a prefix of arrives, or when the budget forces a least-recently-used
+eviction.
+
+**What to expect.** The boundary is learned by comparing consecutive prompts, so
+the first two turns pay full price and reuse begins at the third. Measured end to
+end on a 1,462-token prompt: **5.80 s → 2.11 s**, with byte-identical output.
+
+Three things it deliberately does not do:
+
+* **No partial credit.** A prompt that shares only part of a cached preamble is a
+  miss and prefills in full. Recurrent state has no per-position structure and
+  cannot be rewound, so a trimmed restore would be silently wrong on 48 of this
+  model's 64 layers rather than an error. A prompt *equal* to a cached preamble
+  misses too, for a different reason: with everything restored there would be no
+  token left to batch, and nothing to carry logits.
+* **No client key.** `prompt_cache_key` stays dropped. The preamble is found by
+  comparing prompts, so a client gets this without asking and cannot mistakenly
+  ask for another client's state.
+* **Nothing under speculative decoding.** A speculative generation runs target and
+  draft contexts whose states are not independent, so the cache stays inert there
+  rather than restoring half a pair.
+
+Everything it holds is recomputable, so a failed restore or a failed snapshot
+costs a request nothing: it falls back to prefilling in full.
 
 ## Not a hosted API
 

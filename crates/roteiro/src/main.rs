@@ -14719,6 +14719,16 @@ fn serve_models_endpoint(
     let max_context_tokens = cfg.serve.max_context_tokens.unwrap_or(0);
     let engine =
         rto_serve::llama::LlamaEngine::new_with_budget(served, max_context_tokens, budget_bytes)
+            .map(|e| {
+                // `[serve] prefix_cache_mb` reaches the engine here and nowhere
+                // else. `0` — the default — leaves the cache inert, so a server
+                // whose operator has not asked for it behaves exactly as before.
+                e.with_prefix_cache_bytes(
+                    usize::try_from(cfg.serve.prefix_cache_mb.unwrap_or(0))
+                        .unwrap_or(usize::MAX)
+                        .saturating_mul(1024 * 1024),
+                )
+            })
             .map_err(|e| anyhow::anyhow!("starting llama.cpp: {e}"))?;
     let engine: std::sync::Arc<dyn rto_serve::Engine> = std::sync::Arc::new(engine);
     // With the tier granted for this process, the hosted model joins the served

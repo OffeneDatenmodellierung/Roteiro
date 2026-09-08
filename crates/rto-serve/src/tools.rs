@@ -444,7 +444,8 @@ fn finish(completion: Completion, ending: Ending, limits: Limits) -> ToolLoopOut
 /// 2. **The loop stops re-sending it.** The assistant turn appended below is fed
 ///    back into the next round's prompt, so a block left in was re-prefilled
 ///    once per round against the budget [`crate::budget`] accounts for — and
-///    there is no prefix cache today (#578), so it is paid in full each time.
+///    a preamble is reusable only where `[serve] prefix_cache_mb` is set (#578),
+///    and unset — the default — it is paid in full each time.
 ///    The same compounding happens on the client's side of the wire, because a
 ///    multi-turn caller echoes assistant turns back as history.
 /// 3. **[`read_markup`] judges the reply rather than the deliberation.** A model
