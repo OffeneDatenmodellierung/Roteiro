@@ -1090,17 +1090,6 @@ mod tests {
         );
     }
 
-    /// **The rejection names what to cut.**
-    ///
-    /// The message used to say only "over 32768 bytes", which is true and
-    /// unactionable: a bundle author sees a 400 naming none of their forty tools,
-    /// and no client computes this byte count for itself. Diagnosing one real case
-    /// (issue #578) took an hour of driving MCP servers over stdio by hand to sum
-    /// schemas the server had already summed and discarded.
-    ///
-    /// Asserted on the parts a reader acts on — the total, the overage, and the
-    /// biggest tool by name — rather than on the whole sentence, so rewording the
-    /// prose does not fail the test while dropping a number would.
     /// Where `needle` appears in `hay`, failing loudly when it does not.
     ///
     /// Ordering assertions must not be written `hay.find(a) < hay.find(b)`:
@@ -1114,6 +1103,17 @@ mod tests {
             .unwrap_or_else(|| panic!("{needle} must appear in: {hay}"))
     }
 
+    /// **The rejection names what to cut.**
+    ///
+    /// The message used to say only "over 32768 bytes", which is true and
+    /// unactionable: a bundle author sees a 400 naming none of their forty tools,
+    /// and no client computes this byte count for itself. Diagnosing one real case
+    /// (issue #578) took an hour of driving MCP servers over stdio by hand to sum
+    /// schemas the server had already summed and discarded.
+    ///
+    /// Asserted on the parts a reader acts on — the total, the overage, and the
+    /// biggest tool by name — rather than on the whole sentence, so rewording the
+    /// prose does not fail the test while dropping a number would.
     #[test]
     fn an_oversized_tools_array_names_its_largest_contributors() {
         let big = "x".repeat(super::DEFAULT_MAX_CLIENT_TOOL_BYTES / 2);

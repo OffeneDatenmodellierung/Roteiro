@@ -665,16 +665,6 @@ impl LlamaEngine {
             .map(|s| s.path.clone())
     }
 
-    /// A fresh context sized to `n_ctx`, borrowing `model`.
-    ///
-    /// The parameters come from [`crate::speculative::base_params`] — the one
-    /// place a generative context's shape is written down — so a plain context
-    /// and the two a speculative generation builds cannot disagree about the
-    /// window or the batch width they accept.
-    ///
-    /// The window is passed in rather than read from the engine because it is a
-    /// property of the *request* now, not of the engine (issue #486); callers
-    /// get it from [`LlamaEngine::request_window`].
     /// Turn preamble reuse on with a byte budget, or off with `0` (#578).
     ///
     /// Off by default: an entry costs a fixed ~149.6 MiB whatever it covers, so a
@@ -852,6 +842,16 @@ impl LlamaEngine {
         Ok(boundary)
     }
 
+    /// A fresh context sized to `n_ctx`, borrowing `model`.
+    ///
+    /// The parameters come from [`crate::speculative::base_params`] — the one
+    /// place a generative context's shape is written down — so a plain context
+    /// and the two a speculative generation builds cannot disagree about the
+    /// window or the batch width they accept.
+    ///
+    /// The window is passed in rather than read from the engine because it is a
+    /// property of the *request* now, not of the engine (issue #486); callers
+    /// get it from [`LlamaEngine::request_window`].
     fn new_context<'m>(
         &self,
         model: &'m LlamaModel,

@@ -1236,6 +1236,11 @@ fn serve_overlaid(user: &ServeConfig, over: &ServeConfig) -> ServeConfig {
 /// and delegating to [`rto_graph::layering::Grant`] rather than re-deriving the
 /// rule, because ADR-0007 §111 requires declaring a key a capability and getting
 /// its precedence right to be one act rather than two.
+fn max_client_tool_bytes_effective(user: Option<usize>, project: Option<usize>) -> Option<usize> {
+    rto_graph::layering::Grant::from_layers(project, user, DEFAULT_MAX_CLIENT_TOOL_BYTES)
+        .as_effective()
+}
+
 /// The `[serve] prefix_cache_mb` the config layers jointly produce.
 ///
 /// The second capability key in this table, and the reason `Grant` was worth
@@ -1244,11 +1249,6 @@ fn serve_overlaid(user: &ServeConfig, over: &ServeConfig) -> ServeConfig {
 /// it (ADR-0007 v1.4, clause 4).
 fn prefix_cache_mb_effective(user: Option<u64>, project: Option<u64>) -> Option<u64> {
     rto_graph::layering::Grant::from_layers(project, user, 0).as_effective()
-}
-
-fn max_client_tool_bytes_effective(user: Option<usize>, project: Option<usize>) -> Option<usize> {
-    rto_graph::layering::Grant::from_layers(project, user, DEFAULT_MAX_CLIENT_TOOL_BYTES)
-        .as_effective()
 }
 
 /// The built-in for [`ServeConfig::max_client_tool_bytes`].
@@ -1315,10 +1315,6 @@ pub struct ServeConfig {
     /// the worst case a single request can reach regardless. Raising it raises
     /// that worst case.
     pub max_context_tokens: Option<u32>,
-    /// PEM certificate-chain file for in-app TLS. Set **both** this and `tls_key`
-    /// and `serve --models` terminates HTTPS itself (needs `--features serve`);
-    /// set **neither** and it serves plain HTTP (front with a proxy for TLS).
-    /// Setting exactly one is a startup error.
     /// Total bytes of client tool names, descriptions and schemas one request may
     /// advertise in `tools` (default 32,768 — [`DEFAULT_MAX_CLIENT_TOOL_BYTES`]).
     ///
@@ -1371,6 +1367,10 @@ pub struct ServeConfig {
     /// not otherwise happen and spends materially more of every teammate's
     /// machine — clause 4. The project layer may lower it and never raise it.
     pub prefix_cache_mb: Option<u64>,
+    /// PEM certificate-chain file for in-app TLS. Set **both** this and `tls_key`
+    /// and `serve --models` terminates HTTPS itself (needs `--features serve`);
+    /// set **neither** and it serves plain HTTP (front with a proxy for TLS).
+    /// Setting exactly one is a startup error.
     pub tls_cert: Option<String>,
     /// PEM private-key file paired with `tls_cert` (PKCS#8 or RSA).
     pub tls_key: Option<String>,
