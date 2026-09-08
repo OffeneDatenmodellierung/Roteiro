@@ -113,25 +113,47 @@ impl<S> PrefixCache<S> {
         self.budget_bytes > 0
     }
 
-    /// The longest cached preamble that `tokens` begins with, for `model`.
+    /// The longest cached preamble that `tokens` begins **strictly** within, for
+    /// `model`.
     ///
     /// Returns the state to restore and how many of `tokens` it covers, so the
-    /// caller batches only the rest. `None` when nothing cached is a prefix of
-    /// this prompt — including when an entry shares a *shorter* prefix, because
-    /// an entry can only be restored whole (see the module docs).
-    pub fn longest_prefix(&mut self, model: &str, tokens: &[i32]) -> Option<(&S, usize)> {
+    /// caller batches only the rest. `None` when nothing applies — which includes
+    /// three distinct cases worth naming, because each would be a defect if it
+    /// returned a hit:
+    ///
+    /// - An entry sharing only a *shorter* prefix. An entry is restored whole or
+    ///   not at all (see the module docs), so a partial match is a miss.
+    /// - A prompt *shorter* than the entry: the state would run past the prompt.
+    /// - A prompt **exactly equal** to the entry. The caller batches
+    ///   `tokens[covered..]`, so full coverage leaves it with an empty batch and
+    ///   no token to carry logits — it would decode nothing and then sample from
+    ///   whatever was last in the logits buffer. Reachable in ordinary use: a
+    ///   client that sends its system message with no question at all matches its
+    ///   own cached preamble exactly. Raised in review of #578.
+    ///
+    /// Returns the state **by value** rather than by reference so the caller can
+    /// drop the lock before restoring it. Restoring copies hundreds of MiB into a
+    /// context, and generation locks are per *model* — holding one global lock
+    /// across that native call would serialise models that otherwise run
+    /// concurrently. With `S = Arc<_>` the clone is a refcount bump.
+    pub fn longest_prefix(&mut self, model: &str, tokens: &[i32]) -> Option<(S, usize)>
+    where
+        S: Clone,
+    {
         self.tick = self.tick.saturating_add(1);
         let tick = self.tick;
         let best = self
             .entries
             .iter()
             .enumerate()
-            .filter(|(_, (m, e))| m == model && tokens.starts_with(&e.tokens))
+            .filter(|(_, (m, e))| {
+                m == model && tokens.len() > e.tokens.len() && tokens.starts_with(&e.tokens)
+            })
             .max_by_key(|(_, (_, e))| e.tokens.len())
             .map(|(i, _)| i)?;
         let (_, entry) = &mut self.entries[best];
         entry.used = tick;
-        Some((&entry.state, entry.tokens.len()))
+        Some((entry.state.clone(), entry.tokens.len()))
     }
 
     /// Where a snapshot of this prompt would be worth taking, if anywhere.
@@ -256,6 +278,14 @@ mod tests {
         (0..n).map(|i| i32::try_from(i).unwrap()).collect()
     }
 
+    /// A prompt that would hit an entry of `n` tokens: the preamble plus one more,
+    /// because an entry only matches a prompt strictly longer than itself.
+    fn asking(n: usize) -> Vec<i32> {
+        let mut v = preamble(n);
+        v.push(-1);
+        v
+    }
+
     #[test]
     fn the_boundary_is_what_two_consecutive_prompts_share() {
         let mut c: PrefixCache<Vec<u8>> = PrefixCache::new(1 << 30);
@@ -306,7 +336,7 @@ mod tests {
             .longest_prefix("m", &prompt(&pre, 40, 9))
             .expect("the prompt begins with the cached preamble");
         assert_eq!(covered, 600, "the caller batches only the remaining 40");
-        assert_eq!(state, &vec![7u8; 8]);
+        assert_eq!(state, vec![7u8; 8]);
     }
 
     #[test]
@@ -330,6 +360,31 @@ mod tests {
         assert_eq!(c.longest_prefix("m", &pre[..599]), None);
     }
 
+    /// The case review found: a prompt that *is* the cached preamble.
+    ///
+    /// Reachable in ordinary use — a client sending its system message with no
+    /// question matches its own entry exactly — and a hit would leave the caller
+    /// batching zero tokens, so nothing would carry logits.
+    #[test]
+    fn a_prompt_equal_to_the_entry_is_a_miss_because_it_would_leave_nothing_to_batch() {
+        let mut c: PrefixCache<Vec<u8>> = PrefixCache::new(1 << 30);
+        let pre = preamble(600);
+        c.store("m", pre.clone(), vec![1u8; 8], 8);
+
+        assert_eq!(
+            c.longest_prefix("m", &pre),
+            None,
+            "exact equality is a miss"
+        );
+        // One token past it is the shortest prompt that may hit.
+        let mut just_longer = pre.clone();
+        just_longer.push(-7);
+        assert_eq!(
+            c.longest_prefix("m", &just_longer).map(|(_, n)| n),
+            Some(600)
+        );
+    }
+
     #[test]
     fn one_model_never_answers_for_another() {
         let mut c: PrefixCache<Vec<u8>> = PrefixCache::new(1 << 30);
@@ -350,20 +405,17 @@ mod tests {
         c.store("a", preamble(600), vec![0u8; 1], 100);
         c.store("b", preamble(601), vec![0u8; 1], 100);
         // Touch `a`, making `b` the least recently used.
-        assert!(c.longest_prefix("a", &preamble(600)).is_some());
+        assert!(c.longest_prefix("a", &asking(600)).is_some());
         c.store("c", preamble(602), vec![0u8; 1], 100);
 
         assert_eq!(c.len(), 2, "{} bytes held", c.used_bytes());
         assert!(c.used_bytes() <= 250);
         assert!(
-            c.longest_prefix("a", &preamble(600)).is_some(),
+            c.longest_prefix("a", &asking(600)).is_some(),
             "recently used"
         );
-        assert!(
-            c.longest_prefix("c", &preamble(602)).is_some(),
-            "just stored"
-        );
-        assert!(c.longest_prefix("b", &preamble(601)).is_none(), "evicted");
+        assert!(c.longest_prefix("c", &asking(602)).is_some(), "just stored");
+        assert!(c.longest_prefix("b", &asking(601)).is_none(), "evicted");
     }
 
     #[test]
@@ -374,7 +426,7 @@ mod tests {
         c.store("a", preamble(600), vec![0u8; 1], 100);
         c.store("big", preamble(700), vec![0u8; 1], 10_000);
         assert_eq!(c.len(), 1);
-        assert!(c.longest_prefix("a", &preamble(600)).is_some());
+        assert!(c.longest_prefix("a", &asking(600)).is_some());
     }
 
     #[test]

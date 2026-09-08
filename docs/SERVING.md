@@ -327,7 +327,9 @@ Three things it deliberately does not do:
 * **No partial credit.** A prompt that shares only part of a cached preamble is a
   miss and prefills in full. Recurrent state has no per-position structure and
   cannot be rewound, so a trimmed restore would be silently wrong on 48 of this
-  model's 64 layers rather than an error.
+  model's 64 layers rather than an error. A prompt *equal* to a cached preamble
+  misses too, for a different reason: with everything restored there would be no
+  token left to batch, and nothing to carry logits.
 * **No client key.** `prompt_cache_key` stays dropped. The preamble is found by
   comparing prompts, so a client gets this without asking and cannot mistakenly
   ask for another client's state.

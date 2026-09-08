@@ -230,7 +230,7 @@ pub struct LlamaEngine {
     /// [`LlamaEngine::with_prefix_cache_bytes`] turns it on. Native state — it
     /// holds llama.cpp-owned bytes — but bytes only: nothing here borrows a
     /// context or a model, so it carries no teardown ordering of its own.
-    prefixes: Mutex<crate::prefix_cache::PrefixCache<SeqState>>,
+    prefixes: Mutex<crate::prefix_cache::PrefixCache<std::sync::Arc<SeqState>>>,
     served: Vec<Served>,
     /// The **ceiling** a per-request context may grow to, not the size every
     /// context is built at (issue #486). `0` — the default — means "the window
@@ -717,14 +717,23 @@ impl LlamaEngine {
         let Some(ctx) = decoder.plain_mut() else {
             return 0;
         };
-        let mut cache = self
-            .prefixes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some((state, covered)) = cache.longest_prefix(model_id, ids) else {
+        // Looked up under the lock and restored **outside** it. `state_seq_set`
+        // copies hundreds of MiB into the context, and generation locks are per
+        // model (`ModelSlot::gen_lock`), so holding one global lock across that
+        // call would serialise models that otherwise generate concurrently. The
+        // `Arc` is what makes taking the state out of the lock a refcount bump
+        // rather than the copy it would otherwise be. Raised in review of #578.
+        let hit = {
+            let mut cache = self
+                .prefixes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            cache.longest_prefix(model_id, ids)
+        };
+        let Some((state, covered)) = hit else {
             return 0;
         };
-        match ctx.state_seq_set(state, 0) {
+        match ctx.state_seq_set(&state, 0) {
             Ok(()) => covered,
             Err(e) => {
                 tracing::debug!(
@@ -733,7 +742,10 @@ impl LlamaEngine {
                     error = %e,
                     "preamble restore refused; prefilling in full"
                 );
-                cache.forget(model_id, covered);
+                self.prefixes
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .forget(model_id, covered);
                 0
             }
         }
@@ -785,7 +797,12 @@ impl LlamaEngine {
                 self.prefixes
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .store(model_id, ids[..boundary].to_vec(), state, bytes);
+                    .store(
+                        model_id,
+                        ids[..boundary].to_vec(),
+                        std::sync::Arc::new(state),
+                        bytes,
+                    );
                 tracing::debug!(model = model_id, boundary, bytes, "preamble cached");
             }
             // Same reasoning as a failed restore: the tokens are decoded either
