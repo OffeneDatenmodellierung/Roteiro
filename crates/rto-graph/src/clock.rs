@@ -76,6 +76,11 @@ pub fn rfc3339_from_unix(secs: u64) -> String {
 /// Days since 1970-01-01 → `(year, month, day)`, by Howard Hinnant's
 /// `civil_from_days` (public domain), which is exact for the whole proleptic
 /// Gregorian range and needs no lookup tables.
+// The casts are exact by construction, not merely believed to be: the
+// algorithm's own ranges bound `mp` to 0..=11 and the day-of-month to 1..=31
+// before either narrowing, and the era arithmetic keeps the operands
+// non-negative. Widening the return types would push the same casts onto
+// every caller.
 #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;

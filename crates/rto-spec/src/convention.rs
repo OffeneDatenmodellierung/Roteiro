@@ -42,20 +42,56 @@ fn is_attribute(line: &str) -> bool {
     t.starts_with("#[") || t.starts_with("#![")
 }
 
-/// Whether `line` is a comment of any flavour: `//`, `///` or `//!`.
+/// Whether `line` is a comment that can *justify* an `#[allow(…)]`.
 ///
-/// A doc comment counts. The convention asks for a justification a reader will
-/// find, and `AGENTS.md` does not distinguish — several existing allows are
-/// justified by the doc comment of the item they sit on, and calling those
-/// unjustified would be inventing a stricter rule than the one written down.
-fn is_comment(line: &str) -> bool {
-    line.trim_start().starts_with("//")
+/// Every **line** comment except an **outer** doc comment (`///`). A `///` belongs to the
+/// item below it and says nothing about why a lint is silenced, so counting it
+/// made this rule satisfiable by accident: every `#[allow]` written under
+/// ordinary docs — which is where most attributes sit — was exempt whatever
+/// those docs said, and the rule could not tell "a considered exception from a
+/// silenced warning", the exact distinction its own message claims to enforce.
+/// See issue #770.
+///
+/// **This was a deliberate choice before, and it is being reversed knowingly.**
+/// The removed `is_comment` argued that "`AGENTS.md` does not distinguish", and
+/// on the letter that was true — so the convention has been tightened alongside
+/// this change rather than the rule quietly outrunning it. It also predicted the
+/// cost: "several existing allows are justified by the doc comment of the item
+/// they sit on". Measured, that is exactly three, all now carrying a real reason.
+///
+/// **`//!` still counts**, and that is not an oversight. An inner
+/// `#![allow(…)]` sits at the top of a file where module prose is the only place
+/// its reason can live — `an_inner_allow_at_the_top_of_a_file_is_checked_too`
+/// pins exactly that shape. Excluding it was the first cut of this fix and it
+/// broke that test, which was right.
+///
+/// `////` and beyond are plain comments to rustc rather than docs, so the test
+/// is `///` *not* followed by another `/`.
+///
+/// **Block comments are not recognised.** A `/* … */` above an allow reads as a
+/// justification to a person and not to this rule, which would report the allow
+/// as unjustified — a false positive, and this rule's worth is that it stays
+/// silent on correct uses. Left as it is because it costs nothing today: the
+/// whole of `crates/` contains one block-comment line and no allow justified by
+/// one. Worth revisiting the moment that stops being true.
+fn is_justifying_comment(line: &str) -> bool {
+    let t = line.trim_start();
+    if !t.starts_with("//") {
+        return false;
+    }
+    // `////` and beyond are plain comments to rustc, not doc comments, so they
+    // justify — checked before `///`, which they would otherwise match.
+    if t.starts_with("////") {
+        return true;
+    }
+    !t.starts_with("///")
 }
 
 /// Whether an `#[allow(…)]` opening at `lines[i]` carries a justification.
 ///
 /// Justified by a trailing comment on the attribute's own line, or by the
-/// nearest line above it that is **not another attribute**.
+/// nearest line above it that is **not another attribute** — and that comment
+/// must be a plain `//`, not a doc comment. See [`is_justifying_comment`].
 ///
 /// # Skipping the attributes above is load-bearing, not tidiness
 ///
@@ -93,7 +129,7 @@ fn is_justified(lines: &[&str], i: usize) -> bool {
     while j > 0 && is_attribute(lines[j - 1]) {
         j -= 1;
     }
-    j > 0 && is_comment(lines[j - 1])
+    j > 0 && is_justifying_comment(lines[j - 1])
 }
 
 /// Whether the attribute opening at `lines[i]` carries a `reason = "…"` field.
@@ -415,7 +451,61 @@ pub fn scan_unjustified_allows(rel_path: &str, text: &str) -> Vec<Violation> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ViolationKind, scan_lossy_identity};
+    use super::{ViolationKind, scan_lossy_identity, scan_unjustified_allows};
+
+    /// The defect issue #770 records: a doc comment belongs to the item, not to
+    /// the attribute, so counting it made this rule satisfiable by accident —
+    /// every `#[allow]` under ordinary docs was exempt whatever the docs said.
+    #[test]
+    fn a_doc_comment_above_an_allow_is_not_a_justification() {
+        let src = "/// What this function does.\n#[allow(clippy::too_many_lines)]\nfn f() {}\n";
+        let v = scan_unjustified_allows("src/x.rs", src);
+        assert_eq!(v.len(), 1, "an outer doc comment must not justify: {v:?}");
+        assert_eq!(v[0].kind, ViolationKind::UnjustifiedAllow);
+        assert!(v[0].message.contains("src/x.rs:2"), "{}", v[0].message);
+
+        // `//!` is deliberately still a justification — see `is_justifying_comment`.
+        assert!(
+            scan_unjustified_allows(
+                "src/x.rs",
+                "//! shared fixture, not every consumer uses every path\n#![allow(dead_code)]\n",
+            )
+            .is_empty(),
+            "module prose is where a file-level allow's reason lives"
+        );
+    }
+
+    /// The forms that must keep working, or the fix trades one wrong answer for
+    /// another and every considered exception in the tree starts shouting.
+    #[test]
+    fn the_real_justifications_still_count() {
+        for src in [
+            // A plain comment on the line above — how this codebase writes them.
+            "// Exact by construction; see the ranges above.\n#[allow(clippy::cast_sign_loss)]\nfn f() {}\n",
+            // Rust's own field, which needs no comment at all.
+            "#[allow(clippy::cast_sign_loss, reason = \"exact by construction\")]\nfn f() {}\n",
+            // Trailing, after the closing bracket.
+            "#[allow(clippy::cast_sign_loss)] // exact by construction\nfn f() {}\n",
+            // `////` is a plain comment to rustc, not a doc comment.
+            "//// Not a doc comment.\n#[allow(clippy::cast_sign_loss)]\nfn f() {}\n",
+            // A comment separated from the attribute by other attributes.
+            "// Justified.\n#[must_use]\n#[allow(clippy::cast_sign_loss)]\nfn f() {}\n",
+        ] {
+            assert!(
+                scan_unjustified_allows("src/x.rs", src).is_empty(),
+                "must stay silent: {src}"
+            );
+        }
+    }
+
+    /// An allow with nothing above it at all was already reported, and still is —
+    /// the fix narrows what counts, it does not change this case.
+    #[test]
+    fn an_allow_with_no_comment_at_all_is_still_reported() {
+        let v =
+            scan_unjustified_allows("src/x.rs", "#[allow(clippy::too_many_lines)]\nfn f() {}\n");
+        assert_eq!(v.len(), 1, "{v:?}");
+    }
 
     #[test]
     fn a_lossy_conversion_feeding_a_hash_is_reported() {
@@ -464,8 +554,6 @@ mod tests {
         let md = "Call `sha256_hex(p.to_string_lossy().as_bytes())` to hash a path.\n";
         assert!(scan_lossy_identity("docs/guide.md", md).is_empty());
     }
-
-    use super::scan_unjustified_allows;
 
     fn hits(text: &str) -> Vec<String> {
         scan_unjustified_allows("src/x.rs", text)
