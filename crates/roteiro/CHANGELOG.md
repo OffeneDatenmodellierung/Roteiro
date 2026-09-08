@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.10.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.10.0...roteiro-v5.10.1) - 2026-09-08
+
+### Fixed
+
+- *(graph)* two writers on one store queue instead of one dying
+
 ## [5.10.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.9.0...roteiro-v5.10.0) - 2026-09-08
 
 ### Added
