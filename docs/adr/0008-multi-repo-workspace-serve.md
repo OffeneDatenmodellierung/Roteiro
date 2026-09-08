@@ -11,8 +11,8 @@ architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.4"
-last-modified: 2026-09-01
+version: "1.5"
+last-modified: 2026-09-08
 confluence-url:
 ---
 
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | Accepted |
 | **Architectural Significance** | HIGH |
 | **Domain** | Developer Tooling |
-| **Document version** | 1.4 |
+| **Document version** | 1.5 |
 
 ## Reference
 
@@ -179,7 +179,9 @@ graphs opened on demand, and an explicit `project` selector on every surface.**
   server's cached connection reads the latest *committed* state on the next
   query — so a project's updates appear on the next question with **no reload**.
   A `busy_timeout` on every store connection makes a read that lands during a
-  concurrent sync-commit wait briefly rather than fail with `database is locked`.
+  concurrent sync-commit wait briefly rather than fail with `database is locked`
+  — and since v1.5 the store runs in WAL, so such a read does not wait at all.
+  Two *writers* need more than that timeout; see v1.5.
   `serve --sync-on-access` opts into the opposite trade: (re)build a project's
   graph on first touch (a first-open hook on the workspace), so a stale or
   never-synced repo is prepared before it is served — slower first query, never
@@ -323,3 +325,4 @@ person to tidy it away would reintroduce diamonds silently.
 | 1.2 | 2026-08-11 | Implemented the two optional extras this ADR left open. **`/v1/{project}/…` path routing** (`rto-serve`): a client uses `…/v1/<project>` as its base URL and tool calls are pre-bound to that project (a `ScopedTools` wrapper fills `project` when the model omits it); `models`/`embeddings` accept and ignore the prefix. **`serve --sync-on-access`**: a first-open hook on the `Workspace` (re)builds a project's graph on first touch, so a stale/never-synced repo is prepared before serving. Also added **`GET /v1/projects`** so a client-side router can enumerate hosted projects without a model round-trip. And `serve --models --mcp` **merges `/v1` and `/mcp` onto one port** (both are axum path prefixes), so a single process — one loaded model, one Workspace — serves both surfaces. |
 | 1.3 | 2026-08-20 | Added **nested workspaces**: a `[[workspaces]]` entry may `includes` other named workspaces, whose members fold in transitively. Resolution **flattens** — a composed workspace is a flat `ResolvedWorkspace` like any other, so no surface learns a new concept and none changes. Records that nesting adds no expressiveness, only non-duplication (the lists cannot drift), and that whether a surface should *display* hierarchy is undecided and unforeclosed, since the declaration survives in config for a later tree-aware surface to re-derive. Cycles and unknown names are named errors; `[standalone]` is unnameable and therefore uncomposable, which removes the `linked`-across-a-boundary incoherence by construction. |
 | 1.4 | 2026-09-01 | Split the `SIGHUP` guarantee in two, after both halves were found broken. **Installing** the handler moved to `main`, before dispatch, driven by an exhaustive `is_long_lived_server` match over the CLI: it had lived at the tail of `build_serve_workspaces`, which `explorer` never calls and which the single-repo fallback returns before reaching — so those two servers had no handler and the signal's fatal default killed them (exit 129). **Reloading** now covers the whole server: `WorkspaceSet` gained a reload (it had none), and a `SIGHUP` swaps it beside the flattened `Workspace` from one snapshot, so the server can no longer log a fresh project list and serve a stale one — both are planned from one walk of the roots and then swapped back to back. Records that a reload re-scans the roots but does **not** re-read config, and why. |
+| 1.5 | 2026-09-08 | Amended (no issue; the finding was recorded on #579, which is closed **not planned**, and outlives it). **v1.1's `busy_timeout` does not do what that row claims for a second *writer*, and this corrects it.** The row says a concurrent access "waits briefly instead of failing with `database is locked`". True of a reader. Not true of a writer: every upsert in the store reads before it writes inside one transaction, and `Connection::transaction()` defaults to `DEFERRED`, so two such writers each hold a shared lock and then each ask to upgrade. SQLite refuses that **immediately** and deliberately does not invoke the busy handler, because waiting could only deadlock — so the five second timeout was never reached in the case it appears to cover, and one of the two writers died at once. Two Roteiro processes over one repository is ordinary rather than exotic: an editor's MCP client and a terminal, a long-lived `serve` and that repo's own `sync`, or several clients each spawning their own stdio server. Two settings now, in the one place a connection is configured, and **neither substitutes for the other** — which an injection shows rather than an argument. (a) Write transactions are `IMMEDIATE`, taking the lock when the transaction opens rather than upgrading into it, which turns the refusal into a queue the timeout can wait on. (b) The store runs in **WAL**, so a reader is no longer shut out for the whole of a writer's transaction — under the default rollback journal a `sync` blocked every query in a running `serve`, which is what v1.1's timeout was papering over. **WAL alone would not have fixed the reported failure**: with WAL on and transactions left `DEFERRED` the second writer still dies with `SQLITE_BUSY` / "database is locked", and the regression test says exactly that under injection — so the obvious half of this fix is the half that does not address the symptom. WAL is *tolerated rather than required*: it needs shared memory and is refused on most network filesystems, where `PRAGMA journal_mode` reports the mode actually in force. Such a store keeps precisely the behaviour it had before, so there is no new failure to report and the fallback is deliberately silent. |

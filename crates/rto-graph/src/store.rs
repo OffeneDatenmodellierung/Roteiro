@@ -187,12 +187,48 @@ impl Store {
 
     fn from_conn(mut conn: Connection) -> Result<Self, StoreError> {
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-        // Wait briefly for a concurrent writer instead of failing a read with
-        // `database is locked`. Matters for workspace `serve` (ADR-0008), where a
-        // long-lived server reads a project's graph while that repo's own
-        // `roteiro sync` commits an update to the same file. Syncs are
-        // sub-second, so this only ever costs a short wait, never a lost query.
+        // Wait for a concurrent writer instead of failing with `database is
+        // locked`. Matters for workspace `serve` (ADR-0008), where a long-lived
+        // server reads a project's graph while that repo's own `roteiro sync`
+        // commits an update to the same file — and for any two Roteiro processes
+        // over one repository, which is ordinary rather than exotic: an editor's
+        // MCP client and a terminal, or several clients each spawning their own
+        // stdio server.
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
+
+        // **The timeout alone does not deliver that**, which is what this pair of
+        // settings is for. Both are needed and neither substitutes for the other.
+        //
+        // `Immediate` takes the write lock when the transaction *opens*, rather
+        // than upgrading to it on the first write. rusqlite's default is the lazy
+        // one — `TransactionBehavior::Deferred` — and under it two writers that  roteiro:ignore
+        // each read before they write, which every upsert here does, both hold a
+        // shared lock and then both ask to upgrade.
+        // SQLite refuses that immediately with `SQLITE_BUSY` and **does not invoke
+        // the busy handler**, because waiting could only deadlock. So the five
+        // second timeout above was never reached in the case it looks like it
+        // covers: one of the two writers died at once. Taking the lock up front
+        // turns the deadlock into a queue, which is what the timeout can wait on.
+        conn.set_transaction_behavior(rusqlite::TransactionBehavior::Immediate);
+
+        // WAL is the other half: under the default rollback journal a writer
+        // excludes readers for the whole transaction, so a `sync` blocks every
+        // query in a running `serve`. In WAL, readers never block writers and
+        // writers never block readers, so only writer-against-writer waits.
+        //
+        // Tolerated rather than required, and **silently** — which is the one place
+        // silence is right here. WAL needs shared memory and is refused on most
+        // network filesystems; `PRAGMA journal_mode` reports the mode actually in
+        // force rather than failing. A store that cannot take WAL keeps exactly
+        // the behaviour it had before this change, so there is no new failure to
+        // report — only an improvement that did not apply. `:memory:` answers
+        // `memory` for the same reason and is equally fine.
+        //
+        // The result is discarded rather than checked because nothing here can act
+        // on it. `PRAGMA journal_mode` answers for anyone who needs to know which
+        // of the two a given store got.
+        let _: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
+
         migrations::apply(&mut conn)?;
         Ok(Self { conn })
     }
@@ -1999,6 +2035,31 @@ mod tests {
     use crate::model::{Direction, Edge, EdgeKind, FactSet, Node, NodeKind, Span};
     use crate::provenance::Provenance;
 
+    /// A fresh directory for a file-backed store, cleared on the way out of this
+    /// function rather than trusted to be absent.
+    ///
+    /// Keyed by process id **and** a monotonic counter, matching
+    /// `rto-render`'s `okf_inspect` tests and the CLI tests' `bundle` helper —
+    /// whose own note explains why, and which I should have followed first time:
+    /// *"uniqueness must not depend on everyone remembering to pick a distinct
+    /// name."*
+    ///
+    /// The pre-clean is the half that matters most here, and is what review
+    /// caught. A store is not one file: a failed run leaves `graph.db` beside its
+    /// `-wal` and `-shm`, and reusing that state would have the concurrency test
+    /// counting rows a previous run inserted — failing, eventually, for a reason
+    /// that has nothing to do with locking. A test that can fail for the wrong
+    /// reason is worse than no test, because the next person debugs the wrong
+    /// thing.
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root =
+            std::env::temp_dir().join(format!("rto-store-{}-{seq}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        root
+    }
+
     fn sample_node(key: &str) -> Node {
         Node {
             key: key.to_owned(),
@@ -2011,6 +2072,147 @@ mod tests {
             provenance: Provenance::Derived,
             meta: serde_json::json!({"vis": "pub"}),
         }
+    }
+
+    /// Two Roteiro processes over one repository is ordinary rather than exotic —
+    /// an editor's MCP client and a terminal, a long-lived `serve` and a `sync`,
+    /// or several clients each spawning their own stdio server. Both writing must
+    /// **queue**, not kill one of them.
+    ///
+    /// Reproduces the shape every upsert in this file has: *read, then write,
+    /// inside one transaction.* That is precisely the case the five-second
+    /// `busy_timeout` never covered — SQLite refuses a lock upgrade outright
+    /// rather than waiting on it, because waiting could deadlock, so the handler
+    /// is never invoked and the second writer dies at once. See `from_conn`.
+    ///
+    /// Drives the connection directly rather than a public method because the
+    /// first writer has to still be *holding* the lock when the second arrives,
+    /// and no public API lets a caller pause mid-transaction.
+    #[test]
+    fn a_second_writer_waits_for_the_first_instead_of_failing() {
+        let dir = scratch("lock");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("graph.db");
+
+        let mut first = Store::open(&path).expect("first store opens");
+        first
+            .conn
+            .execute_batch("CREATE TABLE IF NOT EXISTS probe(v INTEGER);")
+            .expect("probe table");
+        let mut second = Store::open(&path).expect("second store opens");
+
+        // Signalled once the first writer is inside its transaction *and* holding
+        // the write lock, so the second arrives during the contention rather than
+        // racing to it.
+        //
+        // A channel rather than a `Barrier`, because `Barrier::wait` cannot fail:
+        // if the writer panicked before reaching it — a failing `expect`, a
+        // migration error — the main thread would wait for ever and the test would
+        // hang CI instead of failing it. Dropping the `Sender` on a panicking
+        // thread disconnects the channel, so `recv_timeout` returns *immediately*
+        // in that case, and the timeout covers the merely-pathological one.
+        // Raised in review of this change.
+        let (signal, holding) = std::sync::mpsc::channel::<()>();
+
+        let writer = std::thread::spawn(move || {
+            let tx = first.conn.transaction().expect("first writer opens");
+            let _: i64 = tx
+                .query_row("SELECT count(*) FROM probe", [], |r| r.get(0))
+                .expect("first writer reads");
+            tx.execute("INSERT INTO probe(v) VALUES (1)", [])
+                .expect("first writer writes");
+            // Ignored deliberately: if the main thread has already gone (its own
+            // assertion failed), there is nobody to tell and nothing to do.
+            let _ = signal.send(());
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            tx.commit().expect("first writer commits");
+        });
+
+        if holding
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .is_err()
+        {
+            // Re-raise the writer's own panic, which says far more than "timed
+            // out" would; only if it did not panic is the timeout itself the news.
+            writer.join().expect("first writer reached the lock");
+            panic!("first writer neither signalled nor panicked");
+        }
+        let tx = second
+            .conn
+            .transaction()
+            .expect("a second writer must wait for the first, not be refused");
+        let _: i64 = tx
+            .query_row("SELECT count(*) FROM probe", [], |r| r.get(0))
+            .expect("second writer reads");
+        tx.execute("INSERT INTO probe(v) VALUES (2)", [])
+            .expect("second writer writes rather than failing `database is locked`");
+        tx.commit().expect("second writer commits");
+
+        writer.join().expect("first writer finished");
+
+        let seen: i64 = second
+            .conn
+            .query_row("SELECT count(*) FROM probe", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(seen, 2, "both writers' rows survive — neither was dropped");
+
+        drop(second);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A file-backed store takes WAL wherever the filesystem allows it, so a
+    /// reader is not shut out for the whole of a writer's transaction.
+    ///
+    /// Asserted **against what a plain connection gets on this same filesystem**
+    /// rather than against the literal `wal`, because `from_conn` treats WAL as
+    /// tolerated rather than required: it is refused on most network filesystems,
+    /// and a hard assertion would fail there for a store behaving exactly as
+    /// designed. Raised in review — the first version of this test contradicted
+    /// the tolerance documented by the code it tests.
+    ///
+    /// Still not vacuous, which is what an "assert the two agree" test has to
+    /// earn: the probe is a raw `Connection` that asks for WAL itself, so a
+    /// `from_conn` that stopped asking would leave the probe reporting `wal` and
+    /// the store reporting something else, and the two would disagree.
+    #[test]
+    fn a_file_backed_store_takes_whatever_wal_this_filesystem_allows() {
+        let dir = scratch("wal");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+
+        let available: String = {
+            let probe = super::Connection::open(dir.join("probe.db")).expect("probe opens");
+            probe
+                .query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))
+                .expect("probe journal mode")
+        };
+
+        let store = Store::open(&dir.join("graph.db")).expect("store opens");
+        let mode: String = store
+            .conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .expect("journal mode");
+
+        assert_eq!(
+            mode.to_ascii_lowercase(),
+            available.to_ascii_lowercase(),
+            "a store must reach the same journal mode a plain connection does here"
+        );
+
+        drop(store);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// And an in-memory store still opens, which is the tolerance path: WAL is
+    /// meaningless there, `PRAGMA journal_mode` answers `memory`, and that must
+    /// not be an error — the same branch a network filesystem takes.
+    #[test]
+    fn an_in_memory_store_opens_without_wal() {
+        let store = Store::open_in_memory().expect("in-memory store opens");
+        let mode: String = store
+            .conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .expect("journal mode");
+        assert_ne!(mode.to_ascii_lowercase(), "wal");
     }
 
     #[test]
