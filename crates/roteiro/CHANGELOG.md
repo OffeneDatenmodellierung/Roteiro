@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.10.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.9.0...roteiro-v5.10.0) - 2026-09-08
+
+### Added
+
+- *(serve)* reuse a prompt's preamble instead of re-prefilling it
+
+### Other
+
+- give four items back the doc comments that ran into their neighbours
+
 ## [5.9.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.8.1...roteiro-v5.9.0) - 2026-09-08
 
 ### Added
