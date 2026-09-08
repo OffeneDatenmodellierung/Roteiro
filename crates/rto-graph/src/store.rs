@@ -2080,11 +2080,18 @@ mod tests {
             .expect("probe table");
         let mut second = Store::open(&path).expect("second store opens");
 
-        // Released once the first writer is inside its transaction *and* holding
+        // Signalled once the first writer is inside its transaction *and* holding
         // the write lock, so the second arrives during the contention rather than
         // racing to it.
-        let holding = std::sync::Arc::new(std::sync::Barrier::new(2));
-        let signal = std::sync::Arc::clone(&holding);
+        //
+        // A channel rather than a `Barrier`, because `Barrier::wait` cannot fail:
+        // if the writer panicked before reaching it — a failing `expect`, a
+        // migration error — the main thread would wait for ever and the test would
+        // hang CI instead of failing it. Dropping the `Sender` on a panicking
+        // thread disconnects the channel, so `recv_timeout` returns *immediately*
+        // in that case, and the timeout covers the merely-pathological one.
+        // Raised in review of this change.
+        let (signal, holding) = std::sync::mpsc::channel::<()>();
 
         let writer = std::thread::spawn(move || {
             let tx = first.conn.transaction().expect("first writer opens");
@@ -2093,12 +2100,22 @@ mod tests {
                 .expect("first writer reads");
             tx.execute("INSERT INTO probe(v) VALUES (1)", [])
                 .expect("first writer writes");
-            signal.wait();
+            // Ignored deliberately: if the main thread has already gone (its own
+            // assertion failed), there is nobody to tell and nothing to do.
+            let _ = signal.send(());
             std::thread::sleep(std::time::Duration::from_millis(250));
             tx.commit().expect("first writer commits");
         });
 
-        holding.wait();
+        if holding
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .is_err()
+        {
+            // Re-raise the writer's own panic, which says far more than "timed
+            // out" would; only if it did not panic is the timeout itself the news.
+            writer.join().expect("first writer reached the lock");
+            panic!("first writer neither signalled nor panicked");
+        }
         let tx = second
             .conn
             .transaction()
