@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.10.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v5.9.0...rto-llama-v5.10.0) - 2026-09-08
+
+### Added
+
+- *(serve)* reuse a prompt's preamble instead of re-prefilling it
+
+### Fixed
+
+- *(llama)* forget a refused preamble by identity, and stop overstating supersession
+- *(llama)* supersede a cached preamble by prefix, not by length
+- *(llama)* a prompt equal to a cached preamble must miss, and restore off-lock
+
+### Other
+
+- *(llama)* ask the budget before paying for a snapshot
+- *(llama)* a refused restore fails at every window, not all but one
+- give four items back the doc comments that ran into their neighbours
+- *(llama)* gate preamble reuse before it allocates
+
 ## [5.9.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v5.8.1...rto-llama-v5.9.0) - 2026-09-08
 
 ### Other
