@@ -1419,11 +1419,12 @@ pub struct McpConfig {
 /// key where a flag has a value to state. Here it has none: there is no grant
 /// for a flag to express, only a further denial, exactly as the ADR says of a
 /// value key that "there is no deny for `[models] generative`, only a different
-/// value". The reading that matters is who writes the flag. Under issue #579
-/// Roteiro may write its own `roteiro mcp …` line into a third-party agent's
-/// config, so the invocation is not reliably a person typing at a prompt, while
-/// `~/.roteiro/config.toml` is unambiguously the machine owner's standing
-/// intent. A flag that could widen would let a generated registration undo it.
+/// value". The reading that matters is who writes the flag. An MCP invocation is
+/// **argv in a client's configuration file** — written once by whoever wired that
+/// client up, then committed and shared — so it is not reliably a person typing
+/// at a prompt, while `~/.roteiro/config.toml` is unambiguously the machine
+/// owner's standing intent. A flag that could widen would let a checked-in
+/// invocation undo what that owner denied.
 /// To widen, widen the config layer — the same answer `[lint]` gives.
 ///
 /// # It is a value, not a capability, under ADR-0007 v1.4

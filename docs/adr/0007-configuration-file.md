@@ -11,8 +11,8 @@ architectural-significance: MEDIUM  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.7"
-last-modified: 2026-09-07
+version: "1.8"
+last-modified: 2026-09-08
 confluence-url:
 ---
 
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | Accepted |
 | **Architectural Significance** | MEDIUM |
 | **Domain** | Developer Tooling |
-| **Document version** | 1.7 |
+| **Document version** | 1.8 |
 
 ## Reference
 
@@ -92,9 +92,10 @@ intersection.** Every layer may narrow, none may widen, the invocation included.
 The flag narrows rather than winning because a flag has nothing else to express
 here — there is no grant available to it, exactly as this ADR says of a value
 key that "there is no deny for `[models] generative`, only a different value" —
-and because under issue #579 Roteiro may write its own `roteiro mcp …` line into
-a third-party agent's config, so the invocation is not reliably a person at a
-prompt while the user layer is unambiguously that person's standing intent.
+and because an MCP invocation is **argv in a client's configuration file** —
+written once by whoever wired that client up, then committed and shared — so the
+invocation is not reliably a person at a prompt, while the user layer is
+unambiguously that person's standing intent.
 
 Intersection is a lattice meet: order-independent, idempotent and monotone
 downwards, so "may deny, may not grant" holds by construction rather than by a
@@ -225,3 +226,4 @@ Project direction incorporated: add a config file, but keep it **optional and fu
 | 1.5 | 2026-08-21 | Amended (issue #584). Adds `[mcp] tools`, the advertised MCP tool surface, and with it a case v1.4's classification had no name for: a key that is a **value** by the default rule — its default already advertises everything, so a project file grants nothing new — and whose **every setting is nonetheless a denial**. Ordinary precedence would let a nearer layer *un-deny*, restoring a tool the machine's owner removed, which is v1.2's failure reached from the other direction. Such a key therefore **layers by intersection**: every layer may narrow the surface and none may widen it, the invocation included, and the flag narrows rather than winning because it has no grant to express and is not reliably written by a person (issue #579). Intersection is a lattice meet, so the property holds by construction rather than by a remembered rule, satisfying v1.4's requirement that the mechanism be structural. An empty intersection is a startup error and never an unrestricted server. `roteiro config` labels the key `project ∩ user` rather than naming a winning layer, on the same reasoning as v1.1's per-pattern `[debt] ignore` provenance. |
 | 1.6 | 2026-09-07 | Amended (no issue; implemented directly at the owner's request). Adds `[serve] max_client_tool_bytes` to the table above as a **capability**, and — more to the point — **§111's type finally exists.** That section required a capability key's layering to be carried by its type "so that declaring a key a capability and getting its precedence right are *the same act*", and warned that a second bespoke implementation is how the rule decays into a convention and a third into folklore. On inspection there were already **three** hand-written copies of "a project may deny but never grant": `rto_remote::ConfigGrant`, `rto_exec::LintConfigGrant`, and the reasoning that would have been written a fourth time here. They are now one `rto_graph::layering::Grant<T>`, which all three delegate to. The generalisation is smaller than the prose suggests: "deny but never grant" and "lower but never raise" are one comparison under `Ord`, since `false < true` and a tighter bound is a smaller number. Two things did **not** generalise and are documented where they live — `project_denied` and `project_grant_ignored` report what a *file said*, which is a `bool`-shaped question rather than a layering one, so each grant type keeps its own; and the comparison is `<=`, not `<`, so a project restating the baseline applies rather than being misreported as an overruled grant. |
 | 1.7 | 2026-09-07 | Amended (issue #578). Adds `[serve] prefix_cache_mb` to the table above as a **capability**, by the same clause 4 as `max_client_tool_bytes` and with the same `Grant` carrying it. Recorded because it is the first key added *after* v1.6 built the shared type, and so the first evidence that §111's requirement — that declaring a key a capability and getting its precedence right be *one act* — actually holds in practice rather than only in principle: the key's whole layering is `Grant::from_layers(project, user, 0).as_effective()`, one line, with no new rule written and none available to get wrong. It is also the first key at a *different width* to reach the type, `u64` where the others are `bool` and `usize`, which is what the generalisation was for. |
+| 1.8 | 2026-09-08 | Amended (no issue). **Re-grounds v1.5's reason for `--tools` narrowing rather than winning, which cited issue #579 — now closed *not planned*.** The conclusion is unchanged and the argument is stronger without it. v1.5 argued the invocation "is not reliably written by a person" because *Roteiro itself might one day* write a `roteiro mcp …` line into a third-party agent's config (#579). That will not happen, and it was always the weaker form of the point: it rested on a hypothetical feature rather than on what an MCP invocation already is. It is **argv in a client's configuration file** — written once by whoever wired the client up, then committed and shared with a team. Observed rather than supposed: a bundle in use against this server carried `args: [mcp, --tools, query]` in a checked-in `config.yaml`, which is precisely the "consent by pull request, granted by someone else, noticed by nobody" shape [[docs/adr/0019-remote-model-tier.md]] §3 names — reached here through a *narrowing* flag rather than a granting one, which is why intersection is the right regime whoever writes it. No key changes class and no precedence moves; this replaces a citation that no longer points at anything with the reason that was underneath it. |
