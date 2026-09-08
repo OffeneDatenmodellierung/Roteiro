@@ -702,6 +702,46 @@ impl LlamaEngine {
         (c.len(), c.used_bytes())
     }
 
+    /// Reuse this prompt's preamble if one is cached, or snapshot it if this is
+    /// where one becomes visible (#578). Returns how many leading tokens restored
+    /// state already accounts for, so the caller does not batch them.
+    ///
+    /// **Gated before it does any work.** With the cache off — the default — or
+    /// under a speculative decoder, this returns `0` having done nothing but read
+    /// a flag: no token-id vector is built and no prompt is retained. A server
+    /// that has not opted in therefore pays one uncontended lock acquire per
+    /// request for a feature it is not using, and nothing else. Raised in review
+    /// of #578, where the vector was allocated before the gate rather than after.
+    fn reuse_preamble(
+        &self,
+        decoder: &mut Decoder<'_>,
+        model_id: &str,
+        tokens: &[LlamaToken],
+    ) -> Result<usize, EngineError> {
+        if !decoder.is_plain() {
+            return Ok(0);
+        }
+        let enabled = self
+            .prefixes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .enabled();
+        if !enabled {
+            return Ok(0);
+        }
+        let ids: Vec<i32> = tokens.iter().map(|t| t.0).collect();
+        match self.restore_preamble(decoder, model_id, &ids) {
+            // A hit: those tokens are already in the context and must not be
+            // batched again.
+            n if n > 0 => Ok(n),
+            // A miss. If this prompt and the last one share a preamble worth
+            // keeping, prefill up to that boundary as its own batch and snapshot
+            // it — the same tokens are decoded either way, so the only new cost is
+            // the copy, and the next turn skips all of it.
+            _ => self.capture_preamble(decoder, model_id, tokens, &ids),
+        }
+    }
+
     /// Restore a cached preamble into `decoder`, returning how many leading
     /// tokens it accounts for — `0` when nothing applies.
     ///
@@ -963,17 +1003,7 @@ impl LlamaEngine {
         // `reused` is how many leading tokens the restored state accounts for, so
         // they are not batched; it is `0` on a miss, with the cache off, or under
         // speculative decoding, and the code below is then exactly what it was.
-        let ids: Vec<i32> = tokens.iter().map(|t| t.0).collect();
-        let reused = match self.restore_preamble(&mut decoder, &req.model, &ids) {
-            // A hit: those tokens are already in the context and must not be
-            // batched again.
-            n if n > 0 => n,
-            // A miss. If this prompt and the last one share a preamble worth
-            // keeping, prefill up to that boundary as its own batch and snapshot
-            // it — the same tokens are decoded either way, so the only new cost is
-            // the copy, and the next turn skips all of it.
-            _ => self.capture_preamble(&mut decoder, &req.model, &tokens, &ids)?,
-        };
+        let reused = self.reuse_preamble(&mut decoder, &req.model, &tokens)?;
 
         // Prime the batch with the prompt; only the last token needs logits.
         let mut batch = LlamaBatch::new(tokens.len().saturating_sub(reused).max(1), 1);
@@ -1152,6 +1182,15 @@ impl<'m> Decoder<'m> {
             Self::Plain(ctx) => ctx,
             Self::Speculative(mtp) => mtp.target(),
         }
+    }
+
+    /// Whether this is the plain decoder, without borrowing it.
+    ///
+    /// Preamble reuse is gated on this *before* it does any work, so a
+    /// speculative generation does not pay to discover that the cache does not
+    /// apply to it.
+    fn is_plain(&self) -> bool {
+        matches!(self, Self::Plain(_))
     }
 
     /// The plain context, mutably — `None` for a speculative pair.
