@@ -372,31 +372,43 @@ fn a_snapshot_restores_into_a_context_of_a_different_size() {
         let mut ctx = model
             .new_context(&backend, context_params_at(target))
             .expect("context builds");
-        if let Err(e) = ctx.state_seq_set(&snapshot, 0) {
-            eprintln!("  n_ctx {target:>5}: REFUSED — {e}");
-            assert_eq!(
-                target, 8192,
-                "a refusal at {target} would mean a snapshot is welded to its own window"
-            );
-        } else {
-            {
-                let from = i32::try_from(preamble.len()).expect("fits i32");
-                feed(&mut ctx, &suffix, from);
-                let last = i32::try_from(suffix.len() - 1).expect("fits i32");
-                let pos = from + i32::try_from(suffix.len()).expect("fits i32");
-                let got = continue_greedy(&mut ctx, last, pos, CONTINUE);
-                let same = got == baseline;
-                eprintln!(
-                    "  n_ctx {target:>5}: restored, continuation {}",
-                    if same { "IDENTICAL" } else { "DIVERGED" }
-                );
-                assert!(
-                    same,
-                    "a restore that succeeds must be correct — silently wrong is worse than refused.\n\
-                     baseline={baseline:?}\ngot={got:?}"
-                );
-            }
-        }
+
+        // **A refusal fails the test, at every window.** An earlier draft tolerated
+        // one at 8192 — written before the answer was known, when growing past the
+        // source's own window looked like the case llama.cpp would reject. It does
+        // not, and the tolerance would have let exactly the regression this test
+        // exists to catch pass silently. Raised in review of #578.
+        //
+        // The assertion below is not redundant with this one, and an injection
+        // showed why: grafting a snapshot taken from a *different, empty* sequence
+        // is **accepted** rather than refused, and produces a diverged
+        // continuation. `state_seq_set` validates less than its `SizeMismatch`
+        // documentation suggests, so "it restored" is not "it restored the right
+        // thing" — the refusal check and the identity check catch different
+        // failures and both are load-bearing.
+        ctx.state_seq_set(&snapshot, 0).unwrap_or_else(|e| {
+            panic!(
+                "n_ctx {target}: refused ({e}) — a snapshot welded to the window it \
+                 was taken at cannot coexist with per-request sizing, which is what \
+                 `prefix_cache` is built on"
+            )
+        });
+
+        let from = i32::try_from(preamble.len()).expect("fits i32");
+        feed(&mut ctx, &suffix, from);
+        let last = i32::try_from(suffix.len() - 1).expect("fits i32");
+        let pos = from + i32::try_from(suffix.len()).expect("fits i32");
+        let got = continue_greedy(&mut ctx, last, pos, CONTINUE);
+        let same = got == baseline;
+        eprintln!(
+            "  n_ctx {target:>5}: restored, continuation {}",
+            if same { "IDENTICAL" } else { "DIVERGED" }
+        );
+        assert!(
+            same,
+            "a restore that succeeds must be correct — silently wrong is worse than refused.\n\
+             baseline={baseline:?}\ngot={got:?}"
+        );
     }
     eprintln!("  snapshot bytes at n_ctx 4096: {taken_at}");
 }
