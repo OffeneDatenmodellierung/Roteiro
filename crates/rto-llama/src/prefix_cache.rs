@@ -181,10 +181,16 @@ impl<S> PrefixCache<S> {
         if shared < MIN_PREFIX_TOKENS {
             return None;
         }
+        // "Already covered" means an entry that would actually *hit this prompt*,
+        // not merely one of the same length. Comparing lengths alone would make
+        // the cache one-entry-per-model: a second conversation with a different
+        // preamble of similar size would never be snapshotted, however expensive.
+        // Raised in review of #578.
         let covered = self
             .entries
             .iter()
-            .filter(|(m, _)| m == model)
+            .filter(|(m, e)| m == model && tokens.len() > e.tokens.len())
+            .filter(|(_, e)| tokens.starts_with(&e.tokens))
             .map(|(_, e)| e.tokens.len())
             .max()
             .unwrap_or(0);
@@ -192,6 +198,10 @@ impl<S> PrefixCache<S> {
     }
 
     /// Store `state`, the state after `tokens`, occupying `bytes`.
+    ///
+    /// Supersedes any entry for this model whose tokens are a prefix of these —
+    /// and only those. Entries for other conversations survive and compete for
+    /// the budget on their own merits, so one model may hold several preambles.
     ///
     /// Evicts least-recently-used entries until it fits. An entry larger than the
     /// whole budget is dropped rather than stored, and dropping it does not
@@ -202,10 +212,15 @@ impl<S> PrefixCache<S> {
             return;
         }
         self.tick = self.tick.saturating_add(1);
-        // A longer entry for this model supersedes a shorter one: the shorter can
-        // only ever be hit by a prompt the longer also matches.
+        // Drop only what this entry genuinely supersedes: an entry whose tokens
+        // are a prefix of the new one can only be hit by prompts the new one also
+        // matches, so keeping it would spend ~150 MiB on an entry that can never
+        // win. Comparing *lengths* would have been wrong — two preambles of
+        // similar size are usually different conversations, not one superseding
+        // the other, and dropping by length evicted a still-useful entry. Raised
+        // in review of #578; the justification was right and the test was not.
         self.entries
-            .retain(|(m, e)| m != model || e.tokens.len() > tokens.len());
+            .retain(|(m, e)| m != model || !tokens.starts_with(&e.tokens));
         while self.used_bytes().saturating_add(bytes) > self.budget_bytes {
             let Some(lru) = self
                 .entries
@@ -441,6 +456,50 @@ mod tests {
             .longest_prefix("m", &prompt(&preamble(900), 5, 1))
             .expect("hit");
         assert_eq!(covered, 900);
+    }
+
+    /// Two conversations, two preambles, one model. Neither supersedes the other,
+    /// so keeping only the longer would silently make this cache
+    /// one-entry-per-model — the second client would never see a hit.
+    #[test]
+    fn two_different_preambles_for_one_model_both_survive() {
+        let mut c: PrefixCache<Vec<u8>> = PrefixCache::new(1 << 30);
+        let a: Vec<i32> = (0..600).collect();
+        let b: Vec<i32> = (0..600).map(|i| i + 5_000).collect();
+        c.store("m", a.clone(), vec![1u8; 1], 100);
+        c.store("m", b.clone(), vec![2u8; 1], 100);
+
+        assert_eq!(c.len(), 2, "neither preamble supersedes the other");
+        let mut ask_a = a.clone();
+        ask_a.push(-1);
+        let mut ask_b = b.clone();
+        ask_b.push(-1);
+        assert_eq!(
+            c.longest_prefix("m", &ask_a).map(|(s, _)| s),
+            Some(vec![1u8; 1])
+        );
+        assert_eq!(
+            c.longest_prefix("m", &ask_b).map(|(s, _)| s),
+            Some(vec![2u8; 1])
+        );
+    }
+
+    /// And a second conversation is still *proposed*, even when the cache already
+    /// holds a longer entry for the same model that cannot serve it.
+    #[test]
+    fn a_second_conversation_is_proposed_despite_a_longer_unrelated_entry() {
+        let mut c: PrefixCache<Vec<u8>> = PrefixCache::new(1 << 30);
+        c.store("m", (0..900).collect::<Vec<i32>>(), vec![0u8; 1], 100);
+
+        let other: Vec<i32> = (0..MIN_PREFIX_TOKENS + 50)
+            .map(|i| i32::try_from(i).unwrap() + 9_000)
+            .collect();
+        c.boundary_for("m", &prompt(&other, 5, 1));
+        assert_eq!(
+            c.boundary_for("m", &prompt(&other, 5, 2)),
+            Some(other.len()),
+            "a longer entry that cannot match this prompt does not cover it"
+        );
     }
 
     #[test]
