@@ -2035,6 +2035,31 @@ mod tests {
     use crate::model::{Direction, Edge, EdgeKind, FactSet, Node, NodeKind, Span};
     use crate::provenance::Provenance;
 
+    /// A fresh directory for a file-backed store, cleared on the way out of this
+    /// function rather than trusted to be absent.
+    ///
+    /// Keyed by process id **and** a monotonic counter, matching
+    /// `rto-render`'s `okf_inspect` tests and the CLI tests' `bundle` helper —
+    /// whose own note explains why, and which I should have followed first time:
+    /// *"uniqueness must not depend on everyone remembering to pick a distinct
+    /// name."*
+    ///
+    /// The pre-clean is the half that matters most here, and is what review
+    /// caught. A store is not one file: a failed run leaves `graph.db` beside its
+    /// `-wal` and `-shm`, and reusing that state would have the concurrency test
+    /// counting rows a previous run inserted — failing, eventually, for a reason
+    /// that has nothing to do with locking. A test that can fail for the wrong
+    /// reason is worse than no test, because the next person debugs the wrong
+    /// thing.
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root =
+            std::env::temp_dir().join(format!("rto-store-{}-{seq}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        root
+    }
+
     fn sample_node(key: &str) -> Node {
         Node {
             key: key.to_owned(),
@@ -2065,11 +2090,7 @@ mod tests {
     /// and no public API lets a caller pause mid-transaction.
     #[test]
     fn a_second_writer_waits_for_the_first_instead_of_failing() {
-        let dir = std::env::temp_dir().join(format!(
-            "roteiro-store-lock-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let dir = scratch("lock");
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join("graph.db");
 
@@ -2155,7 +2176,7 @@ mod tests {
     /// the store reporting something else, and the two would disagree.
     #[test]
     fn a_file_backed_store_takes_whatever_wal_this_filesystem_allows() {
-        let dir = std::env::temp_dir().join(format!("roteiro-store-wal-{}", std::process::id()));
+        let dir = scratch("wal");
         std::fs::create_dir_all(&dir).expect("temp dir");
 
         let available: String = {
