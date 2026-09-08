@@ -197,6 +197,18 @@ impl<S> PrefixCache<S> {
         (shared > covered).then_some(shared)
     }
 
+    /// Whether an entry of `bytes` could be kept at all.
+    ///
+    /// For a caller to ask **before** producing the state. A snapshot is a copy of
+    /// hundreds of MiB out of the context, and [`PrefixCache::store`] drops an
+    /// entry larger than the whole budget on arrival — so without this the copy is
+    /// made and thrown away on every miss, and the smaller the budget the more
+    /// often that happens. Raised in review of #578.
+    #[must_use]
+    pub fn could_store(&self, bytes: usize) -> bool {
+        self.enabled() && bytes <= self.budget_bytes
+    }
+
     /// Store `state`, the state after `tokens`, occupying `bytes`.
     ///
     /// Supersedes any entry for this model whose tokens are a prefix of these —
@@ -449,6 +461,34 @@ mod tests {
         assert!(c.longest_prefix("b", &asking(601)).is_none(), "evicted");
     }
 
+    /// The question a caller asks *before* paying for a snapshot, so it agrees
+    /// with what `store` would then do — one refusing what the other accepts would
+    /// mean either a wasted copy or a cached entry nobody checked the budget for.
+    #[test]
+    fn could_store_agrees_with_what_store_would_keep() {
+        let c: PrefixCache<Vec<u8>> = PrefixCache::new(250);
+        assert!(c.could_store(250), "exactly the budget fits");
+        assert!(c.could_store(1));
+        assert!(!c.could_store(251), "one byte over is never keepable");
+
+        let off: PrefixCache<Vec<u8>> = PrefixCache::new(0);
+        assert!(!off.could_store(1), "a disabled cache keeps nothing");
+        assert!(!off.could_store(0));
+
+        // And the agreement itself: whatever `could_store` rejects, `store` drops.
+        let mut c: PrefixCache<Vec<u8>> = PrefixCache::new(250);
+        for bytes in [1usize, 250, 251, 10_000] {
+            let before = c.len();
+            c.store("m", preamble(600 + bytes), vec![0u8; 1], bytes);
+            assert_eq!(
+                c.len() > before,
+                c.could_store(bytes),
+                "store and could_store disagreed at {bytes} B"
+            );
+            c = PrefixCache::new(250);
+        }
+    }
+
     #[test]
     fn an_entry_larger_than_the_budget_is_declined_without_disturbing_the_rest() {
         // Otherwise one oversized preamble empties a working set to make room for
@@ -462,8 +502,12 @@ mod tests {
 
     #[test]
     fn a_longer_preamble_supersedes_a_shorter_one_for_the_same_model() {
-        // The shorter can only be hit by prompts the longer also matches, so
-        // keeping both would spend ~150 MiB on an entry that can never win.
+        // Keeping both would spend ~150 MiB on an entry the longer one usually
+        // answers for. Deliberately *not* "an entry that can never win" — that was
+        // the over-strong claim `store`'s own comment already gave up, and this
+        // copy of it survived the correction: a prompt sharing 600 tokens and
+        // diverging before 900 hits the short entry and not the long one. The
+        // trade, and why it is still right, is on `store`.
         let mut c: PrefixCache<Vec<u8>> = PrefixCache::new(1 << 30);
         c.store("m", preamble(600), vec![0u8; 1], 100);
         c.store("m", preamble(900), vec![0u8; 1], 100);

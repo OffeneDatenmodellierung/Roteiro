@@ -821,7 +821,27 @@ impl LlamaEngine {
         ctx.decode(&mut batch)
             .map_err(|e| EngineError::Inference(format!("preamble decode: {e}")))?;
 
+        // Asked before the copy, not after. `state_seq_get` allocates and copies
+        // the whole state — ~150 MiB at minimum on a hybrid model — and `store`
+        // discards an entry bigger than the budget on arrival, so a budget too
+        // small for this preamble would otherwise pay that copy on **every** turn
+        // to throw it away each time. The size is readable without producing the
+        // state, which is what makes the check free. Raised in review of #578.
         let bytes = ctx.state_seq_get_size_ext(0, LlamaStateSeqFlags::empty());
+        if !self
+            .prefixes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .could_store(bytes)
+        {
+            tracing::debug!(
+                model = model_id,
+                boundary,
+                bytes,
+                "preamble is larger than the whole prefix-cache budget; not snapshotting"
+            );
+            return Ok(boundary);
+        }
         match ctx.state_seq_get(0, LlamaStateSeqFlags::empty()) {
             Ok(state) => {
                 self.prefixes
