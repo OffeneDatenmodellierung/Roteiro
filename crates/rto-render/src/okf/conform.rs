@@ -547,11 +547,20 @@ fn check_link_targets(cx: &mut Cx<'_>, bundle: &Bundle, concept: &Concept) {
     let mut deprecated: BTreeSet<String> = BTreeSet::new();
     for link in bundle.links_from(&concept.id) {
         if !link.exists {
-            cx.info(format!(
-                "link `{}` names `{}`, which the bundle does not contain; \
-                 §6 tells a consumer to tolerate this",
-                link.raw, link.target
-            ));
+            // `exists` means "resolves to a concept", so a link to a diagram or a
+            // data file beside the concept lands here — and saying the bundle
+            // "does not contain" a file it demonstrably does is simply false.
+            // `check_resources` above already settles this the right way for
+            // frontmatter paths, by asking the filesystem; this asks the same
+            // question of link targets. Issue #778, where the three commands
+            // disagreed about the same four links.
+            if bundle.resolve_path_field(&concept.id, &link.raw).is_none() {
+                cx.info(format!(
+                    "link `{}` names `{}`, which the bundle does not contain; \
+                     §6 tells a consumer to tolerate this",
+                    link.raw, link.target
+                ));
+            }
             continue;
         }
         if let Some(target) = bundle.get(&link.target)
