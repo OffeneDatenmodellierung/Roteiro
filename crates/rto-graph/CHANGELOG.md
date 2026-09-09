@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.10.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v5.10.0...rto-graph-v5.10.1) - 2026-09-08
+
+### Fixed
+
+- *(graph)* two writers on one store queue instead of one dying
+
+### Other
+
+- *(graph)* clear the scratch directory rather than trusting it to be absent
+- *(graph)* a writer that dies before signalling fails the test, not hangs it
+- *(graph)* assert the journal mode this filesystem allows, not the literal
+
 ## [5.9.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v5.8.1...rto-graph-v5.9.0) - 2026-09-08
 
 ### Added
