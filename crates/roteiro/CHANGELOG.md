@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.10.2](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.10.1...roteiro-v5.10.2) - 2026-09-09
+
+### Fixed
+
+- *(okf)* a link is broken when the bundle lacks its target, not when it is not a concept
+
 ## [5.10.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.10.0...roteiro-v5.10.1) - 2026-09-08
 
 ### Fixed

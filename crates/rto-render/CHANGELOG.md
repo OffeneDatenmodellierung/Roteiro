@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.10.2](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v5.10.1...rto-render-v5.10.2) - 2026-09-09
+
+### Fixed
+
+- *(okf)* report where a non-concept link resolved, and stop a fixture testing nothing
+- *(okf)* a link is broken when the bundle lacks its target, not when it is not a concept
+
 ## [5.8.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v5.7.0...rto-render-v5.8.0) - 2026-09-07
 
 ### Added
