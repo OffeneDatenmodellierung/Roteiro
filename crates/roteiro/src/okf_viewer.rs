@@ -767,8 +767,8 @@ async fn concept(State(v): State<Viewer>, UrlPath(id): UrlPath<String>) -> Respo
             Html(format!(
                 "<p>The bundle contains no concept <code>{}</code>. \
                  <a href=\"{}\">Back to the bundle</a>.</p>",
-                index_href(base),
-                escape(&id)
+                escape(&id),
+                index_href(base)
             )),
         )
             .into_response();
@@ -1782,6 +1782,12 @@ mod tests {
         let (status, body) = get_(&root, "", "/c/metrics/nope").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(body.contains("no concept"), "{body}");
+        // Which concept, and where back to — asserted separately, because the two
+        // are interchangeable at the type level. They were in fact swapped once
+        // (#785 review): the page named the mount path as the missing concept and
+        // linked to the concept id, and "no concept" alone could not see it.
+        assert!(body.contains("<code>metrics/nope</code>"), "{body}");
+        assert!(body.contains("<a href=\"/\">Back to the bundle"), "{body}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2394,5 +2400,28 @@ mod tests {
         assert!(!body.contains("All bundles"), "{body}");
         assert!(!body.contains(">Explorer<"), "{body}");
         assert!(body.contains("Concepts"), "{body}");
+    }
+
+    /// A nested 404 links back to *its own* bundle, and that link resolves.
+    ///
+    /// `every_link_a_nested_bundle_writes_resolves` walks a page that exists; this
+    /// is the other page the viewer can produce, and it is the one where the id
+    /// and the href sit side by side as two `{}` of the same type.
+    #[tokio::test]
+    async fn a_nested_404_links_back_to_its_own_bundle() {
+        let mounts = vec![mount_at("one", sample())];
+        let app = host().merge(mounts_router("/okf", mounts, None));
+        let (status, body, _) = get_mounted(&app, "/okf/one/c/metrics/nope").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body.contains("<code>metrics/nope</code>"), "{body}");
+        let links = hrefs(&body);
+        assert!(
+            links.iter().any(|h| h == "/okf/one"),
+            "no way back: {links:?}"
+        );
+        for link in &links {
+            let (status, _, _) = get_mounted(&app, link).await;
+            assert_eq!(status, StatusCode::OK, "{link}");
+        }
     }
 }
