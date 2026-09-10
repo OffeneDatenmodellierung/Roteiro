@@ -39,7 +39,7 @@
 //! - **Screener findings are surfaced, not dropped**, so a reader is told the
 //!   document tripped them instead of the viewer quietly knowing.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use okf_core::{Concept, TrustTier};
@@ -311,6 +311,216 @@ pub fn graph_in(bundle: &Bundle) -> GraphView {
         }
     }
     GraphView { nodes, edges }
+}
+
+/// How much of the graph a view is drawing, and of what.
+///
+/// Carried with every scoped view because the whole point is that the view is
+/// **partial**. A graph that quietly draws some of its nodes is the same defect
+/// as an inventory that quietly lists some of its files: the reader cannot tell
+/// a small bundle from a truncated picture of a large one, and will believe the
+/// wrong one. Every field here exists so the page can say what it left out.
+#[derive(Debug, Clone, Serialize)]
+pub struct GraphScope {
+    /// The concept the view is centred on.
+    pub focus: String,
+    /// Hops from [`GraphScope::focus`] this view reaches.
+    pub depth: usize,
+    /// Nodes drawn.
+    pub shown_nodes: usize,
+    /// Nodes the whole bundle holds.
+    pub total_nodes: usize,
+    /// Edges drawn.
+    pub shown_edges: usize,
+    /// Edges the whole bundle holds.
+    pub total_edges: usize,
+    /// Concepts linked to something drawn here that are **not** drawn.
+    ///
+    /// The number an "expand" affordance quotes, and deliberately one number
+    /// rather than two. A view can fall short of the whole graph two ways — the
+    /// node budget cut a ring short, or the depth horizon stopped before the next
+    /// ring — and a reader does not care which: they care that there is more
+    /// here. Reporting them separately invited exactly that confusion, and cost a
+    /// test that asserted one and measured the other.
+    ///
+    /// Distinct from `total_nodes - shown_nodes`, which counts the whole bundle
+    /// including concepts with no path to the focus at all.
+    pub beyond: usize,
+}
+
+/// One concept's neighbourhood, bounded and honest about its bounds.
+#[derive(Debug, Clone, Serialize)]
+pub struct ScopedGraph {
+    /// The nodes drawn, focus first.
+    pub nodes: Vec<GraphNode>,
+    /// Edges with both endpoints among [`ScopedGraph::nodes`].
+    pub edges: Vec<GraphEdge>,
+    /// What this view is showing, and of how much.
+    pub scope: GraphScope,
+}
+
+/// A well-connected concept, for the entry list.
+#[derive(Debug, Clone, Serialize)]
+pub struct GraphHub {
+    /// The concept id.
+    pub id: String,
+    /// Its title.
+    pub label: String,
+    /// How many **distinct** concepts this one is linked to, in either direction.
+    ///
+    /// Distinct neighbours rather than a link count, and undirected, because this
+    /// ranks how *connected* a concept is rather than how much it links: a
+    /// concept naming the same target six times is one connection, and a bundle
+    /// ranked the other way would put its most repetitive documents on top.
+    pub degree: usize,
+}
+
+/// Undirected adjacency and degree over a whole graph.
+///
+/// Built per call rather than cached on [`GraphView`]: it is linear in the edge
+/// count and the caller already holds the graph, so caching it would trade a
+/// measured 40 ms for a second thing that can go stale against the bundle.
+fn adjacency(graph: &GraphView) -> BTreeMap<&str, BTreeSet<&str>> {
+    let mut adj: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for node in &graph.nodes {
+        adj.entry(node.id.as_str()).or_default();
+    }
+    for edge in &graph.edges {
+        adj.entry(edge.source.as_str())
+            .or_default()
+            .insert(edge.target.as_str());
+        adj.entry(edge.target.as_str())
+            .or_default()
+            .insert(edge.source.as_str());
+    }
+    adj
+}
+
+/// The most-connected concepts, most connected first.
+///
+/// The entry point to the graph, and deliberately **a list rather than a
+/// drawing**. Measured on this repository's own bundle, the 100 highest-degree
+/// concepts share only 157 edges out of 41,980 — the graph is hub-and-spoke
+/// (max degree 1,670, median 4), so any "top N" tier renders as disconnected
+/// scatter whatever N is. There is no ranking that makes the whole graph a
+/// useful picture, which is why the drawing starts from one concept instead.
+#[must_use]
+pub fn hubs(graph: &GraphView, limit: usize) -> Vec<GraphHub> {
+    let adj = adjacency(graph);
+    let mut ranked: Vec<&GraphNode> = graph.nodes.iter().collect();
+    // Degree descending, then id ascending: two concepts of equal degree must
+    // list in the same order on every request, or the entry page reshuffles
+    // under a reader who reloads it.
+    ranked.sort_by(|a, b| {
+        let (da, db) = (
+            adj.get(a.id.as_str()).map_or(0, BTreeSet::len),
+            adj.get(b.id.as_str()).map_or(0, BTreeSet::len),
+        );
+        db.cmp(&da).then_with(|| a.id.cmp(&b.id))
+    });
+    ranked
+        .into_iter()
+        .take(limit)
+        .map(|n| GraphHub {
+            id: n.id.clone(),
+            label: n.label.clone(),
+            degree: adj.get(n.id.as_str()).map_or(0, BTreeSet::len),
+        })
+        .collect()
+}
+
+/// The graph within `depth` hops of `focus`, holding at most `limit` nodes.
+///
+/// `None` when the bundle has no such concept, so a mistyped id is a 404 rather
+/// than an empty drawing that looks like an isolated concept.
+///
+/// **Breadth-first, and within each ring most-connected first.** The budget is
+/// spent on the neighbours that lead somewhere, because this view is something a
+/// reader navigates: a leaf tells them nothing about where to go next. What the
+/// budget excluded is counted in [`GraphScope::omitted`] rather than dropped
+/// silently.
+#[must_use]
+pub fn neighbourhood(
+    graph: &GraphView,
+    focus: &str,
+    depth: usize,
+    limit: usize,
+) -> Option<ScopedGraph> {
+    let adj = adjacency(graph);
+    let degree = |id: &str| adj.get(id).map_or(0, BTreeSet::len);
+
+    // The focus is always drawn, even at `limit` 0: a view centred on a concept
+    // it does not draw would be a picture of nothing labelled as that concept.
+    let mut kept: BTreeSet<&str> = BTreeSet::new();
+    // The `?` is the whole unknown-focus guard. An explicit `contains_key` above
+    // it read as the guard and was doing nothing — removed, because a redundant
+    // check is worse than none: it draws the eye away from the line that
+    // actually decides, and an injection aimed at it passes.
+    let focus_id = adj.get_key_value(focus).map(|(k, _)| *k)?;
+    kept.insert(focus_id);
+    let mut order: Vec<&str> = vec![focus_id];
+    let mut frontier: Vec<&str> = vec![focus_id];
+    let mut seen_ring: BTreeSet<&str> = BTreeSet::new();
+
+    for _ in 0..depth {
+        let mut ring: Vec<&str> = Vec::new();
+        for node in &frontier {
+            for next in adj.get(node).into_iter().flatten() {
+                if !kept.contains(next) && seen_ring.insert(*next) {
+                    ring.push(*next);
+                }
+            }
+        }
+        ring.sort_by(|a, b| degree(b).cmp(&degree(a)).then_with(|| a.cmp(b)));
+        let mut admitted = Vec::new();
+        for node in ring {
+            if kept.len() >= limit.max(1) {
+                break;
+            }
+            kept.insert(node);
+            order.push(node);
+            admitted.push(node);
+        }
+        if admitted.is_empty() {
+            break;
+        }
+        frontier = admitted;
+    }
+
+    let nodes: Vec<GraphNode> = order
+        .iter()
+        .filter_map(|id| graph.nodes.iter().find(|n| n.id == *id).cloned())
+        .collect();
+    let edges: Vec<GraphEdge> = graph
+        .edges
+        .iter()
+        .filter(|e| kept.contains(e.source.as_str()) && kept.contains(e.target.as_str()))
+        .cloned()
+        .collect();
+
+    Some(ScopedGraph {
+        scope: GraphScope {
+            focus: focus.to_owned(),
+            depth,
+            shown_nodes: nodes.len(),
+            total_nodes: graph.nodes.len(),
+            shown_edges: edges.len(),
+            total_edges: graph.edges.len(),
+            // Counted from what was drawn rather than accumulated during the
+            // walk: the walk knows what it skipped in the rings it visited, and
+            // nothing about the ring it never reached. Asking the finished set
+            // "what touches this that is not in it" answers both at once.
+            beyond: kept
+                .iter()
+                .filter_map(|id| adj.get(id))
+                .flatten()
+                .filter(|id| !kept.contains(*id))
+                .collect::<BTreeSet<_>>()
+                .len(),
+        },
+        nodes,
+        edges,
+    })
 }
 
 fn card(concept: &Concept) -> ConceptCard {
@@ -625,6 +835,154 @@ fn bundle_path(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A graph from `(source, target)` pairs, with every named node present.
+    fn graph_of(edges: &[(&str, &str)]) -> GraphView {
+        let mut ids: BTreeSet<String> = BTreeSet::new();
+        for (s, t) in edges {
+            ids.insert((*s).to_owned());
+            ids.insert((*t).to_owned());
+        }
+        GraphView {
+            nodes: ids
+                .into_iter()
+                .map(|id| GraphNode {
+                    label: format!("{id} title"),
+                    id,
+                    trust: "unverified",
+                })
+                .collect(),
+            edges: edges
+                .iter()
+                .map(|(s, t)| GraphEdge {
+                    source: (*s).to_owned(),
+                    target: (*t).to_owned(),
+                })
+                .collect(),
+        }
+    }
+
+    /// A star: one hub, `n` leaves. The shape this repository's own bundle is
+    /// made of — max degree 1,670 against a median of 4.
+    fn star(n: usize) -> Vec<(String, String)> {
+        (0..n)
+            .map(|i| ("hub".to_owned(), format!("leaf-{i:03}")))
+            .collect()
+    }
+
+    #[test]
+    fn a_view_centred_on_a_concept_says_how_much_it_left_out() {
+        let owned = star(50);
+        let pairs: Vec<(&str, &str)> = owned
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        let graph = graph_of(&pairs);
+
+        let view = neighbourhood(&graph, "hub", 1, 10).expect("hub exists");
+
+        assert_eq!(view.scope.shown_nodes, 10, "the budget is honoured");
+        assert_eq!(
+            view.nodes[0].id, "hub",
+            "the focus is drawn, and drawn first"
+        );
+        assert_eq!(
+            view.scope.beyond, 41,
+            "and the 41 neighbours it could not fit are counted rather than \
+             dropped silently: {:?}",
+            view.scope
+        );
+        assert_eq!(view.scope.total_nodes, 51, "against the whole bundle");
+    }
+
+    /// The budget must never produce an edge to a node that is not drawn.
+    /// cytoscape renders a dangling edge as an invisible attachment to nothing,
+    /// so this is the difference between a partial picture and a broken one.
+    #[test]
+    fn an_edge_is_drawn_only_when_both_of_its_ends_are() {
+        let owned = star(50);
+        let pairs: Vec<(&str, &str)> = owned
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        let view = neighbourhood(&graph_of(&pairs), "hub", 1, 10).expect("hub exists");
+
+        let drawn: BTreeSet<&str> = view.nodes.iter().map(|n| n.id.as_str()).collect();
+        for edge in &view.edges {
+            assert!(
+                drawn.contains(edge.source.as_str()) && drawn.contains(edge.target.as_str()),
+                "edge {} -> {} has an end that is not drawn",
+                edge.source,
+                edge.target
+            );
+        }
+        assert_eq!(view.scope.shown_edges, view.edges.len());
+    }
+
+    /// The budget is spent on neighbours that lead somewhere, because this view
+    /// is navigated: a leaf says nothing about where to go next.
+    #[test]
+    fn the_budget_admits_the_best_connected_neighbours_first() {
+        let graph = graph_of(&[
+            ("focus", "busy"),
+            ("focus", "quiet"),
+            ("busy", "a"),
+            ("busy", "b"),
+            ("busy", "c"),
+        ]);
+
+        let view = neighbourhood(&graph, "focus", 1, 2).expect("focus exists");
+        let drawn: Vec<&str> = view.nodes.iter().map(|n| n.id.as_str()).collect();
+
+        assert_eq!(drawn, vec!["focus", "busy"], "the leaf waits: {drawn:?}");
+        assert_eq!(
+            view.scope.beyond, 4,
+            "the leaf and `busy`'s own three neighbours are all reachable and \
+             undrawn, and the reader is told so"
+        );
+    }
+
+    /// Depth is what an "expand" affordance moves, so it has to move something.
+    #[test]
+    fn a_deeper_view_reaches_past_the_first_ring() {
+        let graph = graph_of(&[("a", "b"), ("b", "c"), ("c", "d")]);
+
+        let one = neighbourhood(&graph, "a", 1, 100).expect("a exists");
+        let two = neighbourhood(&graph, "a", 2, 100).expect("a exists");
+
+        assert_eq!(one.scope.shown_nodes, 2, "a and b");
+        assert_eq!(two.scope.shown_nodes, 3, "a, b and c");
+        assert_eq!(
+            one.scope.beyond, 1,
+            "depth 1 reports the ring it stopped short of"
+        );
+    }
+
+    /// A mistyped id must not render as an isolated concept — that reads as a
+    /// real concept with no links, which is a different and wrong answer.
+    #[test]
+    fn an_unknown_focus_is_none_rather_than_an_empty_drawing() {
+        let graph = graph_of(&[("a", "b")]);
+        assert!(neighbourhood(&graph, "nonesuch", 1, 10).is_none());
+        assert!(neighbourhood(&graph, "a", 1, 10).is_some());
+    }
+
+    /// The entry list must not reshuffle under a reader who reloads it.
+    #[test]
+    fn hubs_rank_by_degree_and_break_ties_by_id() {
+        let graph = graph_of(&[("big", "x"), ("big", "y"), ("aa", "z"), ("bb", "w")]);
+
+        let top = hubs(&graph, 3);
+        let ranked: Vec<&str> = top.iter().map(|h| h.id.as_str()).collect();
+
+        assert_eq!(ranked[0], "big", "degree 2 outranks degree 1");
+        assert_eq!(
+            &ranked[1..],
+            &["aa", "bb"],
+            "and equal degrees list by id, so the order is stable"
+        );
+        assert_eq!(hubs(&graph, 3)[0].degree, 2);
+    }
 
     fn bundle_at(tag: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
         static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);

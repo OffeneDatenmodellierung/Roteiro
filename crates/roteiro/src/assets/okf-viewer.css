@@ -103,3 +103,13 @@ article img { max-width: 100%; }
 #graph { width: 100%; height: 78vh; border: 1px solid var(--line); border-radius: .3rem; background: var(--card); }
 
 footer { border-top: 1px solid var(--line); color: var(--sub); font-size: .8rem; padding: 1rem 1.2rem; text-align: center; }
+
+/* What a partial view is showing, and what it is not. Given the weight of
+   ordinary prose rather than a warning: the view is correct, it is simply not
+   the whole graph, and styling that as an error would misreport it. */
+.scope { color: var(--muted); font-size: .9rem; margin: 0 0 .8rem; }
+.scope a { margin-left: .2rem; }
+/* The graph's entry list. Ordered, because the rank is the information. */
+.hubs { margin: 0; padding-left: 1.4rem; }
+.hubs li { margin: .25rem 0; }
+.hubs .deg { color: var(--muted); font-size: .85rem; margin-left: .4rem; }

@@ -35,7 +35,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
-use axum::extract::{Path as UrlPath, State};
+use axum::extract::{Path as UrlPath, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
@@ -577,6 +577,15 @@ async fn concept(State(v): State<Viewer>, UrlPath(id): UrlPath<String>) -> Respo
         c.body_html,
     );
 
+    // The graph is reached *from* a concept rather than the other way round: a
+    // neighbourhood needs a centre, and this is where the reader already is.
+    let _ = write!(
+        body,
+        "<p class=\"scope\"><a href=\"{base}/graph?focus={}\">See this concept \
+         in the graph</a></p>",
+        urlencode(&c.id)
+    );
+
     body.push_str("<div class=\"rel\">");
     if !c.links.is_empty() {
         body.push_str("<h2>Links out</h2><ul>");
@@ -616,31 +625,131 @@ async fn concept(State(v): State<Viewer>, UrlPath(id): UrlPath<String>) -> Respo
     page(&c.title, &v.root.display().to_string(), base, &body)
 }
 
-async fn graph_page(State(v): State<Viewer>) -> Response {
+/// What the graph routes accept, and the bounds they are held to.
+///
+/// **The bounds are the fix, so they are enforced here rather than trusted.**
+/// This page was unusable because it drew every concept: 9,766 nodes and 41,980
+/// edges of this repository's own bundle, 8.16 MB, handed to a force-directed
+/// layout in one go. A caller-supplied `limit` that were taken at its word would
+/// simply move that defect into a URL, so `depth` and `limit` are clamped and a
+/// request for more is answered with the most this page will draw.
+#[derive(Debug, serde::Deserialize)]
+struct GraphQuery {
+    /// The concept to centre on. Absent means the entry list.
+    focus: Option<String>,
+    /// Hops from the focus. Clamped to [`MAX_DEPTH`].
+    depth: Option<usize>,
+    /// Node budget. Clamped to [`MAX_NODES`].
+    limit: Option<usize>,
+}
+
+/// The most hops from a focus this page will draw.
+///
+/// Three, because two is already enough to leave the neighbourhood behind on
+/// this shape of graph: measured on this bundle, a *median* concept reaches 3
+/// nodes at depth 1 and 436 at depth 2. Depth is the coarse control and the node
+/// budget is the fine one.
+const MAX_DEPTH: usize = 3;
+
+/// The most nodes this page will draw at once.
+///
+/// A force-directed layout is O(n²) per tick in its repulsion step, so this is
+/// the number that decides whether the page renders or hangs. 500 lays out in
+/// well under a second; the 9,766 it used to attempt never finished.
+const MAX_NODES: usize = 500;
+
+/// Nodes drawn when the caller does not say.
+const DEFAULT_NODES: usize = 150;
+
+/// Concepts listed on the entry page.
+const HUB_LIST: usize = 40;
+
+impl GraphQuery {
+    /// Hops to draw, within [`MAX_DEPTH`] and never zero — a depth-0 view is one
+    /// node and no edges, which is a concept page with extra steps.
+    fn depth(&self) -> usize {
+        self.depth.unwrap_or(1).clamp(1, MAX_DEPTH)
+    }
+
+    /// Nodes to draw, within [`MAX_NODES`].
+    fn limit(&self) -> usize {
+        self.limit.unwrap_or(DEFAULT_NODES).clamp(1, MAX_NODES)
+    }
+}
+
+async fn graph_page(State(v): State<Viewer>, Query(q): Query<GraphQuery>) -> Response {
     // The script is inline and fixed at compile time, so it is content of this
     // binary rather than of the bundle. `'unsafe-inline'` is scoped to
     // `script-src` on this one route and never widens `default-src`.
-    // `{BASE}` and a `replace`, not `format!`: this is JavaScript, so it is most
-    // of the way to being braces, and every one of them would have to be doubled
-    // to survive a format string. A placeholder keeps the script readable as the
-    // script it is.
-    const SCRIPT: &str = "<article><h1>Concept graph</h1><div id=\"graph\"></div>\
+    // Placeholders and a `replace`, not `format!`: this is JavaScript, so it is
+    // most of the way to being braces, and every one of them would have to be
+    // doubled to survive a format string.
+    //
+    // `concentric`, not `cose`. A neighbourhood has a centre, so the layout that
+    // draws one is the one that says what the picture means — and it is linear
+    // where a force-directed layout is quadratic per tick, which is what made
+    // this page hang.
+    const SCRIPT: &str = "<article><h1>Concept graph</h1>\
+        <p class=\"scope\" id=\"scope\">Loading…</p>\
+        <div id=\"graph\"></div>\
         <script src=\"{BASE}/cytoscape.min.js\"></script>\
-        <script>fetch('{BASE}/api/graph.json').then(r=>r.json()).then(g=>{\
-        cytoscape({container:document.getElementById('graph'),\
-        elements:[...g.nodes.map(n=>({data:{id:n.id,label:n.label,trust:n.trust}})),\
+        <script>\
+        var Q='focus={FOCUS}&depth={DEPTH}&limit={LIMIT}';\
+        fetch('{BASE}/api/graph.json?'+Q).then(r=>r.json()).then(g=>{\
+        var s=g.scope,n=document.getElementById('scope');\
+        n.textContent='Showing '+s.shown_nodes+' of '+s.total_nodes+\
+        ' concepts and '+s.shown_edges+' of '+s.total_edges+' links, '+\
+        s.depth+(s.depth==1?' hop':' hops')+' from '+s.focus+\
+        (s.beyond?'. '+s.beyond+' more connected concepts are not drawn.':'.');\
+        if(s.beyond){var a=document.createElement('a');\
+        a.href='{BASE}/graph?focus='+encodeURIComponent(s.focus)+\
+        '&depth={NEXT_DEPTH}&limit={NEXT_LIMIT}';\
+        a.textContent=' Show more.';n.appendChild(a);}\
+        var cy=cytoscape({container:document.getElementById('graph'),\
+        elements:[...g.nodes.map(n=>({data:{id:n.id,label:n.label,trust:n.trust,\
+        focus:n.id===s.focus?'yes':'no'}})),\
         ...g.edges.map(e=>({data:{source:e.source,target:e.target}}))],\
-        layout:{name:'cose'},style:[\
+        layout:{name:'concentric',concentric:n=>n.data('focus')==='yes'?100:n.degree(),\
+        levelWidth:()=>1,minNodeSpacing:24},style:[\
         {selector:'node',style:{'label':'data(label)','font-size':'8px',\
         'background-color':'#6b7684','color':'#1a2733'}},\
         {selector:'node[trust=\"human-reviewed\"]',style:{'background-color':'#0e6e8c'}},\
+        {selector:'node[focus=\"yes\"]',style:{'background-color':'#b4531f',\
+        'font-size':'12px','font-weight':'bold'}},\
         {selector:'edge',style:{'width':1,'line-color':'#d8d2c4',\
         'target-arrow-shape':'triangle','target-arrow-color':'#d8d2c4',\
-        'curve-style':'bezier'}}]});});</script></article>";
+        'curve-style':'bezier'}}]});\
+        cy.on('tap','node',e=>{location.href='{BASE}/graph?focus='+\
+        encodeURIComponent(e.target.id())+'&depth={DEPTH}&limit={LIMIT}';});\
+        });</script></article>";
+
+    let Some(focus) = q.focus.clone() else {
+        return graph_entry(&v).await;
+    };
 
     let base = v.base.as_str();
-    let body = &SCRIPT.replace("{BASE}", base);
-    let mut res = page("Concept graph", &v.root.display().to_string(), base, body);
+    let depth = q.depth();
+    let limit = q.limit();
+    let body = SCRIPT
+        .replace("{BASE}", base)
+        .replace("{FOCUS}", &urlencode(&focus))
+        .replace("{DEPTH}", &depth.to_string())
+        .replace("{LIMIT}", &limit.to_string())
+        // "Show more" widens the budget first and only then reaches further: a
+        // deeper ring on this shape of graph multiplies, where a bigger budget
+        // adds. Both are clamped by `GraphQuery`, so the link cannot ask for the
+        // payload this page exists to avoid.
+        .replace("{NEXT_LIMIT}", &(limit * 2).min(MAX_NODES).to_string())
+        .replace(
+            "{NEXT_DEPTH}",
+            &if limit >= MAX_NODES {
+                (depth + 1).min(MAX_DEPTH)
+            } else {
+                depth
+            }
+            .to_string(),
+        );
+    let mut res = page("Concept graph", &v.root.display().to_string(), base, &body);
     res.headers_mut().insert(
         header::CONTENT_SECURITY_POLICY,
         header::HeaderValue::from_static(
@@ -651,18 +760,125 @@ async fn graph_page(State(v): State<Viewer>) -> Response {
     res
 }
 
-async fn graph_json(State(v): State<Viewer>) -> Response {
-    let built = blocking(move || v.graph()).await;
+/// The graph's entry page: what to centre on, as a **list**.
+///
+/// Deliberately not a drawing. Measured on this repository's own bundle, the 100
+/// highest-degree concepts share 157 edges out of 41,980 — the graph is
+/// hub-and-spoke, so any "top N" tier is disconnected scatter whatever N is and
+/// whatever it is ranked by. A reader choosing where to start is served by a
+/// ranked list; there is no whole-graph picture worth drawing, and pretending
+/// otherwise is what made this page unusable.
+async fn graph_entry(v: &Viewer) -> Response {
+    let built = blocking({
+        let v = v.clone();
+        move || v.graph()
+    })
+    .await;
     let graph = match built {
         Some(Ok(graph)) => graph,
         Some(Err(e)) => return unreadable(&e),
         None => return spawn_failed(),
     };
-    // `GraphView` is plain owned data, so this does not fail in practice — which
-    // is exactly why it must not be swallowed. A `{}` under a 200 would render
-    // as a bundle with no concepts: a client cannot tell that from a real empty
-    // graph, so the one way this ever goes wrong is also the way that hides it.
-    let Ok(body) = serde_json::to_string(graph.as_ref()) else {
+    let base = v.base.as_str();
+    let hubs = view::hubs(&graph, HUB_LIST);
+
+    let mut body = String::with_capacity(4096);
+    let _ = write!(
+        body,
+        "<article><h1>Concept graph</h1><p class=\"scope\">This bundle holds \
+         {} concepts and {} links between them — too many to draw at once, and \
+         too sparsely connected between its hubs for any single picture to mean \
+         much. Pick a concept to centre the graph on; its neighbourhood is drawn \
+         from there.</p><ol class=\"hubs\">",
+        graph.nodes.len(),
+        graph.edges.len()
+    );
+    for hub in &hubs {
+        let _ = write!(
+            body,
+            "<li><a href=\"{base}/graph?focus={}\">{}</a> \
+             <span class=\"deg\">{} links</span></li>",
+            urlencode(&hub.id),
+            escape(&hub.label),
+            hub.degree
+        );
+    }
+    body.push_str("</ol></article>");
+    page("Concept graph", &v.root.display().to_string(), base, &body)
+}
+
+/// Percent-encode a concept id for a query string.
+///
+/// Ids carry `/` and may carry anything a path segment can, so they are encoded
+/// rather than interpolated: an id containing `&` would otherwise end the
+/// parameter and silently change which concept was asked for.
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(char::from(b));
+            }
+            _ => {
+                let _ = write!(out, "%{b:02X}");
+            }
+        }
+    }
+    out
+}
+
+/// The graph as data, always bounded.
+///
+/// With a `focus`, one concept's neighbourhood; without one, the entry list. It
+/// **never** returns the whole graph, and that is the point rather than an
+/// omission: the unbounded response this replaces was 8.16 MB on this
+/// repository's own bundle, and every caller of it — there was one, this page —
+/// then failed to draw it. A route that can still be asked for the payload that
+/// broke the page has not fixed the page.
+async fn graph_json(State(v): State<Viewer>, Query(q): Query<GraphQuery>) -> Response {
+    let built = blocking({
+        let v = v.clone();
+        move || v.graph()
+    })
+    .await;
+    let graph = match built {
+        Some(Ok(graph)) => graph,
+        Some(Err(e)) => return unreadable(&e),
+        None => return spawn_failed(),
+    };
+
+    let payload = match q.focus.as_deref() {
+        Some(focus) => match view::neighbourhood(&graph, focus, q.depth(), q.limit()) {
+            Some(scoped) => serde_json::to_string(&scoped),
+            // A mistyped id is a 404, not an empty graph: an empty drawing reads
+            // as a real concept with no links, which is a different answer and a
+            // wrong one.
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    [
+                        (header::CONTENT_TYPE, "application/json"),
+                        (header::CONTENT_SECURITY_POLICY, CSP),
+                    ],
+                    format!(
+                        r#"{{"error":"no concept {}"}}"#,
+                        serde_json::Value::String(focus.to_owned())
+                    ),
+                )
+                    .into_response();
+            }
+        },
+        None => serde_json::to_string(&serde_json::json!({
+            "hubs": view::hubs(&graph, HUB_LIST),
+            "total_nodes": graph.nodes.len(),
+            "total_edges": graph.edges.len(),
+        })),
+    };
+    // Plain owned data, so this does not fail in practice — which is exactly why
+    // it must not be swallowed. A `{}` under a 200 would render as a bundle with
+    // no concepts: a client cannot tell that from a real empty graph, so the one
+    // way this ever goes wrong is also the way that hides it.
+    let Ok(body) = payload else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             [
@@ -931,6 +1147,34 @@ mod tests {
         )
     }
 
+    /// A bundle with more concepts than a small budget will draw: one hub and
+    /// eight leaves. Small enough to read, big enough to be **truncated**, which
+    /// is the whole property under test — `sample()`'s two concepts cannot show
+    /// the difference between a budget that binds and one that is ignored.
+    fn crowded() -> PathBuf {
+        let hub = format!(
+            "---\ntype: Metric\ntitle: Hub\n---\n\n# Hub\n\n{}\n",
+            (0..8)
+                .map(|i| format!("[leaf {i}](/leaf/leaf-{i}.md)"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        let leaves: Vec<(String, String)> = (0..8)
+            .map(|i| {
+                (
+                    format!("leaf/leaf-{i}.md"),
+                    format!("---\ntype: Metric\ntitle: Leaf {i}\n---\n\n# Leaf {i}\n"),
+                )
+            })
+            .collect();
+        let mut files: Vec<(&str, &str)> = vec![
+            ("index.md", "---\nokf_version: \"0.2\"\n---\n\n# Bundle\n"),
+            ("hub/hub.md", hub.as_str()),
+        ];
+        files.extend(leaves.iter().map(|(a, b)| (a.as_str(), b.as_str())));
+        fixture("crowded", &files)
+    }
+
     #[tokio::test]
     async fn the_index_lists_the_bundle_and_counts_its_tiers() {
         let root = sample();
@@ -957,6 +1201,119 @@ mod tests {
     }
 
     /// An unknown concept is a 404 page, not a 500 and not a blank 200.
+    /// The entry page must not carry the graph it exists to avoid drawing.
+    #[tokio::test]
+    async fn the_graph_entry_page_is_a_list_and_not_the_whole_graph() {
+        let root = sample();
+        let (status, body) = get_(&root, "", "/graph").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains("Pick a concept to centre the graph on"),
+            "the entry page says how to start: {body}"
+        );
+        assert!(
+            body.contains("/graph?focus="),
+            "and offers concepts to start from"
+        );
+        assert!(
+            !body.contains("cytoscape.min.js"),
+            "and draws nothing, so it costs no layout at all"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A focused view has to *say* it is partial, or a reader cannot tell a small
+    /// bundle from a truncated picture of a large one.
+    #[tokio::test]
+    async fn a_focused_view_states_what_it_is_showing_and_of_how_much() {
+        let root = sample();
+        let (status, body) = get_(&root, "", "/graph?focus=metrics/revenue").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("id=\"scope\""), "a scope line exists: {body}");
+        assert!(
+            body.contains("focus=metrics%2Frevenue"),
+            "and the fetch is scoped to the focus rather than the whole graph"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The bounds are the fix, so they are tested where they live.
+    ///
+    /// Separate from the wiring test below because one fixture cannot hold both
+    /// halves: proving `limit` is clamped to 500 needs a bundle of more than 500
+    /// concepts, and proving the handler *honours* a limit needs only a handful.
+    /// A single test over the two-concept bundle passed whatever the clamp did —
+    /// which is what the first draft of this was, and what an injection caught.
+    #[test]
+    fn the_graph_query_clamps_what_a_caller_may_ask_for() {
+        let asked = GraphQuery {
+            focus: None,
+            depth: Some(99),
+            limit: Some(999_999),
+        };
+        assert_eq!(asked.depth(), MAX_DEPTH, "depth is clamped");
+        assert_eq!(asked.limit(), MAX_NODES, "and so is the node budget");
+
+        let silent = GraphQuery {
+            focus: None,
+            depth: None,
+            limit: None,
+        };
+        assert_eq!(silent.depth(), 1, "a silent caller gets one hop");
+        assert_eq!(silent.limit(), DEFAULT_NODES);
+
+        let zero = GraphQuery {
+            focus: None,
+            depth: Some(0),
+            limit: Some(0),
+        };
+        assert_eq!(
+            zero.depth(),
+            1,
+            "depth 0 is a concept page with extra steps, so it is not offered"
+        );
+        assert_eq!(zero.limit(), 1, "and the focus is always drawn");
+    }
+
+    /// And the handler has to actually use them.
+    ///
+    /// Nine concepts against a budget of three: an endpoint that ignored `limit`
+    /// would return all nine and fail here, which the two-concept bundle could
+    /// never have shown.
+    #[tokio::test]
+    async fn the_graph_api_honours_the_budget_it_was_given() {
+        let root = crowded();
+        let (status, body) = get_(&root, "", "/api/graph.json?focus=hub/hub&limit=3&depth=1").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body).expect("json");
+        assert_eq!(
+            json["scope"]["shown_nodes"], 3,
+            "the budget binds rather than being ignored: {body}"
+        );
+        assert_eq!(
+            json["scope"]["total_nodes"], 9,
+            "against a bundle that holds more"
+        );
+        assert_eq!(
+            json["scope"]["beyond"], 6,
+            "and the six it did not draw are counted, not dropped: {body}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A mistyped id is a 404. An empty drawing would read as a real concept with
+    /// no links, which is a different answer and a wrong one.
+    #[tokio::test]
+    async fn an_unknown_focus_is_a_404_rather_than_an_empty_graph() {
+        let root = sample();
+        let (status, _) = get_(&root, "", "/api/graph.json?focus=nonesuch").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[tokio::test]
     async fn an_unknown_concept_is_a_404() {
         let root = sample();
