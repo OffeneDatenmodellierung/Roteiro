@@ -348,14 +348,31 @@ pub fn slug(raw: &str) -> String {
     }
 }
 
+/// The path segments the mount base owns, which no bundle may be given.
+///
+/// [`mounts_router`] registers `{base}/okf-viewer.css` so the chooser — the one
+/// page that is not inside a bundle — is styled. axum does not shadow an
+/// overlapping route, it **panics at startup**, so a bundle landing on that
+/// segment does not merely become unreachable: it stops the server booting. And
+/// the label need not be strange to get there, because [`slug`] folds: a project
+/// called `okf viewer.css` is enough.
+const RESERVED_SLUGS: &[&str] = &["okf-viewer.css"];
+
 /// Make every slug in `mounts` distinct, in place, preserving order.
 ///
 /// [`slug`] is lossy, so `my repo` and `my/repo` fold to one segment — and two
 /// mounts sharing a segment means the second `nest` registers over the first and
 /// one bundle becomes silently unreachable. A numeric suffix is the smallest fix
 /// that keeps the readable name for the first and loses nothing for the rest.
+///
+/// Distinct **from the mount base's own routes as well**, not just from each
+/// other — see [`RESERVED_SLUGS`].
 pub fn disambiguate(mounts: &mut [Mount]) {
-    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    // Seeded, not checked afterwards: a reserved segment is simply already
+    // taken, so the same suffix loop that resolves a collision between two
+    // bundles resolves a collision with the base's own routes.
+    let mut seen: std::collections::BTreeSet<String> =
+        RESERVED_SLUGS.iter().map(|s| (*s).to_owned()).collect();
     for m in mounts.iter_mut() {
         if seen.insert(m.slug.clone()) {
             continue;
@@ -2423,5 +2440,42 @@ mod tests {
             let (status, _, _) = get_mounted(&app, link).await;
             assert_eq!(status, StatusCode::OK, "{link}");
         }
+    }
+
+    /// A bundle cannot be named over the mount base's own stylesheet.
+    ///
+    /// `disambiguate` resolving collisions *between bundles* is not enough: the
+    /// base owns routes too, and axum does not shadow an overlapping one — it
+    /// panics at startup. So this is not an unreachable bundle, it is a server
+    /// that does not boot, reachable from an ordinary project name because
+    /// [`slug`] folds `okf viewer.css` onto the reserved segment. Raised by
+    /// review on #785.
+    #[tokio::test]
+    async fn a_bundle_cannot_be_named_over_the_mount_bases_stylesheet() {
+        assert_eq!(
+            slug("okf viewer.css"),
+            "okf-viewer.css",
+            "the fixture must contain the collision it is testing"
+        );
+        let mut mounts = vec![Mount {
+            slug: slug("okf viewer.css"),
+            label: "okf viewer.css".to_owned(),
+            origin: "test".to_owned(),
+            root: named_bundle("reserved", "Alpha"),
+        }];
+        disambiguate(&mut mounts);
+        assert_eq!(
+            mounts[0].slug, "okf-viewer.css-2",
+            "moved off the reserved segment"
+        );
+
+        // Both survive: the base keeps its stylesheet, the bundle keeps a home.
+        let app = host().merge(mounts_router("/okf", mounts, None));
+        let (status, css, _) = get_mounted(&app, "/okf/okf-viewer.css").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(css.contains("--ink"), "not the stylesheet: {css:.80}");
+        let (status, body, _) = get_mounted(&app, "/okf/okf-viewer.css-2").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Alpha"), "{body}");
     }
 }
