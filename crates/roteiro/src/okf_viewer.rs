@@ -630,9 +630,9 @@ async fn concept(State(v): State<Viewer>, UrlPath(id): UrlPath<String>) -> Respo
 /// **The bounds are the fix, so they are enforced here rather than trusted.**
 /// This page was unusable because it drew every concept: 9,766 nodes and 41,980
 /// edges of this repository's own bundle, 8.16 MB, handed to a force-directed
-/// layout in one go. A caller-supplied `limit` that were taken at its word would
-/// simply move that defect into a URL, so `depth` and `limit` are clamped and a
-/// request for more is answered with the most this page will draw.
+/// layout in one go. A caller-supplied `limit` taken at its word would simply
+/// move that defect into a URL, so `depth` and `limit` are clamped and a request
+/// for more is answered with the most this page will draw.
 #[derive(Debug, serde::Deserialize)]
 struct GraphQuery {
     /// The concept to centre on. Absent means the entry list.
@@ -665,6 +665,22 @@ const DEFAULT_NODES: usize = 150;
 const HUB_LIST: usize = 40;
 
 impl GraphQuery {
+    /// The concept to centre on, or `None` for the entry list.
+    ///
+    /// Empty and whitespace-only mean **absent**: taken literally they ask for a
+    /// concept whose id is the empty string, which no bundle holds, so they would
+    /// 404 every time for what is plainly a request for the entry list.
+    ///
+    /// An accessor rather than a check at each route, because the first fix for
+    /// this normalised the HTML route and left the JSON one 404ing — two call
+    /// sites that had already disagreed once. Raised twice in review of #782.
+    fn focus(&self) -> Option<&str> {
+        self.focus
+            .as_deref()
+            .map(str::trim)
+            .filter(|f| !f.is_empty())
+    }
+
     /// Hops to draw, within [`MAX_DEPTH`] and never zero — a depth-0 view is one
     /// node and no edges, which is a concept page with extra steps.
     fn depth(&self) -> usize {
@@ -737,11 +753,7 @@ async fn graph_page(State(v): State<Viewer>, Query(q): Query<GraphQuery>) -> Res
         encodeURIComponent(e.target.id())+'&depth={DEPTH}&limit={LIMIT}';});\
         });</script></article>";
 
-    // `focus=` present but empty is **absent**, not a focus. Taken literally it
-    // asks for a concept whose id is the empty string, which no bundle holds, so
-    // it would reliably 404 and leave the page reporting an error for what is
-    // plainly a request for the entry list. Raised in review of #782.
-    let Some(focus) = q.focus.clone().filter(|f| !f.trim().is_empty()) else {
+    let Some(focus) = q.focus().map(ToOwned::to_owned) else {
         return graph_entry(&v).await;
     };
 
@@ -883,7 +895,7 @@ async fn graph_json(State(v): State<Viewer>, Query(q): Query<GraphQuery>) -> Res
         None => return spawn_failed(),
     };
 
-    let payload = match q.focus.as_deref() {
+    let payload = match q.focus() {
         Some(focus) => match view::neighbourhood(&graph, focus, q.depth(), q.limit()) {
             Some(scoped) => serde_json::to_string(&scoped),
             // A mistyped id is a 404, not an empty graph: an empty drawing reads
@@ -1412,8 +1424,12 @@ mod tests {
 
     /// `?focus=` with nothing after it is a request for the entry list, not for a
     /// concept whose id is the empty string. Taken literally it 404s every time.
+    ///
+    /// **Both routes**, because the first fix normalised the HTML one and left
+    /// the JSON one 404ing on the same input — two call sites that disagreed
+    /// about one rule, which is why the rule now lives on `GraphQuery::focus`.
     #[tokio::test]
-    async fn an_empty_focus_is_the_entry_list_rather_than_a_guaranteed_404() {
+    async fn an_empty_focus_is_the_entry_list_on_both_routes() {
         let root = sample();
         for uri in ["/graph?focus=", "/graph?focus=%20", "/graph"] {
             let (status, body) = get_(&root, "", uri).await;
@@ -1421,6 +1437,20 @@ mod tests {
             assert!(
                 body.contains("Pick a concept to centre the graph on"),
                 "{uri} must reach the entry list: {body}"
+            );
+        }
+        for uri in [
+            "/api/graph.json?focus=",
+            "/api/graph.json?focus=%20",
+            "/api/graph.json",
+        ] {
+            let (status, body) = get_(&root, "", uri).await;
+            assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+            let json: serde_json::Value =
+                serde_json::from_str(&body).unwrap_or_else(|e| panic!("{uri}: {e}: {body}"));
+            assert!(
+                json.get("hubs").is_some(),
+                "{uri} must answer with the entry list, not a 404: {body}"
             );
         }
         let _ = std::fs::remove_dir_all(&root);
