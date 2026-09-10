@@ -860,10 +860,13 @@ async fn graph_json(State(v): State<Viewer>, Query(q): Query<GraphQuery>) -> Res
                         (header::CONTENT_TYPE, "application/json"),
                         (header::CONTENT_SECURITY_POLICY, CSP),
                     ],
-                    format!(
-                        r#"{{"error":"no concept {}"}}"#,
-                        serde_json::Value::String(focus.to_owned())
-                    ),
+                    // Built rather than formatted: `Value::String` renders *with*
+                    // its quotes, so interpolating it into a quoted field
+                    // produced `"no concept "nonesuch""` — invalid JSON, from
+                    // the very escaping that was there to make it safe. A
+                    // concept id can hold a quote, so the escaping is needed;
+                    // it just has to be done once.
+                    serde_json::json!({ "error": format!("no concept {focus}") }).to_string(),
                 )
                     .into_response();
             }
@@ -1306,11 +1309,29 @@ mod tests {
 
     /// A mistyped id is a 404. An empty drawing would read as a real concept with
     /// no links, which is a different answer and a wrong one.
+    ///
+    /// The **body** is asserted as well as the status, and by parsing rather than
+    /// by matching text. Checking the status alone let a malformed body through
+    /// review: the id was interpolated as a `serde_json::Value`, which renders
+    /// with its own quotes, so the error read `"no concept "nonesuch""` and no
+    /// client could parse it.
     #[tokio::test]
-    async fn an_unknown_focus_is_a_404_rather_than_an_empty_graph() {
+    async fn an_unknown_focus_is_a_404_carrying_json_a_client_can_read() {
         let root = sample();
-        let (status, _) = get_(&root, "", "/api/graph.json?focus=nonesuch").await;
+        let (status, body) = get_(&root, "", "/api/graph.json?focus=nonesuch").await;
+
         assert_eq!(status, StatusCode::NOT_FOUND);
+        let json: serde_json::Value =
+            serde_json::from_str(&body).unwrap_or_else(|e| panic!("{e}: {body}"));
+        assert_eq!(json["error"], "no concept nonesuch");
+
+        // An id may hold a quote, which is the case the escaping exists for and
+        // the one a hand-built string gets wrong.
+        let (status, body) = get_(&root, "", "/api/graph.json?focus=a%22b").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let json: serde_json::Value =
+            serde_json::from_str(&body).unwrap_or_else(|e| panic!("{e}: {body}"));
+        assert_eq!(json["error"], r#"no concept a"b"#);
         let _ = std::fs::remove_dir_all(&root);
     }
 

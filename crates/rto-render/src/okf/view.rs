@@ -437,7 +437,7 @@ pub fn hubs(graph: &GraphView, limit: usize) -> Vec<GraphHub> {
 /// **Breadth-first, and within each ring most-connected first.** The budget is
 /// spent on the neighbours that lead somewhere, because this view is something a
 /// reader navigates: a leaf tells them nothing about where to go next. What the
-/// budget excluded is counted in [`GraphScope::omitted`] rather than dropped
+/// budget excluded is counted in [`GraphScope::beyond`] rather than dropped
 /// silently.
 #[must_use]
 pub fn neighbourhood(
