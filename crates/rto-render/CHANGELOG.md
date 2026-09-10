@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.10.3](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v5.10.2...rto-render-v5.10.3) - 2026-09-10
+
+### Fixed
+
+- *(okf)* a 404 from the graph API must be JSON a client can parse
+- *(okf)* draw the graph one neighbourhood at a time, and say what is not drawn
+
+### Other
+
+- *(okf)* index the node lookup, and label the hub metric as what it counts
+
 ## [5.10.2](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v5.10.1...rto-render-v5.10.2) - 2026-09-09
 
 ### Fixed
