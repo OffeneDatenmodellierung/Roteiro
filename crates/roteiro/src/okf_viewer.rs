@@ -689,6 +689,15 @@ async fn graph_page(State(v): State<Viewer>, Query(q): Query<GraphQuery>) -> Res
     // draws one is the one that says what the picture means — and it is linear
     // where a force-directed layout is quadratic per tick, which is what made
     // this page hang.
+    //
+    // The focus ranks `Infinity`, not a large number. `concentric` puts the
+    // highest rank innermost and every other node is ranked by its in-view
+    // degree, so any finite constant is a threshold a neighbour can cross — and
+    // then the picture is centred on something that is not the focus, silently.
+    // Measured on this bundle the nearest neighbour reached **96** against a
+    // constant of 100, with nothing bounding it: the node budget allows 500, so a
+    // neighbour may in principle reach 499. Raised in review of #782, where it
+    // had not yet fired.
     const SCRIPT: &str = "<article><h1>Concept graph</h1>\
         <p class=\"scope\" id=\"scope\">Loading…</p>\
         <div id=\"graph\"></div>\
@@ -709,7 +718,7 @@ async fn graph_page(State(v): State<Viewer>, Query(q): Query<GraphQuery>) -> Res
         elements:[...g.nodes.map(n=>({data:{id:n.id,label:n.label,trust:n.trust,\
         focus:n.id===s.focus?'yes':'no'}})),\
         ...g.edges.map(e=>({data:{source:e.source,target:e.target}}))],\
-        layout:{name:'concentric',concentric:n=>n.data('focus')==='yes'?100:n.degree(),\
+        layout:{name:'concentric',concentric:n=>n.data('focus')==='yes'?Infinity:n.degree(),\
         levelWidth:()=>1,minNodeSpacing:24},style:[\
         {selector:'node',style:{'label':'data(label)','font-size':'8px',\
         'background-color':'#6b7684','color':'#1a2733'}},\
@@ -1303,6 +1312,29 @@ mod tests {
         assert_eq!(
             json["scope"]["beyond"], 6,
             "and the six it did not draw are counted, not dropped: {body}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `concentric` draws the highest-ranked node innermost, and every other node
+    /// is ranked by its degree — so a *finite* rank for the focus is a threshold
+    /// a neighbour can cross, and the picture then centres on something that is
+    /// not the focus without saying so.
+    ///
+    /// Pinned as a string because the layout runs in the browser and Rust cannot
+    /// reach it. That makes this a weak test of a real property, which is the
+    /// trade: it cannot prove the layout is right, and it does stop the one
+    /// regression that had already happened once — measured at 96 against a
+    /// constant of 100, four short of firing.
+    #[tokio::test]
+    async fn the_focus_outranks_every_neighbour_by_construction() {
+        let root = sample();
+        let (status, body) = get_(&root, "", "/graph?focus=metrics/revenue").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains("?Infinity:n.degree()"),
+            "the focus must not be ranked by a constant a degree can exceed: {body}"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
