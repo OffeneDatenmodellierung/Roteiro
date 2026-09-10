@@ -802,11 +802,16 @@ async fn graph_entry(v: &Viewer) -> Response {
         graph.nodes.len(),
         graph.edges.len()
     );
+    // "connected", not "links": `GraphHub::degree` counts **distinct** concepts
+    // in either direction, so a concept naming the same target six times counts
+    // once. Labelling that "6 links" would be a different number, and the wrong
+    // one — a mismatch introduced by correcting the Rust doc and leaving the
+    // markup. Raised in review of #782.
     for hub in &hubs {
         let _ = write!(
             body,
             "<li><a href=\"{base}/graph?focus={}\">{}</a> \
-             <span class=\"deg\">{} links</span></li>",
+             <span class=\"deg\">{} connected</span></li>",
             urlencode(&hub.id),
             escape(&hub.label),
             hub.degree

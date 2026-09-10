@@ -487,9 +487,17 @@ pub fn neighbourhood(
         frontier = admitted;
     }
 
+    // Indexed rather than scanned. `find` per id is O(order x nodes) — at the
+    // 500-node budget against this repository's own bundle that is 4.9 million
+    // string comparisons on every request, for what is a lookup. Measured at
+    // 0.10 s, so it was never user-visible; it is fixed because the request path
+    // is the wrong place to leave an avoidable quadratic, and a knowledge layer
+    // (ADR-0026) only makes the bundle bigger.
+    let by_id: BTreeMap<&str, &GraphNode> =
+        graph.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
     let nodes: Vec<GraphNode> = order
         .iter()
-        .filter_map(|id| graph.nodes.iter().find(|n| n.id == *id).cloned())
+        .filter_map(|id| by_id.get(id).map(|n| (*n).clone()))
         .collect();
     let edges: Vec<GraphEdge> = graph
         .edges
