@@ -399,6 +399,7 @@ pub fn disambiguate(mounts: &mut [Mount]) {
 /// base pointing straight at the only bundle is what this route did when it could
 /// hold only one.
 pub fn mounts_router(base: &str, mounts: Vec<Mount>, explorer: Option<String>) -> Router {
+    assert_mountable(base);
     let mut app = Router::new();
     for m in &mounts {
         let prefix = format!("{base}/{}", m.slug);
@@ -421,12 +422,18 @@ pub fn mounts_router(base: &str, mounts: Vec<Mount>, explorer: Option<String>) -
     // the one page with no styling — `{base}/okf-viewer.css` resolves to a
     // bundle's route everywhere else.
     let at = base.to_owned();
-    let owned = base.to_owned();
+    let owned = Arc::new(base.to_owned());
+    // Behind an `Arc` because the handler closure must own what it reads and is
+    // called once per request. The list is short — one per hosted project with a
+    // bundle, six here — and the clone was cheaper than the page it precedes, so
+    // this is not a measured cost; it is one line to stop doing per-request work
+    // that has no per-request reason to happen.
+    let shared = Arc::new(mounts);
     let app = app.route(&format!("{base}/okf-viewer.css"), get(stylesheet));
     app.route(
         &at,
         get(move || {
-            let (base, mounts) = (owned.clone(), mounts.clone());
+            let (base, mounts) = (Arc::clone(&owned), Arc::clone(&shared));
             let explorer = explorer.clone();
             async move { chooser(&base, &mounts, explorer.as_deref()) }
         }),
@@ -494,6 +501,37 @@ fn chooser(base: &str, mounts: &[Mount], explorer: Option<&str>) -> Response {
     )
 }
 
+/// Refuse a mount path this module cannot safely write into markup.
+///
+/// `base` is interpolated raw into `href` and `src` attributes at a dozen call
+/// sites. That is *not* a case for `escape`: escaping is for text, and a URL
+/// that needed it would be a broken URL, not a safe one — `&lt;script&gt;` in an
+/// `href` is nonsense either way. What the pages actually rely on is that `base`
+/// is a path this module built itself, out of [`slug`], whose charset already
+/// excludes every character that could leave an attribute.
+///
+/// So the fix for "interpolated without escaping" is to make the assumption a
+/// **checked** one at the single point where a router is built, rather than a
+/// remark in a comment eleven interpolations away. Raised by review on #785.
+///
+/// # Panics
+///
+/// If `base` is not empty and not a `/`-prefixed path of `[A-Za-z0-9._-]`
+/// segments. Callers construct it; there is no input that reaches this from a
+/// bundle or a request, so a bad one is a bug in this crate and should stop the
+/// server rather than render.
+fn assert_mountable(base: &str) {
+    assert!(
+        base.is_empty()
+            || (base.starts_with('/')
+                && base.split('/').skip(1).all(|seg| !seg.is_empty()
+                    && seg
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')))),
+        "mount path is not slug-safe and must not be written into markup: {base:?}"
+    );
+}
+
 /// One bundle's routes, mounted at `base`.
 ///
 /// Stateless from the caller's side — it holds a path and where it sits — so it
@@ -504,6 +542,7 @@ fn chooser(base: &str, mounts: &[Mount], explorer: Option<&str>) -> Response {
 /// directly. `nav` is what else the same server holds, which the bundle cannot
 /// know and must not guess — see [`Nav`].
 pub fn router(root: PathBuf, base: &str, nav: Nav) -> Router {
+    assert_mountable(base);
     let state = Viewer {
         root: Arc::new(root),
         base: Arc::new(base.to_owned()),
@@ -2477,5 +2516,51 @@ mod tests {
         let (status, body, _) = get_mounted(&app, "/okf/okf-viewer.css-2").await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("Alpha"), "{body}");
+    }
+
+    /// A mount path that could leave an attribute is refused, not rendered.
+    ///
+    /// `base` is interpolated raw into `href`/`src` at a dozen call sites, which
+    /// review on #785 read as a missing `escape`. It is not: escaping is for
+    /// text, and the pages rely on `base` being slug-safe by construction. This
+    /// turns that from an assumption into a checked one — the assertion is the
+    /// contract, and these are the strings that violate it.
+    #[test]
+    fn a_mount_path_that_could_leave_an_attribute_is_refused() {
+        // What the module actually builds, all accepted.
+        for ok in ["", "/okf", "/okf/Roteiro-Roteiro", "/okf/a.b_c-d"] {
+            assert_mountable(ok);
+        }
+        for bad in [
+            "/okf/\"><script>alert(1)</script>",
+            "/okf/a b",
+            "/okf/a/",
+            "okf",
+            "/okf//x",
+        ] {
+            assert!(
+                std::panic::catch_unwind(|| assert_mountable(bad)).is_err(),
+                "accepted a mount path it cannot safely write: {bad:?}"
+            );
+        }
+    }
+
+    /// A hostile mount path stops the router being built at all.
+    ///
+    /// The assertion above is only worth having if the constructors run it, and
+    /// both do — a page rendered from a bad `base` is the outcome this refuses.
+    #[test]
+    fn a_hostile_base_cannot_reach_a_page() {
+        let root = sample();
+        let hostile = "/okf/\"><script>alert(1)</script>";
+        assert!(
+            std::panic::catch_unwind(|| router(root.clone(), hostile, Nav::default())).is_err(),
+            "a bundle router was built on a hostile base"
+        );
+        assert!(
+            std::panic::catch_unwind(|| mounts_router(hostile, Vec::new(), None)).is_err(),
+            "a mount layer was built on a hostile base"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
