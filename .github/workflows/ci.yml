@@ -506,6 +506,10 @@ jobs:
   #     `rto-render::mcp` surface and `dep:tokio`, which the floor leaves out.
   #   * `--no-default-features --features execution` — the ADR-0014 posture,
   #     below, unchanged.
+  #   * `--no-default-features --features explorer` — the explorer on its own.
+  #     Not implied by the viewer cell below: `okf-viewer` enables `explorer`, so
+  #     that cell builds a superset and cannot fail on what only the smaller
+  #     shape reaches. It went unbuilt once and broke immediately — see the job.
   #   * `--no-default-features --features okf-viewer` — ADR-0022's commitment.
   #     A new optional feature that no job compiled in isolation would be the
   #     fourth defect of this exact class in a year (`vlm_content` under
@@ -626,6 +630,20 @@ jobs:
       - name: Test (okf-viewer only, no default features)
         if: env.RELEASE_PR != 'true'
         run: cargo test --workspace --no-default-features --features okf-viewer --no-fail-fast
+
+      # `explorer` **without** the viewer, which is no longer implied by the cell
+      # above: `okf-viewer` now enables `explorer`, so that cell builds both and
+      # this one is the only job that compiles the explorer on its own. It was
+      # broken for exactly as long as nothing built it — folding the viewer in
+      # made `serve_graph_ui` construct a multi-threaded runtime whose feature
+      # only `okf-viewer` enabled, so `--features explorer` did not compile and
+      # `--all-features` could not tell, because it turns both on.
+      - name: Clippy (explorer only, no default features)
+        if: env.RELEASE_PR != 'true'
+        run: cargo clippy --workspace --all-targets --no-default-features --features explorer -- -D warnings
+      - name: Test (explorer only, no default features)
+        if: env.RELEASE_PR != 'true'
+        run: cargo test --workspace --no-default-features --features explorer --no-fail-fast
 
   # Test coverage — MEASURING, NOT BLOCKING (issue #319).
   #

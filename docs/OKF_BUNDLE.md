@@ -308,7 +308,6 @@ graph — with the consent gate above.
 | `okf syntax` | Does its fenced code parse | on any error |
 | `okf computations` | What Attested Computations does it declare (§10) | `--check`, on an incomplete contract |
 | `okf diff` | What changed between two bundles | never |
-| `okf view` | Serves it as a website (`okf-viewer` feature, ADR-0022) | n/a |
 
 Start with `info`; it composes the others' reports rather than deriving anything
 of its own, so it cannot disagree with the command that reports a number in
@@ -369,7 +368,10 @@ whether to trust a source: "screened clean" is a claim about the *concepts*, and
 it has to be visible that the screen's verdict did not cover everything in front
 of them.
 
-Serving one is a separate decision. `okf view`'s `/f/` route types a file from a
+Serving one is a separate decision. The viewer (`okf-viewer` feature, ADR-0022)
+is reached through `roteiro explorer` or `roteiro serve` at `/okf`, and
+`roteiro explorer` run inside a bundle directory serves that bundle even where
+there is no repository. Its `/f/` route types a file from a
 closed allow-list under a `default-src 'none'; sandbox` policy with `nosniff`, and
 now sets **`Content-Disposition: attachment`** for anything outside the image
 allow-list. A bundle does not get to choose how its bytes are presented, any more

@@ -942,9 +942,26 @@
   // routes by type (`goByType`): a hub opens the cross-repo view, a standalone
   // drills straight into its project. This is only rendered when there is a
   // genuine choice; a lone workspace auto-enters (see `route`).
+  // Reveal the OKF link when the server has a bundle to show.
+  //
+  // Probed rather than declared: whether `/okf` exists depends on which hosted
+  // projects have run `render okf`, which the served assets cannot know and the
+  // capabilities endpoint does not carry. A HEAD that 404s simply leaves the link
+  // hidden, which is the honest outcome and needs no error path.
+  function revealOkf() {
+    const link = $("#okf-link");
+    if (!link) return;
+    fetch("/okf", { method: "HEAD", redirect: "follow" })
+      .then((r) => {
+        if (r.ok) link.hidden = false;
+      })
+      .catch(() => {});
+  }
+
   function renderSelector() {
     const grid = $("#select-grid");
     if (!grid) return;
+    revealOkf();
     const status = $("#select-status");
     const cards = state.workspaces.map((w) => {
       const projects = w.projects || [];

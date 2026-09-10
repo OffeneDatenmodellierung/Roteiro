@@ -1235,6 +1235,14 @@
         <div id="select-status">Loading workspaces…</div>
 
         <div class="select-grid" id="select-grid"></div>
+
+        <!-- Revealed by `app.js` only when the server actually mounts a bundle
+             (ADR-0022 v1.2). Hidden by default rather than always shown: which
+             projects have rendered one is a property of the server, and a link
+             to a route that 404s is worse than no link. -->
+        <p id="okf-link" hidden>
+          <a href="/okf">Browse the OKF bundles this server holds &rarr;</a>
+        </p>
       </main>
     </div>
 
