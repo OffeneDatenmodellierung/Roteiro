@@ -704,16 +704,21 @@ async fn graph_page(State(v): State<Viewer>, Query(q): Query<GraphQuery>) -> Res
         <script src=\"{BASE}/cytoscape.min.js\"></script>\
         <script>\
         var Q='focus={FOCUS}&depth={DEPTH}&limit={LIMIT}';\
-        fetch('{BASE}/api/graph.json?'+Q).then(r=>r.json()).then(g=>{\
-        var s=g.scope,n=document.getElementById('scope');\
+        var n=document.getElementById('scope');\
+        fetch('{BASE}/api/graph.json?'+Q).then(r=>r.json().then(g=>({ok:r.ok,g:g})))\
+        .catch(e=>({ok:false,g:{error:String(e)}})).then(res=>{\
+        if(!res.ok||!res.g.scope){\
+        n.textContent=res.g.error||'The graph could not be read.';return;}\
+        var g=res.g,s=g.scope;\
         n.textContent='Showing '+s.shown_nodes+' of '+s.total_nodes+\
         ' concepts and '+s.shown_edges+' of '+s.total_edges+' links, '+\
         s.depth+(s.depth==1?' hop':' hops')+' from '+s.focus+\
         (s.beyond?'. '+s.beyond+' more connected concepts are not drawn.':'.');\
-        if(s.beyond){var a=document.createElement('a');\
+        if(s.beyond&&{CAN_EXPAND}){var a=document.createElement('a');\
         a.href='{BASE}/graph?focus='+encodeURIComponent(s.focus)+\
         '&depth={NEXT_DEPTH}&limit={NEXT_LIMIT}';\
         a.textContent=' Show more.';n.appendChild(a);}\
+        else if(s.beyond){n.textContent+=' This is the most this page draws.';}\
         var cy=cytoscape({container:document.getElementById('graph'),\
         elements:[...g.nodes.map(n=>({data:{id:n.id,label:n.label,trust:n.trust,\
         focus:n.id===s.focus?'yes':'no'}})),\
@@ -732,7 +737,11 @@ async fn graph_page(State(v): State<Viewer>, Query(q): Query<GraphQuery>) -> Res
         encodeURIComponent(e.target.id())+'&depth={DEPTH}&limit={LIMIT}';});\
         });</script></article>";
 
-    let Some(focus) = q.focus.clone() else {
+    // `focus=` present but empty is **absent**, not a focus. Taken literally it
+    // asks for a concept whose id is the empty string, which no bundle holds, so
+    // it would reliably 404 and leave the page reporting an error for what is
+    // plainly a request for the entry list. Raised in review of #782.
+    let Some(focus) = q.focus.clone().filter(|f| !f.trim().is_empty()) else {
         return graph_entry(&v).await;
     };
 
@@ -748,6 +757,19 @@ async fn graph_page(State(v): State<Viewer>, Query(q): Query<GraphQuery>) -> Res
         // deeper ring on this shape of graph multiplies, where a bigger budget
         // adds. Both are clamped by `GraphQuery`, so the link cannot ask for the
         // payload this page exists to avoid.
+        // Offered only when it can actually widen something. At both maxima the
+        // link would point at the view already on screen — an affordance that
+        // does nothing is worse than none, because the reader concludes there is
+        // nothing more rather than that this page will not draw it. The page says
+        // which it is.
+        .replace(
+            "{CAN_EXPAND}",
+            if limit < MAX_NODES || depth < MAX_DEPTH {
+                "true"
+            } else {
+                "false"
+            },
+        )
         .replace("{NEXT_LIMIT}", &(limit * 2).min(MAX_NODES).to_string())
         .replace(
             "{NEXT_DEPTH}",
@@ -1340,6 +1362,117 @@ mod tests {
         assert!(
             body.contains("?Infinity:n.degree()"),
             "the focus must not be ranked by a constant a degree can exceed: {body}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The inline script must **parse**, which nothing else here checks.
+    ///
+    /// It is thirty lines of JavaScript inside a Rust string literal, with every
+    /// quote escaped and every line continued — the exact place a syntax error
+    /// hides, and one that would ship silently: the page would serve 200 OK with
+    /// a dead script and sit on "Loading…" for ever. The assertions around this
+    /// one match *text*, so they would all still pass.
+    ///
+    /// Self-skips without `node`, like the model instruments in `rto-llama`: a
+    /// checkout without it loses this check rather than failing on it.
+    #[tokio::test]
+    async fn the_inline_script_is_javascript_that_parses() {
+        let Ok(node) = std::process::Command::new("node").arg("--version").output() else {
+            eprintln!("SKIP: no `node` to parse the script with");
+            return;
+        };
+        if !node.status.success() {
+            eprintln!("SKIP: `node --version` failed");
+            return;
+        }
+
+        let root = sample();
+        let (_, body) = get_(&root, "", "/graph?focus=metrics/revenue").await;
+        let script = body
+            .rsplit_once("<script>")
+            .and_then(|(_, tail)| tail.split_once("</script>"))
+            .map(|(js, _)| js.to_owned())
+            .expect("the focused page carries an inline script");
+
+        let dir = fixture("script-check", &[("check.js", &script)]);
+        let out = std::process::Command::new("node")
+            .arg("--check")
+            .arg(dir.join("check.js"))
+            .output()
+            .expect("run node");
+        assert!(
+            out.status.success(),
+            "the inline script does not parse:\n{}\n--- script ---\n{script}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `?focus=` with nothing after it is a request for the entry list, not for a
+    /// concept whose id is the empty string. Taken literally it 404s every time.
+    #[tokio::test]
+    async fn an_empty_focus_is_the_entry_list_rather_than_a_guaranteed_404() {
+        let root = sample();
+        for uri in ["/graph?focus=", "/graph?focus=%20", "/graph"] {
+            let (status, body) = get_(&root, "", uri).await;
+            assert_eq!(status, StatusCode::OK, "{uri}");
+            assert!(
+                body.contains("Pick a concept to centre the graph on"),
+                "{uri} must reach the entry list: {body}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An affordance that cannot do anything is worse than none: the reader
+    /// concludes there is nothing more, rather than that this page will not draw
+    /// it. At both maxima the page says which it is.
+    #[tokio::test]
+    async fn show_more_is_offered_only_when_it_can_widen_something() {
+        let root = sample();
+
+        let (_, growable) = get_(&root, "", "/graph?focus=metrics/revenue&limit=10&depth=1").await;
+        assert!(
+            growable.contains("&&true)"),
+            "with room to grow, expanding is offered: {growable}"
+        );
+
+        let (_, maxed) = get_(
+            &root,
+            "",
+            &format!("/graph?focus=metrics/revenue&limit={MAX_NODES}&depth={MAX_DEPTH}"),
+        )
+        .await;
+        assert!(
+            maxed.contains("&&false)"),
+            "at both maxima it is not: {maxed}"
+        );
+        assert!(
+            maxed.contains("This is the most this page draws"),
+            "and the page says so instead of going quiet: {maxed}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The API answers a bad focus with a 404 carrying JSON. The page has to
+    /// *read* that: a script that reaches straight for `scope` throws on the
+    /// error body and leaves the reader looking at "Loading…" for ever, which is
+    /// a worse outcome than the 404 it was given.
+    #[tokio::test]
+    async fn the_page_reads_an_error_response_rather_than_throwing_on_it() {
+        let root = sample();
+        let (status, body) = get_(&root, "", "/graph?focus=nonesuch").await;
+
+        assert_eq!(status, StatusCode::OK, "the page itself renders");
+        assert!(
+            body.contains("if(!res.ok||!res.g.scope){"),
+            "the script checks the response before reading it: {body}"
+        );
+        assert!(
+            body.contains("The graph could not be read."),
+            "and has something to say when it cannot: {body}"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
