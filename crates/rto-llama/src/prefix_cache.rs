@@ -1,5 +1,8 @@
 //! Reuse a prompt's byte-identical preamble instead of re-prefilling it (#578).
 //!
+//! **The policy half**, which needs no model and no `llama` feature, so it is
+//! compiled and tested unconditionally.
+//!
 //! `serve` builds a context per generation and prefills the whole prompt every
 //! time. For a one-shot question that is right. For a multi-turn agent client it
 //! is not: the system prompt and the client's `tools` array are re-sent verbatim

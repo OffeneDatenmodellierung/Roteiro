@@ -1,4 +1,4 @@
-//! The concrete generators behind [`MediaProducer`](super::MediaProducer), and
+//! The concrete generators behind [`MediaProducer`], and
 //! the process-wide llama.cpp engines they load.
 //!
 //! Everything here is feature-gated: the default build has no generator at all,
@@ -8,7 +8,7 @@
 //! ADR-0015 an absent model and a blob with nothing to say were indistinguishable,
 //! because both produced no content.
 //!
-//! The engines moved here from [`crate::extract`] with the generative content
+//! The engines moved here from `crate::extract` with the generative content
 //! itself: after ADR-0015 nothing on the extraction path loads a GGUF model, so
 //! `sync` never touches llama.cpp. Their **release** is still driven from
 //! `extract` ([`crate::release_media_engines`]), which is the public entry point
@@ -195,7 +195,7 @@ fn vlm_producer() -> Option<Producer> {
 /// The digests come from the registry rather than from hashing the installed
 /// files: the registry pin *is* the identity of what was installed (a file whose
 /// bytes differ from the pin never gets written — see
-/// [`crate::models::download_verified`]), and re-hashing three gigabytes on every
+/// `crate::models::download_verified`), and re-hashing three gigabytes on every
 /// `media status` would make the command unusable.
 #[cfg(any(feature = "audio-transcribe", feature = "image-vision"))]
 fn registry_producer(
@@ -357,7 +357,7 @@ pub(crate) fn asr_engine() -> Option<std::sync::Arc<rto_llama::llama::LlamaEngin
 ///
 /// Test-only, and a thin wrapper over the production path: `media build` goes
 /// through [`MediaProducer::generate`]. It exists so the engine-teardown tests in
-/// [`crate::extract`] — which are about the process-global engines and the
+/// `crate::extract` — which are about the process-global engines and the
 /// backend they share (issues #291, #296, #301), not about the artifact store —
 /// keep driving a real load without each of them assembling a producer.
 #[cfg(all(test, feature = "audio-transcribe"))]

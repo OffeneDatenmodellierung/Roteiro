@@ -42,7 +42,7 @@ pub enum StoreError {
 ///
 /// Opening such a store is not an error and reading its *schema* is sound —
 /// migrations are additive in effect, so every column an older build selects is
-/// still there (each `DROP TABLE` in [`crate::migrations`] is a table rebuild
+/// still there (each `DROP TABLE` in `crate::migrations` is a table rebuild
 /// that re-selects every prior column). What is *not* sound is **rewriting** the
 /// graph: this build would re-extract every file with its older extractor and
 /// replace the newer build's content with worse content, silently. So the
@@ -237,7 +237,7 @@ impl Store {
     /// which every migration `1..=v` is recorded as applied.
     ///
     /// **Not the maximum recorded version.** Migrations are selected by set
-    /// membership rather than `> MAX(version)` (see [`crate::migrations`]), so a
+    /// membership rather than `> MAX(version)` (see `crate::migrations`), so a
     /// store *can* hold a gap — one written by a build that knew a higher
     /// migration but not a lower one. For a store recorded as `1..11, 13`, the
     /// maximum is 13 while none of migration 12's schema is present; reporting 13
@@ -371,7 +371,7 @@ impl Store {
             .optional()?)
     }
 
-    /// The extractor environment recorded with the last committed [`sync`],
+    /// The extractor environment recorded with the last committed `sync`,
     /// `None` if unset (a legacy row, or the last sync was a worktree/index
     /// preview). The incremental committed `sync` compares this to the current
     /// env and falls back to a full re-extraction when they differ.
@@ -1006,7 +1006,7 @@ impl Store {
 
     /// Fetch the cached context bundle for `key` as `(fingerprint, json)`, if
     /// present. The caller compares the fingerprint to the node's current one to
-    /// decide whether the entry is fresh (see [`crate::context`]).
+    /// decide whether the entry is fresh (see `crate::context`).
     ///
     /// # Errors
     /// Returns [`StoreError::Sqlite`] on query failure.

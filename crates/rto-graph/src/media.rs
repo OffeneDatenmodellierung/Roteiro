@@ -84,7 +84,7 @@ pub const MEDIA_SCHEMA: &str = "roteiro.media/v1";
 pub const MAX_AUDIO_BYTES: usize = 50 * 1024 * 1024;
 
 /// Images larger than this (compressed bytes) are not described. Shared with the
-/// OCR path in [`crate::extract`], which applies the same cap.
+/// OCR path in `crate::extract`, which applies the same cap.
 pub const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 
 /// Longest permitted prompt, in bytes. A prompt is part of the producer identity
@@ -93,7 +93,7 @@ pub const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 pub const MAX_PROMPT: usize = 4096;
 
 /// Longest permitted model id, in characters — the same bound, and the same
-/// character set, the analyzer ids in [`crate::findings`] use, because a model id
+/// character set, the analyzer ids in `crate::findings` use, because a model id
 /// is likewise a component of a stored, indexed and printed identity.
 pub const MAX_MODEL_ID: usize = 64;
 
@@ -541,7 +541,7 @@ pub struct MediaRecord {
     ///
     /// It is derived from the blob's surviving records, so `media clear` does
     /// reset it — completely, if every record for that blob is discarded. See
-    /// [`record`] for why that limit is accepted rather than engineered around.
+    /// `record` for why that limit is accepted rather than engineered around.
     pub generation: u32,
     /// When the record was written, as `SQLite`'s `datetime('now')`. Written for
     /// humans and for `media status`; no ordering or policy depends on it.
@@ -657,7 +657,7 @@ pub struct CandidateCount {
     pub blobs: u64,
     /// How many of those have at least one record carrying **generated text**.
     pub described: u64,
-    /// How many of those the [gate](gate) refused, and no producer has since
+    /// How many of those the [gate] refused, and no producer has since
     /// described. Counted apart from `described` deliberately: a skipped blob is
     /// not a described one, and folding the two together would restore exactly
     /// the ambiguity the recorded skip exists to remove.

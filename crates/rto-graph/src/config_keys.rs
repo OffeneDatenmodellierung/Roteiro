@@ -25,7 +25,7 @@ pub(crate) const KIND: &str = "config_key";
 /// The placeholder a redacted config value is replaced with, before anything is
 /// persisted. Single-sourced across the two places that *write* it — this module
 /// (a k8s `Secret`'s data, secret whatever the key is called) and
-/// [`crate::extract`] (any secret-*named* key) — and the one that *reads* it back,
+/// `crate::extract` (any secret-*named* key) — and the one that *reads* it back,
 /// [`crate::config_secrets`]. That lens's whole report is "was this redacted",
 /// so it cannot be allowed to drift from the redactor by a spelling.
 pub(crate) const REDACTED: &str = "<redacted>";

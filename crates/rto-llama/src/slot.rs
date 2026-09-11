@@ -122,7 +122,7 @@ impl<T> EngineSlot<T> {
     /// an error the caller must see, not an "unavailable" to be swallowed.
     ///
     /// A failure leaves the slot **uninitialised**, so a later caller retries.
-    /// Errors are deliberately not memoised the way [`SlotState::Absent`] memoises
+    /// Errors are deliberately not memoised the way `SlotState::Absent` memoises
     /// a missing model: an error value cannot be cloned for the callers that did
     /// not run `init`, so the honest choice is to let each of them attempt it and
     /// report its own failure.

@@ -104,14 +104,6 @@ pub mod asset_paths;
 pub mod assets;
 #[cfg(feature = "exec-boxlite")]
 pub mod boxlite;
-/// What an analyzer's environment is — for **both** backends, in one place.
-///
-/// Private because it is a seam between this crate's backends rather than a
-/// contract with a caller. It exists as its own module because it used to exist
-/// as two: a `ChildEnv` in [`subprocess`] and a hand-rolled list in [`boxlite`],
-/// which is how `CARGO_TARGET_DIR` came to be listed as a name to *inherit*
-/// under a promise that it was *set*. Read the module for why a guest has no
-/// `inherit` half at all.
 #[cfg(any(feature = "exec-subprocess", feature = "exec-boxlite"))]
 mod child_env;
 pub mod crossref;
@@ -126,54 +118,12 @@ pub mod crossref;
 /// read the file's own comments for the measurements, and for why the encoder
 /// and the decoder have to be one file rather than two.
 pub mod file_url;
-/// How a refusal is written, so that a way forward stays one.
-///
-/// Ungated, like [`lint_grant`], and for the same kind of reason: what a refusal
-/// owes its reader is not a property of which backends were compiled in. Read
-/// the module for the failure it makes unrepresentable — three of this crate's
-/// refusals leaked source indentation into shipped output at once, which says
-/// the way they were written invited it.
 pub mod guidance;
-/// Whether an image reference is pinned by a digest — the one place that decides.
-///
-/// Ungated, like [`guidance`], and for a reason of the same shape: the rule is
-/// about a string somebody wrote in a config file, not about which backends were
-/// compiled in. `roteiro config` reports an unpinned reference in a build with no
-/// sandbox at all, and a second copy of the check written for that purpose is how
-/// one of the two ends up laxer than the other.
 pub mod image_ref;
 mod ingest;
-/// Running a linter and **reporting** it, with no store anywhere in the path.
-///
-/// The other half of this crate produces artifacts; this module deliberately
-/// does not (ADR-0020 v1.1). It has no [`AnalyzerRunner`] implementation, takes
-/// no [`Consent`], and cannot reach [`rto_graph::Store`] — read its own
-/// documentation for why a lint is not a finding, and why relaxing
-/// [`check_request`] to fit a builder through the reader-class preflight is the
-/// conversion ADR-0014 warns against rather than a refactor.
 #[cfg(feature = "exec-subprocess")]
 pub mod lint;
-/// ADR-0020 §6's grant: may a linter run on **this host**?
-///
-/// Ungated, unlike [`lint`] itself. A policy that existed only where the
-/// capability does would be the conversion ADR-0014 warns about, so the answer
-/// is the same in a build that cannot run a linter as in one that can — see the
-/// module's own documentation.
 pub mod lint_grant;
-/// ADR-0020 conditions 1-2: the **sandboxed builder** — `roteiro lint`'s default.
-///
-/// The boundary half of [`lint`]. It adds one writable mount to what
-/// [`boxlite`] already does and removes nothing: the worktree stays read-only,
-/// [`check_request`]'s preflight is untouched, and the package cache is a
-/// read-only mount of this machine's own rather than a vendored copy. Read its
-/// documentation for why the image is supplied rather than pinned here, and why
-/// a `$CARGO_HOME` root is not what gets mounted.
-///
-/// Gated on **both** backends. The boundary does not imply the escape hatch —
-/// `exec-boxlite` still does not enable `exec-subprocess`, and enabling one must
-/// never switch on the other. This module needs both because it shares
-/// [`lint`]'s report shape and its one host-side `cargo locate-project`, which
-/// is how it learns what to mount.
 #[cfg(all(feature = "exec-boxlite", feature = "exec-subprocess"))]
 pub mod lint_sandbox;
 mod runner;
@@ -193,27 +143,10 @@ pub mod runtime_file_pins;
 /// documentation lives here instead. Read the file's own comments for what is
 /// pinned and why it has to be.
 pub mod runtime_pins;
-/// The **sandbox image store**: what it is holding, and dropping it safely.
-///
-/// Ungated, like [`assets`], and the argument is the same one that moved
-/// provisioning off the backend features: reclaiming the bytes a previous build
-/// cached must not require rebuilding with the backend that cached them. Nothing
-/// here executes anything — it reads an index, measures files, and removes what
-/// a pinned digest re-obtains (ADR-0014 v1.6).
 pub mod sandbox_store;
 pub mod snippet;
 #[cfg(feature = "exec-subprocess")]
 pub mod subprocess;
-/// The **read-only documents** `security list` / `security status` return over a
-/// model-facing tool surface.
-///
-/// Ungated, like [`guidance`] and [`lint_grant`], and for a related reason: what
-/// a read owes its reader is not a property of which backends were compiled in.
-/// It is also the one place either document is built — the CLI's `security
-/// status` shares its coverage matrix and staleness rows from here, so
-/// `possibly_stale` and `ready` are one computation rather than three. Read the
-/// module for the two hazards it exists to remove: an empty listing that reads as
-/// a clean one, and a status blob whose two halves have different scopes.
 pub mod tool_security;
 
 pub use adapter::{

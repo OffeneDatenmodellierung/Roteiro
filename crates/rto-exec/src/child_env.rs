@@ -1,5 +1,11 @@
 //! What an analyzer's environment is, in one place, for both backends.
 //!
+//! **Private because it is a seam between this crate's backends** rather than a
+//! contract with a caller. It exists as its own module because it used to exist as
+//! two: a `ChildEnv` in `subprocess` and a hand-rolled list in `boxlite`, which is
+//! how `CARGO_TARGET_DIR` came to be listed as a name to *inherit* under a promise
+//! that it was *set*.
+//!
 //! Two things reach an analyzer's environment and they read alike while doing
 //! opposite things:
 //!

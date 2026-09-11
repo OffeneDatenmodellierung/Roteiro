@@ -1,8 +1,14 @@
 //! `roteiro lint` — run a linter over the tree in front of you, print what it
 //! said, and keep none of it.
 //!
+//! **The other half of this crate produces artifacts; this module deliberately does
+//! not** (ADR-0020 v1.1). It has no [`AnalyzerRunner`] implementation, takes no
+//! [`Consent`], and cannot reach [`rto_graph::Store`] — and relaxing
+//! `check_request` to fit a builder through the reader-class preflight is the
+//! conversion ADR-0014 warns against rather than a refactor.
+//!
 //! This is a **reporting** surface, not an artifact one, and the difference is
-//! the whole reason the module exists separately from [`crate::runner`]'s
+//! the whole reason the module exists separately from `crate::runner`'s
 //! backends. Nothing here can reach the findings store: there is no
 //! [`rto_graph::AnalysisRun`], no layer key, no call to
 //! [`rto_graph::Store::replace_findings_layer`], and the analyzer it drives is
@@ -53,10 +59,10 @@
 //! into the tree it was reviewing, under a doc comment saying it did not.
 //!
 //! It is a property of this code now. [`run`] **sets** `CARGO_TARGET_DIR` to a
-//! directory it chooses outside the tree ([`scratch_dir`]) and passes
+//! directory it chooses outside the tree (`scratch_dir`) and passes
 //! `--locked`, which between them are the two writes a lint would otherwise make
 //! into the tree under review. Neither depends on the caller's environment: the
-//! seam that carries them is [`crate::subprocess::ChildEnv`]'s *set* half, and
+//! seam that carries them is `crate::subprocess::ChildEnv`'s *set* half, and
 //! its *inherit* half — the one that cannot express a value — is documented at
 //! that type precisely because conflating the two is what produced this.
 //!
@@ -81,7 +87,7 @@
 //!
 //! So ADR-0020 condition 6 puts the sandbox first and makes the host a thing a
 //! person opts into. Conditions 1–2 are now built, so the default **selects
-//! [`crate::lint_sandbox`]** rather than refusing — see [`decide`] for the
+//! [`crate::lint_sandbox`]** rather than refusing — see `decide` for the
 //! layering and [`Reason`] for what each layer tells the reader.
 //!
 //! What the layers say did not change; what "denied" *amounts to* did. A project
@@ -501,7 +507,7 @@ pub fn invocation(analyzer: &str, features: &FeatureSet, backend: Backend) -> Op
 /// commit. No source identity is recorded, because recording one would imply a
 /// tie to a revision that a dirty tree does not have.
 ///
-/// `decision` is the outcome of [`decide`], and it is a **required argument
+/// `decision` is the outcome of `decide`, and it is a **required argument
 /// rather than something read from a global** for the reason
 /// [`crate::SubprocessRunner::new`] takes its flag at construction: a caller must
 /// not be able to execute a build here by forgetting to check something. It

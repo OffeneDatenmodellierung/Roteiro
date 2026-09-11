@@ -10,7 +10,7 @@
 //!
 //! It reads a git tree and parses text. It touches no [`Store`](rto_graph::Store)
 //! and writes nothing, so a read-only surface can call it — which is what
-//! [`crate::tool_check`] does.
+//! `crate::tool_check` does.
 
 use rto_graph::{BlobRef, GitError, GraphSource, Repo};
 
@@ -28,8 +28,8 @@ use crate::site::SitePage;
 /// closure without converting on the way in.
 pub type BlobReader<'a, E> = dyn Fn(&BlobRef) -> Result<Option<Vec<u8>>, E> + 'a;
 
-/// The authored documents found in one tree, ready for [`crate::check::run`] or
-/// [`crate::check::validate`].
+/// The authored documents found in one tree, ready for `crate::check::run` or
+/// `crate::check::validate`.
 #[derive(Debug, Default)]
 pub struct AuthoredLayer {
     /// ADRs under `docs/adr/` that parsed.
@@ -46,7 +46,7 @@ pub struct AuthoredLayer {
     /// consequence: the page silently does not exist.
     pub malformed: Vec<Violation>,
     /// House-style convention breaches found while reading the same blobs — see
-    /// [`crate::convention`].
+    /// `crate::convention`.
     ///
     /// Carried beside [`Self::malformed`] rather than inside it because the two
     /// are different claims: `malformed` is *this document does not parse*, and
@@ -187,7 +187,7 @@ pub fn authored_docs(repo: &Repo, source: GraphSource) -> Result<AuthoredDocs, G
 /// - [`authored_layer`] below, from a [`GraphSource`] tree (`build_graph`);
 /// - `build_graph_at_rev` in the `roteiro` binary, from an arbitrary rev's blobs
 ///   (the Stage 35b graph arm, which needs the ADRs *of the reviewed commit*);
-/// - [`crate::tool_check`], read-only, which cannot use either of the first two
+/// - `crate::tool_check`, read-only, which cannot use either of the first two
 ///   because both end in a write.
 ///
 /// Copying the loop would leave them free to drift, which is the shape this

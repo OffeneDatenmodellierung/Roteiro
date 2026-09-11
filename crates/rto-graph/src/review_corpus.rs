@@ -28,7 +28,7 @@
 //! `gix` dependency is pinned without transports precisely so that such a call
 //! cannot be written (the same reasoning as [`crate::model_choice`]).
 //!
-//! # Not [`crate::findings`]
+//! # Not `crate::findings`
 //!
 //! `findings` models *analyzer* findings (ADR-0012): store-backed, keyed by
 //! analyzer identity, owned by an [`crate::AnalysisRun`] that records a runner,

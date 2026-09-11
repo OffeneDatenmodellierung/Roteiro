@@ -26,7 +26,7 @@ pub struct RenderedAdr {
 /// Where each source document is **actually published**: the file the site
 /// serves, keyed by the source markdown's file name.
 ///
-/// [`rewrite_doc_link`] used to derive a link's target from the link's own
+/// `rewrite_doc_link` used to derive a link's target from the link's own
 /// spelling — `../BUILD_PLAN_V2.md` → `../BUILD_PLAN_V2.html` — which is correct
 /// only while every document is served under its own stem. Site pages ended
 /// that: a page is published as its declared `site-page:` slug, so
@@ -37,7 +37,7 @@ pub struct RenderedAdr {
 /// A slug may also name a **path** — `history/build-plan-v2` serves at
 /// `/history/build-plan-v2.html` — so a served name is not necessarily a bare
 /// filename. When it contains a `/` it is a path from the site root, and
-/// [`rewrite_doc_link`] replaces the link's own directory hops with the climb
+/// `rewrite_doc_link` replaces the link's own directory hops with the climb
 /// back to the root rather than keeping them; keeping them doubled the
 /// directory. A bare served name still keeps the link's hops, which is what
 /// every ADR-to-ADR link depends on.
@@ -218,7 +218,7 @@ pub fn markdown_to_html(md: &str) -> String {
 /// their href prefix), rewrite ordinary `[…](*.md)` links to their rendered
 /// `.html` targets and links out of the site to `source`, then run `CommonMark`
 /// with GitHub tables/strikethrough. `depth` is the page's own depth below the
-/// site root; see [`rewrite_doc_link`].
+/// site root; see `rewrite_doc_link`.
 fn render_markdown(
     md: &str,
     adr_prefix: &str,
@@ -384,7 +384,7 @@ fn heading_ids(md: &str) -> Vec<String> {
 ///
 /// `../crates/x.rs` is `(1, ["crates", "x.rs"])`; `adr/../guide.md` is
 /// `(0, ["guide.md"])`. The hop count is the whole escape test in
-/// [`rewrite_doc_link`]: a link that climbs further than the page sits below the
+/// `rewrite_doc_link`: a link that climbs further than the page sits below the
 /// site root is a link to something outside the site.
 fn resolve_relative(path: &str) -> (usize, Vec<&str>) {
     let mut up = 0usize;

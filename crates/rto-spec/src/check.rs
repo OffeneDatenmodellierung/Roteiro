@@ -230,7 +230,7 @@ fn duplicate_site_slugs(pages: &[SitePage]) -> Vec<Violation> {
 /// thing with all of them — fail the gate and print the message — and because
 /// the message, not the label, is what tells the reader which one fired. This
 /// follows [`ViolationKind::MalformedAdr`], which likewise covers every
-/// [`crate::adr::ParseError`] behind one label and puts the specifics in prose.
+/// `crate::adr::ParseError` behind one label and puts the specifics in prose.
 /// It is also why rules 4 and 5 (issue #432) needed no new variant, and so
 /// reopened no part of the semver question this enum's exhaustiveness raises.
 ///
@@ -392,7 +392,7 @@ fn adr_version_drift(docs: &[AdrDoc]) -> Vec<Violation> {
 ///
 /// Splitting the edges out of the report is what lets one violation definition
 /// serve both a gate that writes ([`run`]) and a tool surface that must not
-/// ([`crate::tool_check`]). Nothing decides what counts as drift twice.
+/// (`crate::tool_check`). Nothing decides what counts as drift twice.
 #[derive(Debug, Clone, Default)]
 pub struct Validation {
     /// What was checked and what drifted.

@@ -3,28 +3,28 @@
 //! Extraction must be a deterministic pure function of `(path, blob_id, bytes)`
 //! so its output can be cached; because the facts are path-dependent (node keys
 //! are path-scoped), the cache is keyed by both path and blob id (see
-//! [`crate::sync`]). [`Registry`] dispatches by file extension to a
+//! `crate::sync`). [`Registry`] dispatches by file extension to a
 //! language-aware extractor ([`RustExtractor`]), falling back to
 //! [`FileNodeExtractor`] for files with no registered language.
 //!
 //! Language extractors emit `defines`/`contains`/`imports` edges directly, and
 //! record each function's callee names in the caller node's `meta.calls`. Call
 //! *edges* are resolved later, at assembly time, once every file's symbols are
-//! known (see [`crate::sync`]) — a single blob cannot resolve cross-file calls.
+//! known (see `crate::sync`) — a single blob cannot resolve cross-file calls.
 
 use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Provenance, Span};
 
 /// Version of the extraction *output* (node/edge shape and captured `meta`).
 /// Bump whenever extraction changes what it produces, so the content-addressed
 /// cache (keyed by blob oid + path) does not serve stale facts for an unchanged
-/// blob — the version is folded into the cache key. See [`crate::sync`].
+/// blob — the version is folded into the cache key. See `crate::sync`.
 ///
 /// The `pdf-text`, `image-ocr` and `audio-metadata` features change what PDFs,
 /// images and audio blobs extract to, so each occupies a distinct version
 /// namespace: a feature build and a default build never serve each other stale
 /// (content-bearing vs content-free) facts from a shared cache. (OCR output also depends on *which* models are
 /// installed; that runtime state is folded into the cache key separately — see
-/// [`media_env_tag`] and [`crate::sync`].)
+/// [`media_env_tag`] and `crate::sync`.)
 ///
 /// `image-vision` and `audio-transcribe` deliberately have **no namespace here
 /// any more**: since ADR-0015 they change nothing about extraction output, so
@@ -72,7 +72,7 @@ use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Provenance, Span};
 // and so carries the inline opt-out rather than reporting itself — the same
 // reason `markers.rs` carries the file-level one:
 // `placeholder implementation` / `returns a placeholder`.  roteiro:ignore
-// [`crate::markers::augment`] runs inside extraction, so every cached fact set
+// `crate::markers::augment` runs inside extraction, so every cached fact set
 // holding one of those 36 must be regenerated without it; without the bump a
 // cached blob keeps serving the phantom marker until its bytes happen to
 // change. No namespace moves: this is a base-version change only, unconditional
@@ -86,10 +86,10 @@ pub(crate) const EXTRACT_VERSION: u32 = EXTRACT_BASE_VERSION
         0
     };
 
-/// The **generation** half of [`EXTRACT_VERSION`]: what a bump above counts, with
+/// The **generation** half of `EXTRACT_VERSION`: what a bump above counts, with
 /// no feature namespace added. Monotone, global, and identical in every build —
-/// which is what makes it, and not [`EXTRACT_VERSION`], the thing an entry's
-/// reachability can be decided against (see [`crate::sync::sweep_superseded`]).
+/// which is what makes it, and not `EXTRACT_VERSION`, the thing an entry's
+/// reachability can be decided against (see `crate::sync::sweep_superseded`).
 ///
 /// The split was always there, encoded in the arithmetic; naming it only makes
 /// it readable.
@@ -243,7 +243,7 @@ impl IngestConfig {
 
 /// Dispatches extraction to a language-aware extractor by file extension,
 /// falling back to a plain file node when no language is registered. After the
-/// language extractor runs, [`crate::markers`] appends any intent-debt markers
+/// language extractor runs, `crate::markers` appends any intent-debt markers
 /// (intent-debt markers) found in the blob. Carries the runtime
 /// [`IngestConfig`] applied to content extraction.
 #[derive(Debug, Clone, Copy, Default)]
@@ -481,7 +481,7 @@ fn config_facts(path: &str, blob_id: &str, bytes: &[u8], ingest: IngestConfig) -
 ///
 /// - **A whole image string** under a key named `image` or ending `.image` —
 ///   `container.api.image: registry/app:1.2` (k8s, mined by
-///   [`crate::config_keys`]) and a bare Helm `image: app:1.2`.
+///   `crate::config_keys`) and a bare Helm `image: app:1.2`.
 /// - **The split Helm form**, `<prefix>.repository` with an optional
 ///   `<prefix>.tag` and `<prefix>.registry` — the `image:` block essentially every
 ///   chart writes, and the shape that made this issue visible.
@@ -1064,7 +1064,7 @@ impl Drop for MediaEngineGuard {
 /// installed, else a hash of the installed OCR model identity. Folded into the
 /// sync cache key so installing/upgrading a model re-extracts affected images
 /// instead of serving stale facts (OCR output is not a pure function of the blob
-/// alone). See [`crate::sync`].
+/// alone). See `crate::sync`.
 ///
 /// Only OCR is folded in. The vision and audio models used to be, because they
 /// wrote into `meta.content`; since ADR-0015 they do not, so their presence
@@ -1136,7 +1136,7 @@ pub fn is_prose(path: &str) -> bool {
     )
 }
 
-/// Trim and cap `text` to [`MAX_CONTENT`] characters (whitespace-collapsed), so
+/// Trim and cap `text` to `MAX_CONTENT` characters (whitespace-collapsed), so
 /// stored content stays small and deterministic.
 ///
 /// Public because the *budget is the definition*, and a second copy of it would
@@ -1144,7 +1144,7 @@ pub fn is_prose(path: &str) -> bool {
 /// `adr`/`adr_section` nodes so `search` and `explain` can reach it, and that text
 /// has to be bounded by the same rule the derived layer uses — otherwise the
 /// exportable store grows by whichever cap was written down last. This is not an
-/// extraction path and needs no [`EXTRACT_VERSION`] bump: the authored layer is
+/// extraction path and needs no `EXTRACT_VERSION` bump: the authored layer is
 /// re-parsed from blobs on every sync rather than served from the
 /// content-addressed extraction cache.
 #[must_use]
@@ -1196,7 +1196,7 @@ impl Extractor for FileNodeExtractor {
 /// others) with `defines`/`contains` edges reflecting lexical nesting, and
 /// `imports` edges for `use` declarations. Each function records the (optionally
 /// scope-qualified) names it calls in `meta.calls` for later cross-file
-/// resolution — see [`RustWalk::callee_name`].
+/// resolution — see `RustWalk::callee_name`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RustExtractor;
 
@@ -1675,7 +1675,7 @@ impl RustWalk<'_> {
     }
 
     /// A callee descriptor for a `call_expression`'s function child, keeping the
-    /// *immediate* qualifier when the syntax supplies one so [`crate::sync`] can
+    /// *immediate* qualifier when the syntax supplies one so `crate::sync` can
     /// resolve scope-aware (not just by unique simple name):
     /// - `foo()` → `foo` (unqualified)
     /// - `a::b::foo()` → `b::foo` (immediate module/type qualifier)

@@ -688,7 +688,7 @@ fn file_count(facts: &FactSet) -> usize {
 /// Resolution is deliberately conservative — it links a call only when the target
 /// is **unambiguous** — but scope-aware: a callee descriptor may carry the
 /// immediate qualifier the call site provided (`b::foo`, `Type::assoc`,
-/// `Self::method`; see [`crate::extract`]). A call resolves when either
+/// `Self::method`; see `crate::extract`). A call resolves when either
 ///
 /// 1. its simple name is unique across the whole tree (the base case), or
 /// 2. its name is ambiguous but a qualifier picks out **exactly one** matching
@@ -792,10 +792,10 @@ fn split_callee(descriptor: &str) -> (Option<&str>, &str) {
 
 /// Content-addressed cache key for a blob at a given path: the blob oid (kept
 /// as the leading, well-distributed shard) suffixed with a stable 64-bit hash of
-/// the path, the [`crate::extract::EXTRACT_VERSION`], and the extractor
+/// the path, the `crate::extract::EXTRACT_VERSION`, and the extractor
 /// environment tag `env` (the installed media-model — OCR + vision + audio —
 /// identity; `0` when no media model is active — see
-/// [`crate::extract::media_env_tag`]). Sharing across branches/worktrees is
+/// `crate::extract::media_env_tag`). Sharing across branches/worktrees is
 /// preserved (same path+oid+version+env → same key) while duplicate content at
 /// distinct paths stays distinct; bumping the extractor version *or* changing the
 /// installed media models retires old entries so a re-extraction is forced.
@@ -812,7 +812,7 @@ fn cache_key(path: &str, oid: &str, env: u64) -> String {
 ///
 /// Not clutter, and not free — it is a trade against the one workflow this
 /// project actually has. Roteiro is developed *inside* the repository it indexes,
-/// so a branch that bumps [`crate::extract::EXTRACT_VERSION`] and the `main` it
+/// so a branch that bumps `crate::extract::EXTRACT_VERSION` and the `main` it
 /// will merge into share one `.git/roteiro` (the cache is under the **common**
 /// git dir). With no retention, one maintenance pass on the branch deletes
 /// `main`'s whole live set, and every switch back pays a full cold extraction;
@@ -829,7 +829,7 @@ pub const DEFAULT_KEEP_GENERATIONS: u32 = 1;
 ///
 /// # Why a sweep and not a byte budget
 ///
-/// Because a proof is available here and nowhere else. [`cache_key`] writes the
+/// Because a proof is available here and nowhere else. `cache_key` writes the
 /// extractor generation into every key, and that generation only ever moves
 /// forward, so an entry tagged with an older one *cannot be asked for* by any
 /// binary at or beyond the current generation — no bookkeeping, no recency, no
@@ -845,10 +845,10 @@ pub const DEFAULT_KEEP_GENERATIONS: u32 = 1;
 ///
 /// # What "superseded" is allowed to mean
 ///
-/// **Only the generation**, i.e. [`crate::extract::EXTRACT_BASE_VERSION`]. The
+/// **Only the generation**, i.e. `crate::extract::EXTRACT_BASE_VERSION`. The
 /// other two things folded into a key are deliberately *not* eligible:
 ///
-/// - The **feature namespace** ([`crate::extract::FEATURE_NAMESPACE_STRIDE`] and
+/// - The **feature namespace** (`crate::extract::FEATURE_NAMESPACE_STRIDE` and
 ///   above). A default build and an `--all-features` build write different
 ///   `EXTRACT_VERSION`s at the *same* generation, and both are live at once —
 ///   `cargo test --workspace` and `cargo test --all-features` on one repository
@@ -977,7 +977,7 @@ impl ReclaimReport {
     }
 }
 
-/// The extractor **generation** encoded in a [`cache_key`] key, or `None` if the
+/// The extractor **generation** encoded in a `cache_key` key, or `None` if the
 /// key does not carry one in the exact shape `cache_key` writes.
 ///
 /// The parse is strict on purpose: this is the predicate a delete hangs off, so

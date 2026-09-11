@@ -86,7 +86,7 @@ fn section_key(path: &str, slug: &str) -> String {
 /// Resolves `stem` / `stem.md` / `stem#Section#Subsection` against the file set:
 /// the doc node when no section is given, else the deepest section's node. Code
 /// links (a path with a `/` or a non-`.md` extension) are **not** resolved here —
-/// [`resolve_link`] handles those. Returns `None` when the file is unknown.
+/// `resolve_link` handles those. Returns `None` when the file is unknown.
 #[must_use]
 pub fn resolve_lat_ref(files: &[(String, String)], raw: &str) -> Option<String> {
     LatIndex::build(files).resolve_section(raw)

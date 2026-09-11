@@ -1,11 +1,15 @@
 //! The recorded answer to "may this peer's bundle be read into our graph?"
 //! (issue #706 phase 2, ADR-0021).
 //!
+//! **In this crate, beside the store that holds the record and the screen that
+//! informs it**, rather than in `rto-render`: the record is a row in `graph.db`,
+//! and the renderer has no business owning a consent decision.
+//!
 //! # This is a consent question, not a convenience one
 //!
 //! Automatic discovery finds a workspace member's OKF bundle without anyone
 //! asking for it. Reading it puts a **foreign repository's prose into our
-//! graph**, where [`crate::query`] returns it to a language model as grounding
+//! graph**, where `crate::query` returns it to a language model as grounding
 //! (see [`crate::screen`] for that path in full). Doing that because a directory
 //! appeared is consent-by-installation, which is exactly what the prompt exists
 //! to prevent.
@@ -18,7 +22,7 @@
 //! # Where this departs from ADR-0019, and why it has to
 //!
 //! ADR-0019 persists **nothing**: "a remote grant [does not survive] the
-//! process, [is not] persisted anywhere, or [inferred] from a previous session".
+//! process, \[is not\] persisted anywhere, or \[inferred\] from a previous session".
 //! Issue #706 settles the opposite for this question — "record the answer against
 //! that source so it is asked once, not per sync" — and the two are not in
 //! conflict, because the questions differ in how often they recur.

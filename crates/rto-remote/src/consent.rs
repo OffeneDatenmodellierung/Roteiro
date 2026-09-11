@@ -6,7 +6,7 @@
 //! source off the machine for a reason nobody can inspect afterwards. So the
 //! local→remote edge is **a boolean the user opened**, never a prediction: there
 //! is no classifier here, no scoring, nothing probabilistic, and nothing in this
-//! module reads anything about the request it is gating. [`decide`] takes facts
+//! module reads anything about the request it is gating. `decide` takes facts
 //! about *layers* and returns one of seven [`Reason`]s.
 //!
 //! # The precedence is inverted for this one key
@@ -128,7 +128,7 @@ impl ConfigGrant {
 /// thing it is reporting on, so the two forms are distinguishable here and
 /// produce different [`Reason`]s.
 ///
-/// [`decide`] takes the flag form directly, because that is the common one and
+/// `decide` takes the flag form directly, because that is the common one and
 /// changing its signature would have bought nothing; [`decide_with`] takes this.
 ///
 /// Marked `#[non_exhaustive]` for the reason recorded on [`Reason`]: the ADR

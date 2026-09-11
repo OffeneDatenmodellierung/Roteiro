@@ -1,6 +1,6 @@
 //! The served **workspace-explorer web app** (ADR-0010): a self-contained,
 //! same-origin UI mounted alongside the read-only `/v1/graph/*` data API by the
-//! llama-free `roteiro explorer` server ([`crate::main::run_explorer`]).
+//! llama-free `roteiro explorer` server (`crate::main::run_explorer`).
 //!
 //! Three static assets, all committed to the repo and embedded at compile time
 //! with `include_str!` — no npm, no build step, no external fetch:
@@ -16,7 +16,7 @@
 //! The app is served *only* by the explorer server; a full `serve` build keeps
 //! exposing just the JSON API (no bundled UI). It talks to the same origin's
 //! `/v1/graph/*` endpoints, so there is no CORS surface. This is distinct from
-//! the script-free static `links --matrix --html` export ([`crate::overview`]),
+//! the script-free static `links --matrix --html` export (`crate::overview`),
 //! which stays a single self-contained file with no JavaScript.
 
 use axum::Router;

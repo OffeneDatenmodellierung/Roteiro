@@ -8,7 +8,7 @@
 //! no native tool support, so the protocol is hand-rolled and model-agnostic:
 //! any instruction-following model that emits the documented `<tool_call>` form
 //! works, without a model-specific template. A model that emits its *own* form
-//! instead works too, provided that form is a [`Dialect`] — the envelope is a
+//! instead works too, provided that form is a `Dialect` — the envelope is a
 //! property of the dialect (#592), so `Dialect::ALL` is the whole list of what
 //! can be read and nothing sits above it deciding what is worth reading.
 //!
@@ -35,17 +35,17 @@
 //!
 //! The qualifier is load-bearing, and every statement of this property carries
 //! it. `<tool_call>` means "I am calling a tool" only because
-//! [`tool_system_prompt`] said so, and that prompt is sent only when something
+//! `tool_system_prompt` said so, and that prompt is sent only when something
 //! was advertised; a run that advertised nothing is a plain [`Engine::chat`]
-//! whose output passes through untouched ([`Ending::Untooled`]). Every other run
+//! whose output passes through untouched (`Ending::Untooled`). Every other run
 //! is covered without qualification — every Ask, and every request carrying
 //! `tools`.
 //!
-//! Every way out of [`chat_with_client_tools`] goes through [`finish`], which is
+//! Every way out of [`chat_with_client_tools`] goes through `finish`, which is
 //! the only place a [`ToolLoopOutcome`] is built and the only place a generation
 //! is declared to be prose the user may read. So a new exit cannot leak markup by
 //! forgetting a check — it can only fail to compile, because leaving means naming
-//! which [`Ending`] it is.
+//! which `Ending` it is.
 //!
 //! This replaces three separate return sites that each decided for themselves,
 //! and that is what let the same defect land three ways: an unreadable dialect
@@ -80,7 +80,7 @@ pub struct ToolDef {
     ///
     /// `"additionalProperties": false` here is **enforced, not decorative**: the
     /// tool loop refuses a call carrying a key `properties` does not declare
-    /// rather than dropping it. See [`unknown_argument`] for why a dropped key is
+    /// rather than dropping it. See `unknown_argument` for why a dropped key is
     /// worse than a refused one.
     pub parameters: serde_json::Value,
 }
@@ -128,7 +128,7 @@ pub struct ClientToolCall {
 /// The result of a tool-loop run: the model's completion, plus any calls against
 /// the client's tools that ended it.
 ///
-/// Built in exactly one place — [`finish`] — which is what holds #489's property:
+/// Built in exactly one place — `finish` — which is what holds #489's property:
 /// when `client_tool_calls` is empty, `completion.content` is prose the user may
 /// read as the answer, and it carries no tool-call markup.
 ///
@@ -136,7 +136,7 @@ pub struct ClientToolCall {
 /// all — neither a registry's nor the client's — was never sent the tool system
 /// prompt, so `<tool_call>` in its output is text the model wrote rather than a
 /// call Roteiro asked for, and it passes through deliberately
-/// ([`Ending::Untooled`] carries the reasoning). Read the guarantee as
+/// (`Ending::Untooled` carries the reasoning). Read the guarantee as
 /// conditional on the *call*, not on the outcome: advertise a tool and it holds
 /// without qualification, which covers every Ask and every request carrying
 /// `tools`.
@@ -273,7 +273,7 @@ fn unknown_argument(def: &ToolDef, arguments: &serde_json::Value) -> Option<Stri
     ))
 }
 
-/// Why a run of the tool loop ended — the input to [`finish`].
+/// Why a run of the tool loop ended — the input to `finish`.
 ///
 /// The variants are exhaustive over the ways a generation leaves this module,
 /// and each names a *judgement* rather than a shape: this is the answer, the
@@ -284,7 +284,7 @@ fn unknown_argument(def: &ToolDef, arguments: &serde_json::Value) -> Option<Stri
 enum Ending {
     /// The generation carried no tool call: it is the model's answer.
     ///
-    /// A *claim*, which [`finish`] checks — see its documentation.
+    /// A *claim*, which `finish` checks — see its documentation.
     Answer,
     /// The turn named a client tool. Every call is handed back, none is run.
     ClientCalls(Vec<ToolCall>),
@@ -296,13 +296,13 @@ enum Ending {
     /// A sibling of [`Ending::Unfinished`] and named to rhyme with it: both are
     /// a marker that was opened and never closed, and both mean the generation
     /// stopped before it became a reply. Established by [`read_reasoning`] the
-    /// moment the generation arrives, which is why no arm of [`finish`] has to
+    /// moment the generation arrives, which is why no arm of `finish` has to
     /// look for it.
     Unanswered(Unterminated),
     /// The round budget ran out with the model still calling Roteiro's tools,
     /// so it never reached an answer.
     Exhausted,
-    /// Nothing was advertised, so [`tool_system_prompt`] was never injected and
+    /// Nothing was advertised, so `tool_system_prompt` was never injected and
     /// this is a plain [`Engine::chat`] passed straight through.
     ///
     /// The one ending whose content is *not* read for markup, named here rather
@@ -331,12 +331,12 @@ enum Unfinished {
     /// The same unproven call, but the model chose to stop: it emitted
     /// end-of-generation part-way through writing one.
     CutShort,
-    /// The call arrived whole and no [`Dialect`] understood its body — the shape
+    /// The call arrived whole and no `Dialect` understood its body — the shape
     /// #489 opened on, still reachable by a dialect Roteiro has not learned.
     Unreadable,
 }
 
-/// The two budgets a refusal has to be able to name, carried to [`finish`] so
+/// The two budgets a refusal has to be able to name, carried to `finish` so
 /// the message can quote the actual number rather than gesture at a limit.
 #[derive(Clone, Copy)]
 struct Limits {
@@ -361,7 +361,7 @@ const REFUSAL: &str = "Roteiro: ";
 /// > **Where Roteiro advertised tools, content carrying tool-call markup is
 /// > never returned as the user's answer.**
 ///
-/// Under [`tool_system_prompt`] the marker `<tool_call>` means the model was
+/// Under `tool_system_prompt` the marker `<tool_call>` means the model was
 /// *calling a tool*: the prompt told it to "reply with ONLY a tool call ... in
 /// exactly this form". A generation carrying that marker is therefore not an
 /// answer, whatever prose it also contains — prose written on the way into a
@@ -375,7 +375,7 @@ const REFUSAL: &str = "Roteiro: ";
 /// it: a caller that mis-reads a call as an answer gets the refusal, not the
 /// markup. That is why the check lives here rather than at each return site — a
 /// check every site must remember to call is how #489's next leak arrives. The
-/// single exception is [`Ending::Untooled`], named rather than omitted — it is
+/// single exception is `Ending::Untooled`, named rather than omitted — it is
 /// the "where Roteiro advertised tools" qualifier above, and the only thing that
 /// makes that statement a qualified one.
 ///
@@ -451,7 +451,7 @@ fn finish(completion: Completion, ending: Ending, limits: Limits) -> ToolLoopOut
 /// 3. **[`read_markup`] judges the reply rather than the deliberation.** A model
 ///    that writes "I could call `<tool_call>`…" *while thinking* and then answers
 ///    plainly used to be refused for markup it never emitted as a call. The
-///    marker means "I am calling a tool" because [`tool_system_prompt`] said so,
+///    marker means "I am calling a tool" because `tool_system_prompt` said so,
 ///    and the prompt is talking about the reply.
 ///
 /// Only `content` changes. The token counts stay as generated — the model really
@@ -572,7 +572,7 @@ fn still_calling_refusal(limits: Limits) -> String {
 /// This is the structural half of suppression. Emptying the advertised tool list
 /// stops the graph schemas reaching the prompt, but it does not stop a *call*:
 /// the model is primed toward `search` and `explain` by name in
-/// [`tool_system_prompt`]'s own instruction prose, and a call to one of those
+/// `tool_system_prompt`'s own instruction prose, and a call to one of those
 /// would otherwise take the execute branch and run a graph tool the request
 /// deliberately did not advertise.
 ///
@@ -643,7 +643,7 @@ pub fn chat_with_tools(
 ///    because its tools are resolved first.
 /// 2. **Roteiro never executes a client's tool.** A call naming one ends the loop
 ///    and is returned in [`ToolLoopOutcome::client_tool_calls`] for the client to
-///    run. See [`disposition`] for what happens to a turn that names both kinds.
+///    run. See `disposition` for what happens to a turn that names both kinds.
 ///
 /// # Errors
 /// Propagates [`EngineError`] from the underlying generation.
@@ -782,7 +782,7 @@ pub fn chat_with_client_tools(
         });
         for call in &calls {
             // The argument object is checked against the schema the model was
-            // shown, **before** the registry sees it — see [`unknown_argument`].
+            // shown, **before** the registry sees it — see `unknown_argument`.
             // Here rather than inside each registry because this is the one
             // execution funnel, so a tool cannot be reached with an argument
             // nobody read; and before the call rather than after, so a wrapper
@@ -963,7 +963,7 @@ fn system_prompt(tools: &[&ToolDef], list: bool, graph: bool) -> String {
     // never seen is not this one. #592 narrowed what this sentence has to carry
     // and did not remove it, so it is still the last line of defence: a model
     // whose training beats the instruction is now read anyway **if the envelope
-    // it used is a [`Dialect`]** — the call runs, or the refusal says why it
+    // it used is a `Dialect`** — the call runs, or the refusal says why it
     // could not. An envelope in no `Dialect` is recognised by nothing: every
     // dialect answers [`Reading::Absent`], the fold answers [`Markup::None`],
     // and the generation is published as the model's prose. That is exactly the
@@ -1058,7 +1058,7 @@ fn system_prompt(tools: &[&ToolDef], list: bool, graph: bool) -> String {
     out
 }
 
-/// One tool as [`tool_system_prompt`] states it.
+/// One tool as `tool_system_prompt` states it.
 struct Advertisement {
     /// The call form — `search(query: str, limit?: int 1..25)` — or `None` when
     /// the schema is not one [`advertise`] can state without losing something.
@@ -1292,7 +1292,7 @@ fn shared_notes(advertised: &[Advertisement]) -> Vec<(String, String)> {
 }
 
 /// What the tool-call markup in a generation turned out to be — the reading
-/// [`chat_with_client_tools`] acts on, and the reading [`finish`] re-checks.
+/// [`chat_with_client_tools`] acts on, and the reading `finish` re-checks.
 ///
 /// The variant that did not exist before #489 is [`Markup::Unfinished`]. The
 /// parser used to answer `Option<ToolCall>`, which collapses "the model was not
@@ -1301,15 +1301,15 @@ fn shared_notes(advertised: &[Advertisement]) -> Vec<(String, String)> {
 /// Three of them are three different situations and only one of them is an
 /// answer, so the type says three things.
 enum Markup {
-    /// No [`Dialect`]'s opening marker at all: whatever the model wrote is its
+    /// No `Dialect`'s opening marker at all: whatever the model wrote is its
     /// own text.
     None,
-    /// A complete call, in one of the [`Dialect`]s.
+    /// A complete call, in one of the `Dialect`s.
     ///
     /// **Divergence, declared rather than half-implemented:** a turn carries at
     /// most one call, so `parallel_tool_calls` is accepted-and-carried rather
     /// than enforced. N-call parsing lands with the grammar work (#485 PR 2);
-    /// the callers already wrap this in the `Vec` [`disposition`] takes, so the
+    /// the callers already wrap this in the `Vec` `disposition` takes, so the
     /// mixed-turn rule is expressible and testable before the parser can produce
     /// a mixed turn.
     Call(ToolCall),
@@ -1317,11 +1317,11 @@ enum Markup {
     Unfinished(Unfinished),
 }
 
-/// Where a [`Dialect`]'s calls begin and end in a generation, and — the half
+/// Where a `Dialect`'s calls begin and end in a generation, and — the half
 /// that carries the weight — **what proves one arrived whole**.
 ///
 /// This is what makes a dialect *reachable* (#592). The `<tool_call>` wrapper
-/// used to be searched for one layer *above* [`Dialect`], and a dialect was
+/// used to be searched for one layer *above* `Dialect`, and a dialect was
 /// consulted only inside a wrapper that had already been found. So
 /// [`Dialect::ALL`] guaranteed that every dialect was handled *consistently* —
 /// parser and parity test drive from the same array — and guaranteed nothing
@@ -1461,7 +1461,7 @@ enum Reading {
     Call(ToolCall),
 }
 
-/// Read a generation as tool-call markup: ask every [`Dialect`] what it sees,
+/// Read a generation as tool-call markup: ask every `Dialect` what it sees,
 /// and use the engine's own account of why generation stopped to say what a call
 /// that did not arrive means.
 ///
@@ -1536,7 +1536,7 @@ fn read_markup(completion: &Completion) -> Markup {
 /// A call form a model may emit — its [`Envelope`] and the body grammar inside
 /// it, together, because a form is both.
 ///
-/// [`tool_system_prompt`] instructs the JSON form inside `<tool_call>` and most
+/// `tool_system_prompt` instructs the JSON form inside `<tool_call>` and most
 /// models comply — but it is sent only to a model whose engine cannot carry
 /// tools, and in any case a model's *training* can beat an instruction. That is
 /// this type's whole subject, and it has now been measured twice:
@@ -1571,7 +1571,7 @@ impl Dialect {
     ///
     /// **This list is the only thing that makes a dialect reachable, and since
     /// #592 that is true rather than merely intended.** Nothing else dispatches
-    /// on [`Dialect`]: [`read_markup`] drives from `ALL`, and so do
+    /// on `Dialect`: [`read_markup`] drives from `ALL`, and so do
     /// `every_dialect_parses_to_the_same_call`, which renders one call in each
     /// dialect and asserts they arrive identical, and
     /// `no_dialect_reads_a_truncated_call_as_a_whole_one`, which holds each of
@@ -2445,7 +2445,7 @@ mod tests {
 
     /// A schema that has not closed its argument object is left exactly as it
     /// was. The rule is one a tool declares, not one imposed on every
-    /// implementor of [`ToolRegistry`] — see [`unknown_argument`].
+    /// implementor of [`ToolRegistry`] — see `unknown_argument`.
     #[test]
     fn an_open_schema_still_tolerates_extra_keys() {
         let def = ToolDef {

@@ -4,7 +4,7 @@
 //! only the models it was handed; never downloads.
 //!
 //! **Model residency.** Loaded models are held in a small memory-bounded LRU
-//! ([`ModelCache`]): each request loads its model on demand and keeps it warm,
+//! (`ModelCache`): each request loads its model on demand and keeps it warm,
 //! and when the resident set exceeds the byte budget the least-recently-used
 //! models are unloaded — so a process serving several models (or alternating
 //! between an embedding and a generative model) swaps them in and out in real
@@ -43,8 +43,8 @@
 //! GGUF holds used to be loaded per media blob: a sync over twenty audio files
 //! re-read the 688 MB Voxtral projector twenty times, building and freeing a clip
 //! context and its GPU buffers each time. It is now built once per
-//! `(loaded model, mmproj path)` and reused — see [`Projector`] and
-//! [`LlamaEngine::projector`].
+//! `(loaded model, mmproj path)` and reused — see `Projector` and
+//! `LlamaEngine::projector`.
 //!
 //! What that is worth depends on the host, and less than the issue expected on
 //! the one it was measured on: an `mmproj` is `mmap`ed, so a repeat load of a
@@ -57,7 +57,7 @@
 //!
 //! Caching it adds a third native object to the teardown chain, and it is placed
 //! *inside* the existing one rather than beside it: a projector is owned by the
-//! [`ModelCache`] entry of the very model it was initialised over, so it is freed
+//! `ModelCache` entry of the very model it was initialised over, so it is freed
 //! when that model is evicted or when the engine is dropped, and always before the
 //! backend. Nothing new has to be released, and nothing new can be forgotten.
 
@@ -206,7 +206,7 @@ pub struct Served {
 /// releases its ggml buffers — and, on Metal, deregisters them from the device's
 /// residency set. So `cache` (the resident models) is declared first and
 /// `backend` last. The cached multimodal projectors (issue #301) own ggml buffers
-/// of their own, and they sit *inside* `cache` — each in the [`Loaded`] entry of
+/// of their own, and they sit *inside* `cache` — each in the `Loaded` entry of
 /// the model it is bound to — so dropping this struct frees projectors, then
 /// models, then the backend handle, in that order and by construction. See also
 /// [`crate::llama`]'s note on teardown: an engine that
@@ -266,7 +266,7 @@ pub struct LlamaEngine {
 ///
 /// **Field order is load-bearing here too**: `projectors` is declared before
 /// `model`, so evicting an entry frees its multimodal projectors before the model
-/// they were initialised over. (Each [`Projector`] also carries its own handle on
+/// they were initialised over. (Each `Projector` also carries its own handle on
 /// that model, so the ordering holds for a projector handed out to an in-flight
 /// request as well — this declaration order is the same statement made where a
 /// reader of the cache will look for it.)
@@ -286,7 +286,7 @@ struct Loaded {
     ///
     /// Resident rather than per-request, because every completion needs it and
     /// the alternative is re-reading 1.7 GB per request — the same reasoning that
-    /// put [`Projector`] here.
+    /// put `Projector` here.
     ///
     /// **Field order carries no meaning for this one**, unusually for this
     /// struct, and that is worth saying rather than leaving to be inferred: a
@@ -330,7 +330,7 @@ struct Loaded {
 /// So the binding is carried by the value rather than by a rule: this struct owns
 /// a handle on that model, and `mtmd` is declared **before** `model` so Rust's
 /// field order frees the projector first and releases the model handle second. A
-/// [`Projector`] is thus safe to use for as long as it exists, wherever it exists,
+/// `Projector` is thus safe to use for as long as it exists, wherever it exists,
 /// which is what lets one be handed to a caller and outlive the cache entry it
 /// came from.
 ///
@@ -404,7 +404,7 @@ impl LlamaEngine {
     ///
     /// This is not the window every context is built at (issue #486): contexts
     /// are per-generation and disposable, so each is sized to the request that
-    /// needs it — see [`window_for_request`]. Passing a non-zero `n_ctx` bounds
+    /// needs it — see `window_for_request`. Passing a non-zero `n_ctx` bounds
     /// that sizing for every model this engine serves; it cannot raise a window
     /// past a model's own `n_ctx_train`, which is clamped with a warning.
     ///
@@ -623,9 +623,9 @@ impl LlamaEngine {
     ///   a change that would mean the model store was edited under a running
     ///   process, which is not a case this cache is trying to survive.
     /// * the **model** because an `mtmd_context` holds the `llama_model *` it was
-    ///   built with (see [`Projector`]), so a projector is only ever sound for
+    ///   built with (see `Projector`), so a projector is only ever sound for
     ///   that one model *instance*. That half of the key is structural rather than
-    ///   compared: the slot lives in the model's own [`Loaded`] entry, so a
+    ///   compared: the slot lives in the model's own `Loaded` entry, so a
     ///   different model — or the same model reloaded after eviction — cannot
     ///   reach this one's projectors.
     ///
@@ -1078,7 +1078,7 @@ impl LlamaEngine {
     /// (images via `stb_image`, audio via miniaudio) and only the support check
     /// and which byte vectors are read differ.
     ///
-    /// The projector arrives already loaded, from [`LlamaEngine::projector`]'s
+    /// The projector arrives already loaded, from `LlamaEngine::projector`'s
     /// per-model cache (issue #301) — this used to re-read the `mmproj` GGUF on
     /// every call. The model is read from the projector rather than passed
     /// alongside it, because the only model this projector may be used with is the
@@ -1725,7 +1725,7 @@ impl Engine for LlamaEngine {
         // (issue #486), because this is the one context that is *not* per
         // request: it is built once and reused across every input, so there is
         // no single request to size it to. Passing `0` as the prompt count asks
-        // [`window_for_request`] for the largest window this model and this
+        // `window_for_request` for the largest window this model and this
         // operator allow.
         //
         // For the BERT family this serves, that is a **reduction**: `bge-large-

@@ -4,7 +4,7 @@
 //! The authoring pillar (`roteiro spec`, ADR-0004), Tier 0: deterministic,
 //! **graph-grounded** context assembly — no model, no network.
 //!
-//! [`context`] answers "what does the graph already know about <topic>?" by
+//! [`context`] answers "what does the graph already know about `<topic>`?" by
 //! searching the store for related symbols and docs and gathering each symbol's
 //! neighbourhood (its container, callers/callees, and the ADRs that govern it).
 //! It is the grounding an author or agent starts from before writing an ADR or

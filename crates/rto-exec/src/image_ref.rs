@@ -1,5 +1,11 @@
 //! Whether an image reference is pinned by a digest — the one place that decides.
 //!
+//! Ungated, like [`crate::guidance`], and for a reason of the same shape: the rule is
+//! about a string somebody wrote in a config file, not about which backends were
+//! compiled in. `roteiro config` reports an unpinned reference in a build with no
+//! sandbox at all, and a second copy of the check written for that purpose is how
+//! one of the two ends up laxer than the other.
+//!
 //! Ungated, like [`crate::guidance`] and [`crate::sandbox_store`], and for a
 //! reason of the same shape: **the rule is about a string somebody wrote in a
 //! config file, not about which backends were compiled in.** `roteiro config`

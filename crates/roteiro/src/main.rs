@@ -23,14 +23,7 @@ mod graph_api;
 mod explorer_app;
 mod infer_links;
 mod init;
-/// Automatic discovery of a workspace member's OKF bundle, and the trust /
-/// acknowledge / ignore consent prompt that guards reading one (#706 phase 2).
-/// A sibling module rather than more of `main.rs`: the policy — in particular
-/// what happens when there is no terminal — is worth reading in one piece.
 mod okf_discovery;
-/// The served half of the OKF viewer (ADR-0022): axum routes over
-/// `rto_render::okf::view`, which owns every rule about untrusted content and is
-/// compiled by the default build.
 #[cfg(feature = "okf-viewer")]
 mod okf_viewer;
 mod overview;
@@ -9334,7 +9327,7 @@ fn persist_authored_links(
 /// `authored` edge from this repo's local anchor to it.
 ///
 /// The mirror of [`infer_links::link_facts`], differing in exactly the two ways
-/// that matter: [`Provenance::Authored`] rather than `Inferred` (no confidence —
+/// that matter: [`rto_graph::Provenance::Authored`] rather than `Inferred` (no confidence —
 /// a declaration is not scored), and [`rto_graph::LINKS_AUTHORED_REF`] rather
 /// than `LINKS_REF`, so the two layers replace independently.
 fn authored_link_facts(from: &str, to: &str, kind: &str) -> rto_graph::FactSet {
@@ -13927,7 +13920,7 @@ fn plural(n: usize, one: &'static str, many: &'static str) -> &'static str {
 ///
 /// Empty when there is nothing useful to say, so the error keeps its old wording
 /// in the ordinary case. Bounded at eight named directories and at
-/// [`PROBE_LIMIT`] directories examined: this runs only where the user is already
+/// `PROBE_LIMIT` directories examined: this runs only where the user is already
 /// stuck, and a dead end is worth one `read_dir` per candidate, but a root with
 /// ten thousand children is not worth ten thousand of them.
 #[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
@@ -15365,7 +15358,7 @@ impl GraphToolRegistry {
         serde_json::to_string(&value).map_err(|e| e.to_string())
     }
 
-    /// The `security_list` call. Lifted out of [`GraphToolRegistry::call`] to keep
+    /// The `security_list` call. Lifted out of `GraphToolRegistry::call` to keep
     /// that dispatcher readable, as its `debt_density` argument parsing already is.
     ///
     /// # Errors
@@ -15391,7 +15384,7 @@ impl GraphToolRegistry {
     }
 
     /// The `security_status` call, in two labelled scopes. Lifted out of
-    /// [`GraphToolRegistry::call`] alongside [`Self::security_list`].
+    /// `GraphToolRegistry::call` alongside [`Self::security_list`].
     ///
     /// # Errors
     /// An unknown `analyzer`, an unknown or ambiguous `project`, or the
@@ -15546,7 +15539,7 @@ fn sandbox_clear_tool_def() -> rto_serve::ToolDef {
 }
 
 /// The served-chat `debt_density` tool definition. Lifted out of
-/// [`GraphToolRegistry::tools`] to keep that function readable, not because it
+/// `GraphToolRegistry::tools` to keep that function readable, not because it
 /// is shared: the MCP server declares its own (see `rto_render::mcp`).
 ///
 /// `with_project` adds the workspace `project` selector every tool carries.
@@ -15578,7 +15571,7 @@ fn debt_density_tool_def(
 }
 
 /// The served-chat `config_secrets` tool definition. Lifted out of
-/// [`GraphToolRegistry::tools`] to keep that function readable, not because it is
+/// `GraphToolRegistry::tools` to keep that function readable, not because it is
 /// shared: the MCP server declares its own (see `rto_render::mcp`).
 ///
 /// The description carries the limitations in full, and deliberately at length.
@@ -15606,7 +15599,7 @@ fn config_secrets_tool_def(
 }
 
 /// The served-chat `security_list` tool definition. Lifted out of
-/// [`GraphToolRegistry::tools`] for the same reason its neighbours are, and
+/// `GraphToolRegistry::tools` for the same reason its neighbours are, and
 /// declared here rather than shared with MCP: the `rmcp` macro generates that
 /// surface's schema statically from an argument struct, so there is no one
 /// declaration for the two to share. `both_tool_surfaces_offer_the_same_tools` is
@@ -15640,7 +15633,7 @@ fn security_list_tool_def(
 }
 
 /// The served-chat `security_status` tool definition. Lifted out of
-/// [`GraphToolRegistry::tools`] like its neighbours.
+/// `GraphToolRegistry::tools` like its neighbours.
 ///
 /// It advertises **no `limit`**, and that is a property of the answer: the document
 /// is one row per shipped analyzer, one per pinned asset and one per live findings
@@ -15728,7 +15721,7 @@ fn model_limit(args: &serde_json::Value, default: usize, max: usize) -> usize {
 /// string members of the `categories` array, or empty (= all) when it is absent
 /// or holds nothing usable.
 ///
-/// Lifted out of [`GraphToolRegistry::call`] because both arms need it
+/// Lifted out of `GraphToolRegistry::call` because both arms need it
 /// identically — and because two copies of a filter is how the two tools would
 /// come to disagree about what a model asked for.
 #[cfg(feature = "serve")]
@@ -15744,12 +15737,12 @@ fn categories_arg(args: &serde_json::Value) -> Vec<String> {
 }
 
 /// The `(order, limit, min_lines)` triple for a served-chat `debt_density` call,
-/// lifted out of [`GraphToolRegistry::call`] to keep that dispatcher readable.
+/// lifted out of `GraphToolRegistry::call` to keep that dispatcher readable.
 ///
 /// An unrecognised `order` is an `Err` rather than a silent fall back to
 /// `density`: a model told it ranked by `markers` when it did not will state that
 /// as fact to the user. `limit` is model-controlled, so it goes through
-/// [`model_limit`], which is where the `1..=max` contract and its reasoning live.
+/// `model_limit`, which is where the `1..=max` contract and its reasoning live.
 #[cfg(feature = "serve")]
 fn density_args(args: &serde_json::Value) -> Result<(rto_graph::DensityOrder, usize, u32), String> {
     let order = match args.get("order").and_then(serde_json::Value::as_str) {
@@ -15828,7 +15821,7 @@ fn check_tool_def(
 }
 
 /// The served-chat `coupling` tool definition. Lifted out of
-/// [`GraphToolRegistry::tools`] to keep that function readable, not because it
+/// `GraphToolRegistry::tools` to keep that function readable, not because it
 /// is shared: the MCP server declares its own (see `rto_render::mcp`).
 ///
 /// `with_project` adds the workspace `project` selector every tool carries.
@@ -15936,7 +15929,7 @@ fn class_index_reply(
 /// Every tool the served-chat surface **carries in this build**, before an
 /// operator's `--tools` selection is applied to it (#664).
 ///
-/// Split out of [`GraphToolRegistry::tools`] so the two questions stay separate.
+/// Split out of `GraphToolRegistry::tools` so the two questions stay separate.
 /// "What does this build offer" and "what did the operator keep" have different
 /// answers and different remedies, and `list_tool_classes` has to report both —
 /// a single filtered list cannot tell a withheld tool from an absent one, which
