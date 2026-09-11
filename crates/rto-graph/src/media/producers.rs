@@ -195,7 +195,7 @@ fn vlm_producer() -> Option<Producer> {
 /// The digests come from the registry rather than from hashing the installed
 /// files: the registry pin *is* the identity of what was installed (a file whose
 /// bytes differ from the pin never gets written — see
-/// `crate::models::download_verified`), and re-hashing three gigabytes on every
+/// [`crate::download_verified`]), and re-hashing three gigabytes on every
 /// `media status` would make the command unusable.
 #[cfg(any(feature = "audio-transcribe", feature = "image-vision"))]
 fn registry_producer(

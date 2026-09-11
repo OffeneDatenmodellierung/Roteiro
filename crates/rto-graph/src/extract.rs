@@ -3,28 +3,28 @@
 //! Extraction must be a deterministic pure function of `(path, blob_id, bytes)`
 //! so its output can be cached; because the facts are path-dependent (node keys
 //! are path-scoped), the cache is keyed by both path and blob id (see
-//! `crate::sync`). [`Registry`] dispatches by file extension to a
+//! [`crate::sync`]). [`Registry`] dispatches by file extension to a
 //! language-aware extractor ([`RustExtractor`]), falling back to
 //! [`FileNodeExtractor`] for files with no registered language.
 //!
 //! Language extractors emit `defines`/`contains`/`imports` edges directly, and
 //! record each function's callee names in the caller node's `meta.calls`. Call
 //! *edges* are resolved later, at assembly time, once every file's symbols are
-//! known (see `crate::sync`) — a single blob cannot resolve cross-file calls.
+//! known (see [`crate::sync`]) — a single blob cannot resolve cross-file calls.
 
 use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Provenance, Span};
 
 /// Version of the extraction *output* (node/edge shape and captured `meta`).
 /// Bump whenever extraction changes what it produces, so the content-addressed
 /// cache (keyed by blob oid + path) does not serve stale facts for an unchanged
-/// blob — the version is folded into the cache key. See `crate::sync`.
+/// blob — the version is folded into the cache key. See [`crate::sync`].
 ///
 /// The `pdf-text`, `image-ocr` and `audio-metadata` features change what PDFs,
 /// images and audio blobs extract to, so each occupies a distinct version
 /// namespace: a feature build and a default build never serve each other stale
 /// (content-bearing vs content-free) facts from a shared cache. (OCR output also depends on *which* models are
 /// installed; that runtime state is folded into the cache key separately — see
-/// [`media_env_tag`] and `crate::sync`.)
+/// [`media_env_tag`] and [`crate::sync`].)
 ///
 /// `image-vision` and `audio-transcribe` deliberately have **no namespace here
 /// any more**: since ADR-0015 they change nothing about extraction output, so
@@ -89,7 +89,7 @@ pub(crate) const EXTRACT_VERSION: u32 = EXTRACT_BASE_VERSION
 /// The **generation** half of `EXTRACT_VERSION`: what a bump above counts, with
 /// no feature namespace added. Monotone, global, and identical in every build —
 /// which is what makes it, and not `EXTRACT_VERSION`, the thing an entry's
-/// reachability can be decided against (see `crate::sync::sweep_superseded`).
+/// reachability can be decided against (see [`crate::sweep_superseded`]).
 ///
 /// The split was always there, encoded in the arithmetic; naming it only makes
 /// it readable.
@@ -1064,7 +1064,7 @@ impl Drop for MediaEngineGuard {
 /// installed, else a hash of the installed OCR model identity. Folded into the
 /// sync cache key so installing/upgrading a model re-extracts affected images
 /// instead of serving stale facts (OCR output is not a pure function of the blob
-/// alone). See `crate::sync`.
+/// alone). See [`crate::sync`].
 ///
 /// Only OCR is folded in. The vision and audio models used to be, because they
 /// wrote into `meta.content`; since ADR-0015 they do not, so their presence
@@ -1675,7 +1675,7 @@ impl RustWalk<'_> {
     }
 
     /// A callee descriptor for a `call_expression`'s function child, keeping the
-    /// *immediate* qualifier when the syntax supplies one so `crate::sync` can
+    /// *immediate* qualifier when the syntax supplies one so [`crate::sync`] can
     /// resolve scope-aware (not just by unique simple name):
     /// - `foo()` → `foo` (unqualified)
     /// - `a::b::foo()` → `b::foo` (immediate module/type qualifier)
@@ -1828,7 +1828,7 @@ impl RustWalk<'_> {
 // same fact shape as the Rust walker — a `file` node, one symbol node per
 // definition with `defines`/`contains` edges reflecting byte-range nesting, and
 // each function's callee simple-names in `meta.calls` — so cross-file (and
-// cross-language) call resolution in `crate::sync` works uniformly. Where the
+// cross-language) call resolution in [`crate::sync`] works uniformly. Where the
 // language has an import query (`import_query_for`), it also emits `imports`
 // edges (`file → import` target), as the Rust walker does for `use`. A new
 // language is a row in `tag_lang_for` (and optionally `import_query_for`), not
@@ -3341,7 +3341,7 @@ mod inner {
     fn env_tag_stable_by_default_and_shifts_when_gated() {
         use super::IngestConfig;
 
-        // All-on is the default: its tag must equal a plain `Registry` so existing
+        // All-on is the default: its tag must equal a plain [`crate::Registry`] so existing
         // caches are untouched.
         let all_on = Registry::new(IngestConfig::default()).env_tag();
         assert_eq!(all_on, Registry::default().env_tag());

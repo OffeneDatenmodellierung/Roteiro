@@ -752,7 +752,7 @@ pub struct ConfigSecretReport {
 ///
 /// # The heuristic, stated
 ///
-/// "Secret-named" is `crate::config_keys::is_secret_key`: the key's
+/// "Secret-named" is [`crate::is_secret_key`]: the key's
 /// ASCII-alphanumerics, lowercased, containing any of `secret`, `password`,
 /// `passwd`, `passphrase`, `token`, `apikey`, `credential`, `privatekey`,
 /// `accesskey`, `pwd`. So it matches `API_TOKEN`, `db.passwordFile` and

@@ -1,7 +1,7 @@
 //! Content-addressed on-disk cache of per-blob [`FactSet`]s.
 //!
 //! The cache is a simple content-addressed key→[`FactSet`] store; the caller
-//! derives the key (see `crate::sync`, which keys by blob oid **and** path,
+//! derives the key (see [`crate::sync`], which keys by blob oid **and** path,
 //! because extraction is a pure function of both). The cache lives under the
 //! repository's *common* git directory (e.g. `<common>/roteiro/objects/`), so
 //! all worktrees and branches that share a key share its extracted facts.

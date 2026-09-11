@@ -2928,7 +2928,7 @@ mod tests {
         // suppression such a call must be refused, not executed.
         //
         // `NeverCalled` panics if executed, so this asserts the guarantee by
-        // construction — reverting the registry swap in `chat_with_client_tools`
+        // construction — reverting the registry swap in [`crate::chat_with_client_tools`]
         // makes this test abort inside the registry rather than fail an
         // assertion.
         let engine = ScriptedEngine::new(&[

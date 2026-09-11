@@ -78,7 +78,7 @@ pub const LINE_WINDOW: u32 = 10;
 
 /// A finding a candidate reviewer offered, in the corpus's coordinate system.
 ///
-/// Not `crate::findings::Finding`: that models a persisted *analyzer* result
+/// Not [`crate::Finding`]: that models a persisted *analyzer* result
 /// owned by an `AnalysisRun` with a runner, an isolation mode and an advisory-db
 /// digest (ADR-0012). A candidate finding is an ephemeral opinion about one line
 /// of one commit, and scoring it must stay a pure function.

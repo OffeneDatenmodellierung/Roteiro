@@ -17,7 +17,7 @@ pub struct BlobRef {
 /// the committed `HEAD`, the working tree (uncommitted edits on disk), or the
 /// git index (the staged tree a commit would record).
 ///
-/// It selects the sync engine (`crate::sync` / [`crate::sync_worktree`] /
+/// It selects the sync engine ([`crate::sync`] / [`crate::sync_worktree`] /
 /// [`crate::sync_index`]) and the authored-layer source
 /// ([`Repo::read_source`]) **together**, which is the point of it being one
 /// type: the two layers disagreeing about which tree they describe is issue

@@ -230,7 +230,7 @@ pub struct HistoryRow {
 }
 
 /// Every claim an ADR makes about its own version, gathered so
-/// `crate::check::validate` can cross-check them against each other.
+/// [`crate::validate`] can cross-check them against each other.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VersionFacts {
     /// The version cell of the `| **Document version** | X.Y |` summary row.
@@ -510,7 +510,7 @@ pub fn adr_home(docs: &[AdrDoc]) -> AdrHome {
 /// the code they govern.
 ///
 /// Declaring it is the pattern already used for site pages
-/// (`crate::site::is_site_page`), whose comment in `layer.rs` gives the reason:
+/// ([`crate::is_site_page`]), whose comment in `layer.rs` gives the reason:
 /// a document that says what it is should never be demoted by a coincidence of
 /// its path. Blueprints have the same escape hatch through their H1 marker. ADRs
 /// were the only one of the three still decided by location alone.

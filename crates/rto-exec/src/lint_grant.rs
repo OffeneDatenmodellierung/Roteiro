@@ -1,6 +1,9 @@
 //! ADR-0020 §6's grant: **may a linter run on this host?**
 //!
-//! Ungated, unlike [`crate::lint`] itself. A policy that existed only where the
+//! Ungated, unlike `crate::lint` itself — deliberately **not** a link, because
+//! this module is compiled unconditionally while `lint` is behind
+//! `exec-subprocess`, so a link here would be unresolved in exactly the builds
+//! the sentence is about. A policy that existed only where the
 //! capability does would be the conversion ADR-0014 warns about, so the answer
 //! is the same in a build that cannot run a linter as in one that can — see the
 //! module's own documentation.

@@ -276,7 +276,7 @@ pub fn parse_site_page(rel_path: &str, text: &str) -> Result<SitePage, ParseErro
 /// The site navigation order: every page, sorted by `site-order` then slug.
 ///
 /// One function rather than a sort each caller writes, for the reason
-/// `crate::layer::authored_layer_from` gives about the classification rule: the
+/// [`crate::authored_layer_from`] gives about the classification rule: the
 /// bar the renderer emits and the order the check reports have to be the same
 /// order, or a page's position becomes a thing two surfaces disagree about.
 /// Ties break on the slug so the bar is deterministic — the site is diffed in CI.

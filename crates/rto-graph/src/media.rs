@@ -657,7 +657,7 @@ pub struct CandidateCount {
     pub blobs: u64,
     /// How many of those have at least one record carrying **generated text**.
     pub described: u64,
-    /// How many of those the [gate] refused, and no producer has since
+    /// How many of those the [`crate::media::gate`] refused, and no producer has since
     /// described. Counted apart from `described` deliberately: a skipped blob is
     /// not a described one, and folding the two together would restore exactly
     /// the ambiguity the recorded skip exists to remove.

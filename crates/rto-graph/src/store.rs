@@ -212,7 +212,7 @@ impl Store {
         conn.set_transaction_behavior(rusqlite::TransactionBehavior::Immediate);
 
         // WAL is the other half: under the default rollback journal a writer
-        // excludes readers for the whole transaction, so a `sync` blocks every
+        // excludes readers for the whole transaction, so a [`crate::sync`] blocks every
         // query in a running `serve`. In WAL, readers never block writers and
         // writers never block readers, so only writer-against-writer waits.
         //
@@ -371,9 +371,9 @@ impl Store {
             .optional()?)
     }
 
-    /// The extractor environment recorded with the last committed `sync`,
+    /// The extractor environment recorded with the last committed [`crate::sync`],
     /// `None` if unset (a legacy row, or the last sync was a worktree/index
-    /// preview). The incremental committed `sync` compares this to the current
+    /// preview). The incremental committed [`crate::sync`] compares this to the current
     /// env and falls back to a full re-extraction when they differ.
     ///
     /// # Errors
@@ -387,7 +387,7 @@ impl Store {
     }
 
     /// Record the extractor environment for the current synced tree. Called by a
-    /// committed `sync` right after it writes the tree, so a later sync can decide
+    /// committed [`crate::sync`] right after it writes the tree, so a later sync can decide
     /// whether the incremental fast path is sound. A no-op if no tree is recorded.
     ///
     /// # Errors
@@ -404,7 +404,7 @@ impl Store {
     /// `graph.db` is an assembled view of **one** tree, so a store that came to
     /// describe a different tree — restored from a backup, copied along with a
     /// `.git` directory, or reached after a layout change — would otherwise
-    /// answer confidently about the wrong one: `sync` reporting "up to date"
+    /// answer confidently about the wrong one: [`crate::sync`] reporting "up to date"
     /// against a state id belonging to someone else's tree, `check` validating a
     /// tree nobody is looking at. `None` reads as "unknown" and is *adopted*
     /// rather than treated as a mismatch, so an existing store is never rebuilt
@@ -446,7 +446,7 @@ impl Store {
     /// set.
     ///
     /// Passing `None` records *no* synced tree — distinct from an empty string —
-    /// so [`Store::sync_state`] returns `None` and a later `sync` will not
+    /// so [`Store::sync_state`] returns `None` and a later [`crate::sync`] will not
     /// spuriously short-circuit.
     ///
     /// # Errors
@@ -667,7 +667,7 @@ impl Store {
     }
 
     /// Every node produced by a given layer, ordered by key. The incremental
-    /// `sync` loads the `Derived` layer to reconstruct the extraction graph
+    /// [`crate::sync`] loads the `Derived` layer to reconstruct the extraction graph
     /// without re-reading every blob.
     ///
     /// # Errors
@@ -954,14 +954,14 @@ impl Store {
         for row in rows {
             let (src_ref, json) = row?;
             let mut facts: FactSet = serde_json::from_str(&json)?;
-            // An import-layer node is *never* derived (derivation is `sync`'s job),
+            // An import-layer node is *never* derived (derivation is [`crate::sync`]'s job),
             // so a `Derived` tag here is always wrong. It arises two ways, both
             // repaired the same: a legacy layer persisted before nodes carried
             // provenance (the field is absent → serde defaults `Derived`), or —
             // anomalously — a layer that stored an explicit `"provenance":"derived"`
             // (a producer/data bug). We deliberately repair *both* rather than only
             // the absent case: leaving an explicit-`derived` import node in place
-            // would let a layer-scoped `sync` treat it as derived and delete it —
+            // would let a layer-scoped [`crate::sync`] treat it as derived and delete it —
             // the exact corruption this guards against — so repair is the safe
             // recovery, not silent masking. Idempotent, runs on every reapply
             // (old stores self-heal), and a no-op for correctly-tagged fresh imports.
@@ -1006,7 +1006,7 @@ impl Store {
 
     /// Fetch the cached context bundle for `key` as `(fingerprint, json)`, if
     /// present. The caller compares the fingerprint to the node's current one to
-    /// decide whether the entry is fresh (see `crate::context`).
+    /// decide whether the entry is fresh (see [`crate::context`]).
     ///
     /// # Errors
     /// Returns [`StoreError::Sqlite`] on query failure.
@@ -1670,7 +1670,7 @@ fn node_row_id(conn: &Connection, key: &str) -> rusqlite::Result<Option<i64>> {
 fn write_sync_state(conn: &Connection, tree: Option<&str>) -> Result<(), StoreError> {
     match tree {
         // Clear `env` on every tree write: it is only valid for the tree a
-        // committed `sync` set it against, and that sync re-records it (via
+        // committed [`crate::sync`] set it against, and that sync re-records it (via
         // `set_sync_env`) immediately after. So a worktree/index sync, or any
         // path that does not re-set it, leaves `env` NULL — reading as "unknown"
         // and forcing the safe full re-extraction next time.
@@ -2075,7 +2075,7 @@ mod tests {
     }
 
     /// Two Roteiro processes over one repository is ordinary rather than exotic —
-    /// an editor's MCP client and a terminal, a long-lived `serve` and a `sync`,
+    /// an editor's MCP client and a terminal, a long-lived `serve` and a [`crate::sync`],
     /// or several clients each spawning their own stdio server. Both writing must
     /// **queue**, not kill one of them.
     ///
