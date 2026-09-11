@@ -61,9 +61,14 @@ const ADR_KEY_ORDER: &[&str] = &[
 #[must_use]
 pub fn canonical(text: &str) -> String {
     let (front, body) = crate::adr::split_frontmatter(text);
-    let is_adr = front
-        .lines()
-        .any(|l| l.trim_start().starts_with("type:") && l.contains("adr"));
+    // The declared kind, read the way the rest of the crate reads it. Substring
+    // matching on the raw line is both too loose and too tight: `type: not-adr`
+    // contains "adr" and `type: ADR` does not, so one non-ADR would get the
+    // summary relabel and one ADR would not.
+    let is_adr = front.lines().any(|l| {
+        l.strip_prefix("type:")
+            .is_some_and(|v| crate::adr::clean_value(v).eq_ignore_ascii_case("adr"))
+    });
     let mut out = String::with_capacity(text.len());
     if !front.is_empty() {
         out.push_str("---\n");
@@ -177,7 +182,13 @@ fn canonical_body(body: &str, is_adr: bool) -> String {
         let line = lines[i];
         if let Some((ch, len)) = fence {
             let _ = writeln!(out, "{line}");
-            if fence_of(line).is_some_and(|(c, n)| c == ch && n >= len) {
+            // A *closing* fence carries nothing but whitespace after its run.
+            // ```` ```not-a-close ```` opens an info string, so treating it as a
+            // close would put the rest of the block outside the fence and let
+            // the pipe rows inside it be reformatted.
+            if fence_of(line).is_some_and(|(c, n)| {
+                c == ch && n >= len && line.trim_start().trim_start_matches(c).trim().is_empty()
+            }) {
                 fence = None;
             }
             i += 1;
@@ -381,6 +392,19 @@ pub fn unified_diff(path: &str, before: &str, after: &str) -> Option<String> {
         return None;
     }
     let (a, b): (Vec<&str>, Vec<&str>) = (before.lines().collect(), after.lines().collect());
+    if a == b {
+        // Same lines, different bytes: the difference is the file's final
+        // newline, which `lines()` does not carry. Emitting two headers and no
+        // hunk would be a diff that says nothing while the caller reports drift.
+        let says = |s: &str| {
+            if s.ends_with('\n') { "with" } else { "without" }
+        };
+        return Some(format!(
+            "--- {path}\n+++ {path}\n@@ -0,0 +0,0 @@\n\\ file ended {} a trailing newline, now ends {} one\n",
+            says(before),
+            says(after)
+        ));
+    }
     let mut lcs = vec![vec![0_usize; b.len() + 1]; a.len() + 1];
     for i in (0..a.len()).rev() {
         for j in (0..b.len()).rev() {
@@ -711,5 +735,58 @@ mod review_regressions {
         assert!(d.contains("-line 10\n+changed\n"), "{d}");
         assert!(d.contains(" line 7\n"), "no leading context:\n{d}");
         assert!(!d.contains("line 1\nline 2"), "whole file emitted:\n{d}");
+    }
+}
+
+#[cfg(test)]
+mod second_round {
+    use super::*;
+
+    /// The declared kind is read, not pattern-matched.
+    ///
+    /// Substring matching on the raw `type:` line was both too loose and too
+    /// tight — `type: not-adr` contains "adr" and `type: ADR` does not — so one
+    /// non-ADR got the summary relabel and one ADR did not. Raised on #790.
+    #[test]
+    fn the_declared_kind_decides_the_relabel() {
+        let row = "| **Status** | Accepted |\n|---|---|\n";
+        let doc = |ty: &str| format!("---\ntype: {ty}\n---\n\n{row}");
+        assert!(canonical(&doc("adr")).contains("**State**"));
+        assert!(
+            canonical(&doc("ADR")).contains("**State**"),
+            "case-sensitive"
+        );
+        assert!(
+            canonical(&doc("not-adr")).contains("**Status**"),
+            "`not-adr` was treated as an ADR"
+        );
+        assert!(canonical(&doc("blueprint")).contains("**Status**"));
+    }
+
+    /// A closing fence carries nothing after its run.
+    ///
+    /// ```` ```not-a-close ```` opens an info string. Treating it as a close put
+    /// the rest of the block outside the fence, where its pipe rows were
+    /// reformatted — a fenced example being rewritten. Raised on #790.
+    #[test]
+    fn a_fence_is_not_closed_by_a_line_carrying_an_info_string() {
+        let src = "```md\n```not-a-close\n|  x |y|\n|---|---|\n```\n";
+        let got = canonical_body(src, true);
+        assert!(
+            got.contains("|  x |y|"),
+            "a row inside the still-open fence was reformatted:\n{got}"
+        );
+    }
+
+    /// A change of only the final newline still produces a diff that says so.
+    ///
+    /// `lines()` does not carry it, so the hunk loop saw no change and emitted
+    /// two headers and nothing else while the CLI reported drift. Raised on
+    /// #790.
+    #[test]
+    fn a_trailing_newline_change_is_reported_rather_than_shown_as_empty() {
+        let d = unified_diff("a.md", "x\ny\n", "x\ny").expect("changed");
+        assert!(d.contains("@@"), "a diff with no hunk:\n{d}");
+        assert!(d.contains("trailing newline"), "{d}");
     }
 }

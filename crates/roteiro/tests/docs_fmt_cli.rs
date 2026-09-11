@@ -35,6 +35,11 @@ fn run(dir: &Path, args: &[&str]) -> (bool, String) {
         .args(["docs", "fmt"])
         .args(args)
         .current_dir(dir)
+        // An isolated home, as `config_cli.rs` and `debt_density_cli.rs` do:
+        // `main` loads user configuration before dispatching, so without this a
+        // developer's own `config.toml` decides whether these assertions hold.
+        .env("ROTEIRO_HOME", dir)
+        .env("HOME", dir)
         .output()
         .expect("run roteiro docs fmt");
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
