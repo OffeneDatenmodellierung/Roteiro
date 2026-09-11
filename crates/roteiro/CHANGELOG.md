@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.11.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.10.2...roteiro-v5.11.0) - 2026-09-11
+
+### Added
+
+- *(okf)* the viewer is a mount, not a server
+
+### Fixed
+
+- *(okf)* check the mount-path contract instead of assuming it
+- *(okf)* a bundle cannot be named over the mount base's own routes
+- *(okf)* the 404 page names the concept, not the way back
+- *(okf)* one rule for an empty focus, shared by both graph routes
+- *(okf)* the graph page reads an error response instead of hanging on it
+- *(okf)* the focus outranks every neighbour by construction, not by margin
+- *(okf)* a 404 from the graph API must be JSON a client can parse
+- *(okf)* draw the graph one neighbourhood at a time, and say what is not drawn
+
+### Other
+
+- *(okf)* index the node lookup, and label the hub metric as what it counts
+
 ## [5.10.2](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.10.1...roteiro-v5.10.2) - 2026-09-09
 
 ### Fixed
