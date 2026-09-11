@@ -144,9 +144,16 @@ fn canonical_frontmatter(front: &str) -> String {
 ///   `12345-1-1` is left alone rather than padded into `12345-01-01`, which is
 ///   just as invalid and now looks deliberate.
 fn normalise_value(line: &str) -> String {
-    let Some(rest) = line.strip_prefix("last-modified:") else {
+    // The key is **parsed**, not prefix-matched. `parse_adr` trims and lowercases
+    // it, so `last-modified : 2026-9-1` is the same key to the rest of the crate
+    // — and matching the literal prefix left exactly that line non-ISO, making
+    // the canonical date rule depend on punctuation.
+    let Some((key, rest)) = line.split_once(':') else {
         return line.to_owned();
     };
+    if !key.trim().eq_ignore_ascii_case("last-modified") || key.starts_with(char::is_whitespace) {
+        return line.to_owned();
+    }
     let (value, comment) = match rest.find(" #") {
         Some(i) => (&rest[..i], rest[i..].trim_start()),
         None => (rest, ""),
@@ -167,7 +174,14 @@ fn normalise_value(line: &str) -> String {
     } else {
         format!(" {comment}")
     };
-    format!("last-modified: {y:04}-{m:02}-{d:02}{tail}")
+    // Whatever separated the colon from the value, kept.
+    let lead = &rest[..rest.len() - rest.trim_start().len()];
+    let lead = if lead.is_empty() { " " } else { lead };
+    // The key is written back **verbatim**. Trimming it would canonicalise
+    // `last-modified :` to `last-modified:`, which is a rewrite this command
+    // does not advertise — and unadvertised rewriting is where every defect in
+    // this module has been.
+    format!("{key}:{lead}{y:04}-{m:02}-{d:02}{tail}")
 }
 
 /// Canonicalise the body: tables, and the ADR summary table's first-row label.
@@ -252,6 +266,13 @@ fn canonical_body(body: &str, is_adr: bool) -> String {
 
 /// The fence this line opens or closes, as `(character, length)`.
 fn fence_of(line: &str) -> Option<(char, usize)> {
+    // Four spaces — or a tab — is an indented code block, and a run of backticks
+    // inside one is literal content. Trimming all indentation read it as a fence
+    // opener, and an unmatched one there left every table after it "fenced" and
+    // therefore never canonicalised.
+    if !markdown_indented(line) {
+        return None;
+    }
     let t = line.trim_start();
     for ch in ['`', '~'] {
         let n = t.chars().take_while(|c| *c == ch).count();
@@ -265,9 +286,20 @@ fn fence_of(line: &str) -> Option<(char, usize)> {
 /// A line that could be part of a table: `|`-led, indented no further than
 /// markdown allows, and carrying a second pipe so a lone `|` is not a row.
 fn is_table_line(line: &str) -> bool {
-    let indent = line.len() - line.trim_start().len();
     let t = line.trim_start();
-    indent <= 3 && t.starts_with('|') && t.trim_end().len() > 1 && t[1..].contains('|')
+    markdown_indented(line) && t.starts_with('|') && t.trim_end().len() > 1 && t[1..].contains('|')
+}
+
+/// Whether `line` is indented little enough to be markup rather than code.
+///
+/// Markdown allows up to three spaces before a construct; four begins an
+/// indented code block, and **a leading tab counts as four**. Counting bytes
+/// gave a tab an indent of one, so a tab-indented example was stripped of its
+/// tab and reformatted — the promise to leave indented code alone, broken by
+/// the measurement rather than by the rule.
+fn markdown_indented(line: &str) -> bool {
+    let indent = &line[..line.len() - line.trim_start().len()];
+    !indent.contains('\t') && indent.len() <= 3
 }
 
 /// A separator row: every cell all `-`/`:` with **at least three** hyphens.
@@ -900,6 +932,10 @@ mod properties {
         "````md\n```\n|  x |y|\n```\n````\n",
         "```md\n```not-a-close\n|  x |y|\n```\n",
         "    |  indented |code|\n",
+        "\t|  tab indented |code|\n",
+        "    ```\n",
+        "\t```\n",
+        "last-modified : 2026-9-1\n",
         "| :--- | ---: | :---: |\n",
         "\n",
     ];
@@ -1042,5 +1078,58 @@ mod fifth_round {
         assert_eq!(split_cells("| a |"), vec!["a"]);
         // And a doubled backslash escapes itself, so that pipe *is* a delimiter.
         assert_eq!(split_cells(r"| a \\|"), vec![r"a \\"]);
+    }
+}
+
+#[cfg(test)]
+mod sixth_round {
+    use super::*;
+
+    /// Four spaces or a tab is code, and a run of backticks in it is content.
+    ///
+    /// `fence_of` trimmed all indentation, so an indented backtick run opened a fence
+    /// that never closed — and every real table after it stayed unformatted,
+    /// silently. Raised on #790.
+    #[test]
+    fn an_indented_backtick_run_is_not_a_fence() {
+        assert!(fence_of("```md").is_some());
+        assert!(fence_of("   ```").is_some(), "three spaces is still markup");
+        assert!(fence_of("    ```").is_none(), "four spaces is code");
+        assert!(fence_of("\t```").is_none(), "a tab is code");
+        // A table after an indented backtick run is still formatted.
+        let got = canonical_body("    ```\n\n|  a |b |\n|---|---|\n", true);
+        assert!(
+            got.contains("| a | b |"),
+            "left fenced by an indented run:\n{got}"
+        );
+    }
+
+    /// A leading tab is four columns, not one byte.
+    #[test]
+    fn a_tab_indented_row_is_code_not_a_table() {
+        assert!(is_table_line("| a | b |"));
+        assert!(is_table_line("   | a | b |"));
+        assert!(!is_table_line("    | a | b |"), "four spaces is code");
+        assert!(!is_table_line("\t| a | b |"), "a tab is code");
+        assert_eq!(canonical_body("\t|  a |b |\n", true), "\t|  a |b |\n");
+    }
+
+    /// The frontmatter key is parsed the way the ADR parser parses it.
+    #[test]
+    fn the_date_key_is_parsed_not_prefix_matched() {
+        assert_eq!(
+            normalise_value("last-modified : 2026-9-1"),
+            "last-modified : 2026-09-01"
+        );
+        assert_eq!(
+            normalise_value("Last-Modified: 2026-9-1"),
+            "Last-Modified: 2026-09-01"
+        );
+        // Indented keys are nested values, not top-level ones.
+        assert_eq!(
+            normalise_value("  last-modified: 2026-9-1"),
+            "  last-modified: 2026-9-1"
+        );
+        assert_eq!(normalise_value("other: 2026-9-1"), "other: 2026-9-1");
     }
 }
