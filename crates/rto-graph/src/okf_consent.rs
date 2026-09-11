@@ -21,7 +21,7 @@
 //!
 //! # Where this departs from ADR-0019, and why it has to
 //!
-//! ADR-0019 persists **nothing**: "a remote grant [does not survive] the
+//! ADR-0019 persists **nothing**: "a remote grant \[does not survive\] the
 //! process, \[is not\] persisted anywhere, or \[inferred\] from a previous session".
 //! Issue #706 settles the opposite for this question — "record the answer against
 //! that source so it is asked once, not per sync" — and the two are not in

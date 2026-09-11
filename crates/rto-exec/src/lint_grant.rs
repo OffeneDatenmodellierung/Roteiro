@@ -15,7 +15,7 @@
 //!
 //! # Why it compiles when the linter does not
 //!
-//! [`crate::lint`] needs `exec-subprocess`; this module needs nothing. That is
+//! `crate::lint` needs `exec-subprocess`; this module needs nothing. That is
 //! deliberate rather than incidental. ADR-0020 spends its length refusing one
 //! specific failure — *the availability of a capability quietly deciding a
 //! question that was supposed to be decided on purpose* — and a policy that

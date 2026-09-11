@@ -87,7 +87,7 @@
 //!
 //! So ADR-0020 condition 6 puts the sandbox first and makes the host a thing a
 //! person opts into. Conditions 1–2 are now built, so the default **selects
-//! [`crate::lint_sandbox`]** rather than refusing — see `decide` for the
+//! `crate::lint_sandbox`** rather than refusing — see `decide` for the
 //! layering and [`Reason`] for what each layer tells the reader.
 //!
 //! What the layers say did not change; what "denied" *amounts to* did. A project
