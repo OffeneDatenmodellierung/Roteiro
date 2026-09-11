@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.11.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-remote-v5.11.0...rto-remote-v5.11.1) - 2026-09-11
+
+### Other
+
+- *(rust)* clear the broken intra-doc link backlog
+
 ## [5.9.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-remote-v5.8.1...rto-remote-v5.9.0) - 2026-09-08
 
 ### Added

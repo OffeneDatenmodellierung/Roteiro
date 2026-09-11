@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.11.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v5.11.0...rto-spec-v5.11.1) - 2026-09-11
+
+### Fixed
+
+- *(docs)* relink what was reachable, and one link that only builds sometimes
+- *(docs)* repair three things the delink sweep got wrong
+
+### Other
+
+- Merge pull request #791 from OffeneDatenmodellierung/feat/non-exhaustive-rto-spec
+- *(rust)* clear the broken intra-doc link backlog
+
 ## [5.9.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v5.8.1...rto-spec-v5.9.0) - 2026-09-08
 
 ### Fixed
