@@ -222,7 +222,12 @@ fn canonical_body(body: &str, is_adr: bool) -> String {
                 let summary = !seen_table;
                 seen_table = true;
                 for (n, l) in block.iter().enumerate() {
-                    let row = canonical_table_row(l.trim());
+                    // The accepted indentation is **kept**. Up to three spaces
+                    // is markup, and a table nested under a list item carries
+                    // exactly that — trimming it promoted the table out of its
+                    // list, which is a change of structure rather than padding.
+                    let indent = &l[..l.len() - l.trim_start().len()];
+                    let row = format!("{indent}{}", canonical_table_row(l.trim()));
                     // The **first row** of the first table, as documented. A
                     // later `**Status**` row in that same table is a data row.
                     let row = if is_adr && summary && n == 0 {
@@ -1214,5 +1219,40 @@ mod frontmatter_is_not_rewritten {
             front, "Title: T\nlast-modified: 2026-09-01\nversion: \"1\"",
             "the date moved or its neighbours did"
         );
+    }
+}
+
+#[cfg(test)]
+mod twelfth_round {
+    use super::*;
+
+    /// A table nested under a list item stays nested.
+    ///
+    /// Up to three spaces of indentation is markup, not padding, and trimming
+    /// it promoted the table out of its list — a change of structure rather
+    /// than of spacing. Raised on #790.
+    #[test]
+    fn an_indented_table_keeps_its_indentation() {
+        let got = canonical_body("  |  a |b |\n  |---|---|\n", true);
+        assert_eq!(got, "  | a | b |\n  |---|---|\n", "{got:?}");
+        // Column zero stays at column zero.
+        assert_eq!(
+            canonical_body("|  a |b |\n|---|---|\n", true),
+            "| a | b |\n|---|---|\n"
+        );
+    }
+
+    /// An escaped backtick opens nothing.
+    ///
+    /// It was paired with the next real opener, hiding everything between —
+    /// here, the first column boundary. The scanner is shared with the wiki-link
+    /// and annotation readers, so the same defect would have hidden a `[[…]]`
+    /// from them. Raised on #790.
+    #[test]
+    fn an_escaped_backtick_does_not_open_a_span() {
+        let cells = split_cells(r"| a \` | b `code` | c |");
+        assert_eq!(cells.len(), 3, "{cells:?}");
+        assert_eq!(cells[0], r"a \`");
+        assert_eq!(cells[1], "b `code`");
     }
 }
