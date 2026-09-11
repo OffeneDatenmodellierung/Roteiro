@@ -11,7 +11,7 @@ architectural-significance: MEDIUM  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.1"
+version: "1.2"
 last-modified: 2026-09-10
 confluence-url:
 ---
@@ -20,7 +20,7 @@ confluence-url:
 
 | | |
 |---|---|
-| **Document version** | 1.1 |
+| **Document version** | 1.2 |
 | **Status** | Accepted |
 | **Decision makers** | The Roteiro Project Team |
 | **Related** | [[docs/adr/0021-open-knowledge-format-bundle.md]] · [[docs/adr/0010-explorer-web-app-vendored-js.md]] · [[docs/adr/0008-multi-repo-workspace-serve.md]] · [[docs/adr/0017-dependency-security-policy.md]] |
@@ -38,10 +38,16 @@ Add a **dynamic OKF viewer**: a served, themed, read-only web view of an Open
 Knowledge Format bundle, rendered from the bundle's own markdown and links at
 request time rather than from a build step.
 
-It takes a bundle path. It has no knowledge of Roteiro's graph, so it works on
-any conformant bundle, and Roteiro's own `okf/` output is merely the default
-argument. It ships behind a feature and merges onto `serve` the way `explorer`
-already does.
+It reads a bundle path and has no knowledge of Roteiro's graph, so it works on
+any conformant bundle, and Roteiro's own `okf/` output is merely the default.
+It ships behind a feature and merges onto `serve` the way `explorer` already
+does.
+
+**Amended in v1.2**: the path stopped being a *command argument* and became the
+working directory. The viewer no longer has a server of its own; it is mounted
+by `explorer` and by `serve`, which between them offer every bundle the machine
+is configured to know about **plus** the current directory. What it reads is
+unchanged — a directory of markdown, through `okf_core`, never the graph.
 
 ## Context
 
@@ -114,6 +120,11 @@ merged onto `serve`.**
   exists to avoid, and would make viewing a stranger's bundle require trusting
   it first. Rejected on the same grounds as Option 1's staleness: the wrong
   source of truth.
+- **v1.2 does not reverse this.** The viewer is now *served by* `explorer`, and
+  still does not read `explorer`'s data: it is mounted beside the graph API on
+  one port, reading the same directories `okf_core` always read. Sharing a
+  listener is not sharing a source of truth, and that is the whole distinction
+  this rejection turns on.
 
 ### Option 3: A served viewer over `okf_core::Bundle` (recommended)
 
@@ -161,11 +172,18 @@ embedded so the viewer is self-contained and works with no network.
 
 ### Surface
 
-- `roteiro okf view [path] [--port N]` — serve a bundle, defaulting to `okf/`.
-- Under `serve`, the viewer merges onto the same port as `/v1` and `/mcp`,
-  following `serve_v1_tail`'s existing composition (ADR-0008).
-- Feature: `okf-viewer`, pulling `axum` + `tokio`, exactly as `explorer` does.
-  **Off by default.**
+- The viewer has **no command of its own** (v1.2). It merges onto `roteiro
+  explorer` and onto `roteiro serve`, at `/okf`, on the port those already use.
+- Under `serve`, it follows `serve_v1_tail`'s existing composition (ADR-0008).
+- Every OKF bundle the server can see is mounted at `/okf/{slug}`, and `/okf`
+  itself either lists them or — when there is one — redirects to it.
+- **The path-based entry survives as the working directory**: `roteiro explorer`
+  run inside a bundle serves that bundle, whether or not there is a repository
+  there, which is what `roteiro okf view <path>` was for.
+- Feature: `okf-viewer`, **implying `explorer`** (v1.2) and pulling `axum` +
+  `tokio` through it. **Off by default.** It implies rather than parallels
+  because the viewer is a mount: with no server to mount it on, every item in it
+  is dead code.
 
 ### CI must build it
 
@@ -176,6 +194,13 @@ that — an orphaned stub under `image-ocr`, and four more unused items under
 `audio-transcribe`, neither of which any job compiled. A new optional feature
 that no job builds in isolation would be the third. The `no-default-features`
 job gains this feature as a fourth configuration.
+
+**And a fifth, in v1.2.** Once `okf-viewer` implied `explorer`, the viewer cell
+started building a *superset* of the explorer, so `explorer` alone was left to
+`--all-features` — which turns the viewer on and therefore cannot fail on
+anything only the smaller shape reaches. It was already broken when that was
+noticed. The rule this keeps arriving at: **a cell that subsumes another is not
+coverage of it**, so implying a feature costs a new cell for what it implies.
 
 ## Advice Received
 
@@ -196,3 +221,4 @@ issue tracker, and two points in it changed the design:
 | 0.1 | 2026-09-02 | Initial draft. Records the gap ADR-0021 left — Roteiro writes OKF and imports it, but cannot look at one — and proposes a served, themed, read-only viewer over `okf_core::Bundle`. The load-bearing distinction is between `okf::read` (import-shaped: provenance, screening, trust adoption) and `okf::inspect` (bundle-shaped), and the viewer builds on the second so that looking at a stranger's bundle is not a trust decision. Rejects rendering to static HTML (a third renderer, stale by construction, and only ever pointed at our own output) and extending `explorer` (serves the graph, so viewing would require importing first). Records the untrusted-input posture — HTML disabled rather than sanitised, no remote fetches, screener classes surfaced — and that the feature must be added to the `no-default-features` job, since two defects have already been found in feature combinations no job builds. |
 | 1.0 | 2026-09-02 | **Accepted and implemented.** The recommended option was built as written: `rto_render::okf::view` is the model and `roteiro`'s `okf_viewer` is the HTTP, behind an `okf-viewer` feature that is off by default and costs the default build nothing. `roteiro okf view [path]` serves it alone; under `serve` it nests at **`/okf`**, because the explorer already holds `/` and two UIs cannot both be the root — and only when the project has an `okf/` bundle, since `serve` hosts workspaces rather than a bundle path and a route that 404'd every request would be worse than an absent one. **One thing the draft did not anticipate**: nesting means every generated href must carry the mount prefix, because a concept id contains slashes and so relative hrefs sit at varying depths. A router that emitted absolute unprefixed paths would look right standalone and 404 on every link the moment it was mounted, so `base` is threaded through and `a_nested_mount_prefixes_every_href` pins it. **The split moved in the draft's favour**: only the *server* is behind the feature. Every rule about untrusted content — HTML escaped and never emitted, a link rewritten only when it resolves inside the bundle, no image fetched from off it, screener classes surfaced — lives in `okf::view`, which is unconditional and therefore compiled and tested by every job. That was chosen because this repository has found three defects in a year inside feature combinations nothing built. Two additions beyond the draft: raw HTML is **escaped and shown** rather than dropped, since silently discarding part of a document is its own kind of lie; and a `Content-Security-Policy` of `default-src 'self'` rides every response as a second, independently-failing line behind the escaping. The `no-default-features` job gains clippy **and test** cells for the feature, as the draft committed — tests too, because the route tests are themselves feature-gated and a clippy-only cell would compile them and never run them. No decision in this ADR changes. |
 | 1.1 | 2026-09-10 | Amended (no issue; found while sizing the knowledge layer). **The graph page drew every concept, and at this repository's own scale it never finished.** It handed 9,766 nodes and 41,980 edges — 8.16 MB — to a force-directed layout synchronously, having been tested only against the 9-concept fixture. The server was never the problem: that payload builds in 0.25 s. Three measurements decided the fix. (a) **No ranking rescues a whole-graph view.** This bundle is hub-and-spoke — max degree 1,670 against a median of 4 — and the 100 highest-degree concepts share just **157** of its 41,980 edges, so any "top N" tier renders as disconnected scatter whatever N is and whatever it ranks by. (b) Neighbourhoods, by contrast, are the right unit: a median concept reaches 3 nodes at one hop and 436 at two. (c) A force-directed layout is quadratic per tick in its repulsion step, so the node count is what decides whether the page renders at all. So `/graph` is now **focused**: without a `focus` it is a ranked **list** of well-connected concepts rather than a drawing, because there is no whole-graph picture worth drawing and pretending otherwise is what made the page unusable; with one it draws that concept's neighbourhood under a node budget, laid out `concentric` on the focus — linear, and it says what the picture means. **Bounded, not capped.** Every scoped response carries `shown_nodes`/`total_nodes`, `shown_edges`/`total_edges` and `beyond` — concepts linked to something drawn that are not drawn — and the page states them, because a view that quietly draws some of its nodes is the defect [[docs/adr/0024-screening-widened.md]] fixed for the binary inventory: the reader cannot tell a small bundle from a truncated picture of a large one. `beyond` is deliberately **one** number covering both ways a view falls short — budget and depth horizon — after reporting them separately cost a test that asserted one and measured the other. `depth` and `limit` are clamped at the edge (3 and 500), because a caller-supplied budget taken at its word would move the original defect into a URL. Payload for the default view: 8,159,353 B → 213,053 B. |
+| 1.2 | 2026-09-10 | Amended (no issue; task #22). **The premise changed: the viewer stopped being a server and became a mount.** v1.0 gave it two homes — `roteiro okf view <path>` standing alone, and a nest under `serve` — and the standalone one paid for itself twice over: a second command, a second port, a second tokio runtime, and a route shape (`base` empty, `/` real) that was the *only* one anybody exercised. That last part hid a defect for eight days. `nest("/okf")` serves `/okf` and **not** `/okf/`, so the "Concepts" link — written as `{base}/` — has 404'd under `serve` since v1.0 while working perfectly standalone; `index_href` now writes that rule once instead of at four call sites. **What the fold must not lose is the path.** ADR-0022's whole claim is that the viewer takes a path and knows nothing of Roteiro's graph, so it works on any conformant bundle; a viewer reachable only through a configured workspace would quietly become a viewer for *our* bundles. The resolution is that `explorer` serves the configured workspaces' bundles **and** the current directory when one is there — so `roteiro okf view <path>` is exactly `cd <path> && roteiro explorer`, and it works with no repository, no config and no graph, which is the case that proves the premise survived. **One port now holds many bundles**, so `/okf` gained a mount layer: a bundle per workspace project, deduplicated by canonical path, each at `/okf/{slug}`. Slugs are folded to one readable segment rather than percent-encoded, because this is a URL a person is meant to share — and folding collides, so `disambiguate` suffixes, since `nest` does not complain about a prefix it already holds and the second mount would otherwise take the first's URL and make one bundle silently unreachable. `/okf` itself lists the bundles, or redirects when there is one, because a chooser with one row is a click that tells the reader nothing. **Three failures here are route-table failures no type catches**: that shadowed nest; a chooser registered at `/` instead of at `base`, which makes axum panic at startup the moment the mount layer is merged into a host that owns the root; and the chooser being the one page *not* inside a bundle, so `{base}/okf-viewer.css` resolves to a bundle's route everywhere else and to nothing there — it rendered unstyled with a broken nav. All three are pinned by driving a whole merged router and asserting every `href` it writes resolves. Measured against this repository: six workspaces, one bundle, `/okf` → 307 → `/okf/Roteiro-Roteiro`, 3,878,122 B; and a copied bundle with no repository above it serving on `/okf/bare` with no Explorer link offered, because there is no explorer to link to. **The feature matrix moved, and the isolation cell earned itself back.** `okf-viewer` now **implies `explorer`**: a mount with no mount point is dead code, and `--no-default-features --features okf-viewer -D warnings` said so — 25 never-used items, the whole module. That in turn left `--features explorer` built by nothing but `--all-features`, which cannot fail on it because it turns the viewer on too — and it was already broken, because folding the viewer in made `serve_graph_ui` construct a multi-threaded runtime whose tokio feature only `okf-viewer` enables. The runtime is now chosen by `#[cfg]`, since the current-thread choice stays right for an explorer serving only compiled-in assets, and the `no-default-features` job gains a **fifth** cell for `explorer` alone. This is the fourth defect this project has found in a feature combination no job compiled, which is the reason v1.0 made the cell part of the decision rather than a follow-up; the same reasoning applied to the shape the fold created. |

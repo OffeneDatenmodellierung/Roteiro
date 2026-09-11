@@ -37,7 +37,7 @@ use std::sync::{Arc, Mutex};
 use axum::Router;
 use axum::extract::{Path as UrlPath, Query, State};
 use axum::http::{StatusCode, header};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
 use rto_render::okf::view;
 
@@ -45,6 +45,8 @@ use rto_render::okf::view;
 #[derive(Clone)]
 struct Viewer {
     root: Arc<PathBuf>,
+    /// Where this page's "up" links point. See [`Nav`].
+    nav: Arc<Nav>,
     /// The last bundle read, and the stamp it was read at.
     ///
     /// ADR-0022 renders at request time so an author editing a concept sees it
@@ -71,13 +73,6 @@ struct Viewer {
     base: Arc<String>,
 }
 
-/// The viewer's routes.
-///
-/// Stateless from the caller's side — it holds only a path — so it merges into
-/// the `serve` router the way [`crate::explorer_app::router`] does.
-///
-/// `base` is the mount path: empty when served alone by `roteiro okf view`, and
-/// `/okf` when nested beside the explorer under `serve`.
 /// A bundle, what it looked like on disk when it was read, and the whole-bundle
 /// views derived from it.
 ///
@@ -281,10 +276,277 @@ fn spawn_failed() -> Response {
         .into_response()
 }
 
-pub fn router(root: PathBuf, base: &str) -> Router {
+/// The links a viewer page offers *above* the bundle it is showing.
+///
+/// Empty when the viewer is the whole server, which is the case ADR-0022 v1.0
+/// built for: a path, any conformant bundle, nothing else on the port. Populated
+/// when a `roteiro serve` or `roteiro explorer` holds several bundles and a graph
+/// beside them (v1.2) — the reader then needs a way *out* of one bundle, and a
+/// page with no way out is the "half the info" this fold exists to remove.
+#[derive(Debug, Clone, Default)]
+pub struct Nav {
+    /// The prefix of the bundle this page belongs to.
+    ///
+    /// `None` on the chooser, which belongs to no single bundle — and a
+    /// "Concepts"/"Graph" pair there would point at `{base}/` and `{base}/graph`,
+    /// which are routes of a *bundle* and do not exist at the mount base. Two
+    /// dead links on the one page whose whole job is to send a reader somewhere.
+    pub bundle: Option<String>,
+    /// The mount base, when this server holds more than one bundle.
+    ///
+    /// `None` for a lone bundle: an "All bundles" link to a page that redirects
+    /// straight back here is a loop with a label on it.
+    pub bundles: Option<String>,
+    /// The graph explorer's root, when the same server serves one.
+    pub explorer: Option<String>,
+}
+
+/// One bundle a server has mounted: where it lives, and what to call it.
+///
+/// A server hosts *workspaces*, not a bundle path (ADR-0008), so which bundles
+/// exist is a property of what it is serving rather than of an argument somebody
+/// typed. This is that answer, resolved once at startup.
+#[derive(Debug, Clone)]
+pub struct Mount {
+    /// The path segment under the mount base, e.g. `Roteiro`.
+    ///
+    /// Derived by [`slug`] and made unique by [`disambiguate`], because two
+    /// projects of the same name in different workspaces are the ordinary case
+    /// and one silently shadowing the other would be a wrong answer rather than
+    /// a missing one.
+    pub slug: String,
+    /// How the chooser names it — `<workspace>/<project>`, or the directory.
+    pub label: String,
+    /// Where it came from, shown so a reader can tell two similar bundles apart.
+    pub origin: String,
+    /// The bundle directory.
+    pub root: PathBuf,
+}
+
+/// A URL-safe segment for `raw`, keeping only what a path segment carries plainly.
+///
+/// Workspace and project names are directory names, so they may hold anything a
+/// filesystem allows — spaces, a `/` in a label built from two of them, non-ASCII.
+/// Percent-encoding would round-trip but produces a URL nobody can read or type,
+/// and this is a path a person is meant to be able to share; it is folded instead
+/// and [`disambiguate`] resolves the collisions folding creates.
+#[must_use]
+pub fn slug(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+            out.push(c);
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let trimmed = out.trim_matches('-');
+    if trimmed.is_empty() {
+        "bundle".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+/// The path segments the mount base owns, which no bundle may be given.
+///
+/// [`mounts_router`] registers `{base}/okf-viewer.css` so the chooser — the one
+/// page that is not inside a bundle — is styled. axum does not shadow an
+/// overlapping route, it **panics at startup**, so a bundle landing on that
+/// segment does not merely become unreachable: it stops the server booting. And
+/// the label need not be strange to get there, because [`slug`] folds: a project
+/// called `okf viewer.css` is enough.
+const RESERVED_SLUGS: &[&str] = &["okf-viewer.css"];
+
+/// Make every slug in `mounts` distinct, in place, preserving order.
+///
+/// [`slug`] is lossy, so `my repo` and `my/repo` fold to one segment — and two
+/// mounts sharing a segment means the second `nest` registers over the first and
+/// one bundle becomes silently unreachable. A numeric suffix is the smallest fix
+/// that keeps the readable name for the first and loses nothing for the rest.
+///
+/// Distinct **from the mount base's own routes as well**, not just from each
+/// other — see [`RESERVED_SLUGS`].
+pub fn disambiguate(mounts: &mut [Mount]) {
+    // Seeded, not checked afterwards: a reserved segment is simply already
+    // taken, so the same suffix loop that resolves a collision between two
+    // bundles resolves a collision with the base's own routes.
+    let mut seen: std::collections::BTreeSet<String> =
+        RESERVED_SLUGS.iter().map(|s| (*s).to_owned()).collect();
+    for m in mounts.iter_mut() {
+        if seen.insert(m.slug.clone()) {
+            continue;
+        }
+        for n in 2.. {
+            let candidate = format!("{}-{n}", m.slug);
+            if seen.insert(candidate.clone()) {
+                m.slug = candidate;
+                break;
+            }
+        }
+    }
+}
+
+/// Mount every bundle in `mounts` under `base`, with a chooser at `base` itself.
+///
+/// Each bundle is nested at `{base}/{slug}` and told that prefix, so every link
+/// it writes is correct wherever the whole is mounted — which is what lets one
+/// implementation serve `roteiro serve`, `roteiro explorer` and a bare bundle
+/// without knowing which it is.
+///
+/// **A lone bundle redirects rather than listing.** A chooser with one row is a
+/// click that tells the reader nothing they did not already know, and the mount
+/// base pointing straight at the only bundle is what this route did when it could
+/// hold only one.
+pub fn mounts_router(base: &str, mounts: Vec<Mount>, explorer: Option<String>) -> Router {
+    assert_mountable(base);
+    let mut app = Router::new();
+    for m in &mounts {
+        let prefix = format!("{base}/{}", m.slug);
+        let nav = Nav {
+            bundle: Some(prefix.clone()),
+            // Only when there is somewhere else to go — see `Nav::bundles`.
+            bundles: (mounts.len() > 1).then(|| base.to_owned()),
+            explorer: explorer.clone(),
+        };
+        app = app.nest(&prefix, router(m.root.clone(), &prefix, nav));
+    }
+    // At `base` itself, and as an **absolute** path: this router is `merge`d into
+    // a server that already owns `/`, so registering the chooser at `/` claims a
+    // route somebody else has. axum reports that by panicking at startup —
+    // `Overlapping method route. Handler for \`GET /\` already exists` — which is
+    // a loud failure and still one no compiler catches, so the route table is
+    // what the tests below assert on.
+    // The chooser is a viewer page, so the mount base serves the viewer's
+    // stylesheet too. Without it the one page that is *not* inside a bundle is
+    // the one page with no styling — `{base}/okf-viewer.css` resolves to a
+    // bundle's route everywhere else.
+    let at = base.to_owned();
+    let owned = Arc::new(base.to_owned());
+    // Behind an `Arc` because the handler closure must own what it reads and is
+    // called once per request. The list is short — one per hosted project with a
+    // bundle, six here — and the clone was cheaper than the page it precedes, so
+    // this is not a measured cost; it is one line to stop doing per-request work
+    // that has no per-request reason to happen.
+    let shared = Arc::new(mounts);
+    let app = app.route(&format!("{base}/okf-viewer.css"), get(stylesheet));
+    app.route(
+        &at,
+        get(move || {
+            let (base, mounts) = (Arc::clone(&owned), Arc::clone(&shared));
+            let explorer = explorer.clone();
+            async move { chooser(&base, &mounts, explorer.as_deref()) }
+        }),
+    )
+}
+
+/// Where a page links to when it means "this bundle's index".
+///
+/// `{base}/` is wrong under `nest`, and quietly: axum serves `/okf/x` and **not**
+/// `/okf/x/`, so a trailing slash gives a 404 while every other link on the page
+/// works. `roteiro serve` has nested this viewer at `/okf` since ADR-0022 v1.0
+/// and its "Concepts" link has 404'd for exactly that reason — invisible while
+/// the standalone server, where `base` is empty and `/` is right, was the case
+/// anyone used. Folding the viewer in makes nested the *only* case, so the rule
+/// is written down once here instead of being spelled out at four call sites.
+fn index_href(base: &str) -> &str {
+    if base.is_empty() { "/" } else { base }
+}
+
+/// The mount base's index: where to go, or straight there when there is one place.
+fn chooser(base: &str, mounts: &[Mount], explorer: Option<&str>) -> Response {
+    if let [only] = mounts {
+        return Redirect::temporary(&format!("{base}/{}", only.slug)).into_response();
+    }
+    let mut body = String::with_capacity(512 + mounts.len() * 256);
+    if mounts.is_empty() {
+        // Reachable when a server mounts this route and every bundle disappears
+        // underneath it. Says what is missing and what writes one, rather than
+        // rendering an empty list that reads as "these projects have no concepts".
+        body.push_str(
+            "<article><h1>OKF bundles</h1><p class=\"scope\">No bundle is mounted. \
+             A project gets one when <code>roteiro render okf</code> writes it, and \
+             this server picks it up on the next start.</p></article>",
+        );
+    } else {
+        let _ = write!(
+            body,
+            "<article><h1>OKF bundles</h1><p class=\"scope\">{} bundles are mounted \
+             here. Each is served read-only from the directory named beside it.</p>\
+             <ol class=\"hubs\">",
+            mounts.len()
+        );
+        for m in mounts {
+            let _ = write!(
+                body,
+                "<li><a href=\"{}/{}\">{}</a> <span class=\"deg\">{}</span></li>",
+                escape(base),
+                escape(&m.slug),
+                escape(&m.label),
+                escape(&m.origin)
+            );
+        }
+        body.push_str("</ol></article>");
+    }
+    page(
+        "OKF bundles",
+        "",
+        base,
+        &Nav {
+            bundle: None,
+            bundles: None,
+            explorer: explorer.map(ToOwned::to_owned),
+        },
+        &body,
+    )
+}
+
+/// Refuse a mount path this module cannot safely write into markup.
+///
+/// `base` is interpolated raw into `href` and `src` attributes at a dozen call
+/// sites. That is *not* a case for `escape`: escaping is for text, and a URL
+/// that needed it would be a broken URL, not a safe one — `&lt;script&gt;` in an
+/// `href` is nonsense either way. What the pages actually rely on is that `base`
+/// is a path this module built itself, out of [`slug`], whose charset already
+/// excludes every character that could leave an attribute.
+///
+/// So the fix for "interpolated without escaping" is to make the assumption a
+/// **checked** one at the single point where a router is built, rather than a
+/// remark in a comment eleven interpolations away. Raised by review on #785.
+///
+/// # Panics
+///
+/// If `base` is not empty and not a `/`-prefixed path of `[A-Za-z0-9._-]`
+/// segments. Callers construct it; there is no input that reaches this from a
+/// bundle or a request, so a bad one is a bug in this crate and should stop the
+/// server rather than render.
+fn assert_mountable(base: &str) {
+    assert!(
+        base.is_empty()
+            || (base.starts_with('/')
+                && base.split('/').skip(1).all(|seg| !seg.is_empty()
+                    && seg
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')))),
+        "mount path is not slug-safe and must not be written into markup: {base:?}"
+    );
+}
+
+/// One bundle's routes, mounted at `base`.
+///
+/// Stateless from the caller's side — it holds a path and where it sits — so it
+/// merges into a larger router the way [`crate::explorer_app::router`] does.
+///
+/// `base` is the mount path and every generated href carries it: `/okf/{slug}`
+/// under [`mounts_router`], and empty only in tests that drive one bundle
+/// directly. `nav` is what else the same server holds, which the bundle cannot
+/// know and must not guess — see [`Nav`].
+pub fn router(root: PathBuf, base: &str, nav: Nav) -> Router {
+    assert_mountable(base);
     let state = Viewer {
         root: Arc::new(root),
         base: Arc::new(base.to_owned()),
+        nav: Arc::new(nav),
         cache: Arc::new(Mutex::new(None)),
     };
     Router::new()
@@ -359,7 +621,23 @@ const MAX_FILE_BYTES: u64 = 32 * 1024 * 1024;
 /// the reload guarantee the server-side cache is careful to keep.
 const CACHE_ASSET: &str = "public, max-age=3600";
 
-fn page(title: &str, root: &str, base: &str, body: &str) -> Response {
+fn page(title: &str, root: &str, base: &str, nav: &Nav, body: &str) -> Response {
+    let mut up = String::new();
+    if let Some(bundles) = &nav.bundles {
+        let _ = write!(up, "<a href=\"{}\">All bundles</a>", escape(bundles));
+    }
+    if let Some(explorer) = &nav.explorer {
+        let _ = write!(up, "<a href=\"{}\">Explorer</a>", escape(explorer));
+    }
+    let mut here = String::new();
+    if let Some(bundle) = &nav.bundle {
+        let _ = write!(
+            here,
+            "<a href=\"{}\">Concepts</a><a href=\"{}/graph\">Graph</a>",
+            escape(index_href(bundle)),
+            escape(bundle)
+        );
+    }
     let mut out = String::with_capacity(body.len() + 2048);
     let _ = write!(
         out,
@@ -369,7 +647,8 @@ fn page(title: &str, root: &str, base: &str, body: &str) -> Response {
          <title>{} — OKF viewer</title></head><body>\
          <header><span class=\"name\">OKF viewer</span>\
          <span class=\"root\">{}</span>\
-         <nav><a href=\"{base}/\">Concepts</a><a href=\"{base}/graph\">Graph</a></nav></header>\
+         <nav>{here}\
+         {up}</nav></header>\
          <main>{body}</main>\
          <footer>Read-only. Nothing here is imported into the graph — \
          <code>roteiro import --from okf</code> is still the only path that does, \
@@ -516,7 +795,7 @@ async fn index(State(v): State<Viewer>) -> Response {
         );
     }
     body.push_str("</table></article>");
-    page("Bundle", &view.root, base, &body)
+    page("Bundle", &view.root, base, &v.nav, &body)
 }
 
 async fn concept(State(v): State<Viewer>, UrlPath(id): UrlPath<String>) -> Response {
@@ -543,8 +822,9 @@ async fn concept(State(v): State<Viewer>, UrlPath(id): UrlPath<String>) -> Respo
             [(header::CONTENT_SECURITY_POLICY, CSP)],
             Html(format!(
                 "<p>The bundle contains no concept <code>{}</code>. \
-                 <a href=\"{base}/\">Back to the bundle</a>.</p>",
-                escape(&id)
+                 <a href=\"{}\">Back to the bundle</a>.</p>",
+                escape(&id),
+                index_href(base)
             )),
         )
             .into_response();
@@ -622,7 +902,7 @@ async fn concept(State(v): State<Viewer>, UrlPath(id): UrlPath<String>) -> Respo
         body.push_str("</ul>");
     }
     body.push_str("</div></article>");
-    page(&c.title, &v.root.display().to_string(), base, &body)
+    page(&c.title, &v.root.display().to_string(), base, &v.nav, &body)
 }
 
 /// What the graph routes accept, and the bounds they are held to.
@@ -792,7 +1072,13 @@ async fn graph_page(State(v): State<Viewer>, Query(q): Query<GraphQuery>) -> Res
             }
             .to_string(),
         );
-    let mut res = page("Concept graph", &v.root.display().to_string(), base, &body);
+    let mut res = page(
+        "Concept graph",
+        &v.root.display().to_string(),
+        base,
+        &v.nav,
+        &body,
+    );
     res.headers_mut().insert(
         header::CONTENT_SECURITY_POLICY,
         header::HeaderValue::from_static(
@@ -852,7 +1138,13 @@ async fn graph_entry(v: &Viewer) -> Response {
         );
     }
     body.push_str("</ol></article>");
-    page("Concept graph", &v.root.display().to_string(), base, &body)
+    page(
+        "Concept graph",
+        &v.root.display().to_string(),
+        base,
+        &v.nav,
+        &body,
+    )
 }
 
 /// Percent-encode a concept id for a query string.
@@ -1129,6 +1421,7 @@ mod tests {
             "</title><script>alert(1)</script>",
             "/tmp/b",
             "",
+            &Nav::default(),
             "<article/>",
         );
         let body = format!("{html:?}");
@@ -1163,7 +1456,11 @@ mod tests {
 
     /// `(status, body)` for one GET.
     async fn get_(root: &std::path::Path, base: &str, uri: &str) -> (StatusCode, String) {
-        let response = router(root.to_path_buf(), base)
+        let nav = Nav {
+            bundle: Some(base.to_owned()),
+            ..Nav::default()
+        };
+        let response = router(root.to_path_buf(), base, nav)
             .oneshot(
                 Request::builder()
                     .uri(uri)
@@ -1541,6 +1838,12 @@ mod tests {
         let (status, body) = get_(&root, "", "/c/metrics/nope").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(body.contains("no concept"), "{body}");
+        // Which concept, and where back to — asserted separately, because the two
+        // are interchangeable at the type level. They were in fact swapped once
+        // (#785 review): the page named the mount path as the missing concept and
+        // linked to the concept id, and "no concept" alone could not see it.
+        assert!(body.contains("<code>metrics/nope</code>"), "{body}");
+        assert!(body.contains("<a href=\"/\">Back to the bundle"), "{body}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1569,7 +1872,7 @@ mod tests {
         let disposition = |uri: &'static str| {
             let root = root.clone();
             async move {
-                let response = router(root, "")
+                let response = router(root, "", Nav::default())
                     .oneshot(
                         Request::builder()
                             .uri(uri)
@@ -1622,7 +1925,7 @@ mod tests {
         let policy = |uri: &'static str| {
             let root = root.clone();
             async move {
-                let response = router(root, "")
+                let response = router(root, "", Nav::default())
                     .oneshot(
                         Request::builder()
                             .uri(uri)
@@ -1879,7 +2182,7 @@ mod tests {
             "/cytoscape.min.js",
             "/f/../escape",
         ] {
-            let response = router(root.clone(), "")
+            let response = router(root.clone(), "", Nav::default())
                 .oneshot(
                     Request::builder()
                         .uri(uri)
@@ -1918,5 +2221,346 @@ mod tests {
         let (status, body) = get_(&root, "", "/").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(body.contains("Not a readable OKF bundle"), "{body}");
+    }
+
+    // ---- the mount layer -------------------------------------------------
+    //
+    // `mounts_router` is the only part of this module that does not serve a
+    // bundle: it decides where bundles live and what the base itself does. Its
+    // failures are route-table failures — a shadowed nest, a claimed `/`, an
+    // href that 404s — none of which any type catches, so they are driven
+    // through a whole merged router rather than asserted on the pieces.
+
+    /// A bundle whose one concept names it, so two mounts can be told apart by
+    /// what they serve rather than by the URL they were asked for.
+    fn named_bundle(tag: &str, title: &str) -> PathBuf {
+        let concept = format!("---\ntype: Metric\ntitle: {title}\n---\n\n# {title}\n");
+        fixture(
+            tag,
+            &[
+                ("index.md", "---\nokf_version: \"0.2\"\n---\n\n# Bundle\n"),
+                ("metrics/only.md", &concept),
+            ],
+        )
+    }
+
+    fn mount_at(slug: &str, root: PathBuf) -> Mount {
+        Mount {
+            slug: slug.to_owned(),
+            label: slug.to_owned(),
+            origin: "test".to_owned(),
+            root,
+        }
+    }
+
+    /// A host that already owns `/`, which is what both callers are: `roteiro
+    /// serve` and `roteiro explorer` merge the mount layer into a router that
+    /// is already serving something at the root.
+    fn host() -> Router {
+        Router::new().route("/", get(|| async { "explorer" }))
+    }
+
+    async fn get_mounted(app: &Router, uri: &str) -> (StatusCode, String, Option<String>) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let status = response.status();
+        let location = response
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .map(|v| v.to_str().expect("location").to_owned());
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 22)
+            .await
+            .expect("body");
+        (
+            status,
+            String::from_utf8_lossy(&bytes).into_owned(),
+            location,
+        )
+    }
+
+    /// Every `href="…"` in a page, in order.
+    fn hrefs(body: &str) -> Vec<String> {
+        body.match_indices("href=\"")
+            .filter_map(|(i, m)| {
+                let rest = &body[i + m.len()..];
+                rest.find('"').map(|end| rest[..end].to_owned())
+            })
+            .collect()
+    }
+
+    /// A slug is one readable path segment, whatever the label was.
+    #[test]
+    fn a_slug_is_one_readable_path_segment() {
+        assert_eq!(slug("Roteiro/Roteiro"), "Roteiro-Roteiro");
+        assert_eq!(slug("my repo"), "my-repo");
+        assert_eq!(slug("a.b_c-d"), "a.b_c-d");
+        // Runs fold to one separator and the ends are trimmed, so no slug is
+        // ever empty at an end or doubled in the middle.
+        assert_eq!(slug("  spaced  out  "), "spaced-out");
+        // Nothing survivable left: a name is still needed for the route.
+        assert_eq!(slug("日本語"), "bundle");
+        assert_eq!(slug(""), "bundle");
+    }
+
+    /// Two labels that fold to one slug stay separately reachable.
+    ///
+    /// This is the defect `disambiguate` exists for: `nest` does not complain
+    /// about a prefix it already holds, so without it the second mount takes
+    /// the first's URL and one bundle is silently unreachable. The fixture has
+    /// to *contain* the collision — asserted before disambiguating, or the test
+    /// passes on labels that never collided.
+    #[tokio::test]
+    async fn two_labels_that_fold_alike_stay_separately_reachable() {
+        let mut mounts = vec![
+            Mount {
+                slug: slug("my repo"),
+                label: "my repo".to_owned(),
+                origin: "a".to_owned(),
+                root: named_bundle("fold-a", "Alpha"),
+            },
+            Mount {
+                slug: slug("my/repo"),
+                label: "my/repo".to_owned(),
+                origin: "b".to_owned(),
+                root: named_bundle("fold-b", "Beta"),
+            },
+        ];
+        assert_eq!(
+            mounts[0].slug, mounts[1].slug,
+            "the fixture must contain the collision it is testing"
+        );
+        disambiguate(&mut mounts);
+        let (first, second) = (mounts[0].slug.clone(), mounts[1].slug.clone());
+        assert_eq!(first, "my-repo", "the first keeps the readable name");
+        assert_eq!(second, "my-repo-2");
+
+        let app = host().merge(mounts_router("/okf", mounts, None));
+        let (status, body, _) = get_mounted(&app, &format!("/okf/{first}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Alpha") && !body.contains("Beta"), "{body}");
+        let (status, body, _) = get_mounted(&app, &format!("/okf/{second}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Beta") && !body.contains("Alpha"), "{body}");
+    }
+
+    /// The mount layer merges into a host that already owns `/`.
+    ///
+    /// The chooser is registered at `base` as an absolute path for this reason.
+    /// Registering it at `/` — the natural thing to write for a router that is
+    /// about to be nested — makes axum panic at startup with `Overlapping
+    /// method route`, which no compiler catches and no bundle test reaches.
+    #[tokio::test]
+    async fn the_mount_layer_merges_into_a_host_that_owns_the_root() {
+        let mounts = vec![
+            mount_at("one", named_bundle("merge-a", "Alpha")),
+            mount_at("two", named_bundle("merge-b", "Beta")),
+        ];
+        let app = host().merge(mounts_router("/okf", mounts, Some("/".to_owned())));
+        let (status, body, _) = get_mounted(&app, "/").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "explorer", "the host keeps its own root");
+        assert_eq!(get_mounted(&app, "/okf").await.0, StatusCode::OK);
+    }
+
+    /// A lone bundle redirects rather than offering a one-row chooser.
+    #[tokio::test]
+    async fn a_lone_bundle_redirects_from_the_mount_base() {
+        let mounts = vec![mount_at("only", sample())];
+        let app = host().merge(mounts_router("/okf", mounts, None));
+        let (status, _, location) = get_mounted(&app, "/okf").await;
+        assert_eq!(status, StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(location.as_deref(), Some("/okf/only"));
+        assert_eq!(get_mounted(&app, "/okf/only").await.0, StatusCode::OK);
+    }
+
+    /// Every link the chooser writes resolves, and it is styled.
+    ///
+    /// The chooser is the one page that is *not* inside a bundle, so it is the
+    /// one page whose stylesheet and whose base-relative hrefs no other test
+    /// touches: `{base}/okf-viewer.css` resolves to a bundle's route on every
+    /// other page and to nothing at all here.
+    #[tokio::test]
+    async fn every_link_the_chooser_writes_resolves() {
+        let mounts = vec![
+            mount_at("one", named_bundle("chooser-a", "Alpha")),
+            mount_at("two", named_bundle("chooser-b", "Beta")),
+        ];
+        let app = host().merge(mounts_router("/okf", mounts, Some("/".to_owned())));
+        let (status, body, _) = get_mounted(&app, "/okf").await;
+        assert_eq!(status, StatusCode::OK);
+        let links = hrefs(&body);
+        for want in ["/okf/one", "/okf/two", "/okf/okf-viewer.css", "/"] {
+            assert!(links.iter().any(|h| h == want), "{want} missing: {links:?}");
+        }
+        for link in &links {
+            let (status, _, _) = get_mounted(&app, link).await;
+            assert_eq!(status, StatusCode::OK, "{link}");
+        }
+        let (status, css, _) = get_mounted(&app, "/okf/okf-viewer.css").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            css.contains("--ink"),
+            "the chooser's stylesheet is the viewer's"
+        );
+    }
+
+    /// A nested bundle's own links resolve, index included.
+    ///
+    /// `nest("/okf/x")` serves `/okf/x` and **not** `/okf/x/`, so a page that
+    /// writes `{base}/` for "this bundle's index" 404s on that one link while
+    /// every other link on it works. `roteiro serve` has nested this viewer
+    /// since ADR-0022 v1.0 and its "Concepts" link has 404'd throughout.
+    #[tokio::test]
+    async fn every_link_a_nested_bundle_writes_resolves() {
+        let mounts = vec![
+            mount_at("one", named_bundle("nested-a", "Alpha")),
+            mount_at("two", named_bundle("nested-b", "Beta")),
+        ];
+        let app = host().merge(mounts_router("/okf", mounts, Some("/".to_owned())));
+        let (status, body, _) = get_mounted(&app, "/okf/one").await;
+        assert_eq!(status, StatusCode::OK);
+        let links = hrefs(&body);
+        assert!(
+            links.iter().any(|h| h == "/okf/one"),
+            "no index link: {links:?}"
+        );
+        assert!(
+            !links.iter().any(|h| h == "/okf/one/"),
+            "a trailing slash under `nest` is a 404: {links:?}"
+        );
+        for link in &links {
+            let (status, _, _) = get_mounted(&app, link).await;
+            assert_eq!(status, StatusCode::OK, "{link}");
+        }
+    }
+
+    /// A bundle offers only the neighbours it actually has.
+    ///
+    /// The bare case — one bundle, no repository — is the whole reason the fold
+    /// is allowed to replace `roteiro okf view <path>`: it must not link to an
+    /// explorer that is not running, nor to a chooser that would redirect back.
+    #[tokio::test]
+    async fn a_lone_bundle_with_no_explorer_offers_neither_link() {
+        let mounts = vec![mount_at("bare", sample())];
+        let app = Router::new().merge(mounts_router("/okf", mounts, None));
+        let (status, body, _) = get_mounted(&app, "/okf/bare").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body.contains("All bundles"), "{body}");
+        assert!(!body.contains(">Explorer<"), "{body}");
+        assert!(body.contains("Concepts"), "{body}");
+    }
+
+    /// A nested 404 links back to *its own* bundle, and that link resolves.
+    ///
+    /// `every_link_a_nested_bundle_writes_resolves` walks a page that exists; this
+    /// is the other page the viewer can produce, and it is the one where the id
+    /// and the href sit side by side as two `{}` of the same type.
+    #[tokio::test]
+    async fn a_nested_404_links_back_to_its_own_bundle() {
+        let mounts = vec![mount_at("one", sample())];
+        let app = host().merge(mounts_router("/okf", mounts, None));
+        let (status, body, _) = get_mounted(&app, "/okf/one/c/metrics/nope").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body.contains("<code>metrics/nope</code>"), "{body}");
+        let links = hrefs(&body);
+        assert!(
+            links.iter().any(|h| h == "/okf/one"),
+            "no way back: {links:?}"
+        );
+        for link in &links {
+            let (status, _, _) = get_mounted(&app, link).await;
+            assert_eq!(status, StatusCode::OK, "{link}");
+        }
+    }
+
+    /// A bundle cannot be named over the mount base's own stylesheet.
+    ///
+    /// `disambiguate` resolving collisions *between bundles* is not enough: the
+    /// base owns routes too, and axum does not shadow an overlapping one — it
+    /// panics at startup. So this is not an unreachable bundle, it is a server
+    /// that does not boot, reachable from an ordinary project name because
+    /// [`slug`] folds `okf viewer.css` onto the reserved segment. Raised by
+    /// review on #785.
+    #[tokio::test]
+    async fn a_bundle_cannot_be_named_over_the_mount_bases_stylesheet() {
+        assert_eq!(
+            slug("okf viewer.css"),
+            "okf-viewer.css",
+            "the fixture must contain the collision it is testing"
+        );
+        let mut mounts = vec![Mount {
+            slug: slug("okf viewer.css"),
+            label: "okf viewer.css".to_owned(),
+            origin: "test".to_owned(),
+            root: named_bundle("reserved", "Alpha"),
+        }];
+        disambiguate(&mut mounts);
+        assert_eq!(
+            mounts[0].slug, "okf-viewer.css-2",
+            "moved off the reserved segment"
+        );
+
+        // Both survive: the base keeps its stylesheet, the bundle keeps a home.
+        let app = host().merge(mounts_router("/okf", mounts, None));
+        let (status, css, _) = get_mounted(&app, "/okf/okf-viewer.css").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(css.contains("--ink"), "not the stylesheet: {css:.80}");
+        let (status, body, _) = get_mounted(&app, "/okf/okf-viewer.css-2").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Alpha"), "{body}");
+    }
+
+    /// A mount path that could leave an attribute is refused, not rendered.
+    ///
+    /// `base` is interpolated raw into `href`/`src` at a dozen call sites, which
+    /// review on #785 read as a missing `escape`. It is not: escaping is for
+    /// text, and the pages rely on `base` being slug-safe by construction. This
+    /// turns that from an assumption into a checked one — the assertion is the
+    /// contract, and these are the strings that violate it.
+    #[test]
+    fn a_mount_path_that_could_leave_an_attribute_is_refused() {
+        // What the module actually builds, all accepted.
+        for ok in ["", "/okf", "/okf/Roteiro-Roteiro", "/okf/a.b_c-d"] {
+            assert_mountable(ok);
+        }
+        for bad in [
+            "/okf/\"><script>alert(1)</script>",
+            "/okf/a b",
+            "/okf/a/",
+            "okf",
+            "/okf//x",
+        ] {
+            assert!(
+                std::panic::catch_unwind(|| assert_mountable(bad)).is_err(),
+                "accepted a mount path it cannot safely write: {bad:?}"
+            );
+        }
+    }
+
+    /// A hostile mount path stops the router being built at all.
+    ///
+    /// The assertion above is only worth having if the constructors run it, and
+    /// both do — a page rendered from a bad `base` is the outcome this refuses.
+    #[test]
+    fn a_hostile_base_cannot_reach_a_page() {
+        let root = sample();
+        let hostile = "/okf/\"><script>alert(1)</script>";
+        assert!(
+            std::panic::catch_unwind(|| router(root.clone(), hostile, Nav::default())).is_err(),
+            "a bundle router was built on a hostile base"
+        );
+        assert!(
+            std::panic::catch_unwind(|| mounts_router(hostile, Vec::new(), None)).is_err(),
+            "a mount layer was built on a hostile base"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

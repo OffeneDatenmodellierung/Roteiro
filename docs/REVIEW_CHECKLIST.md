@@ -151,10 +151,14 @@ But adjudicate before acting, and one rule pays for itself:
         `default-features` is the default set. **Neither covers the other** —
         turning features on cannot find a defect in code being cfg'd *out*,
         which is why that job exists. Since #667 a third job,
-        `no-default-features`, builds the floor and two combinations above it
-        (`--no-default-features`, `+ mcp`, `+ execution`), so that axis **is**
-        covered now — but only in those three shapes. Any other feature
-        combination is still built by nothing.
+        `no-default-features`, builds the floor and four combinations above it
+        (`--no-default-features`, `+ mcp`, `+ execution`, `+ okf-viewer`,
+        `+ explorer`), so that axis **is** covered now — but only in those five
+        shapes. Any other feature combination is still built by nothing. Note
+        also that **a cell which subsumes another is not coverage of it**:
+        `okf-viewer` implies `explorer`, so the `explorer` cell exists
+        separately — it was added after `--features explorer` stopped compiling
+        and only `--all-features`, which turns both on, could have been asked.
       - **Targets.** `msrv` is `cargo check --workspace --all-features` with **no
         `--all-targets`**, so it never compiles `#[cfg(test)]` modules or
         `tests/` targets. The jobs that do compile test code (`checks`,
