@@ -18,7 +18,7 @@ confluence-url:
 
 # ADR-0003: Pluggable embedding models — tiny static default, opt-in local models
 
-| | |
+|  |  |
 |---|---|
 | **State** | Accepted |
 | **Architectural Significance** | HIGH |
@@ -103,7 +103,7 @@ Decision refined with the project team: (a) prefer models built/re-encoded for t
 ## Document version history
 
 | Version | Date | Notes |
-|---------|------|-------|
+|---|---|---|
 | 1.0 | 2026-08-08 | Accepted. Tiny static int8 default compiled in; GGUF pluggable local models via an in-binary registry; platform-aware (Metal/Apple vs standard) variant selection; consent-gated fetch; candle behind `inference-local-models`. Answers ADR-0001 Q7. |
 | 1.1 | 2026-08-09 | Amended (Stage 20) for the **inference-core unification on llama.cpp** (direction set in ADR-0006). **Generation moved**: `spec draft` generates via llama.cpp (the `serve` engine) over the same GGUFs; candle `LocalGenerator` is a transitional fallback only. **Embeddings → GGUF** and **vision → `mmproj`** scheduled next (both already served via llama.cpp); candle stays their backend until they cut over, then is removed. Adds a `role` label (instruct/coding/reasoning) and opt-in coding (`qwen2.5-coder-3b`) + reasoning (`deepseek-r1-distill-qwen-1.5b`) registry entries. |
 | 1.2 | 2026-08-09 | **Unification complete — candle removed.** The engine was extracted into a shared `rto-llama` crate (no HTTP/async deps), and all three internal uses cut over to it: `infer --model` embeds via GGUF embedding models (`bge-*` re-listed as F16 GGUF; the safetensors `all-MiniLM` entry dropped), `sync` image understanding uses `smolvlm-500m-gguf` + `mmproj` (candle moondream removed), and `spec draft` generates via the shared engine directly. candle-core/nn/transformers + tokenizers are gone from the tree; `inference-local-models`/`image-vision` now mean "local **llama.cpp** models". One inference core, shared by serving and internal uses. |

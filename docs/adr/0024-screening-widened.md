@@ -18,7 +18,7 @@ confluence-url:
 
 # ADR-0024: Widening the content screen — what a peer's bundle can carry, and what we never say about it
 
-| | |
+|  |  |
 |---|---|
 | **State** | Draft |
 | **Architectural Significance** | MEDIUM |
@@ -323,6 +323,6 @@ maintainer's backlog.
 ## Document version history
 
 | Version | Date | Notes |
-|---------|------|-------|
+|---|---|---|
 | 0.1 | 2026-09-02 | Draft. Records that "a bundle is markdown" was false — `okf-core` resolves a frontmatter path to any file, so a peer can cite a hijacked PDF and every report would call the bundle clean without mentioning it; binary files are therefore **inventoried** in every bundle report and in the consent prompt, and `/f/` will set `Content-Disposition: attachment` for anything outside the image allow-list — the response typed them but never said how they should be presented, and "served as an attachment" described a behaviour no header asked for. Extraction is **not** refused: the first draft refused it on the grounds that a PDF parser is dependency weight and the media pipeline is where it would belong "if ever wanted", and Roteiro has extracted PDF text since before this ADR — `pdf-extract`, gated behind `pdf-text`, size-bounded and panic-guarded in `extract.rs`. The stronger correction is that **refusing to extract is refusing to screen**: a binary is unscreenable because nothing reads it, so the inventory is a floor and not a ceiling. Which formats can be read, and who decides per file, moves to ADR-0025. Closes four of the screen's stated exclusions, reshapes the non-English one around language-independent control tokens plus additive dictionaries, and refuses only semantic judgement. `decode_depth` defaults to 5 and is configurable; dictionaries may only ever *add* patterns, because a screen whose configuration can weaken it fails silently in the repository that weakened it. Records that the homoglyph exclusion argued against "contains Cyrillic" rather than against UTS #39's mixed-script rule. |
 | 0.2 | 2026-09-03 | **Option A rejected the external scanner for two reasons that were false, and they are replaced rather than removed.** It claimed "a subprocess per concept over a 9,511-concept bundle" and "a Python runtime as a hard dependency of `import`"; `okfguard scan -r` is one process over a tree, `--json` is per-file NDJSON, and a standalone binary consulted when present is optional. Both were answered on #723 before this ADR was corrected, so the record and the public answer disagreed until now. The decision stands on three reasons about what the interface can express: the screen is per **field** rather than per file, and downgrades a `Block` on a title because a title falls back to its filename while a body does not; `Screened::admit` returns admissible **text** rather than a label, so an exit code cannot supply what lands in `meta.content`; and a screen consulted only when installed is absent, silently, wherever it is not — subtraction by omission, which is the failure the additive-only dictionary rule exists to prevent. |

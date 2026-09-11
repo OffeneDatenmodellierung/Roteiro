@@ -18,7 +18,7 @@ confluence-url:
 
 # ADR-0002: Adopt the official rmcp SDK for networked MCP serving
 
-| | |
+|  |  |
 |---|---|
 | **State** | Accepted |
 | **Architectural Significance** | MEDIUM |
@@ -72,5 +72,5 @@ Decision taken by the project team after weighing the dependency cost against th
 ## Document version history
 
 | Version | Date | Notes |
-|---------|------|-------|
+|---|---|---|
 | 1.0 | 2026-08-08 | Accepted. Adopt rmcp for stdio + streamable-HTTP MCP serving, feature-gated; amends ADR-0001 Stage 7. |

@@ -6,24 +6,24 @@ Parent: ADRs
 # ADR-specific metadata (unknown keys are ignored; used for indexing/search)
 type: adr
 adr-id: "0023"
-status: Draft                       # Draft | For Review | Accepted | Rejected | Superseded
+status: Accepted                    # Draft | For Review | Accepted | Rejected | Superseded
 architectural-significance: MEDIUM  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "0.1"
-last-modified: 2026-09-02
+version: "1.0"
+last-modified: 2026-09-11
 confluence-url:
 ---
 
 # ADR-0023: Authoring commands act on the sources, and only where a rule is decidable
 
-| | |
+|  |  |
 |---|---|
-| **State** | Draft |
+| **State** | Accepted |
 | **Architectural Significance** | MEDIUM |
 | **Domain** | Developer Tooling |
-| **Document version** | 0.1 |
+| **Document version** | 1.0 |
 | **Related** | [[docs/adr/0004-spec-blueprint-authoring-pillar.md]] · [[docs/adr/0021-open-knowledge-format-bundle.md]] · [[docs/adr/0022-dynamic-okf-viewer.md]] |
 
 ## Reference
@@ -119,7 +119,7 @@ Each command is added, and its scope is stated where the rule stops:
 | command | what it does | admitted because |
 |---|---|---|
 | `new` | scaffold a document into the repository's own ADR home | already exists as `spec scaffold`; this is its name in the family, and it writes rather than printing |
-| `fmt` | canonical frontmatter key order, ISO date normalisation, table alignment | purely syntactic; the document's meaning cannot change |
+| `fmt` | canonical frontmatter key order, ISO date normalisation, single-space table cells | purely syntactic; the document's meaning cannot change |
 | `fix` | apply the lint remedies that are mechanical, and **list the rest** | the mechanical set is decidable; the remainder is reported, never guessed |
 | `mv` | move or rename, and repair every inbound `[[…]]` | the link graph is already computed, so the repair is derived, not inferred |
 | `rm` | delete, and report every inbound link that would break | deletion is decidable; whether to *accept* the breakage is the author's call |
@@ -181,5 +181,6 @@ declines.
 ## Document version history
 
 | Version | Date | Notes |
-|---------|------|-------|
+|---|---|---|
 | 0.1 | 2026-09-02 | Draft scaffold. Records the decision to add `roteiro docs` over the authored sources rather than the bundle, and the rule that admits each command only as far as it is decidable. `split` and `merge` are narrowed to their mechanical half. |
+| 1.0 | 2026-09-11 | **Step 1 implemented: `roteiro docs fmt`.** `rto_spec::fmt::canonical` is the form and `roteiro docs fmt [PATHS]` is the surface; without `--write` it prints a unified diff and **exits non-zero**, so it is usable as a check the way `cargo fmt --check` is. **Measurement moved two of the three stated jobs and narrowed the third.** Measured over this repository's 26 ADRs before anything was written: the frontmatter key order is already one order in 26 of 26, and `last-modified` is already ISO in 26 of 26 — so those survive as **idempotence guarantees rather than cleanups**, holding a line rather than moving one. "Table alignment" had to be narrowed, because the obvious reading of it is destructive here: an ADR history table carries prose paragraphs in single cells — **59 of them over 1,000 characters, the widest 5,789** — so padding each cell to its column's widest would blow every sibling row out to match. The canonical form is therefore one space either side of every cell, which is the ordinary markdown convention and a form in which a long cell pads nothing. **Three rules the draft did not anticipate, each of which a naive implementation gets wrong.** (a) *A pipe inside inline code is not a column boundary.* Found by running `fmt` over the real `docs/` rather than a fixture: ADR-0006 documents the chat-template marker `` `<|im_start|>` `` in a history row, and splitting on those pipes rewrote it to `` `< | im_start | >` `` — a formatter corrupting the text it formats, which is the one thing a purely syntactic rewrite may never do. Markdown itself would read that row as having extra columns, so the source is arguably already wrong; that is not this command's business to decide. (b) *Fenced code is left exactly as written* — these documents quote markdown to show what it looks like, and reformatting a fenced table rewrites the thing the surrounding prose is pointing at. (c) *A frontmatter key moves with the comment above it*, or the comment is left describing whatever lands underneath. **`fmt` takes paths rather than the authored layer**, departing from this ADR's "portability is inherited" note. That seam is right for `mv`, `rm` and `index`, which need the link graph; `fmt` does not, and requiring a repository and a built graph to reformat a table would give the cheapest verb in the family the heaviest precondition — and make it unusable on the document being drafted before it is committed. **The `State`/`Status` drift this ADR predicted is settled**, on `**State**`: 23 of 26 already said it and `scaffold_adr` emits it. Nothing reads that row — the drift gate reads the frontmatter and the **Document version** row — so it is cosmetic by construction. **The one-time churn was 33 of 37 files**, and content-preserving: compared as a multiset of whitespace-normalised lines, **zero** files gained or lost content, only separator padding, key order and that one relabel. Pinned by `crates/roteiro/tests/docs_are_canonical.rs`, which asserts both that every document is canonical and that canonicalising it twice changes nothing — proved by de-canonicalising one separator row in `docs/SERVING.md`, which fails it by name. |

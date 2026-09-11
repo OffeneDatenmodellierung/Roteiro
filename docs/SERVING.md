@@ -20,7 +20,7 @@ This is the single most useful thing to know about it. The mode is decided by
 whether you send a `tools` array — nothing else.
 
 | you send | mode | the model's tools are | grounded in your graph |
-| --- | --- | --- | --- |
+|---|---|---|---|
 | **no `tools`** | **Ask** | Roteiro's graph tools — `search`, `context`, `path`, `debt`, … | **yes** |
 | **`tools` present** | **general** | **yours only** — the graph tools are not injected | no |
 
@@ -58,7 +58,7 @@ route. The unscoped route answers about the single repository the server was
 started in.
 
 | route | scope |
-| --- | --- |
+|---|---|
 | `/v1/chat/completions` | the server's own repository |
 | `/v1/{project}/chat/completions` | one project |
 | `/v1/workspaces/{ws}/chat/completions` | a workspace |
@@ -70,7 +70,7 @@ Stated rather than half-implemented, so that a gap is a documented decision rath
 than a surprise.
 
 | surface | status | why |
-| --- | --- | --- |
+|---|---|---|
 | `tools` | **supported** | advertised to the model; calls returned, never run |
 | `tool_calls` on the response and on a replayed assistant turn | **supported** | rendered to and from the in-band `<tool_call>` protocol |
 | `role: "tool"` / `tool_call_id` / `name` | **supported** | mapped to a `<tool_response>` **user** turn — see below |
@@ -160,7 +160,7 @@ Four statuses, the same four the divergence table above uses:
   cell quotes the message you will receive, verbatim.**
 
 | parameter | status | what happens |
-| --- | --- | --- |
+|---|---|---|
 | `audio` | **400** | `audio` is not supported: no audio is generated, so a request asking for it would come back as text with nothing to say the voice was ignored. This endpoint has no audio output path at all; there is no setting that enables one. |
 | `frequency_penalty` | **400** | `frequency_penalty` is not supported: repetition penalties are not wired to the sampler, so the sampling you configured is not the sampling that ran. `temperature` is the one sampling control this endpoint honours. |
 | `function_call` | **400** | `function_call` is not supported: the deprecated `function_call` field is not read, so a forced call would simply not be forced. Send `tool_choice` instead — though note that it too is accepted and not enforced here, so neither field will force a named function today. |

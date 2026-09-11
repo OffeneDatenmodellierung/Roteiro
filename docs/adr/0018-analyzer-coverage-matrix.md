@@ -18,7 +18,7 @@ confluence-url:
 
 # ADR-0018: Analyzer coverage — which analyzers deliver which languages, and on which axis
 
-| | |
+|  |  |
 |---|---|
 | **State** | Accepted |
 | **Architectural Significance** | MEDIUM |

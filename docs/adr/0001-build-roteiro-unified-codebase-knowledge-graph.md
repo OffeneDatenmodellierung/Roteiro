@@ -18,7 +18,7 @@ confluence-url:
 
 # ADR-0001: Build Roteiro — a unified, provenance-tagged codebase knowledge graph (spec-store v2)
 
-| | |
+|  |  |
 |---|---|
 | **State** | Accepted |
 | **Architectural Significance** | HIGH |
@@ -186,12 +186,12 @@ continuing to imply an MSRV constraint that has gone (see v1.4).
 Accepted by the project team without external advisory review — single-team open-source project; future significant changes will be superseding ADRs. Naming secured: `roteiro.dev` registered, crates.io names available, repo created at `OffeneDatenmodellierung/Roteiro`. Planned: circulate v0.x for review before implementation beyond crate-name reservation.
 
 | Date | Advisor | Decision version | Advice |
-|------|---------|------------------|--------|
+|---|---|---|---|
 
 ## Document version history
 
 | Version | Date | Notes |
-|---------|------|-------|
+|---|---|---|
 | 0.1 | 2026-08-07 | Initial draft: consolidation rationale, four options, Roteiro architecture (provenance model, three crates + CLI, content-addressed cache, CI-canonical artifacts, importers, MCP-optional). |
 | 1.0 | 2026-08-07 | Accepted. Naming secured (roteiro.dev, crates.io, OffeneDatenmodellierung/Roteiro); MIT OR Apache-2.0; attribution to The Roteiro Project Team. Stage 1 bootstrap started. |
 | 1.1 | 2026-08-10 | Added an **Implementation** section linking the ADR's decisions into the code (`[[path#Symbol]]`), so `roteiro check` validates this ADR against the implementation (Stage 14 self-check). |

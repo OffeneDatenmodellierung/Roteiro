@@ -18,6 +18,7 @@ mod annotate;
 mod blueprint;
 mod check;
 mod convention;
+pub mod fmt;
 mod import;
 mod lat;
 mod layer;

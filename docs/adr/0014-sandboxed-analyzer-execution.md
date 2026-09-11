@@ -18,7 +18,7 @@ confluence-url:
 
 # ADR-0014: Sandboxed analyzer execution — an owned seam, ingest by default, boxlite opt-in
 
-| | |
+|  |  |
 |---|---|
 | **State** | Accepted |
 | **Architectural Significance** | HIGH |

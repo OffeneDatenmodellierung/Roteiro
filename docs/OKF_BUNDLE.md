@@ -42,7 +42,7 @@ graph already distinguishes what a person wrote from what a machine derived.
 OKF turns that into trust tiers (§5.3), which a consumer derives from `verified`:
 
 | the graph's provenance | frontmatter | tier a consumer derives |
-| --- | --- | --- |
+|---|---|---|
 | authored — ADR and blueprint prose | `verified: [{ by: human:<id> }]` | **human-reviewed** |
 | derived — deterministic extraction | `verified: [{ by: roteiro/<version> }]` | machine-confirmed |
 | inferred — heuristic, carries a confidence | `generated:` alone | unverified |
@@ -299,7 +299,7 @@ of it rewrites a bundle: `roteiro render okf` is the only writer, and
 graph — with the consent gate above.
 
 | Command | Answers | Gates? |
-| --- | --- | --- |
+|---|---|---|
 | `okf info` | What is this bundle — size, tiers, staleness, links, computations, and the files it carries that are **not** concepts | never |
 | `okf validate` | Does it conform to OKF v0.2 | on any error |
 | `okf lint` | Is it hygienic — `L1`–`L12`, plus our `R1` | never |

@@ -18,7 +18,7 @@ confluence-url:
 
 # ADR-0005: Image ingestion — tiered OCR (pure-Rust) + optional vision understanding
 
-| | |
+|  |  |
 |---|---|
 | **State** | Accepted |
 | **Architectural Significance** | MEDIUM |
@@ -123,7 +123,7 @@ Project direction incorporated above: keep the **pure-Rust / no-C++-FFI** stance
 ## Document version history
 
 | Version | Date | Notes |
-|---------|------|-------|
+|---|---|---|
 | 1.0 | 2026-08-09 | Accepted. Two-tier image ingestion: Tier A pure-Rust OCR (`ocrs`/`rten`, feature `image-ocr`) as the default text tier; Tier B optional `candle` document-VLM understanding (feature `image-vision`) reusing ADR-0003. Rejects `rusto-rs` (MNN C++), `yingkitw/ocr` (immature/unvalidated), `oar-ocr` (ONNX Runtime C++), and the spliced `rten`+`candle`-TrOCR pipeline. Go/no-go spike passed: MSRV 1.94 build, no FFI, `cargo deny` clean at ~73 crates — provided `image` is pinned to minimal codecs (default features pull an AVIF→`libfuzzer-sys` NCSA chain). |
 | 1.1 | 2026-08-15 | Consequence added: the shared vision/audio engine must be released before process exit — a `static`-cached engine is never dropped and aborts a Metal build in ggml-metal's exit-time teardown (issue #291). No decision changed. |
 | 1.2 | 2026-08-15 | Consequence added: the llama.cpp backend is a process-global, so it is initialised once and shared by every engine — a second engine used to fail to construct and go silently inert (issue #296). Release ordering (engines, then backend) is now enforced by `Arc` ownership rather than by call order. No decision changed. |
