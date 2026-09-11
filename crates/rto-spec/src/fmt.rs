@@ -60,6 +60,21 @@ const ADR_KEY_ORDER: &[&str] = &[
 /// hand-written fixture missed.
 #[must_use]
 pub fn canonical(text: &str) -> String {
+    // **CRLF is normalised for the work and restored for the write.** Every rule
+    // below is written against `\n`, and `split_frontmatter` matches `\n---\n`
+    // literally — so a CRLF document had no frontmatter on the first pass, got
+    // its line endings flattened by `lines()`, and had its keys reordered on the
+    // *second*. That is `canonical(canonical(t)) != canonical(t)`, the one
+    // property this module advertises, and it survived seven review rounds
+    // because no test used CRLF.
+    //
+    // Restoring the ending matters as much as handling it: rewriting a CRLF file
+    // to LF is a change this command does not advertise, and every defect in this
+    // module has been an unadvertised rewrite.
+    if text.contains("\r\n") {
+        let lf = text.replace("\r\n", "\n");
+        return canonical(&lf).replace('\n', "\r\n");
+    }
     let (front, body) = crate::adr::split_frontmatter(text);
     // `split_frontmatter` returns an empty `front` for **both** "there is no
     // frontmatter" and "the frontmatter block is empty". Telling them apart by
@@ -1171,5 +1186,42 @@ mod seventh_round {
             got.contains("| **Status** | what it means |"),
             "a data row in the summary table was rewritten:\n{got}"
         );
+    }
+}
+
+#[cfg(test)]
+mod line_endings {
+    use super::*;
+
+    /// A CRLF document is formatted in one pass, and stays CRLF.
+    ///
+    /// `split_frontmatter` matches `\n---\n`, so a CRLF file had no frontmatter
+    /// on the first pass, was flattened to LF by `lines()`, and had its keys
+    /// reordered on the second — breaking idempotence, and silently changing
+    /// every line ending in the file. Found by re-testing an old suppressed
+    /// review finding on #790 rather than trusting that it had been answered.
+    #[test]
+    fn a_crlf_document_is_a_fixed_point_and_stays_crlf() {
+        let src = "---\r\nversion: \"1.0\"\r\nTitle: T\r\n---\r\n\r\n|  a |b |\r\n|---|---|\r\n";
+        let once = canonical(src);
+        assert_eq!(canonical(&once), once, "not idempotent:\n{once:?}");
+        assert!(!once.contains('\n') || once.contains("\r\n"), "{once:?}");
+        assert!(
+            !once.replace("\r\n", "").contains('\n'),
+            "line endings were rewritten to LF: {once:?}"
+        );
+        // And it did the work on the first pass.
+        assert!(
+            once.starts_with("---\r\nTitle: T\r\n"),
+            "frontmatter not reordered on pass one: {once:?}"
+        );
+        assert!(once.contains("| a | b |"), "{once:?}");
+    }
+
+    /// An LF document does not acquire carriage returns.
+    #[test]
+    fn an_lf_document_stays_lf() {
+        let got = canonical("---\nTitle: T\n---\n\n| a | b |\n|---|---|\n");
+        assert!(!got.contains('\r'), "{got:?}");
     }
 }
