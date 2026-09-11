@@ -105,56 +105,75 @@ pub fn canonical(text: &str) -> String {
 /// leave the comment describing whatever landed underneath — the same defect
 /// this crate's own module docs had, at a smaller scale.
 fn canonical_frontmatter(front: &str) -> String {
-    let mut blocks: Vec<(Option<String>, Vec<&str>)> = Vec::new();
-    let mut pending: Vec<&str> = Vec::new();
-    for line in front.lines() {
-        let trimmed = line.trim();
-        let is_key = !line.starts_with('#')
-            && !line.starts_with([' ', '\t'])
+    let lines: Vec<&str> = front.lines().collect();
+    let is_key = |l: &str| {
+        let trimmed = l.trim();
+        !l.starts_with('#')
+            && !l.starts_with([' ', '\t'])
             && !trimmed.starts_with('-')
-            && line.contains(':')
-            && !trimmed.is_empty();
-        if is_key {
-            pending.push(line);
-            let key = line.split(':').next().unwrap_or_default().trim().to_owned();
-            blocks.push((Some(key), std::mem::take(&mut pending)));
-            continue;
+            && l.contains(':')
+            && !trimmed.is_empty()
+    };
+    let is_lead = |l: &str| l.trim().is_empty() || l.trim_start().starts_with('#');
+
+    // Two passes rather than one running accumulator. The incremental version
+    // had to decide each line's owner as it arrived, and could not: a blank or a
+    // comment *inside* a sequence is indistinguishable from one leading the next
+    // key until you have seen what follows it. Slicing between key lines and
+    // then deciding each boundary with the whole picture answers both.
+    //
+    // A block runs from the lead-in above its key (blanks and comments, which
+    // belong to the key **below** them) through its continuations (indented or
+    // `-` lines, which belong to the key **above** them).
+    let keys: Vec<usize> = (0..lines.len()).filter(|i| is_key(lines[*i])).collect();
+    let mut blocks: Vec<(String, usize, usize)> = Vec::new();
+    let mut content_end = 0;
+    for (n, &at) in keys.iter().enumerate() {
+        let mut lead = at;
+        while lead > content_end && is_lead(lines[lead - 1]) {
+            lead -= 1;
         }
-        // **A continuation belongs to the key above it; a comment to the key
-        // below.** Treating both as "pending for the next key" moved a YAML
-        // sequence onto whichever key happened to sort next — `tags:\n- one`
-        // emitted `- one` under `Title:`, detaching the list from its key and
-        // corrupting the frontmatter outright.
-        let is_continuation = line.starts_with([' ', '\t']) || trimmed.starts_with('-');
-        match blocks.last_mut() {
-            Some((_, lines)) if is_continuation && pending.is_empty() => lines.push(line),
-            _ => pending.push(line),
+        let stop = keys.get(n + 1).copied().unwrap_or(lines.len());
+        content_end = stop;
+        while content_end > at + 1 && is_lead(lines[content_end - 1]) {
+            content_end -= 1;
         }
+        let key = lines[at]
+            .split(':')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
+        blocks.push((key, lead, content_end));
     }
-    let trailing = pending;
 
     let mut out = String::with_capacity(front.len());
+    let mut emit = |from: usize, to: usize| {
+        for l in &lines[from..to] {
+            let _ = writeln!(out, "{}", normalise_value(l));
+        }
+    };
+    // Anything before the first block, and anything after the last, stays put:
+    // it leads or trails no key and has no place in the ordering.
+    let head = blocks.first().map_or(lines.len(), |b| b.1);
+    emit(0, head);
+
     let mut used = vec![false; blocks.len()];
     for want in ADR_KEY_ORDER {
-        for (i, (key, lines)) in blocks.iter().enumerate() {
-            if !used[i] && key.as_deref() == Some(*want) {
+        for (i, (key, from, to)) in blocks.iter().enumerate() {
+            if !used[i] && key == want {
                 used[i] = true;
-                for l in lines {
-                    let _ = writeln!(out, "{}", normalise_value(l));
-                }
+                emit(*from, *to);
             }
         }
     }
-    for (i, (_, lines)) in blocks.iter().enumerate() {
+    for (i, (_, from, to)) in blocks.iter().enumerate() {
         if !used[i] {
-            for l in lines {
-                let _ = writeln!(out, "{}", normalise_value(l));
-            }
+            emit(*from, *to);
         }
     }
-    for l in trailing {
-        let _ = writeln!(out, "{l}");
-    }
+    let tail = blocks.last().map_or(0, |b| b.2);
+    emit(tail, lines.len());
     out
 }
 
@@ -1285,5 +1304,56 @@ mod yaml_blocks {
         assert_eq!(lines[0], "Title: T");
         assert_eq!(lines[1], "# why");
         assert_eq!(lines[2], "status: Accepted");
+    }
+}
+
+#[cfg(test)]
+mod tenth_round {
+    use super::*;
+
+    /// A blank or a comment **inside** a sequence stays inside it.
+    ///
+    /// The incremental block builder decided each line's owner as it arrived,
+    /// so a blank line in the middle of a sequence made everything after it
+    /// look like a lead-in to the next key — and reordering then moved those
+    /// items onto that key. Raised on #790, the third defect of this shape.
+    #[test]
+    fn a_blank_inside_a_sequence_does_not_break_it_up() {
+        let src =
+            "---\ntags:\n  - one\n\n  # note\n  - two\nstatus: deprecated\nTitle: T\n---\n\n# T\n";
+        let got = canonical(src);
+        let front = got.split("---\n").nth(1).expect("frontmatter");
+        let at = |n: &str| {
+            front
+                .find(n)
+                .unwrap_or_else(|| panic!("{n} missing from:\n{front}"))
+        };
+        assert!(at("tags:") < at("  - one"), "{front}");
+        assert!(at("  - one") < at("  # note"), "{front}");
+        assert!(at("  # note") < at("  - two"), "{front}");
+        assert!(
+            at("  - two") < at("status:") || at("status:") < at("tags:"),
+            "an item escaped its key:\n{front}"
+        );
+        assert_eq!(canonical(&got), got, "not idempotent:\n{got}");
+    }
+
+    /// A comment leads the key below it — even the first one — and a trailing
+    /// comment that leads nothing stays at the end.
+    #[test]
+    fn a_lead_in_travels_and_a_trailing_comment_does_not() {
+        let got = canonical_frontmatter("# top matter\nversion: \"1\"\nTitle: T\n# trailing\n");
+        let lines: Vec<&str> = got.lines().collect();
+        assert_eq!(lines[0], "Title: T", "{got}");
+        assert_eq!(lines[1], "# top matter", "the comment left its key:\n{got}");
+        assert_eq!(lines[2], "version: \"1\"", "{got}");
+        assert_eq!(lines[3], "# trailing", "a trailing comment moved:\n{got}");
+    }
+
+    /// Content before the first key that leads nothing is not reordered.
+    #[test]
+    fn material_before_any_key_stays_put() {
+        let got = canonical_frontmatter("- stray\nversion: \"1\"\nTitle: T\n");
+        assert_eq!(got.lines().next(), Some("- stray"), "{got}");
     }
 }
