@@ -93,16 +93,37 @@ pub(crate) fn scan_wiki_links(line: &str) -> Vec<String> {
 /// preserved verbatim (backticks are ASCII, so all slice boundaries are valid).
 #[must_use]
 pub(crate) fn strip_code_spans(line: &str) -> String {
+    let spans = code_spans(line);
+    let mut out = String::with_capacity(line.len());
+    let mut at = 0;
+    for (start, end) in spans {
+        out.push_str(&line[at..start]);
+        at = end;
+    }
+    out.push_str(&line[at..]);
+    out
+}
+
+/// The byte ranges of `line`'s **matched** inline code spans, in order.
+///
+/// The `CommonMark` rule, in one place: a span opens with a run of *n* backticks
+/// and closes with the next run of exactly *n*; an opening run with no matching
+/// close is literal text and yields no span.
+///
+/// Separate from [`strip_code_spans`] because removing a span and knowing where
+/// one *is* are different questions, and `rto_spec::fmt` needs the second — a
+/// table row's `|` inside a code span is content rather than a column boundary.
+/// It had its own backtick scanner until #790 found that it entered code mode on
+/// an unmatched run and hid the rest of the row, which is exactly the case this
+/// rule exists to get right.
+#[must_use]
+pub(crate) fn code_spans(line: &str) -> Vec<(usize, usize)> {
     let bytes = line.as_bytes();
-    let mut out = String::new();
+    let mut out = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] != b'`' {
-            let start = i;
-            while i < bytes.len() && bytes[i] != b'`' {
-                i += 1;
-            }
-            out.push_str(&line[start..i]);
+            i += 1;
             continue;
         }
         // Measure the opening backtick run.
@@ -128,11 +149,11 @@ pub(crate) fn strip_code_spans(line: &str) -> String {
                 j += 1;
             }
         }
-        match close {
-            // A matched span: drop it entirely.
-            Some(end) => i = end,
-            // Unmatched backticks are literal; keep them and continue.
-            None => out.push_str(&line[run_start..i]),
+        // An unmatched opening run is literal, and the scan continues *after*
+        // it rather than restarting inside it.
+        if let Some(end) = close {
+            out.push((run_start, end));
+            i = end;
         }
     }
     out

@@ -237,9 +237,11 @@ fn canonical_body(body: &str, is_adr: bool) -> String {
                 // and rewriting that is changing authored content.
                 let summary = !seen_table;
                 seen_table = true;
-                for l in block {
+                for (n, l) in block.iter().enumerate() {
                     let row = canonical_table_row(l.trim());
-                    let row = if is_adr && summary {
+                    // The **first row** of the first table, as documented. A
+                    // later `**Status**` row in that same table is a data row.
+                    let row = if is_adr && summary && n == 0 {
                         relabel_state(&row)
                     } else {
                         row
@@ -311,8 +313,12 @@ fn is_separator_row(line: &str) -> bool {
     let cells = split_cells(line.trim());
     !cells.is_empty()
         && cells.iter().all(|c| {
-            let core = c.trim_start_matches(':').trim_end_matches(':');
-            core.len() >= 3 && !core.is_empty() && core.chars().all(|ch| ch == '-')
+            // **At most one** colon at each edge. Trimming every colon read
+            // `| ::--- |` — a data row — as a separator and rewrote it, losing
+            // authored content.
+            let core = c.strip_prefix(':').unwrap_or(c);
+            let core = core.strip_suffix(':').unwrap_or(core);
+            core.len() >= 3 && core.chars().all(|ch| ch == '-')
         })
 }
 
@@ -380,48 +386,32 @@ fn canonical_table_row(row: &str) -> String {
 fn split_cells(row: &str) -> Vec<String> {
     let trimmed = row.trim();
     let body = trimmed.strip_prefix('|').unwrap_or(trimmed);
-    // The **closing** delimiter is only a delimiter when it is unescaped. In a
-    // row like `| a \|` the final pipe is content, and stripping it left a bare
-    // backslash where the escape had been — the formatter corrupting the cell it
-    // was protecting.
     let inner = match body.strip_suffix('|') {
         Some(rest) if !ends_escaped(rest) => rest,
         _ => body,
     };
+    // Code spans come from [`crate::text::code_spans`], which is the crate's one
+    // copy of the `CommonMark` rule. The scanner this replaced entered code mode
+    // on *any* backtick run, so an unmatched backtick — `| a ` | b |` — hid the
+    // rest of the row and silently changed the row's column count.
+    let spans = crate::text::code_spans(inner);
+    let in_code = |at: usize| spans.iter().any(|(s, e)| at >= *s && at < *e);
+
     let mut cells = Vec::new();
     let mut cur = String::new();
     let mut escaped = false;
-    let mut code: Option<usize> = None;
-    let chars: Vec<char> = inner.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        let ch = chars[i];
+    for (at, ch) in inner.char_indices() {
         if escaped {
             cur.push(ch);
             escaped = false;
-            i += 1;
         } else if ch == '\\' {
             cur.push(ch);
             escaped = true;
-            i += 1;
-        } else if ch == '`' {
-            let run = chars[i..].iter().take_while(|c| **c == '`').count();
-            match code {
-                Some(open) if open == run => code = None,
-                None => code = Some(run),
-                Some(_) => {}
-            }
-            for _ in 0..run {
-                cur.push('`');
-            }
-            i += run;
-        } else if ch == '|' && code.is_none() {
+        } else if ch == '|' && !in_code(at) {
             cells.push(cur.trim().to_owned());
             cur = String::new();
-            i += 1;
         } else {
             cur.push(ch);
-            i += 1;
         }
     }
     cells.push(cur.trim().to_owned());
@@ -927,6 +917,9 @@ mod properties {
         "| a \\|\n|---|\n",
         "| `<|im_start|>` | x |\n|---|---|\n",
         "| ``a ` | b`` | c |\n|---|---|\n",
+        "| a ` | b |\n|---|---|\n",
+        "| ::--- | ---:: |\n",
+        "| **Status** | Accepted |\n|---|---|\n| **Status** | what it means |\n",
         "| **Status** | Accepted |\n|---|---|\n",
         "```md\n|  x |y|\n```\n",
         "````md\n```\n|  x |y|\n```\n````\n",
@@ -1131,5 +1124,52 @@ mod sixth_round {
             "  last-modified: 2026-9-1"
         );
         assert_eq!(normalise_value("other: 2026-9-1"), "other: 2026-9-1");
+    }
+}
+
+#[cfg(test)]
+mod seventh_round {
+    use super::*;
+
+    /// An unmatched backtick is literal, so the pipe after it is a boundary.
+    ///
+    /// The scanner this replaced entered code mode on any backtick run, so a row
+    /// carrying a lone backtick hid the rest of itself and silently dropped a
+    /// column.
+    /// Now `crate::text::code_spans` decides — the crate's one copy of the
+    /// `CommonMark` rule. Raised on #790.
+    #[test]
+    fn an_unmatched_backtick_does_not_hide_the_rest_of_the_row() {
+        assert_eq!(split_cells("| a ` | b |"), vec!["a `", "b"]);
+        // A matched span still protects its pipe.
+        assert_eq!(split_cells("| a `x|y` | b |"), vec!["a `x|y`", "b"]);
+    }
+
+    /// Markdown alignment is at most one colon per edge.
+    #[test]
+    fn a_doubled_colon_is_content_not_alignment() {
+        assert!(is_separator_row("| :--- | ---: |"));
+        assert!(is_separator_row("| :---: |"));
+        assert!(
+            !is_separator_row("| ::--- | ---:: |"),
+            "a data row was read as a separator"
+        );
+        assert_eq!(
+            canonical_body("| a | b |\n|---|---|\n| ::--- | ---:: |\n", true),
+            "| a | b |\n|---|---|\n| ::--- | ---:: |\n"
+        );
+    }
+
+    /// The relabel is the summary table's **first row**, not its every row.
+    #[test]
+    fn a_later_row_of_the_summary_table_keeps_its_own_status() {
+        let doc = "---\ntype: adr\n---\n\n| **Status** | Accepted |\n|---|---|\n\
+                   | **Status** | what it means |\n";
+        let got = canonical(doc);
+        assert!(got.contains("| **State** | Accepted |"), "{got}");
+        assert!(
+            got.contains("| **Status** | what it means |"),
+            "a data row in the summary table was rewritten:\n{got}"
+        );
     }
 }
