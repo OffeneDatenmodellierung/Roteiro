@@ -108,14 +108,27 @@ fn canonical_frontmatter(front: &str) -> String {
     let mut blocks: Vec<(Option<String>, Vec<&str>)> = Vec::new();
     let mut pending: Vec<&str> = Vec::new();
     for line in front.lines() {
+        let trimmed = line.trim();
         let is_key = !line.starts_with('#')
-            && !line.starts_with(' ')
+            && !line.starts_with([' ', '\t'])
+            && !trimmed.starts_with('-')
             && line.contains(':')
-            && !line.trim().is_empty();
-        pending.push(line);
+            && !trimmed.is_empty();
         if is_key {
+            pending.push(line);
             let key = line.split(':').next().unwrap_or_default().trim().to_owned();
             blocks.push((Some(key), std::mem::take(&mut pending)));
+            continue;
+        }
+        // **A continuation belongs to the key above it; a comment to the key
+        // below.** Treating both as "pending for the next key" moved a YAML
+        // sequence onto whichever key happened to sort next — `tags:\n- one`
+        // emitted `- one` under `Title:`, detaching the list from its key and
+        // corrupting the frontmatter outright.
+        let is_continuation = line.starts_with([' ', '\t']) || trimmed.starts_with('-');
+        match blocks.last_mut() {
+            Some((_, lines)) if is_continuation && pending.is_empty() => lines.push(line),
+            _ => pending.push(line),
         }
     }
     let trailing = pending;
@@ -1223,5 +1236,54 @@ mod line_endings {
     fn an_lf_document_stays_lf() {
         let got = canonical("---\nTitle: T\n---\n\n| a | b |\n|---|---|\n");
         assert!(!got.contains('\r'), "{got:?}");
+    }
+}
+
+#[cfg(test)]
+mod yaml_blocks {
+    use super::*;
+
+    /// A sequence stays under the key it belongs to.
+    ///
+    /// Every non-key line was held as "pending for the next key", so reordering
+    /// moved a YAML sequence onto whichever key sorted next — `tags:\n- one`
+    /// emitted `- one` under `Title:`, detaching the list from its key. Raised
+    /// on #790.
+    #[test]
+    fn a_sequence_stays_with_its_key() {
+        let got = canonical("---\ntags:\n- one\n- two\nstatus: deprecated\nTitle: T\n---\n\n# T\n");
+        let front = got.split("---\n").nth(1).expect("frontmatter");
+        let at = |needle: &str| front.find(needle).expect(needle);
+        assert!(
+            at("tags:") < at("- one"),
+            "the sequence left its key:\n{front}"
+        );
+        assert!(at("- one") < at("- two"), "{front}");
+        assert!(
+            at("- two") < at("status:") || at("status:") < at("tags:"),
+            "an item landed inside another key's block:\n{front}"
+        );
+        assert_eq!(canonical(&got), got, "not idempotent:\n{got}");
+    }
+
+    /// An indented continuation also stays with its key.
+    #[test]
+    fn an_indented_value_stays_with_its_key() {
+        let got = canonical("---\ndecision-makers:\n  - alice\nTitle: T\n---\n\n# T\n");
+        let front = got.split("---\n").nth(1).expect("frontmatter");
+        assert!(
+            front.find("decision-makers:").expect("key") < front.find("  - alice").expect("value"),
+            "{front}"
+        );
+    }
+
+    /// A comment still belongs to the key below it.
+    #[test]
+    fn a_comment_still_leads_its_key() {
+        let got = canonical_frontmatter("version: \"1\"\n# why\nstatus: Accepted\nTitle: T\n");
+        let lines: Vec<&str> = got.lines().collect();
+        assert_eq!(lines[0], "Title: T");
+        assert_eq!(lines[1], "# why");
+        assert_eq!(lines[2], "status: Accepted");
     }
 }
