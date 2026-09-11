@@ -7159,6 +7159,14 @@ fn markdown_files(root: &std::path::Path, out: &mut Vec<std::path::PathBuf>) -> 
     // directory walk below, so checking only there left `roteiro docs fmt
     // --write link.md` able to rewrite a file outside the tree the caller
     // named — the exact thing the walk refuses. Raised on #790.
+    //
+    // **This is a scope guarantee, not a security boundary**, and the
+    // distinction is deliberate: the check and the later write are not atomic,
+    // so a rename between them is not prevented. That race has nothing on the
+    // other side of it — `fmt` runs with the caller's own privileges on a tree
+    // they already own, so anyone who could win it could edit the file
+    // directly. What the check buys is that an ordinary symlink sitting in
+    // `docs/` does not get quietly written through.
     let meta = std::fs::symlink_metadata(root)
         .map_err(|e| anyhow::anyhow!("reading {}: {e}", root.display()))?;
     if meta.file_type().is_symlink() {
