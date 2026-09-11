@@ -16,6 +16,10 @@ use serde::Deserialize;
 pub const GRAPHIFY_REF: &str = "import:graphify";
 
 /// Errors raised while importing.
+///
+/// Open to extension: one variant today is a statement about how little the
+/// importer currently validates, not a claim that nothing else can go wrong.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum ImportError {
     /// The source JSON could not be parsed.

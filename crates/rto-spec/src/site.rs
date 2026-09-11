@@ -55,6 +55,10 @@ const DEFAULT_ORDER: u32 = 10_000;
 /// `crate::layer::AuthoredLayer::malformed` gives for ADRs: the file asked to
 /// be published, so failing quietly would drop a page from the site while the
 /// gate stayed green.
+///
+/// Open to extension: a slug rule or a frontmatter requirement added later is
+/// a new way for a page to be malformed, not a new API.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ParseError {
     /// The `site-page` slug is not URL-safe. Each `/`-separated segment must be

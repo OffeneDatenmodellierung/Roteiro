@@ -23,6 +23,17 @@ use crate::layer::AuthoredDocs;
 use crate::site::SitePage;
 
 /// The category of an authored-layer drift.
+///
+/// Open to extension. This is the enum #438 argued about for months: adding a
+/// drift kind is technically breaking, and `AGENTS.md` already answers that —
+/// for an `rto-*` crate it ships as a **minor** and takes no `!`. Marking it
+/// here means the next rule does not have to relitigate it.
+///
+/// Note what stays fixed: the kebab-case variant **names** are a wire format a
+/// model reads over the MCP tool surface, and `#[non_exhaustive]` does not touch
+/// them. It governs whether a downstream may `match` without a wildcard, and the
+/// only downstream is `roteiro` itself.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ViolationKind {
