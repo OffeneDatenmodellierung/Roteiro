@@ -61,13 +61,20 @@ const ADR_KEY_ORDER: &[&str] = &[
 #[must_use]
 pub fn canonical(text: &str) -> String {
     let (front, body) = crate::adr::split_frontmatter(text);
+    // `split_frontmatter` returns an empty `front` for **both** "there is no
+    // frontmatter" and "the frontmatter block is empty". Telling them apart by
+    // `front.is_empty()` treated `---\n\n---` as body text and dropped both
+    // delimiters — a formatter deleting a document's frontmatter. What
+    // distinguishes them is the body: when there is no frontmatter, it is the
+    // whole input.
+    let has_front = body.len() != text.len();
     // The shared rule, not a second spelling of it. Reading the key by
     // `strip_prefix("type:")` still missed `Type: adr` and `type : adr`, which
     // `declares_adr` accepts — so a document the rest of the crate treats as an
     // ADR would have kept a legacy summary row.
     let is_adr = crate::adr::declares_adr(text);
     let mut out = String::with_capacity(text.len());
-    if !front.is_empty() {
+    if has_front {
         out.push_str("---\n");
         out.push_str(&canonical_frontmatter(front));
         out.push_str("---\n");
@@ -340,11 +347,15 @@ fn canonical_table_row(row: &str) -> String {
 ///   first column and the table changes shape.
 fn split_cells(row: &str) -> Vec<String> {
     let trimmed = row.trim();
-    let inner = trimmed
-        .strip_prefix('|')
-        .unwrap_or(trimmed)
-        .strip_suffix('|')
-        .unwrap_or_else(|| trimmed.strip_prefix('|').unwrap_or(trimmed));
+    let body = trimmed.strip_prefix('|').unwrap_or(trimmed);
+    // The **closing** delimiter is only a delimiter when it is unescaped. In a
+    // row like `| a \|` the final pipe is content, and stripping it left a bare
+    // backslash where the escape had been — the formatter corrupting the cell it
+    // was protecting.
+    let inner = match body.strip_suffix('|') {
+        Some(rest) if !ends_escaped(rest) => rest,
+        _ => body,
+    };
     let mut cells = Vec::new();
     let mut cur = String::new();
     let mut escaped = false;
@@ -383,6 +394,12 @@ fn split_cells(row: &str) -> Vec<String> {
     }
     cells.push(cur.trim().to_owned());
     cells
+}
+
+/// Whether `s` ends with an unbalanced escape, so the character after it is
+/// escaped rather than syntactic.
+fn ends_escaped(s: &str) -> bool {
+    s.chars().rev().take_while(|c| *c == '\\').count() % 2 == 1
 }
 
 /// A unified diff of `before` against `after`, or `None` when they are equal.
@@ -853,5 +870,177 @@ mod third_round {
             d.contains("@@ -1,1 +0,0 @@"),
             "deletion to an empty file:\n{d}"
         );
+    }
+}
+
+#[cfg(test)]
+mod properties {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    /// Fragments that have each, at some point, been formatted wrongly.
+    ///
+    /// Deterministic rather than random: every one of these is a shape a review
+    /// round found, so the generator is a record of what this module has
+    /// actually got wrong rather than a guess at what it might.
+    const FRAGMENTS: &[&str] = &[
+        "# Heading\n",
+        "prose with a | pipe in it\n",
+        "|\n",
+        "| a | b |\n|---|---|\n| 1 | 2 |\n",
+        "|  a |b |\n| --- | --- |\n",
+        "| -- | -- |\n",
+        "|| empty first |\n|---|---|\n",
+        "| a \\| b | c |\n|---|---|\n",
+        "| a \\|\n|---|\n",
+        "| `<|im_start|>` | x |\n|---|---|\n",
+        "| ``a ` | b`` | c |\n|---|---|\n",
+        "| **Status** | Accepted |\n|---|---|\n",
+        "```md\n|  x |y|\n```\n",
+        "````md\n```\n|  x |y|\n```\n````\n",
+        "```md\n```not-a-close\n|  x |y|\n```\n",
+        "    |  indented |code|\n",
+        "| :--- | ---: | :---: |\n",
+        "\n",
+    ];
+
+    /// The frontmatter blocks, including the two that were mishandled.
+    const FRONTS: &[&str] = &[
+        "",
+        "---\n---\n",
+        "---\n\n---\n",
+        "---\ntype: adr\nadr-id: \"0001\"\nversion: \"1.0\"\nTitle: T\n---\n",
+        "---\nType: adr\n# a comment\nlast-modified: 2026-9-1\n---\n",
+        "---\nsite-page: x/y\nstatus: deprecated\n---\n",
+    ];
+
+    /// What the document *says*, with everything `fmt` is allowed to move
+    /// removed.
+    ///
+    /// Whitespace-splitting is not enough: `|  a |b |` tokenises to `|b` and
+    /// `| a | b |` does not, and normalising exactly that padding is the job. So
+    /// a table row is compared as its **cells**, which is the thing that must
+    /// survive — a lost column changes their count and a lost escape changes
+    /// their content. Everything else is compared with its whitespace
+    /// collapsed. Separator rows are dropped, because normalising their dashes
+    /// is the point, and the ADR summary relabel is folded in as the one
+    /// deliberate substitution, as is the `last-modified` padding.
+    fn says(text: &str) -> BTreeMap<String, usize> {
+        let mut out = BTreeMap::new();
+        let mut fence: Option<(char, usize)> = None;
+        for line in text.lines() {
+            let in_fence = fence.is_some();
+            if let Some((ch, len)) = fence {
+                if fence_of(line).is_some_and(|(c, n)| {
+                    c == ch && n >= len && line.trim_start().trim_start_matches(c).trim().is_empty()
+                }) {
+                    fence = None;
+                }
+            } else if let Some(f) = fence_of(line) {
+                fence = Some(f);
+            }
+            // A separator row has a pipe. Without that test `---` — a
+            // *frontmatter delimiter* — is read as a one-column separator and
+            // skipped, which is how deleting a document's frontmatter went
+            // unnoticed by this very invariant.
+            let key = if !in_fence && line.contains('|') && is_separator_row(line) {
+                continue;
+            } else if !in_fence && is_table_line(line) {
+                split_cells(line.trim()).join("\u{1}")
+            } else {
+                line.split_whitespace().collect::<Vec<_>>().join(" ")
+            };
+            // The two deliberate substitutions, applied to both sides so the
+            // invariant measures *unintended* change only: the ADR summary
+            // relabel, and the date padding.
+            let key = normalise_value(&key).replace("**Status**", "**State**");
+            if !key.is_empty() {
+                *out.entry(key).or_default() += 1;
+            }
+        }
+        out
+    }
+
+    /// Over every front × fragment-pair document: canonicalising is idempotent
+    /// and loses nothing.
+    ///
+    /// # What this cannot see, and why that is stated rather than assumed
+    ///
+    /// [`says`] calls [`split_cells`] and [`is_separator_row`] — the functions
+    /// under test — so a defect *inside them* applies to both sides of the
+    /// comparison and cancels out. Verified rather than reasoned about:
+    /// re-introducing the escaped-trailing-pipe bug leaves this test green.
+    ///
+    /// So it covers the shapes where a defect changes the **document** —
+    /// a dropped line, an invented table, a lost frontmatter delimiter, a
+    /// failure to converge — and the cell-splitting rules keep the explicit
+    /// regression tests above, which do not share an implementation with what
+    /// they check.
+    #[test]
+    fn canonicalising_is_idempotent_and_loses_no_content() {
+        let mut checked = 0_usize;
+        for front in FRONTS {
+            for (i, a) in FRAGMENTS.iter().enumerate() {
+                for b in FRAGMENTS.iter().skip(i) {
+                    let doc = format!("{front}{a}\n{b}");
+                    let once = canonical(&doc);
+                    assert_eq!(
+                        canonical(&once),
+                        once,
+                        "not idempotent for:\n{doc:?}\nfirst pass:\n{once:?}"
+                    );
+                    assert_eq!(
+                        says(&doc),
+                        says(&once),
+                        "content changed for:\n{doc:?}\ninto:\n{once:?}"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 500, "only {checked} documents generated");
+    }
+}
+
+#[cfg(test)]
+mod fifth_round {
+    use super::*;
+
+    /// An empty frontmatter block is frontmatter, and survives.
+    ///
+    /// `split_frontmatter` returns an empty `front` for both "no frontmatter"
+    /// and "empty frontmatter", so testing `front.is_empty()` treated
+    /// `---\n\n---` as body text and dropped both delimiters — `--write`
+    /// deleting a document's frontmatter. Raised on #790.
+    #[test]
+    fn an_empty_frontmatter_block_is_not_deleted() {
+        for src in ["---\n---\n# T\n", "---\n\n---\n# T\n"] {
+            let got = canonical(src);
+            assert!(
+                got.starts_with("---\n") && got[4..].contains("---\n"),
+                "frontmatter delimiters lost from {src:?}: {got:?}"
+            );
+        }
+        // A document with no frontmatter must not gain one.
+        assert_eq!(canonical("# T\n"), "# T\n");
+    }
+
+    /// A trailing `\|` is content, not the closing delimiter.
+    ///
+    /// `strip_suffix('|')` removed the pipe of the escape, leaving a bare
+    /// backslash — the formatter corrupting the cell its escape handling exists
+    /// to protect. Raised on #790.
+    #[test]
+    fn an_escaped_pipe_at_the_end_of_a_row_survives() {
+        assert_eq!(split_cells(r"| a \|"), vec![r"a \|"]);
+        assert!(
+            !canonical_table_row(r"| a \|").contains(r"\ "),
+            "the escape was split from its pipe: {}",
+            canonical_table_row(r"| a \|")
+        );
+        // A genuine closing delimiter is still stripped.
+        assert_eq!(split_cells("| a |"), vec!["a"]);
+        // And a doubled backslash escapes itself, so that pipe *is* a delimiter.
+        assert_eq!(split_cells(r"| a \\|"), vec![r"a \\"]);
     }
 }
