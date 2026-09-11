@@ -7207,9 +7207,13 @@ fn markdown_files(root: &std::path::Path, out: &mut Vec<std::path::PathBuf>) -> 
             continue;
         }
         let path = entry.path();
-        if path.is_dir() {
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
             markdown_files(&path, out)?;
-        } else if path.extension().is_some_and(|e| e == "md") {
+        } else if kind.is_file() && path.extension().is_some_and(|e| e == "md") {
+            // **Regular files only.** "not a directory" also admits a FIFO, a
+            // socket and a device node, and `read_to_string` on a FIFO blocks
+            // forever — a formatter that hangs on a named pipe called `x.md`.
             out.push(path);
         }
     }

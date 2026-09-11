@@ -143,6 +143,32 @@ fn overlapping_roots_do_not_double_count() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A named pipe called `x.md` is not a document.
+///
+/// The walk admitted anything that was not a directory, so a FIFO reached
+/// `read_to_string` — which blocks forever on one. Raised on #790.
+#[cfg(unix)]
+#[test]
+fn a_fifo_is_not_formatted() {
+    let root = fixture("fifo");
+    let fifo = root.join("docs/PIPE.md");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("mkfifo");
+    assert!(status.success(), "mkfifo failed");
+
+    // Completes rather than blocking, and still reports the real document.
+    let (ok, out) = run(&root, &[]);
+    assert!(!ok, "{out}");
+    assert!(out.contains("DRIFTED.md"), "{out}");
+    assert!(
+        !out.contains("PIPE.md"),
+        "a FIFO was treated as a document:\n{out}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// A symlinked **parent** is refused too, not just a symlinked file.
 ///
 /// `symlink_metadata("a/b.md")` reports a regular file even when `a` is a

@@ -223,7 +223,16 @@ fn canonical_body(body: &str, is_adr: bool) -> String {
                 j += 1;
             }
             let block = &lines[i..j];
-            if block.iter().any(|l| is_separator_row(l)) {
+            // A delimiter needs a **header row above it**: `| --- | --- |`
+            // alone is prose that looks like a separator, not a table, and
+            // rewriting it changed a line that was never markup. The same
+            // reasoning as requiring three hyphens — a separator is only a
+            // separator in the position markdown gives it.
+            let is_table = block
+                .iter()
+                .enumerate()
+                .any(|(n, l)| n > 0 && is_separator_row(l));
+            if is_table {
                 // The relabel belongs to the **summary** table — the first one
                 // in the document — and not to every table in it. A later table
                 // may legitimately carry a `| **Status** | … |` row of its own,
@@ -1441,5 +1450,37 @@ mod fifteenth_round {
         // And a well-terminated file gets no marker at all.
         let d = unified_diff("x.md", "a\nb\n", "a\nc\n").expect("changed");
         assert!(!d.contains("No newline"), "{d}");
+    }
+}
+
+#[cfg(test)]
+mod sixteenth_round {
+    use super::*;
+
+    /// A delimiter with no header above it is prose, not a table.
+    ///
+    /// `| --- | --- |` alone was treated as a one-row table and rewritten,
+    /// changing a line that was never markup — the same error as accepting
+    /// `| -- | -- |` as a separator, in the other axis: position rather than
+    /// spelling. Raised on #790.
+    #[test]
+    fn a_delimiter_needs_a_header_above_it() {
+        assert_eq!(
+            canonical_body("Some prose.\n\n| --- | --- |\n\nMore.\n", true),
+            "Some prose.\n\n| --- | --- |\n\nMore.\n"
+        );
+        // With a header it is a table, and is canonicalised.
+        assert_eq!(
+            canonical_body("|  a |b |\n| --- | --- |\n", true),
+            "| a | b |\n|---|---|\n"
+        );
+    }
+
+    /// The empty-file boundary produces a diff with no fictitious old line.
+    #[test]
+    fn an_insertion_into_an_empty_file_has_no_phantom_deletion() {
+        let d = unified_diff("a.md", "", "added\n").expect("changed");
+        assert!(d.contains("@@ -0,0 +1,1 @@"), "{d}");
+        assert!(!d.contains("\n-"), "a deletion was invented:\n{d}");
     }
 }
