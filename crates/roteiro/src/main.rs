@@ -1446,8 +1446,9 @@ enum OkfAction {
 enum DocsAction {
     /// Rewrite authored documents into their canonical form.
     ///
-    /// Purely syntactic — table spacing, frontmatter key order, ISO dates —
-    /// so the document's meaning cannot change. **Prints a diff and writes
+    /// Purely syntactic — table spacing and ISO dates — so the document's
+    /// meaning cannot change. It does **not** reorder frontmatter keys: that
+    /// was built, measured, and removed (ADR-0023 v1.0). **Prints a diff and writes
     /// nothing** unless `--write` is given: a tool that rewrites documents
     /// under version control by default is one people run once.
     Fmt {

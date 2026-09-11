@@ -9,9 +9,14 @@
 //!
 //! ADR-0023 named three jobs. Measured against this repository's own 26 ADRs
 //! before any of it was written, two were already clean — a single frontmatter
-//! key order in 26 of 26, and an ISO `last-modified` in 26 of 26 — so they
-//! survive here as **idempotence guarantees** rather than as cleanups: they
-//! hold the line, they do not move it.
+//! key order in 26 of 26, and an ISO `last-modified` in 26 of 26.
+//!
+//! **One of those two is now gone.** Reordering frontmatter keys had nothing to
+//! fix and produced the three worst defects of its own review; it was removed on
+//! that evidence, and `canonical_frontmatter` records why. What remains cannot
+//! move a line past another one, which is the property that made it dangerous.
+//! The ISO date survives as an idempotence guarantee: it holds a line rather
+//! than moving one.
 //!
 //! The third had to be narrowed. "Table alignment" normally means padding each
 //! cell to its column's widest, and these documents make that actively wrong:
@@ -29,27 +34,6 @@
 //! like. They are listed at the function that enforces each.
 
 use std::fmt::Write as _;
-
-/// Frontmatter keys in the order [`crate::spec::scaffold_adr`] writes them.
-///
-/// Keys outside this list keep their relative order and follow the known ones,
-/// because an unknown key is somebody else's convention and reordering it would
-/// be a change this module has no basis to make.
-const ADR_KEY_ORDER: &[&str] = &[
-    "Title",
-    "Space",
-    "Parent",
-    "type",
-    "adr-id",
-    "status",
-    "architectural-significance",
-    "domain",
-    "decision-makers",
-    "superseded-by",
-    "version",
-    "last-modified",
-    "confluence-url",
-];
 
 /// The canonical form of `text`.
 ///
@@ -98,82 +82,31 @@ pub fn canonical(text: &str) -> String {
     out
 }
 
-/// Reorder frontmatter keys into [`ADR_KEY_ORDER`], carrying each key's
-/// preceding comment and blank lines with it.
+/// The frontmatter, line for line, with only the values `fmt` normalises.
 ///
-/// A comment sits above the key it explains, so moving the key without it would
-/// leave the comment describing whatever landed underneath — the same defect
-/// this crate's own module docs had, at a smaller scale.
+/// # Why this does not reorder keys
+///
+/// It did, until measurement and three defects agreed it should not. All 26 of
+/// this repository's ADRs **already share one key order**, so the reordering had
+/// nothing to fix and existed only to hold a line — while producing the three
+/// worst defects on the pull request that introduced it: a deleted frontmatter
+/// block, a YAML sequence detached from its key, and a blank line inside a
+/// sequence scattering its items onto the next key.
+///
+/// All three came from the same question — *which key owns this line* — which
+/// cannot be answered locally, because a blank inside a sequence is
+/// indistinguishable from one leading the next key until you have seen what
+/// follows. Three implementations tried; each was silent, in place, and wrong.
+///
+/// The rules that remain are line-local: a date's padding here, and table
+/// spacing in [`canonical_body`]. Neither can move a line past another, which
+/// is the property that made the reordering dangerous. If frontmatter order is
+/// ever wanted, the safe shape is a **gate that reports drift**, not a rewrite.
 fn canonical_frontmatter(front: &str) -> String {
-    let lines: Vec<&str> = front.lines().collect();
-    let is_key = |l: &str| {
-        let trimmed = l.trim();
-        !l.starts_with('#')
-            && !l.starts_with([' ', '\t'])
-            && !trimmed.starts_with('-')
-            && l.contains(':')
-            && !trimmed.is_empty()
-    };
-    let is_lead = |l: &str| l.trim().is_empty() || l.trim_start().starts_with('#');
-
-    // Two passes rather than one running accumulator. The incremental version
-    // had to decide each line's owner as it arrived, and could not: a blank or a
-    // comment *inside* a sequence is indistinguishable from one leading the next
-    // key until you have seen what follows it. Slicing between key lines and
-    // then deciding each boundary with the whole picture answers both.
-    //
-    // A block runs from the lead-in above its key (blanks and comments, which
-    // belong to the key **below** them) through its continuations (indented or
-    // `-` lines, which belong to the key **above** them).
-    let keys: Vec<usize> = (0..lines.len()).filter(|i| is_key(lines[*i])).collect();
-    let mut blocks: Vec<(String, usize, usize)> = Vec::new();
-    let mut content_end = 0;
-    for (n, &at) in keys.iter().enumerate() {
-        let mut lead = at;
-        while lead > content_end && is_lead(lines[lead - 1]) {
-            lead -= 1;
-        }
-        let stop = keys.get(n + 1).copied().unwrap_or(lines.len());
-        content_end = stop;
-        while content_end > at + 1 && is_lead(lines[content_end - 1]) {
-            content_end -= 1;
-        }
-        let key = lines[at]
-            .split(':')
-            .next()
-            .unwrap_or_default()
-            .trim()
-            .to_owned();
-        blocks.push((key, lead, content_end));
-    }
-
     let mut out = String::with_capacity(front.len());
-    let mut emit = |from: usize, to: usize| {
-        for l in &lines[from..to] {
-            let _ = writeln!(out, "{}", normalise_value(l));
-        }
-    };
-    // Anything before the first block, and anything after the last, stays put:
-    // it leads or trails no key and has no place in the ordering.
-    let head = blocks.first().map_or(lines.len(), |b| b.1);
-    emit(0, head);
-
-    let mut used = vec![false; blocks.len()];
-    for want in ADR_KEY_ORDER {
-        for (i, (key, from, to)) in blocks.iter().enumerate() {
-            if !used[i] && key == want {
-                used[i] = true;
-                emit(*from, *to);
-            }
-        }
+    for line in front.lines() {
+        let _ = writeln!(out, "{}", normalise_value(line));
     }
-    for (i, (_, from, to)) in blocks.iter().enumerate() {
-        if !used[i] {
-            emit(*from, *to);
-        }
-    }
-    let tail = blocks.last().map_or(0, |b| b.2);
-    emit(tail, lines.len());
     out
 }
 
@@ -639,34 +572,6 @@ mod tests {
         );
     }
 
-    /// A key moves with the comment that explains it.
-    #[test]
-    fn frontmatter_keys_are_reordered_with_their_comments() {
-        let front = "version: \"1.0\"\n# which stage this is at\nstatus: Accepted\nTitle: T\n";
-        let got = canonical_frontmatter(front);
-        let lines: Vec<&str> = got.lines().collect();
-        assert_eq!(lines[0], "Title: T");
-        assert_eq!(
-            lines[1], "# which stage this is at",
-            "the comment was left behind by its key:\n{got}"
-        );
-        assert_eq!(lines[2], "status: Accepted");
-        assert_eq!(lines[3], "version: \"1.0\"");
-    }
-
-    /// An unknown key keeps its place rather than being reordered on a guess.
-    #[test]
-    fn an_unknown_key_is_not_reordered() {
-        let got = canonical_frontmatter("zzz-custom: 1\nTitle: T\naaa-custom: 2\n");
-        let lines: Vec<&str> = got.lines().collect();
-        assert_eq!(lines[0], "Title: T");
-        assert_eq!(
-            lines[1], "zzz-custom: 1",
-            "relative order was not preserved"
-        );
-        assert_eq!(lines[2], "aaa-custom: 2");
-    }
-
     /// A date is normalised, and its trailing comment survives.
     #[test]
     fn a_date_is_normalised_to_iso() {
@@ -816,7 +721,7 @@ mod review_regressions {
     #[test]
     fn frontmatter_closed_at_end_of_file_is_found() {
         let got = canonical("---\nversion: \"1.0\"\nTitle: T\n---");
-        assert!(got.starts_with("---\nTitle: T\n"), "{got}");
+        assert!(got.starts_with("---\nversion: \"1.0\"\n"), "{got}");
     }
 
     /// The diff is a diff: `@@` hunks, and context around each change.
@@ -1244,8 +1149,8 @@ mod line_endings {
         );
         // And it did the work on the first pass.
         assert!(
-            once.starts_with("---\r\nTitle: T\r\n"),
-            "frontmatter not reordered on pass one: {once:?}"
+            once.starts_with("---\r\nversion: \"1.0\"\r\n"),
+            "frontmatter was not seen on pass one: {once:?}"
         );
         assert!(once.contains("| a | b |"), "{once:?}");
     }
@@ -1259,101 +1164,42 @@ mod line_endings {
 }
 
 #[cfg(test)]
-mod yaml_blocks {
+mod frontmatter_is_not_rewritten {
     use super::*;
 
-    /// A sequence stays under the key it belongs to.
+    /// The frontmatter survives **verbatim**, except a date's padding.
     ///
-    /// Every non-key line was held as "pending for the next key", so reordering
-    /// moved a YAML sequence onto whichever key sorted next — `tags:\n- one`
-    /// emitted `- one` under `Title:`, detaching the list from its key. Raised
-    /// on #790.
+    /// This is the guarantee that replaced key reordering, and it is stronger
+    /// than any test the reordering could have had: there is no arrangement of
+    /// keys, comments, blanks or sequence items that `fmt` can disturb, because
+    /// it no longer moves a line past another one. The shapes below are the
+    /// three defects reordering produced before it was removed — a sequence, a
+    /// blank inside one, an empty block — and they now pass by construction.
     #[test]
-    fn a_sequence_stays_with_its_key() {
-        let got = canonical("---\ntags:\n- one\n- two\nstatus: deprecated\nTitle: T\n---\n\n# T\n");
-        let front = got.split("---\n").nth(1).expect("frontmatter");
-        let at = |needle: &str| front.find(needle).expect(needle);
-        assert!(
-            at("tags:") < at("- one"),
-            "the sequence left its key:\n{front}"
+    fn every_frontmatter_shape_survives_except_the_date() {
+        for src in [
+            "---\ntags:\n- one\n- two\nstatus: deprecated\nTitle: T\n---\n\n# T\n",
+            "---\ntags:\n  - one\n\n  # note\n  - two\nstatus: x\nTitle: T\n---\n\n# T\n",
+            "---\n\n---\n\n# T\n",
+            "---\n# top matter\nversion: \"1\"\nTitle: T\n# trailing\n---\n\n# T\n",
+            "---\ndecision-makers: [\"a\", \"b\"]\nsuperseded-by:\n---\n\n# T\n",
+        ] {
+            let got = canonical(src);
+            let (before, _) = crate::adr::split_frontmatter(src);
+            let (after, _) = crate::adr::split_frontmatter(&got);
+            assert_eq!(before, after, "frontmatter changed for {src:?}");
+            assert_eq!(canonical(&got), got, "not idempotent for {src:?}");
+        }
+    }
+
+    /// The one value it does normalise, wherever the key sits.
+    #[test]
+    fn a_date_is_still_padded_in_place() {
+        let got = canonical("---\nTitle: T\nlast-modified: 2026-9-1\nversion: \"1\"\n---\n\n# T\n");
+        let (front, _) = crate::adr::split_frontmatter(&got);
+        assert_eq!(
+            front, "Title: T\nlast-modified: 2026-09-01\nversion: \"1\"",
+            "the date moved or its neighbours did"
         );
-        assert!(at("- one") < at("- two"), "{front}");
-        assert!(
-            at("- two") < at("status:") || at("status:") < at("tags:"),
-            "an item landed inside another key's block:\n{front}"
-        );
-        assert_eq!(canonical(&got), got, "not idempotent:\n{got}");
-    }
-
-    /// An indented continuation also stays with its key.
-    #[test]
-    fn an_indented_value_stays_with_its_key() {
-        let got = canonical("---\ndecision-makers:\n  - alice\nTitle: T\n---\n\n# T\n");
-        let front = got.split("---\n").nth(1).expect("frontmatter");
-        assert!(
-            front.find("decision-makers:").expect("key") < front.find("  - alice").expect("value"),
-            "{front}"
-        );
-    }
-
-    /// A comment still belongs to the key below it.
-    #[test]
-    fn a_comment_still_leads_its_key() {
-        let got = canonical_frontmatter("version: \"1\"\n# why\nstatus: Accepted\nTitle: T\n");
-        let lines: Vec<&str> = got.lines().collect();
-        assert_eq!(lines[0], "Title: T");
-        assert_eq!(lines[1], "# why");
-        assert_eq!(lines[2], "status: Accepted");
-    }
-}
-
-#[cfg(test)]
-mod tenth_round {
-    use super::*;
-
-    /// A blank or a comment **inside** a sequence stays inside it.
-    ///
-    /// The incremental block builder decided each line's owner as it arrived,
-    /// so a blank line in the middle of a sequence made everything after it
-    /// look like a lead-in to the next key — and reordering then moved those
-    /// items onto that key. Raised on #790, the third defect of this shape.
-    #[test]
-    fn a_blank_inside_a_sequence_does_not_break_it_up() {
-        let src =
-            "---\ntags:\n  - one\n\n  # note\n  - two\nstatus: deprecated\nTitle: T\n---\n\n# T\n";
-        let got = canonical(src);
-        let front = got.split("---\n").nth(1).expect("frontmatter");
-        let at = |n: &str| {
-            front
-                .find(n)
-                .unwrap_or_else(|| panic!("{n} missing from:\n{front}"))
-        };
-        assert!(at("tags:") < at("  - one"), "{front}");
-        assert!(at("  - one") < at("  # note"), "{front}");
-        assert!(at("  # note") < at("  - two"), "{front}");
-        assert!(
-            at("  - two") < at("status:") || at("status:") < at("tags:"),
-            "an item escaped its key:\n{front}"
-        );
-        assert_eq!(canonical(&got), got, "not idempotent:\n{got}");
-    }
-
-    /// A comment leads the key below it — even the first one — and a trailing
-    /// comment that leads nothing stays at the end.
-    #[test]
-    fn a_lead_in_travels_and_a_trailing_comment_does_not() {
-        let got = canonical_frontmatter("# top matter\nversion: \"1\"\nTitle: T\n# trailing\n");
-        let lines: Vec<&str> = got.lines().collect();
-        assert_eq!(lines[0], "Title: T", "{got}");
-        assert_eq!(lines[1], "# top matter", "the comment left its key:\n{got}");
-        assert_eq!(lines[2], "version: \"1\"", "{got}");
-        assert_eq!(lines[3], "# trailing", "a trailing comment moved:\n{got}");
-    }
-
-    /// Content before the first key that leads nothing is not reordered.
-    #[test]
-    fn material_before_any_key_stays_put() {
-        let got = canonical_frontmatter("- stray\nversion: \"1\"\nTitle: T\n");
-        assert_eq!(got.lines().next(), Some("- stray"), "{got}");
     }
 }
