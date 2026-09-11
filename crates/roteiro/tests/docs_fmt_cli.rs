@@ -113,6 +113,32 @@ fn the_default_is_docs_and_an_explicit_path_narrows_it() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A symlinked **parent** is refused too, not just a symlinked file.
+///
+/// `symlink_metadata("a/b.md")` reports a regular file even when `a` is a
+/// symlink, so checking only the last component left the same escape open by a
+/// different door. Raised on #790.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_parent_directory_is_not_followed() {
+    let root = fixture("symlink-parent");
+    let outside = root.join("outside");
+    std::fs::create_dir_all(&outside).expect("mkdir");
+    let target = outside.join("OUT.md");
+    std::fs::write(&target, "|  a |b |\n| --- | --- |\n").expect("write");
+    let before = std::fs::read_to_string(&target).expect("read");
+    std::os::unix::fs::symlink(&outside, root.join("docs/linkdir")).expect("symlink");
+
+    let (ok, out) = run(&root, &["--write", "docs/linkdir/OUT.md"]);
+    assert!(ok, "{out}");
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("read"),
+        before,
+        "a symlinked parent let the write escape the named tree"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// A symlink handed to the command directly is refused, not followed.
 ///
 /// The directory walk already skips them; this is the path that bypasses the

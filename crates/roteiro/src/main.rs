@@ -7167,11 +7167,19 @@ fn markdown_files(root: &std::path::Path, out: &mut Vec<std::path::PathBuf>) -> 
     // they already own, so anyone who could win it could edit the file
     // directly. What the check buys is that an ordinary symlink sitting in
     // `docs/` does not get quietly written through.
+    // **Every component**, not just the last. `symlink_metadata("a/b.md")`
+    // reports a regular file even when `a` is a symlink, so checking only the
+    // leaf let an explicit path reach outside the tree through a symlinked
+    // parent — the same escape the walk refuses, by a different door.
+    let mut prefix = std::path::PathBuf::new();
+    for part in root.components() {
+        prefix.push(part);
+        if std::fs::symlink_metadata(&prefix).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Ok(());
+        }
+    }
     let meta = std::fs::symlink_metadata(root)
         .map_err(|e| anyhow::anyhow!("reading {}: {e}", root.display()))?;
-    if meta.file_type().is_symlink() {
-        return Ok(());
-    }
     if meta.is_file() {
         out.push(root.to_path_buf());
         return Ok(());

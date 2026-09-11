@@ -61,14 +61,11 @@ const ADR_KEY_ORDER: &[&str] = &[
 #[must_use]
 pub fn canonical(text: &str) -> String {
     let (front, body) = crate::adr::split_frontmatter(text);
-    // The declared kind, read the way the rest of the crate reads it. Substring
-    // matching on the raw line is both too loose and too tight: `type: not-adr`
-    // contains "adr" and `type: ADR` does not, so one non-ADR would get the
-    // summary relabel and one ADR would not.
-    let is_adr = front.lines().any(|l| {
-        l.strip_prefix("type:")
-            .is_some_and(|v| crate::adr::clean_value(v).eq_ignore_ascii_case("adr"))
-    });
+    // The shared rule, not a second spelling of it. Reading the key by
+    // `strip_prefix("type:")` still missed `Type: adr` and `type : adr`, which
+    // `declares_adr` accepts — so a document the rest of the crate treats as an
+    // ADR would have kept a legacy summary row.
+    let is_adr = crate::adr::declares_adr(text);
     let mut out = String::with_capacity(text.len());
     if !front.is_empty() {
         out.push_str("---\n");
@@ -176,6 +173,7 @@ fn normalise_value(line: &str) -> String {
 fn canonical_body(body: &str, is_adr: bool) -> String {
     let mut out = String::with_capacity(body.len());
     let mut fence: Option<(char, usize)> = None;
+    let mut seen_table = false;
     let lines: Vec<&str> = body.lines().collect();
     let mut i = 0;
     while i < lines.len() {
@@ -212,9 +210,19 @@ fn canonical_body(body: &str, is_adr: bool) -> String {
             }
             let block = &lines[i..j];
             if block.iter().any(|l| is_separator_row(l)) {
+                // The relabel belongs to the **summary** table — the first one
+                // in the document — and not to every table in it. A later table
+                // may legitimately carry a `| **Status** | … |` row of its own,
+                // and rewriting that is changing authored content.
+                let summary = !seen_table;
+                seen_table = true;
                 for l in block {
                     let row = canonical_table_row(l.trim());
-                    let row = if is_adr { relabel_state(&row) } else { row };
+                    let row = if is_adr && summary {
+                        relabel_state(&row)
+                    } else {
+                        row
+                    };
                     let _ = writeln!(out, "{row}");
                 }
             } else {
@@ -466,12 +474,15 @@ pub fn unified_diff(path: &str, before: &str, after: &str) -> Option<String> {
                 new_n += 1;
             }
         }
+        // An empty range starts at 0 — `@@ -0,0 +1,1 @@` for an insertion into an
+        // empty file. Adding one unconditionally emits `-1,0`, which `patch`
+        // rejects at exactly that boundary.
         let _ = writeln!(
             out,
             "@@ -{},{} +{},{} @@",
-            ops[start].1 + 1,
+            if old_n == 0 { 0 } else { ops[start].1 + 1 },
             old_n,
-            ops[start].2 + 1,
+            if new_n == 0 { 0 } else { ops[start].2 + 1 },
             new_n
         );
         for (t, oi, ni) in &ops[start..=end] {
@@ -788,5 +799,59 @@ mod second_round {
         let d = unified_diff("a.md", "x\ny\n", "x\ny").expect("changed");
         assert!(d.contains("@@"), "a diff with no hunk:\n{d}");
         assert!(d.contains("trailing newline"), "{d}");
+    }
+}
+
+#[cfg(test)]
+mod third_round {
+    use super::*;
+
+    /// The relabel is the **summary** table's, not every table's.
+    ///
+    /// A later table may legitimately carry a `| **Status** | … |` row, and
+    /// rewriting it is changing authored content. Raised on #790.
+    #[test]
+    fn only_the_first_table_is_the_summary_table() {
+        let doc = "---\ntype: adr\n---\n\n| **Status** | Accepted |\n|---|---|\n\n\
+                   ## Later\n\n| **Status** | what it means |\n|---|---|\n";
+        let got = canonical(doc);
+        assert!(got.contains("| **State** | Accepted |"), "{got}");
+        assert!(
+            got.contains("| **Status** | what it means |"),
+            "a later table's own Status column was rewritten:\n{got}"
+        );
+    }
+
+    /// ADR detection is the shared rule, so it accepts what that rule accepts.
+    #[test]
+    fn the_shared_declaration_rule_decides() {
+        let row = "| **Status** | Accepted |\n|---|---|\n";
+        for spelling in ["type: adr", "Type: adr", "type : adr", "type: ADR"] {
+            let doc = format!("---\nadr-id: \"0001\"\n{spelling}\n---\n\n{row}");
+            assert!(
+                canonical(&doc).contains("**State**"),
+                "`{spelling}` was not read as an ADR"
+            );
+        }
+        let doc = format!("---\ntype: blueprint\n---\n\n{row}");
+        assert!(
+            canonical(&doc).contains("**Status**"),
+            "a blueprint was relabelled"
+        );
+    }
+
+    /// An empty range starts at zero, which is what `patch` accepts.
+    #[test]
+    fn the_hunk_header_is_valid_at_the_empty_file_boundary() {
+        let d = unified_diff("a.md", "", "added\n").expect("changed");
+        assert!(
+            d.contains("@@ -0,0 +1,1 @@"),
+            "insertion into an empty file:\n{d}"
+        );
+        let d = unified_diff("a.md", "gone\n", "").expect("changed");
+        assert!(
+            d.contains("@@ -1,1 +0,0 @@"),
+            "deletion to an empty file:\n{d}"
+        );
     }
 }
