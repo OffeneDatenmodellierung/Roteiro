@@ -142,7 +142,16 @@ fn normalise_value(line: &str) -> String {
         Some(i) => (&rest[..i], rest[i..].trim_start()),
         None => (rest, ""),
     };
-    let parts: Vec<&str> = value.trim().split('-').collect();
+    // Quotes are stripped the way `parse_adr` strips them, so `"2026-9-1"` and
+    // `2026-9-1` are the same date to both — the quoted one used to be left
+    // unpadded while its bare twin was normalised. Whatever quoting was there is
+    // put back unchanged.
+    let bare = crate::adr::clean_value(value);
+    let quote = match value.trim().chars().next() {
+        Some(q @ ('"' | '\'')) => q.to_string(),
+        _ => String::new(),
+    };
+    let parts: Vec<&str> = bare.split('-').collect();
     let [y, m, d] = parts.as_slice() else {
         return line.to_owned();
     };
@@ -165,7 +174,7 @@ fn normalise_value(line: &str) -> String {
     // `last-modified :` to `last-modified:`, which is a rewrite this command
     // does not advertise — and unadvertised rewriting is where every defect in
     // this module has been.
-    format!("{key}:{lead}{y:04}-{m:02}-{d:02}{tail}")
+    format!("{key}:{lead}{quote}{y:04}-{m:02}-{d:02}{quote}{tail}")
 }
 
 /// Canonicalise the body: tables, and the ADR summary table's first-row label.
@@ -221,7 +230,8 @@ fn canonical_body(body: &str, is_adr: bool) -> String {
                 // and rewriting that is changing authored content.
                 let summary = !seen_table;
                 seen_table = true;
-                for (n, l) in block.iter().enumerate() {
+                let mut relabelled = false;
+                for l in block {
                     // The accepted indentation is **kept**. Up to three spaces
                     // is markup, and a table nested under a list item carries
                     // exactly that — trimming it promoted the table out of its
@@ -230,7 +240,15 @@ fn canonical_body(body: &str, is_adr: bool) -> String {
                     let row = format!("{indent}{}", canonical_table_row(l.trim()));
                     // The **first row** of the first table, as documented. A
                     // later `**Status**` row in that same table is a data row.
-                    let row = if is_adr && summary && n == 0 {
+                    // The **first** state row of the first table. Not row
+                    // zero: a real ADR summary table opens with an empty
+                    // header `| | |` and its separator, so the metadata
+                    // rows start at index two and `n == 0` relabelled
+                    // nothing at all. Either spelling marks it found, or
+                    // a document already saying `**State**` would let a
+                    // later `**Status**` data row be rewritten instead.
+                    let row = if is_adr && summary && !relabelled && is_state_row(&row) {
+                        relabelled = true;
                         relabel_state(&row)
                     } else {
                         row
@@ -267,9 +285,17 @@ fn fence_of(line: &str) -> Option<(char, usize)> {
     let t = line.trim_start();
     for ch in ['`', '~'] {
         let n = t.chars().take_while(|c| *c == ch).count();
-        if n >= 3 {
-            return Some((ch, n));
+        if n < 3 {
+            continue;
         }
+        // A backtick fence's info string may not contain a backtick
+        // (`CommonMark` §4.5), so ```` ```bad` ```` opens nothing. Accepting it
+        // left every table after such a line "fenced", and therefore silently
+        // unformatted.
+        if ch == '`' && t[n..].contains('`') {
+            continue;
+        }
+        return Some((ch, n));
     }
     None
 }
@@ -327,6 +353,11 @@ fn relabel_state(row: &str) -> String {
     } else {
         row.to_owned()
     }
+}
+
+/// Whether this row is the summary table's state row, under either spelling.
+fn is_state_row(row: &str) -> bool {
+    row.starts_with("| **State** |") || row.starts_with("| **Status** |")
 }
 
 /// One table row in canonical form: `| a | b |`.
@@ -430,16 +461,25 @@ pub fn unified_diff(path: &str, before: &str, after: &str) -> Option<String> {
     let (a, b): (Vec<&str>, Vec<&str>) = (before.lines().collect(), after.lines().collect());
     if a == b {
         // Same lines, different bytes: the difference is the file's final
-        // newline, which `lines()` does not carry. Emitting two headers and no
-        // hunk would be a diff that says nothing while the caller reports drift.
-        let says = |s: &str| {
-            if s.ends_with('\n') { "with" } else { "without" }
-        };
-        return Some(format!(
-            "--- {path}\n+++ {path}\n@@ -0,0 +0,0 @@\n\\ file ended {} a trailing newline, now ends {} one\n",
-            says(before),
-            says(after)
-        ));
+        // newline, which `lines()` does not carry.
+        //
+        // `\\ No newline at end of file` is the marker `diff` emits and `patch`
+        // understands; an invented `\\ file ended …` line is neither, so the
+        // output claimed to be a unified diff and was not one. Emitted against a
+        // real one-line hunk so a tool will accept it.
+        let last = |s: &str| s.lines().next_back().unwrap_or_default().to_owned();
+        let n = before.lines().count().max(1);
+        let mut out = format!("--- {path}\n+++ {path}\n@@ -{n},1 +{n},1 @@\n");
+        let _ = write!(out, "-{}", last(before));
+        if !before.ends_with('\n') {
+            let _ = write!(out, "\n\\ No newline at end of file");
+        }
+        let _ = write!(out, "\n+{}", last(after));
+        if !after.ends_with('\n') {
+            let _ = write!(out, "\n\\ No newline at end of file");
+        }
+        out.push('\n');
+        return Some(out);
     }
     let mut lcs = vec![vec![0_usize; b.len() + 1]; a.len() + 1];
     for i in (0..a.len()).rev() {
@@ -798,7 +838,12 @@ mod second_round {
     fn a_trailing_newline_change_is_reported_rather_than_shown_as_empty() {
         let d = unified_diff("a.md", "x\ny\n", "x\ny").expect("changed");
         assert!(d.contains("@@"), "a diff with no hunk:\n{d}");
-        assert!(d.contains("trailing newline"), "{d}");
+        // The marker `diff` emits and `patch` understands, not an invented one.
+        assert!(d.contains("\\ No newline at end of file"), "{d}");
+        assert!(
+            !d.contains("file ended"),
+            "an invented marker survived:\n{d}"
+        );
     }
 }
 
@@ -1254,5 +1299,72 @@ mod twelfth_round {
         assert_eq!(cells.len(), 3, "{cells:?}");
         assert_eq!(cells[0], r"a \`");
         assert_eq!(cells[1], "b `code`");
+    }
+}
+
+#[cfg(test)]
+mod fourteenth_round {
+    use super::*;
+
+    /// The relabel finds the state row where a real ADR actually puts it.
+    ///
+    /// A real summary table opens with an empty header `| | |` and its
+    /// separator, so the metadata rows start at index two — and narrowing the
+    /// relabel to `n == 0` had made it fire on nothing at all. Raised on #790,
+    /// against a narrowing made two rounds earlier.
+    #[test]
+    fn the_state_row_is_found_below_the_header() {
+        let doc = "---\ntype: adr\n---\n\n# T\n\n| | |\n|---|---|\n\
+                   | **Status** | Accepted |\n| **Domain** | X |\n";
+        let got = canonical(doc);
+        assert!(
+            got.contains("| **State** | Accepted |"),
+            "relabel never fired:\n{got}"
+        );
+        assert_eq!(canonical(&got), got, "not idempotent:\n{got}");
+    }
+
+    /// Only the first state row, under either spelling.
+    #[test]
+    fn a_later_status_row_is_left_alone_either_way() {
+        let doc = "---\ntype: adr\n---\n\n| | |\n|---|---|\n\
+                   | **State** | Accepted |\n| **Status** | what it means |\n";
+        let got = canonical(doc);
+        assert!(
+            got.contains("| **Status** | what it means |"),
+            "a data row was relabelled:\n{got}"
+        );
+        assert_eq!(canonical(&got), got, "not idempotent:\n{got}");
+    }
+
+    /// A backtick in a backtick fence's info string opens nothing.
+    #[test]
+    fn a_backtick_in_an_info_string_is_not_a_fence() {
+        assert!(fence_of("```rust").is_some());
+        assert!(fence_of("```bad`").is_none(), "CommonMark §4.5");
+        assert!(
+            fence_of("~~~ok`").is_some(),
+            "only backtick fences are restricted"
+        );
+        // A table after such a line is still formatted.
+        let got = canonical_body("```bad`\n\n|  a |b |\n|---|---|\n", true);
+        assert!(got.contains("| a | b |"), "left fenced:\n{got}");
+    }
+
+    /// A quoted date is the same date.
+    #[test]
+    fn a_quoted_date_is_padded_and_stays_quoted() {
+        assert_eq!(
+            normalise_value("last-modified: \"2026-9-1\""),
+            "last-modified: \"2026-09-01\""
+        );
+        assert_eq!(
+            normalise_value("last-modified: '2026-9-1'"),
+            "last-modified: '2026-09-01'"
+        );
+        assert_eq!(
+            normalise_value("last-modified: 2026-9-1"),
+            "last-modified: 2026-09-01"
+        );
     }
 }

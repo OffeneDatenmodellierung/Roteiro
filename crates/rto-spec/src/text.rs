@@ -112,7 +112,9 @@ pub(crate) fn strip_code_spans(line: &str) -> String {
 /// literal and opens nothing — without that, `` \` `` paired with a later real
 /// opener and swallowed everything between them, which hid a table column from
 /// `rto_spec::fmt` and would hide a `[[…]]` link or a `@rto:` annotation from
-/// the scanners below.
+/// the scanners below. The rule is **asymmetric**: escapes do not work *inside*
+/// a code span, so a backslash before the closing run is content and the run
+/// still closes.
 ///
 /// Separate from [`strip_code_spans`] because removing a span and knowing where
 /// one *is* are different questions, and `rto_spec::fmt` needs the second — a
@@ -150,7 +152,12 @@ pub(crate) fn code_spans(line: &str) -> Vec<(usize, usize)> {
         let mut j = i;
         let mut close = None;
         while j < bytes.len() {
-            if bytes[j] == b'`' && !escaped(j) {
+            // **No escape check on the close.** `CommonMark`: backslash
+            // escapes do not work inside a code span, so a backslash before the
+            // closing run is literal content and the run still closes. Applying
+            // the opener's rule here made `` `a\` `` run on to the next
+            // backtick and swallow whatever lay between.
+            if bytes[j] == b'`' {
                 let s = j;
                 while j < bytes.len() && bytes[j] == b'`' {
                     j += 1;
@@ -228,6 +235,23 @@ mod tests {
         assert_eq!(code_spans(r"a \\`code` b").len(), 1);
         // And the link scanner is not fooled by one.
         assert_eq!(scan_wiki_links(r"\` [[docs/x.md]]"), vec!["docs/x.md"]);
+    }
+
+    /// The rule is asymmetric: an escape opens nothing, but closes normally.
+    ///
+    /// `CommonMark` does not process backslash escapes inside a code span, so a
+    /// backslash before the closing run is literal content and the run still
+    /// closes. Treating the close like the open made a span run on to the next
+    /// backtick and swallow everything between. Raised on #790.
+    #[test]
+    fn an_escape_before_a_closing_run_still_closes_the_span() {
+        // One span, ending at the backtick after the backslash.
+        assert_eq!(code_spans(r"`a\` and [[docs/x.md]]").len(), 1);
+        assert_eq!(
+            scan_wiki_links(r"`a\` and [[docs/x.md]]"),
+            vec!["docs/x.md"]
+        );
+        assert_eq!(strip_code_spans(r"`a\` rest"), " rest");
     }
 
     #[test]

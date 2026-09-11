@@ -113,6 +113,26 @@ fn the_default_is_docs_and_an_explicit_path_narrows_it() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Overlapping roots name each file once.
+///
+/// `docs fmt docs docs/adr` reached every ADR twice, so a check run printed
+/// each diff twice and counted it twice. Raised on #790.
+#[test]
+fn overlapping_roots_do_not_double_count() {
+    let root = fixture("overlap");
+    std::fs::create_dir_all(root.join("docs/adr")).expect("mkdir");
+    std::fs::write(root.join("docs/adr/A.md"), "|  a |b |\n| --- | --- |\n").expect("write");
+
+    let (ok, out) = run(&root, &["docs", "docs/adr"]);
+    assert!(!ok, "{out}");
+    assert_eq!(
+        out.matches("--- docs/adr/A.md").count(),
+        1,
+        "the file was reported twice:\n{out}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// A symlinked **parent** is refused too, not just a symlinked file.
 ///
 /// `symlink_metadata("a/b.md")` reports a regular file even when `a` is a

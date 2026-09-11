@@ -7109,7 +7109,12 @@ fn run_docs_fmt(paths: &[std::path::PathBuf], write: bool) -> anyhow::Result<()>
     for root in &roots {
         markdown_files(root, &mut files)?;
     }
+    // Overlapping roots are one file, not two. `docs fmt docs docs/adr` reached
+    // every ADR twice, so a check run printed each diff twice and counted it
+    // twice, and a write run formatted it twice — harmless only because the
+    // second pass is a no-op on canonical output.
     files.sort();
+    files.dedup();
 
     let (mut changed, mut written) = (0_usize, 0_usize);
     for file in &files {

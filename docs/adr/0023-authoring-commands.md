@@ -142,8 +142,13 @@ people run once.
 - **A new command surface to keep honest.** Eight commands whose help text can
   drift from their behaviour — a failure this project has hit three times in one
   pull request. Each gets a test that runs it rather than reads it.
-- **`fmt` will churn once.** The first run over `docs/` reorders frontmatter in
-  every ADR. That is a single reviewable commit, and it is the point.
+- **`fmt` will churn once.** The first run over `docs/` restates every table in
+  the canonical form. That is a single reviewable commit, and it is the point.
+
+  _Amended at v1.0: this bullet said the churn would be **reordered frontmatter
+  in every ADR**. Measurement found all 26 already shared one key order, so
+  there was no churn to have — and the reordering built to produce it was
+  removed after three content-destroying defects. See the v1.0 row._
 
   A worked example arrived while this ADR was in review: the summary table's
   first row is `**State**` in twenty of twenty-three ADRs and `**Status**` in the
