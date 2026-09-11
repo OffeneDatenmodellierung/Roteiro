@@ -59,7 +59,11 @@ pub fn canonical(text: &str) -> String {
         let lf = text.replace("\r\n", "\n");
         return canonical(&lf).replace('\n', "\r\n");
     }
-    let (front, body) = crate::adr::split_frontmatter(text);
+    // The **verbatim** split: the parsing one consumes the newline of a blank
+    // line before the closing fence, so that blank disappeared on the first pass
+    // — a silent edit, and a contradiction of the byte-for-byte promise this
+    // function makes about frontmatter.
+    let (front, body) = crate::adr::split_frontmatter_verbatim(text);
     // `split_frontmatter` returns an empty `front` for **both** "there is no
     // frontmatter" and "the frontmatter block is empty". Telling them apart by
     // `front.is_empty()` treated `---\n\n---` as body text and dropped both
@@ -1183,11 +1187,20 @@ mod frontmatter_is_not_rewritten {
             "---\n\n---\n\n# T\n",
             "---\n# top matter\nversion: \"1\"\nTitle: T\n# trailing\n---\n\n# T\n",
             "---\ndecision-makers: [\"a\", \"b\"]\nsuperseded-by:\n---\n\n# T\n",
+            "---\nfoo: bar\n\n---\n\n# T\n",
+            "---\n\nfoo: bar\n\n\n---\n\n# T\n",
         ] {
             let got = canonical(src);
-            let (before, _) = crate::adr::split_frontmatter(src);
-            let (after, _) = crate::adr::split_frontmatter(&got);
-            assert_eq!(before, after, "frontmatter changed for {src:?}");
+            // Compared as **raw bytes** up to the closing fence, not by
+            // re-parsing: asking `split_frontmatter` for both sides hid a lost
+            // blank line, because the parser drops it on both. A test that
+            // measures with the code under test cannot see a defect in it.
+            let region = |s: &str| {
+                let rest = s.strip_prefix("---\n").expect("frontmatter");
+                let end = rest.find("---\n").unwrap_or(rest.len());
+                rest[..end].to_owned()
+            };
+            assert_eq!(region(src), region(&got), "frontmatter changed for {src:?}");
             assert_eq!(canonical(&got), got, "not idempotent for {src:?}");
         }
     }

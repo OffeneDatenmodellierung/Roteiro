@@ -823,6 +823,31 @@ fn inline_version_refs(line: &str) -> impl Iterator<Item = DocVersion> + '_ {
 /// Split leading `---`-delimited frontmatter from the body. Returns
 /// `("", text)` when there is no frontmatter. Shared with `crate::site`,
 /// whose publication marker is a frontmatter field read the same way.
+/// Like [`split_frontmatter`], but the frontmatter is returned **verbatim** —
+/// including any blank line before the closing fence.
+///
+/// `split_frontmatter` matches `\n---\n`, so the newline that ends the last
+/// blank line is consumed as part of the fence and the blank line disappears.
+/// That is harmless for parsing, where a blank carries nothing, and wrong for
+/// `rto_spec::fmt`, which promises the frontmatter back byte for byte.
+///
+/// Two functions rather than one for the same reason [`crate::text::code_spans`]
+/// sits beside `strip_code_spans`: reading a region and preserving it are
+/// different questions, and the parser should not grow a flag.
+pub(crate) fn split_frontmatter_verbatim(text: &str) -> (&str, &str) {
+    let Some(rest) = text.strip_prefix("---\n") else {
+        return ("", text);
+    };
+    match rest.find("\n---\n") {
+        // `+ 1` keeps the newline the fence match borrowed from the last line.
+        Some(end) => (&rest[..=end], &rest[end + 5..]),
+        None => match rest.strip_suffix("\n---") {
+            Some(fm) => (&rest[..=fm.len()], ""),
+            None => ("", text),
+        },
+    }
+}
+
 pub(crate) fn split_frontmatter(text: &str) -> (&str, &str) {
     let Some(rest) = text.strip_prefix("---\n") else {
         return ("", text);
