@@ -126,9 +126,19 @@ fn overlapping_roots_do_not_double_count() {
     let (ok, out) = run(&root, &["docs", "docs/adr"]);
     assert!(!ok, "{out}");
     assert_eq!(
-        out.matches("--- docs/adr/A.md").count(),
+        out.matches("docs/adr/A.md").count() / 2,
         1,
         "the file was reported twice:\n{out}"
+    );
+
+    // Different spellings of one tree are still one tree. `sort`/`dedup` on the
+    // strings alone left this duplicate in, because `docs` and `./docs` differ
+    // as text and name the same directory.
+    let (_, out) = run(&root, &["docs", "./docs"]);
+    assert_eq!(
+        out.matches("docs/adr/A.md").count() / 2,
+        1,
+        "`docs` and `./docs` were treated as two trees:\n{out}"
     );
     let _ = std::fs::remove_dir_all(&root);
 }

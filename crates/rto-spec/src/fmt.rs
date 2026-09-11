@@ -348,7 +348,8 @@ fn is_separator_row(line: &str) -> bool {
 /// table of theirs whose first column happens to say **Status** is not this
 /// table and is none of our business.
 fn relabel_state(row: &str) -> String {
-    if row.starts_with("| **Status** |") {
+    // `replacen` on the whole row, so the indentation in front of it survives.
+    if row.trim_start().starts_with("| **Status** |") {
         row.replacen("| **Status** |", "| **State** |", 1)
     } else {
         row.to_owned()
@@ -357,6 +358,10 @@ fn relabel_state(row: &str) -> String {
 
 /// Whether this row is the summary table's state row, under either spelling.
 fn is_state_row(row: &str) -> bool {
+    // Trimmed, because the caller now hands these the row **with** its
+    // indentation — an indented summary table would otherwise match neither
+    // predicate and never be relabelled.
+    let row = row.trim_start();
     row.starts_with("| **State** |") || row.starts_with("| **Status** |")
 }
 
@@ -444,6 +449,17 @@ fn ends_escaped(s: &str) -> bool {
     s.chars().rev().take_while(|c| *c == '\\').count() % 2 == 1
 }
 
+/// `text`'s lines, each keeping its carriage return.
+///
+/// [`str::lines`] drops `\r`, so a CRLF document's diff came out with LF-only
+/// context and `+` lines — describing a file [`canonical`] would never write,
+/// and one `patch` would convert on the way in.
+fn diff_lines(text: &str) -> Vec<&str> {
+    text.split_inclusive('\n')
+        .map(|l| l.strip_suffix('\n').unwrap_or(l))
+        .collect()
+}
+
 /// A unified diff of `before` against `after`, or `None` when they are equal.
 ///
 /// A **real** unified diff, with `@@` hunk headers and three lines of context,
@@ -458,7 +474,7 @@ pub fn unified_diff(path: &str, before: &str, after: &str) -> Option<String> {
     if before == after {
         return None;
     }
-    let (a, b): (Vec<&str>, Vec<&str>) = (before.lines().collect(), after.lines().collect());
+    let (a, b): (Vec<&str>, Vec<&str>) = (diff_lines(before), diff_lines(after));
     if a == b {
         // Same lines, different bytes: the difference is the file's final
         // newline, which `lines()` does not carry.
@@ -556,6 +572,15 @@ pub fn unified_diff(path: &str, before: &str, after: &str) -> Option<String> {
         for (t, oi, ni) in &ops[start..=end] {
             let text = if *t == '+' { b[*ni] } else { a[*oi] };
             let _ = writeln!(out, "{t}{text}");
+            // The marker belongs to whichever side's **last** line this is, and
+            // only when that side has no terminating newline. Without it a diff
+            // touching the final line of a file that does not end in one is
+            // wrong in the direction that silently adds a newline on apply.
+            let last_old = *t != '+' && *oi + 1 == a.len() && !before.ends_with('\n');
+            let last_new = *t != '-' && *ni + 1 == b.len() && !after.ends_with('\n');
+            if last_old || last_new {
+                let _ = writeln!(out, "\\ No newline at end of file");
+            }
         }
     }
     Some(out)
@@ -1366,5 +1391,55 @@ mod fourteenth_round {
             normalise_value("last-modified: 2026-9-1"),
             "last-modified: 2026-09-01"
         );
+    }
+}
+
+#[cfg(test)]
+mod fifteenth_round {
+    use super::*;
+
+    /// An indented summary table is still relabelled.
+    ///
+    /// The row predicates were handed the row **with** its indentation once the
+    /// formatter started preserving it, so an indented table matched neither.
+    /// Raised on #790, one round after the indentation fix that caused it.
+    #[test]
+    fn the_state_row_is_found_when_the_table_is_indented() {
+        assert!(is_state_row("  | **Status** | Accepted |"));
+        assert_eq!(
+            relabel_state("  | **Status** | Accepted |"),
+            "  | **State** | Accepted |"
+        );
+    }
+
+    /// A CRLF document's diff describes a CRLF document.
+    ///
+    /// `lines()` drops `\r`, so the diff showed LF-only context and `+` lines —
+    /// a description of a file `canonical` would never write. Raised on #790.
+    #[test]
+    fn a_crlf_diff_keeps_its_carriage_returns() {
+        let before = "a\r\nb\r\n";
+        let after = "a\r\nc\r\n";
+        let d = unified_diff("x.md", before, after).expect("changed");
+        assert!(d.contains("-b\r\n"), "context lost its CR:\n{d:?}");
+        assert!(d.contains("+c\r\n"), "{d:?}");
+    }
+
+    /// The general path marks a missing final newline too.
+    ///
+    /// Only the newline-only special case did, so a diff that changed the last
+    /// line of a file without a terminating newline was wrong in the direction
+    /// that silently adds one. Raised on #790.
+    #[test]
+    fn the_general_path_marks_a_missing_final_newline() {
+        let d = unified_diff("x.md", "a\nb", "a\nc").expect("changed");
+        assert_eq!(
+            d.matches("\\ No newline at end of file").count(),
+            2,
+            "both sides end without one:\n{d}"
+        );
+        // And a well-terminated file gets no marker at all.
+        let d = unified_diff("x.md", "a\nb\n", "a\nc\n").expect("changed");
+        assert!(!d.contains("No newline"), "{d}");
     }
 }

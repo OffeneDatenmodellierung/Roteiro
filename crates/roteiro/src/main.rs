@@ -7113,8 +7113,16 @@ fn run_docs_fmt(paths: &[std::path::PathBuf], write: bool) -> anyhow::Result<()>
     // every ADR twice, so a check run printed each diff twice and counted it
     // twice, and a write run formatted it twice — harmless only because the
     // second pass is a no-op on canonical output.
+    //
+    // Deduplicated by **resolved** path, not by spelling: `docs` and `./docs`
+    // name the same tree and sort differently, so comparing the strings alone
+    // left the duplicate in. The reported path stays as the caller wrote it.
+    let mut seen = std::collections::HashSet::new();
+    files.retain(|f| {
+        let key = std::fs::canonicalize(f).unwrap_or_else(|_| f.clone());
+        seen.insert(key)
+    });
     files.sort();
-    files.dedup();
 
     let (mut changed, mut written) = (0_usize, 0_usize);
     for file in &files {
