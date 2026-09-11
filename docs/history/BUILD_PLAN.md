@@ -1,7 +1,7 @@
 ---
 status: deprecated
-superseded-by: docs/history/BUILD_PLAN_V2.md
 archived: 2026-09-02
+superseded-by: docs/history/BUILD_PLAN_V2.md
 ---
 
 # Roteiro — Build Plan

@@ -80,7 +80,14 @@ pub fn canonical(text: &str) -> String {
     if has_front {
         out.push_str("---\n");
         out.push_str(&canonical_frontmatter(front));
-        out.push_str("---\n");
+        // The closing fence keeps whatever terminated it. A document whose
+        // fence ends the file without a newline was being given one — small,
+        // but a byte this function promises not to add.
+        out.push_str(if body.is_empty() && !text.ends_with('\n') {
+            "---"
+        } else {
+            "---\n"
+        });
     }
     out.push_str(&canonical_body(body, is_adr));
     out
@@ -228,10 +235,11 @@ fn canonical_body(body: &str, is_adr: bool) -> String {
             // rewriting it changed a line that was never markup. The same
             // reasoning as requiring three hyphens — a separator is only a
             // separator in the position markdown gives it.
-            let is_table = block
-                .iter()
-                .enumerate()
-                .any(|(n, l)| n > 0 && is_separator_row(l));
+            // The delimiter is row **two**, immediately under the header —
+            // not merely somewhere below it. Accepting a later one made a run
+            // of pipe-led prose a table as soon as any line in it looked like a
+            // separator, and rewrote that line.
+            let is_table = block.len() > 1 && is_separator_row(block[1]);
             if is_table {
                 // The relabel belongs to the **summary** table — the first one
                 // in the document — and not to every table in it. A later table
@@ -1482,5 +1490,38 @@ mod sixteenth_round {
         let d = unified_diff("a.md", "", "added\n").expect("changed");
         assert!(d.contains("@@ -0,0 +1,1 @@"), "{d}");
         assert!(!d.contains("\n-"), "a deletion was invented:\n{d}");
+    }
+}
+
+#[cfg(test)]
+mod seventeenth_round {
+    use super::*;
+
+    /// The delimiter is row two, not merely a row below the header.
+    ///
+    /// Accepting a separator anywhere in the block made a run of pipe-led prose
+    /// a table as soon as one line looked like a delimiter, and rewrote that
+    /// line. Raised on #790, one round after the fix that required a header at
+    /// all — position again, one notch finer.
+    #[test]
+    fn the_delimiter_must_immediately_follow_the_header() {
+        // Third line: not a table, nothing touched.
+        assert_eq!(
+            canonical_body("| a |\n| b |\n| --- |\n", true),
+            "| a |\n| b |\n| --- |\n"
+        );
+        // Second line: a table.
+        assert_eq!(canonical_body("|  a |\n| --- |\n", true), "| a |\n|---|\n");
+    }
+
+    /// A closing fence that ends the file keeps ending it.
+    ///
+    /// The document was given a trailing newline it did not have — small, and
+    /// still a byte this function promises not to add. Raised on #790.
+    #[test]
+    fn a_frontmatter_fence_at_eof_gains_no_newline() {
+        assert_eq!(canonical("---\nTitle: T\n---"), "---\nTitle: T\n---");
+        // And one that does end in a newline keeps it.
+        assert_eq!(canonical("---\nTitle: T\n---\n"), "---\nTitle: T\n---\n");
     }
 }

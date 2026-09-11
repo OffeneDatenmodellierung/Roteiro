@@ -1,10 +1,10 @@
 ---
-status: deprecated
-superseded-by: issues
 site-page: history/build-plan-v2
 site-nav: Roadmap
 site-order: 30
+status: deprecated
 archived: 2026-09-02
+superseded-by: issues
 ---
 
 # Roteiro — Build Plan V2
