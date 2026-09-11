@@ -29,6 +29,12 @@ pub const TOOL_CHECK_SCHEMA: &str = "roteiro.check/v1";
 /// `violations.is_empty()` would read a check that never ran as a clean
 /// repository; making the absence of a verdict its own value means that caller
 /// has to notice.
+///
+/// Deliberately closed, and so not `#[non_exhaustive]`: a check either ran and
+/// passed, ran and failed, or did not run. That is the whole of it, and the
+/// exhaustiveness is load-bearing — a wildcard arm here is exactly how `NotRun`
+/// would get folded back into "not a failure", which is the defect the third
+/// state exists to prevent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Gate {

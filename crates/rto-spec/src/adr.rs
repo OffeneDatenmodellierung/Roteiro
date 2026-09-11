@@ -11,6 +11,12 @@ use rto_graph::{Edge, EdgeKind, FactSet, Node, NodeKind, Provenance};
 use serde::{Deserialize, Serialize};
 
 /// ADR lifecycle states, exactly as the house style defines them.
+///
+/// Deliberately closed, and so not `#[non_exhaustive]`: the set is five states
+/// the house style names, and the frontmatter comment on every ADR spells them
+/// out — `Draft | For Review | Accepted | Rejected | Superseded`. A sixth would
+/// be a change to the house style, and the compile error that a downstream
+/// `match` then produces is the point rather than the cost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AdrStatus {
     /// Being drafted.
@@ -47,6 +53,11 @@ impl AdrStatus {
 }
 
 /// Errors raised while parsing ADR metadata.
+///
+/// Open to extension: the house style gains rules, and a caller that must
+/// re-compile to learn there is a new way to be malformed is a caller that will
+/// be pinned to an old version instead.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ParseError {
     /// The status string is not one of the five house-style states.

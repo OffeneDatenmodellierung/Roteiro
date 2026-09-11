@@ -26,6 +26,23 @@
 //! renamed or deleted. So the list can only get shorter, and every removal is a
 //! deliberate act recorded in a diff.
 //!
+//! **`rto-spec` is clear as of #438's closure, and the rest follow the same
+//! way.** What kept the list long was an argument that adding a variant to a
+//! published enum is breaking, so it needed settling before any rule was
+//! written. `AGENTS.md` had already settled it: for an `rto-*` crate a
+//! technically-breaking change ships as a **minor** and takes no `!`, because
+//! the only reverse dependency on crates.io is `roteiro` itself. So the cost
+//! being avoided did not exist, and the six `rto-spec` entries were removed by
+//! paying it — four marked `#[non_exhaustive]`, two documented as deliberately
+//! closed. Measured cost to the workspace: **nothing**, because
+//! `#[non_exhaustive]` does not affect matching inside the defining crate and
+//! there was exactly one `ViolationKind::` reference outside it.
+//!
+//! One crate at a time remains right, for the reason above: the judgement is
+//! per enum, and `Gate` is the example of one that must stay closed — folding
+//! `NotRun` into a wildcard arm is the precise defect its third state exists to
+//! prevent.
+//!
 //! `rto-remote`'s own test stays: it also covers types re-exported from outside
 //! `src/`, which a directory walk cannot see.
 
@@ -114,12 +131,6 @@ const GRANDFATHERED: &[(&str, &str)] = &[
     ("crates/rto-serve/src/types.rs", "ContentPart"),
     ("crates/rto-serve/src/types.rs", "EmbeddingInput"),
     ("crates/rto-serve/src/types.rs", "MessageContent"),
-    ("crates/rto-spec/src/adr.rs", "AdrStatus"),
-    ("crates/rto-spec/src/adr.rs", "ParseError"),
-    ("crates/rto-spec/src/check.rs", "ViolationKind"),
-    ("crates/rto-spec/src/import.rs", "ImportError"),
-    ("crates/rto-spec/src/site.rs", "ParseError"),
-    ("crates/rto-spec/src/tool_check.rs", "Gate"),
 ];
 
 /// One public enum found by the scan.
