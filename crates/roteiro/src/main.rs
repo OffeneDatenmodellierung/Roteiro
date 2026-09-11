@@ -1441,7 +1441,6 @@ enum OkfAction {
     },
 }
 
-/// `roteiro spec` actions (ADR-0004).
 /// ADR-0023's authoring verbs. `fmt` is step 1; the rest follow.
 #[derive(Subcommand)]
 enum DocsAction {
@@ -1460,6 +1459,7 @@ enum DocsAction {
     },
 }
 
+/// `roteiro spec` actions (ADR-0004).
 #[derive(Subcommand)]
 enum SpecAction {
     /// Assemble graph-grounded context for a topic: related symbols (with their
@@ -7075,7 +7075,6 @@ fn read_bundle_files(root: &std::path::Path) -> anyhow::Result<Vec<(String, Stri
     Ok(out)
 }
 
-/// Graph-grounded spec/blueprint authoring (ADR-0004).
 /// `roteiro docs` — ADR-0023's authoring verbs over the authored documents.
 fn run_docs(action: DocsAction) -> anyhow::Result<()> {
     match action {
@@ -7155,7 +7154,17 @@ fn run_docs_fmt(paths: &[std::path::PathBuf], write: bool) -> anyhow::Result<()>
 /// content *in*; here the risk runs the other way — `--write` through a
 /// symlink would rewrite a file outside the tree the caller named.
 fn markdown_files(root: &std::path::Path, out: &mut Vec<std::path::PathBuf>) -> anyhow::Result<()> {
-    if root.is_file() {
+    // `symlink_metadata` rather than `is_file`, which follows the link: an
+    // explicitly named symlink is the one path that does not go through the
+    // directory walk below, so checking only there left `roteiro docs fmt
+    // --write link.md` able to rewrite a file outside the tree the caller
+    // named — the exact thing the walk refuses. Raised on #790.
+    let meta = std::fs::symlink_metadata(root)
+        .map_err(|e| anyhow::anyhow!("reading {}: {e}", root.display()))?;
+    if meta.file_type().is_symlink() {
+        return Ok(());
+    }
+    if meta.is_file() {
         out.push(root.to_path_buf());
         return Ok(());
     }
@@ -7177,6 +7186,7 @@ fn markdown_files(root: &std::path::Path, out: &mut Vec<std::path::PathBuf>) -> 
     Ok(())
 }
 
+/// Graph-grounded spec/blueprint authoring (ADR-0004).
 fn run_spec(
     cfg: &config::Loaded,
     ingest: rto_graph::IngestConfig,
