@@ -118,9 +118,9 @@ enum Mode {
 ///
 /// It was one, and it was wrong every single time. Measured on this repository:
 /// **36 of 36** `stub` markers came from it and **not one** was a stub. They were
-/// the *external-ref placeholder node* ([`crate::links`], [`crate::Workspace`] —
+/// the *external-ref placeholder node* (`crate::links`, [`crate::Workspace`] —
 /// an implemented ADR-0009 concept), the redaction placeholder a secret value is
-/// replaced with ([`crate::config_keys`], ADR-0015), the security lens's own
+/// replaced with (`crate::config_keys`, ADR-0015), the security lens's own
 /// sentence about not being able to tell a secret from a placeholder, a `{tag}`
 /// ref template, and the CSS `::placeholder` pseudo-element. Restricting it to
 /// comments (which is right, and which it already was) does not help, because
@@ -132,7 +132,7 @@ enum Mode {
 /// predicates something of an implementation — "placeholder implementation",
 /// "returns a placeholder" — does it mean *unfinished*, and those are the forms
 /// kept below. The narrower `is a placeholder` was measured too and rejected: its
-/// single hit on this repository is [`crate::config_keys`] documenting the
+/// single hit on this repository is `crate::config_keys` documenting the
 /// redaction value, so it is the same false positive with a longer needle.
 ///
 /// Deleting the word costs no coverage that can be demonstrated: on this

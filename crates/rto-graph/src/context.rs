@@ -1,7 +1,7 @@
 //! Per-node **context bundles** with a dependency-aware cache.
 //!
 //! A node's *context* is the node plus its one-hop, provenance-labelled
-//! neighbourhood — the same shape as [`crate::query::explain`], but **cached**
+//! neighbourhood — the same shape as [`crate::explain`], but **cached**
 //! and **fingerprinted**. The fingerprint folds in the node's own content *and*
 //! every neighbour's content signature, so a change to the node or to any of its
 //! neighbours (callers, callees, referencing docs) moves the fingerprint and the

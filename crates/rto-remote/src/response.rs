@@ -129,7 +129,7 @@ pub enum ResponseError {
     Malformed {
         /// What went wrong, in one clause.
         detail: String,
-        /// The first [`EXCERPT`] characters of the body.
+        /// The first `EXCERPT` characters of the body.
         excerpt: String,
     },
     /// The endpoint reported an error in its own body.
@@ -271,7 +271,7 @@ fn endpoint_error(value: &serde_json::Value) -> Option<String> {
     (!message.is_empty()).then(|| message.to_owned())
 }
 
-/// The first [`EXCERPT`] characters, on a character boundary, marked when
+/// The first `EXCERPT` characters, on a character boundary, marked when
 /// clipped — the same rule the payload's prose excerpts follow, for the same
 /// reason: a reader must be able to tell a whole thing from a piece of one.
 fn excerpt_of(raw: &str) -> String {

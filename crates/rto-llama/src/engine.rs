@@ -67,7 +67,7 @@ pub struct Message {
 }
 
 /// A validated chat request, normalised from the wire
-/// [`crate::types::ChatCompletionRequest`].
+/// `ChatCompletionRequest`.
 #[derive(Debug, Clone)]
 pub struct ChatRequest {
     /// The requested model id.

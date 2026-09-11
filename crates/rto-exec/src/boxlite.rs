@@ -22,7 +22,7 @@
 //! Nothing in this file parses analyzer output. It captures the analyzer's
 //! stdout and hands those bytes to **the same [`crate::Adapter`]** the
 //! subprocess backend and `roteiro security ingest` use, then to the same
-//! [`crate::ingest::assemble`]. Equality of the resulting findings is therefore a
+//! `crate::ingest::assemble`. Equality of the resulting findings is therefore a
 //! property of the code rather than a coincidence two test runs happened to
 //! share (ADR-0012).
 //!

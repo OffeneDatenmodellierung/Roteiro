@@ -1,6 +1,9 @@
 //! The **project-level shape** of a workspace: who depends on whom, derived once
 //! and read by everything that needs to know.
 //!
+//! Concretely: roles, parents, and the config-key baseline the cross-repo views
+//! pivot on (#623).
+//!
 //! # Why this is here rather than in a caller
 //!
 //! Issue #623 asked for two things. The first — that a project can be a spoke of

@@ -14,14 +14,9 @@
 //! shared by every engine ([`backend`], issue #296) — a second engine redirects
 //! to the first instead of failing to construct and going silently inert.
 
-/// Rendering a model's own chat template in Rust, because llama.cpp's
-/// `apply_chat_template` runs no Jinja and takes no tools (issue #492).
 pub mod chat_template;
 pub mod engine;
-/// Reading a GGUF's embedded chat template without loading the model (#492).
 pub mod gguf;
-/// Preamble state reuse (#578) — the policy half, which needs no model and no
-/// `llama` feature, so it is compiled and tested unconditionally.
 pub mod prefix_cache;
 
 // The process's single llama.cpp backend (issue #296): every engine holds a

@@ -31,7 +31,7 @@
 //! target [`Workspace`] is selected (the `{ws}` path segment vs. the default).
 //!
 //! Two routes reuse binary-local code — the override matrix reuses
-//! [`crate::overview::build`], and the cross-repo views reconstruct the persisted
+//! `crate::overview::build`, and the cross-repo views reconstruct the persisted
 //! external-ref edges the workspace resolver walks — which is why the API lives in
 //! the `roteiro` binary rather than `rto-render`.
 //!
@@ -691,7 +691,7 @@ async fn neighbourhood(
 /// numbers are worse than either being wrong, because neither looks wrong.
 ///
 /// The exclusions come from the **target project's own** repository
-/// ([`crate::config::debt_ignore_for`]), not the repo the server was started in.
+/// (`crate::config::debt_ignore_for`), not the repo the server was started in.
 /// An unreadable or malformed `roteiro.toml` there is a 500, deliberately: a
 /// fallback to "no exclusions" would serve a silently different number, which is
 /// the defect rather than a graceful degradation.
@@ -1028,7 +1028,7 @@ async fn topology(State(st): State<AppState>, params: RawPathParams) -> ApiResul
             "parents": pgraph.parents_of(name),
             // Whether this project is the config-key baseline the matrix pivots on.
             // Separate from `role` because they answer different questions and, in a
-            // chain, different projects: see [`determine_hub`].
+            // chain, different projects: see `determine_hub`.
             "isMatrixHub": is_hub,
             "keyCount": key_count,
             "driftCount": drift_count,
@@ -1149,8 +1149,8 @@ async fn matrix(State(st): State<AppState>, params: RawPathParams) -> ApiResult 
 /// `POST /v1/graph[/workspaces/{ws}]/links/write` → infer the workspace's cross-repo
 /// correspondences and **persist** them into each spoke's graph as durable
 /// `inferred` external-ref edges — exactly what `roteiro links --infer --write` does,
-/// reusing the same [`crate::infer_links::match_against_hub`] +
-/// [`crate::infer_links::link_facts`] + [`Store::apply_import_layer`] path. This is
+/// reusing the same `crate::infer_links::match_against_hub` +
+/// `crate::infer_links::link_facts` + [`Store::apply_import_layer`] path. This is
 /// the one deliberately-mutating route on the otherwise read-only API; the durable
 /// edges are what the follow-the-link hop and `roteiro check` gates rely on (the live
 /// inference in [`topology`]/[`matrix`] does not persist).
@@ -1370,7 +1370,7 @@ use rto_graph::topology::{ProjectGraph, project_graph as dependency_graph};
 /// the plain-`sync` case the explorer must now handle:
 ///
 /// - if any persisted external-ref points at a **hosted** project, that project is
-///   the hub ([`determine_hub`]) — the historical behaviour, so an authored/linked
+///   the hub (`determine_hub`) — the historical behaviour, so an authored/linked
 ///   workspace is unchanged;
 /// - otherwise, when there are **no persisted external-ref edges at all** (a repo
 ///   was synced but never `links --write`-ten), fall back to the CLI's rule — the
@@ -1432,7 +1432,7 @@ type SpokeLinks = (Vec<ExternalRef>, Vec<(String, String)>);
 /// with the ones inferred **live** against the hub, plus the spoke keys that match
 /// no hub key (live drift). This is the single place the explorer brings the CLI's
 /// `roteiro links --matrix/--infer` behaviour into the read-only views, reusing
-/// [`crate::infer_links::match_against_hub`] verbatim.
+/// `crate::infer_links::match_against_hub` verbatim.
 ///
 /// **Persisted wins.** A spoke `config_key` that already carries a persisted link
 /// (authored `[[links]]` or a previous `--write`) is left exactly as stored — so

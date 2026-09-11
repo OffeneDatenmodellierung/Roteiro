@@ -78,7 +78,7 @@ pub const LINE_WINDOW: u32 = 10;
 
 /// A finding a candidate reviewer offered, in the corpus's coordinate system.
 ///
-/// Not [`crate::findings::Finding`]: that models a persisted *analyzer* result
+/// Not [`crate::Finding`]: that models a persisted *analyzer* result
 /// owned by an `AnalysisRun` with a runner, an isolation mode and an advisory-db
 /// digest (ADR-0012). A candidate finding is an ephemeral opinion about one line
 /// of one commit, and scoring it must stay a pure function.
@@ -453,7 +453,7 @@ pub struct Score {
     /// **How many real rows a candidate of this shape would match by position
     /// alone** — the chance baseline [`Score::found`] has to beat.
     ///
-    /// [`match_findings`] credits a finding to a row on `(sha, path, line within
+    /// `match_findings` credits a finding to a row on `(sha, path, line within
     /// LINE_WINDOW)` and **nothing else**: not the defect class, not a word of the
     /// description. That is the right rule for a scorer that must not reward
     /// eloquence, but it has a consequence nobody had measured. A reviewer that

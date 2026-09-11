@@ -72,7 +72,7 @@ use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Provenance, Span};
 // and so carries the inline opt-out rather than reporting itself — the same
 // reason `markers.rs` carries the file-level one:
 // `placeholder implementation` / `returns a placeholder`.  roteiro:ignore
-// [`crate::markers::augment`] runs inside extraction, so every cached fact set
+// `crate::markers::augment` runs inside extraction, so every cached fact set
 // holding one of those 36 must be regenerated without it; without the bump a
 // cached blob keeps serving the phantom marker until its bytes happen to
 // change. No namespace moves: this is a base-version change only, unconditional
@@ -86,10 +86,10 @@ pub(crate) const EXTRACT_VERSION: u32 = EXTRACT_BASE_VERSION
         0
     };
 
-/// The **generation** half of [`EXTRACT_VERSION`]: what a bump above counts, with
+/// The **generation** half of `EXTRACT_VERSION`: what a bump above counts, with
 /// no feature namespace added. Monotone, global, and identical in every build —
-/// which is what makes it, and not [`EXTRACT_VERSION`], the thing an entry's
-/// reachability can be decided against (see [`crate::sync::sweep_superseded`]).
+/// which is what makes it, and not `EXTRACT_VERSION`, the thing an entry's
+/// reachability can be decided against (see [`crate::sweep_superseded`]).
 ///
 /// The split was always there, encoded in the arithmetic; naming it only makes
 /// it readable.
@@ -243,7 +243,7 @@ impl IngestConfig {
 
 /// Dispatches extraction to a language-aware extractor by file extension,
 /// falling back to a plain file node when no language is registered. After the
-/// language extractor runs, [`crate::markers`] appends any intent-debt markers
+/// language extractor runs, `crate::markers` appends any intent-debt markers
 /// (intent-debt markers) found in the blob. Carries the runtime
 /// [`IngestConfig`] applied to content extraction.
 #[derive(Debug, Clone, Copy, Default)]
@@ -481,7 +481,7 @@ fn config_facts(path: &str, blob_id: &str, bytes: &[u8], ingest: IngestConfig) -
 ///
 /// - **A whole image string** under a key named `image` or ending `.image` —
 ///   `container.api.image: registry/app:1.2` (k8s, mined by
-///   [`crate::config_keys`]) and a bare Helm `image: app:1.2`.
+///   `crate::config_keys`) and a bare Helm `image: app:1.2`.
 /// - **The split Helm form**, `<prefix>.repository` with an optional
 ///   `<prefix>.tag` and `<prefix>.registry` — the `image:` block essentially every
 ///   chart writes, and the shape that made this issue visible.
@@ -1136,7 +1136,7 @@ pub fn is_prose(path: &str) -> bool {
     )
 }
 
-/// Trim and cap `text` to [`MAX_CONTENT`] characters (whitespace-collapsed), so
+/// Trim and cap `text` to `MAX_CONTENT` characters (whitespace-collapsed), so
 /// stored content stays small and deterministic.
 ///
 /// Public because the *budget is the definition*, and a second copy of it would
@@ -1144,7 +1144,7 @@ pub fn is_prose(path: &str) -> bool {
 /// `adr`/`adr_section` nodes so `search` and `explain` can reach it, and that text
 /// has to be bounded by the same rule the derived layer uses — otherwise the
 /// exportable store grows by whichever cap was written down last. This is not an
-/// extraction path and needs no [`EXTRACT_VERSION`] bump: the authored layer is
+/// extraction path and needs no `EXTRACT_VERSION` bump: the authored layer is
 /// re-parsed from blobs on every sync rather than served from the
 /// content-addressed extraction cache.
 #[must_use]
@@ -1196,7 +1196,7 @@ impl Extractor for FileNodeExtractor {
 /// others) with `defines`/`contains` edges reflecting lexical nesting, and
 /// `imports` edges for `use` declarations. Each function records the (optionally
 /// scope-qualified) names it calls in `meta.calls` for later cross-file
-/// resolution — see [`RustWalk::callee_name`].
+/// resolution — see `RustWalk::callee_name`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RustExtractor;
 
@@ -1828,7 +1828,7 @@ impl RustWalk<'_> {
 // same fact shape as the Rust walker — a `file` node, one symbol node per
 // definition with `defines`/`contains` edges reflecting byte-range nesting, and
 // each function's callee simple-names in `meta.calls` — so cross-file (and
-// cross-language) call resolution in `crate::sync` works uniformly. Where the
+// cross-language) call resolution in [`crate::sync`] works uniformly. Where the
 // language has an import query (`import_query_for`), it also emits `imports`
 // edges (`file → import` target), as the Rust walker does for `use`. A new
 // language is a row in `tag_lang_for` (and optionally `import_query_for`), not
@@ -3341,7 +3341,7 @@ mod inner {
     fn env_tag_stable_by_default_and_shifts_when_gated() {
         use super::IngestConfig;
 
-        // All-on is the default: its tag must equal a plain `Registry` so existing
+        // All-on is the default: its tag must equal a plain [`crate::Registry`] so existing
         // caches are untouched.
         let all_on = Registry::new(IngestConfig::default()).env_tag();
         assert_eq!(all_on, Registry::default().env_tag());

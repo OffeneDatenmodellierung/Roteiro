@@ -128,7 +128,7 @@
 //!   not read this file.
 //! - **`security list` is unbounded, and every other tool here is not.** A
 //!   listing is every finding in every layer, and a tool result is spent against a
-//!   context window — so it takes `limit`, clamped by [`model_limit`] like every
+//!   context window — so it takes `limit`, clamped by `model_limit` like every
 //!   ranking here, with `"minimum": 1` declared in the schema because `0` means
 //!   *unlimited* on the `rto_graph` surfaces and this one must not offer that. The
 //!   bound is **per layer** rather than per document: a document-wide bound spends

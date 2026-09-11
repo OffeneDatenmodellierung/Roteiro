@@ -713,7 +713,7 @@ pub struct ConfigSecretReport {
 ///
 /// Config extraction (ADR-0009) flattens TOML/JSON/YAML/`.env` into `config_key`
 /// nodes, and **redacts the value of any secret-named key before it reaches the
-/// store** (see [`crate::config_keys::REDACTED`] and the redaction sites it
+/// store** (see `crate::config_keys::REDACTED` and the redaction sites it
 /// names). This lens reads that back: *secret-named config keys are present, here
 /// are their paths and names, and here is their redaction state*. It is an
 /// **inventory with an invariant check**, and it is useful for exactly two
@@ -752,7 +752,7 @@ pub struct ConfigSecretReport {
 ///
 /// # The heuristic, stated
 ///
-/// "Secret-named" is [`crate::config_keys::is_secret_key`]: the key's
+/// "Secret-named" is [`crate::is_secret_key`]: the key's
 /// ASCII-alphanumerics, lowercased, containing any of `secret`, `password`,
 /// `passwd`, `passphrase`, `token`, `apikey`, `credential`, `privatekey`,
 /// `accesskey`, `pwd`. So it matches `API_TOKEN`, `db.passwordFile` and
@@ -1011,7 +1011,7 @@ pub struct CouplingReport {
 ///   `self_calls` rather than silently dropped.
 /// - **Cross-language call edges are excluded.** Roteiro extracts no FFI, so a
 ///   `Calls` edge between two languages is never a call — see
-///   [`same_language`]. Reported as `cross_language_calls`.
+///   `same_language`. Reported as `cross_language_calls`.
 ///
 /// Ordering is total and deterministic: by the chosen metric descending, then by
 /// `key` ascending, so identical input yields byte-identical output.
@@ -1265,7 +1265,7 @@ pub struct SearchHit {
     #[serde(flatten)]
     pub node: NodeSummary,
     /// A short, whitespace-collapsed excerpt of the node's captured
-    /// `meta.content` (see [`content_snippet`]), so a model that never calls
+    /// `meta.content` (see `content_snippet`), so a model that never calls
     /// [`explain`] still has real grounding text. `None` for pure symbol/config
     /// nodes with no content — the summary (name/kind/path) is the grounding then.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1570,7 +1570,7 @@ impl Default for SearchOptions {
 /// model-generated media content and episodic agent memory.
 ///
 /// The graph channel is exactly [`search`]. The other two are ranked by scorers of
-/// their own ([`generated_score`], [`memory_score`]) which have **no provenance
+/// their own (`generated_score`, `memory_score`) which have **no provenance
 /// term at all**, so neither can acquire the `authored` boost that curated intent
 /// gets. Neither could do so even by accident: neither record is a node, so
 /// neither ever reaches the code that applies that boost.

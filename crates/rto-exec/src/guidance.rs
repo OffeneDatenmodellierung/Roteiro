@@ -1,5 +1,11 @@
 //! How a refusal is written, so that a way forward stays one.
 //!
+//! Ungated, like [`crate::lint_grant`], and for the same kind of reason: what a refusal
+//! owes its reader is not a property of which backends were compiled in. Read
+//! the module for the failure it makes unrepresentable — three of this crate's
+//! refusals leaked source indentation into shipped output at once, which says
+//! the way they were written invited it.
+//!
 //! #426's rule is that a refusal **names the way forward**. A way forward you
 //! cannot paste is not one, and three of this crate's refusals drifted into
 //! exactly that at once — which says the way they were written invited it rather

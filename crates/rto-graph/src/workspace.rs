@@ -123,7 +123,7 @@ enum Source {
     /// repository's own configuration governs how it is scanned, whoever is
     /// asking ([`Workspace::project_root`]) — and the "repo dir is the store's
     /// grandparent" shortcut is wrong for a **linked worktree**, whose git dir
-    /// is `<main>/.git/worktrees/<name>`, not `<repo>/.git`. [`build_registry`]
+    /// is `<main>/.git/worktrees/<name>`, not `<repo>/.git`. `build_registry`
     /// already holds the true working-tree root, so it is recorded here instead
     /// of guessed later. `None` where the caller supplied only a `graph.db`
     /// path ([`Workspace::from_named_dbs`]).
@@ -553,7 +553,7 @@ impl Workspace {
     /// target (e.g. an authored `[[links]]` that already points at a symbol). A
     /// well-formed target whose node is gone is [`Follow::Drift`].
     ///
-    /// The bridge is deliberately conservative (see [`bridge_config_key`]): it
+    /// The bridge is deliberately conservative (see `bridge_config_key`): it
     /// fires only on a *unique* match of both an independent section→struct-name
     /// signal and a field-presence signal, so it never jumps to a **wrong** node —
     /// an ambiguous or unmatched key falls back to the config-key node.
@@ -996,7 +996,7 @@ pub struct OkfBundle {
     /// The bundle directory inside it.
     pub bundle: PathBuf,
     /// The peer name: the member repository's directory name, which is also the
-    /// project name [`build_registry`] derives and the `--peer` default
+    /// project name `build_registry` derives and the `--peer` default
     /// `roteiro import --from okf` uses. One name, so a bundle discovered
     /// automatically and the same bundle imported by hand land on **one** import
     /// layer rather than two.

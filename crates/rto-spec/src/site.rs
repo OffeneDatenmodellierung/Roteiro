@@ -28,7 +28,7 @@
 //!
 //! Structurally these mirror blueprints: `## ` headings become sections and
 //! `[[path#Symbol]]` wiki-links become the *authored* layer over code, validated
-//! against the derived graph by [`crate::check`] exactly like ADR links. So a
+//! against the derived graph by `crate::check` exactly like ADR links. So a
 //! page that claims `security run` needs `--allow-unsandboxed` can be made to
 //! cite the code it describes, and the citation drifts loudly when the code moves.
 //!
@@ -52,7 +52,7 @@ const DEFAULT_ORDER: u32 = 10_000;
 /// Why a document that *declared* itself a site page could not be parsed as one.
 ///
 /// Every variant is drift rather than a warning, for the reason
-/// [`crate::layer::AuthoredLayer::malformed`] gives for ADRs: the file asked to
+/// `crate::layer::AuthoredLayer::malformed` gives for ADRs: the file asked to
 /// be published, so failing quietly would drop a page from the site while the
 /// gate stayed green.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -110,7 +110,7 @@ impl SitePage {
 
     /// The authored nodes and structural edges: a `site_page` node, one
     /// `site_section` node per section, and `contains` edges between them.
-    /// Wiki-links are *not* included — [`crate::check`] validates them against
+    /// Wiki-links are *not* included — `crate::check` validates them against
     /// the code graph before they become edges.
     #[must_use]
     pub fn facts(&self) -> FactSet {
@@ -276,7 +276,7 @@ pub fn parse_site_page(rel_path: &str, text: &str) -> Result<SitePage, ParseErro
 /// The site navigation order: every page, sorted by `site-order` then slug.
 ///
 /// One function rather than a sort each caller writes, for the reason
-/// [`crate::layer::authored_layer_from`] gives about the classification rule: the
+/// [`crate::authored_layer_from`] gives about the classification rule: the
 /// bar the renderer emits and the order the check reports have to be the same
 /// order, or a page's position becomes a thing two surfaces disagree about.
 /// Ties break on the slug so the bar is deterministic — the site is diffed in CI.

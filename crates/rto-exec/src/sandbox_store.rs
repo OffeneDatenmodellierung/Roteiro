@@ -1,5 +1,11 @@
 //! The **sandbox image store**: what it is holding, and dropping it safely.
 //!
+//! Ungated, like [`crate::assets`], and the argument is the same one that moved
+//! provisioning off the backend features: reclaiming the bytes a previous build
+//! cached must not require rebuilding with the backend that cached them. Nothing
+//! here executes anything — it reads an index, measures files, and removes what
+//! a pinned digest re-obtains (ADR-0014 v1.6).
+//!
 //! `roteiro security prefetch` obtains and `roteiro security status` reports.
 //! Nothing removed, so the store only grew — 2.9 GB when issue #433 was filed,
 //! 8.7 GB on the machine this module was written on, 12 GB after one afternoon

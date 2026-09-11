@@ -1,5 +1,8 @@
 //! The served half of the OKF viewer (ADR-0022).
 //!
+//! axum routes over `rto_render::okf::view`, which owns every rule about untrusted
+//! content and is compiled by the default build.
+//!
 //! [`rto_render::okf::view`] decides *what* a reader is shown and what is never
 //! emitted; this module is the HTTP around it, exactly as `graph_api` is the
 //! served half of the explorer.
@@ -20,7 +23,7 @@
 //! # Serving somebody else's directory
 //!
 //! Every rule about untrusted content lives in `rto_render::okf::view` and is
-//! tested there. The one this module owns is [`file`]: a reader can type a URL,
+//! tested there. The one this module owns is [`file()`]: a reader can type a URL,
 //! so the route re-applies `view::safe_bundle_file` rather than trusting that
 //! only hrefs our own renderer produced will arrive. A guard that assumed its
 //! input came from us would be a guard on the wrong side of the boundary.
@@ -535,7 +538,7 @@ fn assert_mountable(base: &str) {
 /// One bundle's routes, mounted at `base`.
 ///
 /// Stateless from the caller's side — it holds a path and where it sits — so it
-/// merges into a larger router the way [`crate::explorer_app::router`] does.
+/// merges into a larger router the way `crate::explorer_app::router` does.
 ///
 /// `base` is the mount path and every generated href carries it: `/okf/{slug}`
 /// under [`mounts_router`], and empty only in tests that drive one bundle

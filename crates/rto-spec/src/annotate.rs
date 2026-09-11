@@ -35,7 +35,7 @@ const MARKER: &str = "@rto:";
 /// languages Roteiro ingests. Annotations are only recognised on comment lines
 /// so that example `@rto:<id>` tokens inside string literals (e.g. test
 /// fixtures) are not mistaken for real annotations. Shared with the `@lat:`
-/// backlink scanner in [`crate::lat`].
+/// backlink scanner in `crate::lat`.
 pub(crate) fn is_comment_line(line: &str) -> bool {
     let t = line.trim_start();
     ["//", "#", "*", "/*", "<!--", ";", "--"]

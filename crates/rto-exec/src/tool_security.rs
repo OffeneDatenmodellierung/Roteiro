@@ -1,6 +1,14 @@
 //! The **read-only `security list` / `security status` documents** the
 //! model-facing tool surfaces return.
 //!
+//! Ungated, like [`crate::guidance`] and [`crate::lint_grant`], and for a related reason: what
+//! a read owes its reader is not a property of which backends were compiled in.
+//! It is also the one place either document is built — the CLI's `security
+//! status` shares its coverage matrix and staleness rows from here, so
+//! `possibly_stale` and `ready` are one computation rather than three. Read the
+//! module for the two hazards it exists to remove: an empty listing that reads as
+//! a clean one, and a status blob whose two halves have different scopes.
+//!
 //! `roteiro security list` and `roteiro security status` are the two `security`
 //! subcommands that read and never write, so they are the two that may be
 //! exposed to a model at all — the other three (`ingest`, `run`, `prefetch`) are

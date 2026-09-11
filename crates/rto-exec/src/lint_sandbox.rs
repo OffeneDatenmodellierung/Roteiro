@@ -2,6 +2,17 @@
 //! boundary**, so that `roteiro lint`'s sandbox-by-default has something to
 //! select.
 //!
+//! **The boundary half of [`crate::lint`].** It adds one writable mount to what
+//! `boxlite` already does and removes nothing: the worktree stays read-only,
+//! `check_request`'s preflight is untouched, and the package cache is a read-only
+//! mount of this machine's own rather than a vendored copy.
+//!
+//! **Gated on both backends.** The boundary does not imply the escape hatch —
+//! `exec-boxlite` still does not enable `exec-subprocess`, and enabling one must
+//! never switch on the other. This module needs both because it shares
+//! [`crate::lint`]'s report shape and its one host-side `cargo locate-project`,
+//! which is how it learns what to mount.
+//!
 //! `cargo clippy` has `cargo check` semantics: it executes every build script in
 //! the resolved tree and loads every proc macro as a dylib into the compiler —
 //! measured on this repository at 54 build scripts and 7 proc macros by default,
@@ -42,7 +53,7 @@
 //!
 //! **The failure that follows is a refusal, not a build error.** A guest with no
 //! network cannot fetch what the host's cache does not already hold, and cargo
-//! reports that from inside a machine the user cannot see. [`cold_cache`] turns
+//! reports that from inside a machine the user cannot see. `cold_cache` turns
 //! it into the one sentence that helps: run `cargo fetch` on the host first.
 //!
 //! # The package cache is mounted; `CARGO_HOME` is not
@@ -89,7 +100,7 @@
 //! Because nothing is stored (ADR-0020 v1.1, condition 4) that is a **surprise
 //! rather than a corruption**: there is no series for a different compiler to
 //! falsify, and no layer key for two toolchains to collide in. It is still a real
-//! surprise, so the toolchain is read out of the **guest** by [`probe_toolchain`]
+//! surprise, so the toolchain is read out of the **guest** by `probe_toolchain`
 //! rather than assumed from the image reference, and printed with every report
 //! beside the image digest it came from.
 //!
@@ -152,7 +163,7 @@ pub const GUEST_CARGO_GIT: &str = "/cargo/git";
 /// the linter, a test's skip message, and `roteiro lint --help` — and one of
 /// them said "three" over a document showing two. A count repeated four times is
 /// a count that will be wrong somewhere, so it is stated once, checked against
-/// the document by [`tests::the_two_line_dockerfile_claim_matches_the_document`],
+/// the document by `tests::the_two_line_dockerfile_claim_matches_the_document`,
 /// and referenced everywhere else. `--help` no longer states a number at all,
 /// because it is in another crate and this test cannot reach it.
 const SEE_THE_DOCUMENT: Line = Line::Note(&[

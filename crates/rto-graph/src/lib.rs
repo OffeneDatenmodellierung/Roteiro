@@ -79,22 +79,12 @@ pub mod review_score;
 // response parsing and the compile-claim site derivation are functions of bytes,
 // so what the reviewer *decides* is testable with no model and no network. The
 // loop that calls an engine is in the binary, where the engine already is.
-/// The recorded answer to "may this peer's OKF bundle be read into our graph?"
-/// (#706 phase 2). Beside the store that holds it and the screen that informs
-/// it, rather than in `rto-render`: the record is a row in `graph.db`, and the
-/// renderer has no business owning a consent decision.
 pub mod okf_consent;
 pub mod reviewer;
-/// Screening foreign prose before it becomes node content (#706). In this crate
-/// because what it protects is here: `meta.content`, `query`'s `content_snippet`
-/// that returns it to a model, and `cap_content` that admits it. `rto-render`
-/// depends on this crate, so a screen there could never guard a second consumer.
 pub mod screen;
 mod store;
 mod sync;
 mod text;
-/// The project-level dependency shape of a workspace: roles, parents, and the
-/// config-key baseline the cross-repo views pivot on (#623).
 pub mod topology;
 // Whether a producer's identity is measured or asserted (ADR-0019 §5). In *this*
 // crate rather than in `rto-remote` because `rto-remote` depends on this one, so

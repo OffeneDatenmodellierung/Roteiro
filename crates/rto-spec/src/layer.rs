@@ -28,8 +28,8 @@ use crate::site::SitePage;
 /// closure without converting on the way in.
 pub type BlobReader<'a, E> = dyn Fn(&BlobRef) -> Result<Option<Vec<u8>>, E> + 'a;
 
-/// The authored documents found in one tree, ready for [`crate::check::run`] or
-/// [`crate::check::validate`].
+/// The authored documents found in one tree, ready for [`crate::run`] or
+/// [`crate::validate`].
 #[derive(Debug, Default)]
 pub struct AuthoredLayer {
     /// ADRs under `docs/adr/` that parsed.
@@ -46,7 +46,7 @@ pub struct AuthoredLayer {
     /// consequence: the page silently does not exist.
     pub malformed: Vec<Violation>,
     /// House-style convention breaches found while reading the same blobs — see
-    /// [`crate::convention`].
+    /// `crate::convention`.
     ///
     /// Carried beside [`Self::malformed`] rather than inside it because the two
     /// are different claims: `malformed` is *this document does not parse*, and

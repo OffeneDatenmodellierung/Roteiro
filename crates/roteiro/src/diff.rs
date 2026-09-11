@@ -9,9 +9,9 @@
 //!
 //! # Why this shells out rather than using gix
 //!
-//! [`rto_graph::git`] is pure gix and never spawns a process, which is worth
+//! `rto_graph::git` is pure gix and never spawns a process, which is worth
 //! keeping: it is what lets the graph build without a `git` binary on `PATH`.
-//! But gix gives blob-level tree diffs — paths and oids, as [`rto_graph::TreeDiff`]
+//! But gix gives blob-level tree diffs — paths and oids, as `rto_graph::TreeDiff`
 //! shows — not rendered unified hunks, and rendering those is a diff
 //! implementation rather than a call. So the shell-out stays, and it stays *here*
 //! rather than in `rto-graph`, so the graph crate keeps its property.

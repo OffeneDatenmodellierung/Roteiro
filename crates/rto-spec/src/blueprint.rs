@@ -6,7 +6,7 @@
 //! H1 (`… — Technical Implementation Plan`) or by living under `docs/blueprint`.
 //! Structurally they mirror ADRs: `## ` headings become sections and
 //! `[[path#Symbol]]` wiki-links become the *authored* layer over code, validated
-//! against the derived graph by [`crate::check`] exactly like ADR links.
+//! against the derived graph by `crate::check` exactly like ADR links.
 //!
 //! Keys are path-based (`blueprint:<path>`), since a blueprint has no numeric id.
 
@@ -43,7 +43,7 @@ impl BlueprintDoc {
 
     /// The authored nodes and structural edges: a `blueprint` node, one
     /// `blueprint_section` node per section, and `contains` edges between them.
-    /// Wiki-links are *not* included — [`crate::check`] validates them against the
+    /// Wiki-links are *not* included — `crate::check` validates them against the
     /// code graph before they become edges.
     #[must_use]
     pub fn facts(&self) -> FactSet {

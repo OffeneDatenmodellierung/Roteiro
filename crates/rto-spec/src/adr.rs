@@ -230,7 +230,7 @@ pub struct HistoryRow {
 }
 
 /// Every claim an ADR makes about its own version, gathered so
-/// [`crate::check::validate`] can cross-check them against each other.
+/// [`crate::validate`] can cross-check them against each other.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VersionFacts {
     /// The version cell of the `| **Document version** | X.Y |` summary row.
@@ -278,7 +278,7 @@ pub struct Section {
     /// [`AdrDoc::facts`] caps this before it reaches the store; the vault renders
     /// it whole. Empty when a heading is immediately followed by another.
     ///
-    /// Populated by [`parse_adr`] only. [`crate::blueprint`] and [`crate::site`]
+    /// Populated by [`parse_adr`] only. `crate::blueprint` and `crate::site`
     /// share this struct and leave it empty — their section notes have the same
     /// defect #545 fixes here, and fixing them is the same shape of change on a
     /// different document class.
@@ -356,7 +356,7 @@ impl AdrDoc {
     /// The authored nodes and structural edges for this ADR: an `adr` node, one
     /// `adr_section` node per section, and `contains` edges between them. Wiki
     /// links are *not* included — they are validated against the code graph by
-    /// [`crate::check`] before becoming edges.
+    /// `crate::check` before becoming edges.
     #[must_use]
     pub fn facts(&self) -> FactSet {
         let adr_key = self.key();
@@ -404,7 +404,7 @@ fn stored(text: &str) -> Option<serde_json::Value> {
 /// Where a new ADR belongs in a repository, and what its id should be.
 ///
 /// Both answers are derived from the ADRs a repository already has rather than
-/// from this project's own layout. [`declares_adr`] made an ADR a thing a
+/// from this project's own layout. `declares_adr` made an ADR a thing a
 /// document *is*; this makes writing one follow suit, so `roteiro spec scaffold`
 /// works on a repository that keeps its decisions in `architecture/decisions/`
 /// instead of putting a stray file in a `docs/adr/` it does not use.
@@ -510,7 +510,7 @@ pub fn adr_home(docs: &[AdrDoc]) -> AdrHome {
 /// the code they govern.
 ///
 /// Declaring it is the pattern already used for site pages
-/// ([`crate::site::is_site_page`]), whose comment in `layer.rs` gives the reason:
+/// ([`crate::is_site_page`]), whose comment in `layer.rs` gives the reason:
 /// a document that says what it is should never be demoted by a coincidence of
 /// its path. Blueprints have the same escape hatch through their H1 marker. ADRs
 /// were the only one of the three still decided by location alone.
@@ -810,7 +810,7 @@ fn inline_version_refs(line: &str) -> impl Iterator<Item = DocVersion> + '_ {
 }
 
 /// Split leading `---`-delimited frontmatter from the body. Returns
-/// `("", text)` when there is no frontmatter. Shared with [`crate::site`],
+/// `("", text)` when there is no frontmatter. Shared with `crate::site`,
 /// whose publication marker is a frontmatter field read the same way.
 pub(crate) fn split_frontmatter(text: &str) -> (&str, &str) {
     let Some(rest) = text.strip_prefix("---\n") else {
@@ -829,7 +829,7 @@ pub(crate) fn split_frontmatter(text: &str) -> (&str, &str) {
 /// Clean a raw frontmatter value: trim, drop a trailing ` #…` inline comment
 /// (YAML-style) from unquoted values, then strip surrounding quotes. Quoted
 /// values are left intact so a `#` inside quotes survives. Shared with
-/// [`crate::site`] so a site page's frontmatter is read by the same rules as an
+/// `crate::site` so a site page's frontmatter is read by the same rules as an
 /// ADR's — a quoted slug, or a trailing comment, must not mean two things.
 pub(crate) fn clean_value(raw: &str) -> &str {
     let raw = raw.trim();
@@ -854,7 +854,7 @@ fn strip_quotes(s: &str) -> &str {
 
 /// Resolve a wiki-link's inner text to a graph node key: `path#Symbol` →
 /// `sym:<lang>:<path>#<Symbol>`, or `path` → `file:<path>`. Shared with
-/// [`crate::blueprint`], whose links resolve the same way.
+/// `crate::blueprint`, whose links resolve the same way.
 pub(crate) fn resolve_target(raw: &str) -> Option<String> {
     let (path, symbol) = match raw.split_once('#') {
         Some((p, s)) => (p.trim(), Some(s.trim())),

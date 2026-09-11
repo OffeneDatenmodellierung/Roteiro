@@ -225,7 +225,7 @@ pub struct AnalysisResponse {
 /// Implementations differ only in *where* the analyzer ran; the request and the
 /// response are the same, so CI ingestion and a local sandboxed run are the same
 /// code path from a caller's point of view. Every implementation must call
-/// [`check_request`] before doing any work, so the consent, network and
+/// [`crate::check_request`] before doing any work, so the consent, network and
 /// worktree-access guarantees hold uniformly rather than per-backend.
 pub trait AnalyzerRunner {
     /// Which backend this is — recorded on every run it produces.
@@ -240,7 +240,7 @@ pub trait AnalyzerRunner {
     ///
     /// # Errors
     /// Returns [`ExecError`] if the request violates the shared contract (see
-    /// [`check_request`]) or the backend cannot produce a usable result. A failed
+    /// [`crate::check_request`]) or the backend cannot produce a usable result. A failed
     /// run yields no partial result: either a complete [`AnalysisResponse`] or an
     /// error.
     fn run(&self, request: &AnalysisRequest) -> Result<AnalysisResponse, ExecError>;

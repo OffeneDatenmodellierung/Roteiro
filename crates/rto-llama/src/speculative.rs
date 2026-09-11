@@ -24,7 +24,7 @@
 //!
 //! * llama.cpp's speculative helper only ever **proposes**. Every token that
 //!   reaches the caller is sampled by [`LlamaSampler`] from the *target* model's
-//!   logits — see [`run_generation`]. A proposal is used only as a prediction of
+//!   logits — see `run_generation`. A proposal is used only as a prediction of
 //!   what that sampler was going to produce anyway, and is discarded the moment
 //!   it is wrong.
 //! * the sampler is invoked **exactly once per emitted token**, in position
@@ -53,7 +53,7 @@
 //! differently-shaped batch. Fixing the seed does not
 //! reveal this and cannot prevent it; the divergence is in the backend's
 //! arithmetic, below the sampler entirely. Every claim here is measured, not
-//! argued: see [`switch_enables`] for what the measurement decided.
+//! argued: see `switch_enables` for what the measurement decided.
 //!
 //! # When it is on
 //!
@@ -213,7 +213,7 @@ const SEQ: i32 = 0;
 
 /// Whether speculative decoding is switched on in this process.
 ///
-/// Off unless `ROTEIRO_SPECULATIVE` asks for it; see [`switch_enables`] for why
+/// Off unless `ROTEIRO_SPECULATIVE` asks for it; see `switch_enables` for why
 /// that way round, and for the accepted spellings.
 pub(crate) fn speculative_enabled() -> bool {
     switch_enables(std::env::var(SWITCH).ok().as_deref())

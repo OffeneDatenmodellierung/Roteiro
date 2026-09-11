@@ -145,7 +145,7 @@ pub(crate) fn strip_code_spans(line: &str) -> String {
 /// content line, which in Markdown is meaning, not padding. A section opening on
 /// a four-space-indented code block would be stored, and rendered into the vault
 /// note, as ordinary prose. The one rule lives here rather than at each of the
-/// three span closes in [`crate::adr`] (two section closes and the preamble) so
+/// three span closes in `crate::adr` (two section closes and the preamble) so
 /// the next span to be sliced cannot get a fourth, slightly different one — and
 /// so `blueprint` and `site`, which have the same defect on their own section
 /// spans, have something to call when they are fixed.

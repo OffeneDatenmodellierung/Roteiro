@@ -1,6 +1,9 @@
 //! Automatic discovery of a workspace member's OKF bundle, and the consent
 //! prompt that guards it (issue #706 phase 2, ADR-0021).
 //!
+//! A sibling module rather than more of `main.rs`: the policy — in particular
+//! what happens when there is no terminal — is worth reading in one piece.
+//!
 //! # The two halves compose rather than conflict
 //!
 //! Discovery is **automatic**: a member that publishes a bundle should not need

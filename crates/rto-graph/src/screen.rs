@@ -1,12 +1,17 @@
 //! Screen foreign prose before it becomes node content (issue #706, phase 2).
 //!
+//! **In this crate because what it protects is here**: `meta.content`, `query`'s
+//! `content_snippet` that returns it to a model, and `cap_content` that admits
+//! it. `rto-render` depends on this crate, so a screen there could never guard a
+//! second consumer.
+//!
 //! # The exposure this exists to close
 //!
 //! Reading a peer's OKF bundle (ADR-0021, phase 1) puts a **stranger's prose**
 //! into `meta.content`:
 //!
 //! - `rto_render::okf::read` sets `meta["content"] = cap_content(&concept.body)`;
-//! - [`crate::query`]'s `content_snippet` returns `meta.content` as a search hit's
+//! - `crate::query`'s `content_snippet` returns `meta.content` as a search hit's
 //!   `snippet`;
 //! - those queries back the model-facing MCP tools `search`, `explain` and
 //!   `context`.

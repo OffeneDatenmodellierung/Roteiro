@@ -422,7 +422,7 @@ fn worktree_graph(
 ///    per-file reviewer structurally cannot obtain, and `contract-drift`'s
 ///    defining shape.
 /// 2. **Doc comments from elsewhere in this file** (`derived`), and only those the
-///    diff does not already show — see [`doc_already_shown`].
+///    diff does not already show — see `doc_already_shown`.
 ///
 /// Callers, callees and blast radius are excluded by decision, not omission; the
 /// reasoning is on [`GraphContext`].
@@ -444,7 +444,7 @@ fn worktree_graph(
 ///   table below still says 1.2): both halves are in the ADR, one is outside the
 ///   `-U3` window, and the graph cannot reach either.
 /// * **A newly added file gets nothing, correctly.** Its whole text is already in
-///   the diff, so [`doc_already_shown`] filters every doc comment, and nothing
+///   the diff, so `doc_already_shown` filters every doc comment, and nothing
 ///   governs a file that did not exist at the fork point. Three of the corpus's
 ///   five `contract-drift` rows sit in files like this, which means the arm's
 ///   prompt on them is byte-identical to the diff-only arm's and no run can

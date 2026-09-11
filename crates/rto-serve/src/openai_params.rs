@@ -71,7 +71,7 @@
 //! them is a *pointer* — a sentence that sends the reader somewhere:
 //!
 //! - **[`Forward::Do`]'s prose is checked**, in both directions, by
-//!   [`tests::a_way_forward_never_points_at_a_parameter_that_does_not_exist`].
+//!   `tests::a_way_forward_never_points_at_a_parameter_that_does_not_exist`.
 //!   It is the one that tells a caller what to send next, so a name it gets
 //!   wrong costs someone a request that cannot work.
 //! - **[`Forward::Nothing`]'s prose is checked** to name no parameter at all.
@@ -120,7 +120,7 @@ use serde_json::Value;
 pub enum Support {
     /// Read and acted on. Must be a field of
     /// [`crate::types::ChatCompletionRequest`] — asserted in both directions by
-    /// [`tests::the_struct_and_the_table_declare_the_same_fields`].
+    /// `tests::the_struct_and_the_table_declare_the_same_fields`.
     Supported,
     /// Parsed and carried to a named place, then deliberately not acted on.
     /// Distinct from `Dropped` in that the type system can see it: the value
@@ -148,7 +148,7 @@ pub enum Support {
 /// and inventing one would be the "wrong answer that reads like a right one"
 /// the same checklist warns about — so the two cases are distinguished in the
 /// type, both carry prose, and
-/// [`tests::every_refusal_says_what_why_and_what_next`] asserts neither is
+/// `tests::every_refusal_says_what_why_and_what_next` asserts neither is
 /// empty. Saying "there is no way to do this here" plainly *is* the way forward
 /// when it is the truth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,7 +168,7 @@ pub enum Forward {
         /// lookup cannot be the test.
         ///
         /// So the relationship is declared rather than recovered from text, and
-        /// [`tests::a_way_forward_never_points_at_a_parameter_that_does_not_exist`]
+        /// `tests::a_way_forward_never_points_at_a_parameter_that_does_not_exist`
         /// checks it in both directions: every mention here is sound, and every
         /// wire-shaped span in `prose` is mentioned here.
         mentions: &'static [Mention],
@@ -283,10 +283,10 @@ pub struct Param {
     /// apart: OpenAI spells the *same* generation budget two ways, so
     /// `max_completion_tokens` is served by the `max_tokens` field. The
     /// relationship is declared here rather than left as an exception inside
-    /// [`tests::the_struct_and_the_table_declare_the_same_fields`], because a
+    /// `tests::the_struct_and_the_table_declare_the_same_fields`, because a
     /// guard with an exception carved into it for one row is how the next row
     /// gets one too. Checked by
-    /// [`tests::a_served_by_pointer_names_a_parameter_that_serves_itself`].
+    /// `tests::a_served_by_pointer_names_a_parameter_that_serves_itself`.
     pub served_by: Option<&'static str>,
     /// What Roteiro does with it.
     pub support: Support,
@@ -295,7 +295,7 @@ pub struct Param {
     ///
     /// Empty for a [`Support::Rejected`] row, whose published cell is its
     /// [`Param::refusal`] verbatim — one source of truth per row, asserted by
-    /// [`tests::a_refused_row_carries_no_second_explanation`]. The whole of
+    /// `tests::a_refused_row_carries_no_second_explanation`. The whole of
     /// `docs/SERVING.md`'s parameter table is generated from this struct and
     /// compared back against it, so the document cannot drift from the code the
     /// way six earlier tables here did.
@@ -786,7 +786,7 @@ impl Param {
     /// `docs/SERVING.md` carries.
     ///
     /// Generated rather than transcribed, and compared back against the
-    /// document by [`tests::the_published_table_is_this_table`]: the failure
+    /// document by `tests::the_published_table_is_this_table`: the failure
     /// mode being designed out is a table row that says one thing while the
     /// code does another, which this repository has shipped six times.
     #[must_use]

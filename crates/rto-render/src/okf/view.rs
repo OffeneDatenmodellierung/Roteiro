@@ -709,7 +709,7 @@ fn image_src<'a>(dest: &str, bundle: &Bundle, base: &str) -> Option<pulldown_cma
 /// oversight.
 ///
 /// **Three independent mechanisms currently uphold that, and this is one of
-/// them.** The others are [`bundle_path`], which refuses anything containing a
+/// them.** The others are `bundle_path`, which refuses anything containing a
 /// colon, and `concept_id_for_path`, which requires a `.md` suffix and a
 /// parseable id before `bundle.contains` requires the concept to actually exist.
 /// Any one of the three suffices on its own — measured by removing them: taking
@@ -777,7 +777,7 @@ fn viewer_href<'a>(dest: &str, bundle: &Bundle, base: &str) -> Option<pulldown_c
 /// Returns the canonical path only when it is a file that really resolves
 /// inside the bundle.
 ///
-/// **Both halves are load-bearing, and the second was missing.** [`bundle_path`]
+/// **Both halves are load-bearing, and the second was missing.** `bundle_path`
 /// is purely lexical — it rejects `..`, an absolute path and a scheme — but a
 /// symlink has an entirely ordinary relative path. A bundle containing
 /// `notes.png -> /etc/passwd` passed every lexical check, and `is_file()`

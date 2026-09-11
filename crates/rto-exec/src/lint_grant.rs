@@ -1,5 +1,13 @@
 //! ADR-0020 §6's grant: **may a linter run on this host?**
 //!
+//! Ungated, unlike `crate::lint` itself — deliberately **not** a link, because
+//! this module is compiled unconditionally while `lint` is behind
+//! `exec-subprocess`, so a link here would be unresolved in exactly the builds
+//! the sentence is about. A policy that existed only where the
+//! capability does would be the conversion ADR-0014 warns about, so the answer
+//! is the same in a build that cannot run a linter as in one that can — see the
+//! module's own documentation.
+//!
 //! `roteiro lint` runs the linter sandboxed by default, and the host is
 //! something a person opts into. This module is the whole of that rule — the
 //! layering, the precedence between layers, and the sentence each refusal shows
@@ -7,7 +15,7 @@
 //!
 //! # Why it compiles when the linter does not
 //!
-//! [`crate::lint`] needs `exec-subprocess`; this module needs nothing. That is
+//! `crate::lint` needs `exec-subprocess`; this module needs nothing. That is
 //! deliberate rather than incidental. ADR-0020 spends its length refusing one
 //! specific failure — *the availability of a capability quietly deciding a
 //! question that was supposed to be decided on purpose* — and a policy that
@@ -26,7 +34,7 @@ use crate::guidance::{Guidance, Line};
 /// Built by [`ConfigGrant::from_layers`], which is this crate's single
 /// implementation of ADR-0020 §6's "a project may deny but never grant". Nothing
 /// else may re-derive that rule: the binary's config layering calls this, so the
-/// value `roteiro config` echoes and the value [`decide`] consults are the same
+/// value `roteiro config` echoes and the value `decide` consults are the same
 /// value.
 ///
 /// # Why the project layer cannot grant
@@ -49,7 +57,7 @@ use crate::guidance::{Guidance, Line};
 /// so this could not depend on that.
 ///
 /// Where they deliberately differ is the **invocation**, and that difference is
-/// in [`decide`] rather than here: ADR-0019 needs the user layer *and* the flag,
+/// in `decide` rather than here: ADR-0019 needs the user layer *and* the flag,
 /// ADR-0020 §6 needs *either*. Remote egress sends your source elsewhere and is
 /// worth re-consenting to per run; building on your own machine is a standing
 /// preference somebody may reasonably express once. Do not "make them

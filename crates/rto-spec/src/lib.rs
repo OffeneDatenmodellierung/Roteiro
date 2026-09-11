@@ -10,7 +10,7 @@
 //! [`SitePage`] is the same treatment for the public website: a document that
 //! declares itself published becomes a `site_page` node whose links are
 //! drift-checked like an ADR's, so roteiro.dev stops being the one documentation
-//! surface outside the gate. See [`site`](mod@site) for why publication is a
+//! surface outside the gate. See `site` for why publication is a
 //! frontmatter marker rather than a directory.
 
 mod adr;

@@ -910,7 +910,7 @@ pub struct TelemetryConfig {
     /// the OTLP step (ADR-0011).
     pub rotation: Option<String>,
     /// On-disk record format: `otel` (default) / `json` — one
-    /// OpenTelemetry-shaped JSON object per line (see [`crate::telemetry`] for the
+    /// OpenTelemetry-shaped JSON object per line (see `crate::telemetry` for the
     /// field mapping) — or `text`, the same human-readable format stdout uses.
     pub format: Option<String>,
 }

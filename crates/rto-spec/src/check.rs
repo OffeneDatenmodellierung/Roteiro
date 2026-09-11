@@ -230,7 +230,7 @@ fn duplicate_site_slugs(pages: &[SitePage]) -> Vec<Violation> {
 /// thing with all of them — fail the gate and print the message — and because
 /// the message, not the label, is what tells the reader which one fired. This
 /// follows [`ViolationKind::MalformedAdr`], which likewise covers every
-/// [`crate::adr::ParseError`] behind one label and puts the specifics in prose.
+/// [`crate::ParseError`] behind one label and puts the specifics in prose.
 /// It is also why rules 4 and 5 (issue #432) needed no new variant, and so
 /// reopened no part of the semver question this enum's exhaustiveness raises.
 ///

@@ -11,7 +11,7 @@
 //!   vendored advisories (`docs/VENDORED_DEPENDENCIES.md`); putting Roteiro's
 //!   one egress path in the same crate would put the guard and the largest
 //!   third-party surface behind one feature flag.
-//! * **The socket stays in the binary.** [`crate::remote_transport`] remains the
+//! * **The socket stays in the binary.** `crate::remote_transport` remains the
 //!   only module in the workspace that can open one, and this file hands it to
 //!   [`rto_remote::call_with`] as a closure exactly as `roteiro remote call`
 //!   does. There is still no second path to the wire, and no second consent gate.

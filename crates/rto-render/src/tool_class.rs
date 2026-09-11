@@ -188,7 +188,7 @@ fn tool_state(in_build: bool, advertised: bool) -> &'static str {
 /// whether this build or surface carries the tool at all; `advertised` answers
 /// whether the operator's selection kept it. Collapsing them into one would make
 /// a feature gate and a `--tools` flag indistinguishable in the reply, and they
-/// have different remedies — see [`tool_state`].
+/// have different remedies — see `tool_state`.
 ///
 /// Shared by both surfaces rather than written twice: a model that reads a
 /// different class table over MCP than over served chat has been told two

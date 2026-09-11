@@ -56,7 +56,7 @@
 //!   happens to surface first — and tags are then **de-duplicated on
 //!   `(name, value)`**, so a fact two of those blocks both state is recorded once,
 //!   with a survivor chosen by byte order rather than by drain order
-//!   ([`read_tags`]).
+//!   (`read_tags`).
 //!
 //! @rto:0016
 
@@ -117,7 +117,7 @@ pub enum Exactness {
     /// Xing/VBRI header states a frame count the encoder asserted, and with
     /// neither header present symphonia infers one from the bitrate and the
     /// stream length. **Every MPEG-audio duration is marked this way**, including
-    /// one backed by a Xing header — see [`exactness_of_container`].
+    /// one backed by a Xing header — see `exactness_of_container`.
     Estimated,
 }
 
@@ -181,7 +181,7 @@ pub struct AudioTag {
     /// **Not part of a tag's identity.** Two rows with the same `name` and `value`
     /// are one fact however many container keys stated it, so they are merged, and
     /// the lowest `source_key` in byte order is the one recorded — see
-    /// [`read_tags`] for why that rule and not another.
+    /// `read_tags` for why that rule and not another.
     pub source_key: String,
 }
 
@@ -226,7 +226,7 @@ pub struct AudioFacts {
     /// Tags, sorted and de-duplicated on `(name, value)`, so both the emission
     /// order and the set itself are a function of the content rather than of the
     /// container's layout — one row per thing the file says, however many of its
-    /// tag blocks say it. See [`read_tags`].
+    /// tag blocks say it. See `read_tags`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<AudioTag>,
 }
@@ -291,7 +291,7 @@ impl AudioFacts {
 ///
 /// * **`None`** — the bytes are not a readable audio container: the probe matched
 ///   no format, or the container carries no audio track. Nothing is known, so
-///   [`crate::extract`] emits **no `audio_stream` node** for the blob (the `file`
+///   `crate::extract` emits **no `audio_stream` node** for the blob (the `file`
 ///   node is unaffected). Pinned by `a_blob_the_reader_rejects_yields_no_facts`
 ///   and `an_unreadable_audio_blob_emits_no_stream_node`.
 /// * **`Some` with [`AudioFacts::duration`] `None`** — the container *is* readable
@@ -313,7 +313,7 @@ impl AudioFacts {
 ///
 /// # Panics guarded
 /// The call is wrapped in [`std::panic::catch_unwind`], following the `pdf-text`
-/// and `image-ocr` precedent in [`crate::extract`]: symphonia forbids `unsafe`
+/// and `image-ocr` precedent in `crate::extract`: symphonia forbids `unsafe`
 /// and is fuzz-tested, but a malformed blob must degrade to "no facts" rather
 /// than abort an entire `sync`.
 #[must_use]

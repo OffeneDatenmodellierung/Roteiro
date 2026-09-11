@@ -280,7 +280,7 @@ pub enum ContentPart {
         #[serde(default)]
         text: String,
     },
-    /// An image reference (only `data:` URIs are accepted — see [`decode_image_url`]).
+    /// An image reference (only `data:` URIs are accepted — see `decode_image_url`).
     #[serde(rename = "image_url")]
     ImageUrl {
         /// The image URL wrapper.
