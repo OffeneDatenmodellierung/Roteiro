@@ -15384,7 +15384,7 @@ impl GraphToolRegistry {
     }
 
     /// The `security_status` call, in two labelled scopes. Lifted out of
-    /// `GraphToolRegistry::call` alongside [`Self::security_list`].
+    /// `GraphToolRegistry::call` alongside `Self::security_list`.
     ///
     /// # Errors
     /// An unknown `analyzer`, an unknown or ambiguous `project`, or the

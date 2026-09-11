@@ -8,7 +8,7 @@
 //!
 //! # What "network: deny" means here, precisely
 //!
-//! An [`rto_graph::AnalysisRun`] records a `CommandPolicy`, and this backend
+//! An [`rto_graph::AnalysisRun`] records an [`rto_graph::CommandPolicy`], and this backend
 //! records `network: Deny`. That is a claim about **what the run was configured
 //! to do**, not a kernel-enforced boundary:
 //!
