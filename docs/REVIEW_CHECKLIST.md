@@ -166,6 +166,13 @@ But adjudicate before acting, and one rule pays for itself:
         not build **on MSRV 1.96** is refuted by no job in this repository.
       - **Toolchain.** Only `msrv` is on 1.96. A green `stable` build says
         nothing about an MSRV claim.
+      - **Docs.** `checks` runs `cargo doc --workspace --all-features --no-deps
+        --keep-going`, and the rustdoc lints are denied in `Cargo.toml` rather
+        than passed as `RUSTDOCFLAGS`, so a plain `cargo doc` fails too. Read
+        `--keep-going` as load-bearing: without it `cargo doc` stops at the
+        first failing crate, which is how #783's backlog read as 66 findings in
+        three crates when it was ~136 across eight. A shrinking count from a run
+        without it is not evidence of progress.
 
     If no green job covers the configuration, the claim is unrefuted and you
     owe it a real look. `rto_graph::compile_claim` is this rule as code — the
