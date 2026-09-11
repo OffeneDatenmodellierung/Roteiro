@@ -60,6 +60,21 @@ thiserror = "2.0"
 unsafe_code = "forbid"
 missing_docs = "warn"
 
+# Broken intra-doc links, denied — issue #783. Here rather than in a
+# `RUSTDOCFLAGS` invocation for the reason `unsafe_code` is here: a lint in the
+# manifest travels with the crate, so it holds for anyone who runs `cargo doc`
+# rather than only for the one job that remembers the flag.
+#
+# `private_intra_doc_links` is the larger half of what #783 found — 50 of the
+# first 72 — and it is the half that reaches a reader: the item resolves while
+# you are writing it and renders as dead text on docs.rs, where the private
+# half of the crate does not exist.
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "deny"
+invalid_html_tags = "deny"
+redundant_explicit_links = "deny"
+
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
 pedantic = { level = "warn", priority = -1 }

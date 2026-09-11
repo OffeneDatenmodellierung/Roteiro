@@ -347,6 +347,17 @@ jobs:
       - name: Test
         if: env.RELEASE_PR != 'true'
         run: cargo test --workspace --all-features
+      # Broken intra-doc links — issue #783. No `RUSTDOCFLAGS` here: the lints
+      # are denied in `Cargo.toml`, so this fails on a plain `cargo doc` and
+      # keeps failing for anyone who runs it by hand.
+      #
+      # `--keep-going` because `cargo doc` otherwise stops at the first failing
+      # crate. That is how #783's backlog read as 66 links in three crates when
+      # it was ~136 across eight, and a job without it would report a shrinking
+      # number while the tail stayed hidden.
+      - name: Docs (intra-doc links)
+        if: env.RELEASE_PR != 'true'
+        run: cargo doc --workspace --all-features --no-deps --keep-going
       - name: Dogfood (roteiro check)
         if: env.RELEASE_PR != 'true'
         run: cargo run -p roteiro -- check

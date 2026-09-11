@@ -96,6 +96,10 @@ CI (`.github/workflows/ci.yml`) enforces these; run them locally before pushing.
   satisfiable by any attribute that happened to sit under ordinary docs. `//!`
   does count: an inner `#![allow(…)]` sits where module prose is the only place
   its reason can live.
+- `cargo doc --workspace --all-features --no-deps` — clean. The lints are
+  denied in `Cargo.toml`, so this needs no `RUSTDOCFLAGS`. Use **`--keep-going`**
+  when you are clearing a backlog: `cargo doc` stops at the first failing crate,
+  which is how #783's "66 links" turned out to be 136 across eight crates.
 - `cargo test --workspace --all-features` — green. **`--all-features` includes
   `exec-boxlite`.** That builds without a pre-step now: `boxlite` fetches the
   runtime archive over TLS and `rto-exec`'s build script verifies **every
