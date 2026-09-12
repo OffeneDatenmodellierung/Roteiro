@@ -146,6 +146,36 @@ fn repo_root() -> PathBuf {
 /// repository" and skip in silence, which is the defect these two tests spent a
 /// review round removing one level down. Only `NotFound` means absent.
 fn is_repository_checkout() -> bool {
+    laid_out_as_a_checkout() && workspace_manifest_above()
+}
+
+/// Whether this crate sits at `…/crates/roteiro`, the way the repository lays it
+/// out — rather than at `…/registry/src/<index>/roteiro-<version>`, which is how
+/// the published package unpacks, or at `vendor/roteiro-<version>`.
+///
+/// Deliberately a **second, independent** signal rather than a better single
+/// one. The manifest test below can be fooled by a vendored copy that happens to
+/// sit two levels under somebody else's `[workspace]` — which would not skip,
+/// and would then scan *their* repository and make a parity claim about it. The
+/// layout test cannot: a packaged directory carries the version in its name.
+/// Both must agree before the corpus is read.
+fn laid_out_as_a_checkout() -> bool {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    dir.file_name().is_some_and(|n| n == "roteiro")
+        && dir
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|n| n == "crates")
+}
+
+/// Whether a workspace manifest sits where [`repo_root`] expects one.
+///
+/// The rule is `ci_coverage_claims.rs`'s, which met this problem first and wrote
+/// down why the marker has to be as loud as the thing it guards: reading `false`
+/// on an I/O error would turn "cannot read the repository" into "this is not a
+/// repository" and skip in silence, which is the defect these tests spent a
+/// review round removing one level down. Only `NotFound` means absent.
+fn workspace_manifest_above() -> bool {
     let manifest = repo_root().join("Cargo.toml");
     match std::fs::read_to_string(&manifest) {
         Ok(text) => text.lines().any(|line| line.trim() == "[workspace]"),
@@ -256,21 +286,46 @@ fn read_text(path: &Path) -> Option<String> {
 // The test
 // ---------------------------------------------------------------------------
 
-/// The skip above is real, and here it must not happen.
+/// The two corpus tests below either ran, or this says which and why.
 ///
-/// Both corpus tests return early outside a repository checkout, which is right
-/// in the published package and would be a silent hole in CI: a marker that read
-/// `false` here would turn two guards over ~1,400 files into two instant passes
-/// and nothing would say so. That is the same vacuity `read_text` was fixed for
-/// one round earlier, moved up a level, so it gets the same treatment — the skip
-/// is asserted *not* to fire where the files exist.
+/// **This file ships in the published `roteiro` package** — one of 47 integration
+/// tests `cargo package --list` names — so `cargo test` in a vendored or
+/// unpacked copy runs it against a directory that is not this repository. There
+/// the corpus tests must **skip**: failing would be our defect reaching somebody
+/// who did nothing wrong. In a checkout they must **run**: a silent skip there is
+/// two guards over ~1,400 files quietly switched off, which is the same vacuity
+/// `read_text` was fixed for one round earlier, one level up.
+///
+/// Telling those apart needs two signals, so there are two, and this asserts
+/// they agree. There is no path through this test that checks nothing: in a
+/// checkout it proves the corpus is real, and in a package it proves the crate
+/// really is packaged rather than a checkout whose marker broke.
 #[test]
-fn the_corpus_guards_actually_run_in_a_checkout() {
+fn the_corpus_guards_run_here_or_say_which_and_why() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !laid_out_as_a_checkout() {
+        println!(
+            "SKIPPED: {} is not `…/crates/roteiro`, so this is the published \
+             package rather than a repository checkout. The two corpus tests \
+             skip with it.",
+            manifest.display()
+        );
+        assert!(
+            !workspace_manifest_above(),
+            "{} is not laid out as a checkout, yet a `[workspace]` manifest sits \
+             two levels above it. That is a vendored copy inside somebody else's \
+             workspace, and running the corpus over it would make a parity claim \
+             about their repository. Both signals must agree.",
+            manifest.display()
+        );
+        return;
+    }
     assert!(
-        is_repository_checkout(),
-        "no `[workspace]` manifest at {} — so both corpus tests below skipped. \
-         In a checkout that is not a skip, it is two guards silently switched \
-         off; fix the marker rather than this assertion.",
+        workspace_manifest_above(),
+        "{} is laid out as a checkout but there is no `[workspace]` manifest at \
+         {} — so both corpus tests skipped where they should have run. Fix the \
+         marker rather than this assertion.",
+        manifest.display(),
         repo_root().join("Cargo.toml").display()
     );
     // And the walker really reaches the tree it claims to, so "ran" is not
@@ -370,14 +425,15 @@ fn every_reported_link_addresses_the_text_it_was_read_from() {
                 let rel = file.strip_prefix(&root).unwrap_or(&file);
                 let where_ = format!("{}:{}", rel.display(), n + 1);
                 assert!(
-                    link.span.end <= line.len()
-                        && line.is_char_boundary(link.span.start)
-                        && line.is_char_boundary(link.span.end),
+                    link.span().start < link.span().end
+                        && link.span().end <= line.len()
+                        && line.is_char_boundary(link.span().start)
+                        && line.is_char_boundary(link.span().end),
                     "{where_}: span {:?} is not inside the line it came from",
-                    link.span
+                    link.span()
                 );
-                let source = &line[link.span.clone()];
-                match link.kind {
+                let source = &line[link.span()];
+                match link.kind() {
                     rto_graph::LinkKind::Wiki => {
                         assert!(
                             source.starts_with("[[") && source.ends_with("]]"),
@@ -386,7 +442,7 @@ fn every_reported_link_addresses_the_text_it_was_read_from() {
                     }
                     rto_graph::LinkKind::Inline | rto_graph::LinkKind::Image => {
                         inline += 1;
-                        let opens = if link.kind == rto_graph::LinkKind::Image {
+                        let opens = if link.kind() == rto_graph::LinkKind::Image {
                             "!["
                         } else {
                             "["
@@ -396,7 +452,7 @@ fn every_reported_link_addresses_the_text_it_was_read_from() {
                             "{where_}: inline span {source:?} does not open `{opens}` and close `)`"
                         );
                         assert!(
-                            !link.target.is_empty(),
+                            !link.target().is_empty(),
                             "{where_}: a link with no destination was reported"
                         );
                     }

@@ -59,8 +59,8 @@ fn rendered(line: &str) -> Option<(bool, String)> {
 fn scanned(line: &str) -> Option<(bool, String)> {
     markdown_links(line)
         .into_iter()
-        .find(|l| l.kind != LinkKind::Wiki)
-        .map(|l| (l.kind == LinkKind::Image, l.target))
+        .find(|l| l.kind() != LinkKind::Wiki)
+        .map(|l| (l.kind() == LinkKind::Image, l.target().to_owned()))
 }
 
 /// The reason every [`Diverges`] case below gives, because they are all one rule.
@@ -80,9 +80,9 @@ const UNESCAPED: &str = "a backslash is left in the target. The renderer \
      first caller that does is the one that gets to decide, alongside how a \
      citation renders. Recorded here rather than changed inside a review round";
 
-#[test]
-fn the_scanner_and_the_renderer_read_the_same_line_the_same_way() {
-    let cases: &[(&str, Verdict)] = &[
+/// Every shape this file compares, and what it claims about each.
+fn cases() -> Vec<(&'static str, Verdict)> {
+    vec![
         // -- destinations, bare and angle-wrapped ------------------------------
         ("[t](docs/x.md)", Agrees),
         ("[t](<docs/x.md>)", Agrees),
@@ -129,6 +129,12 @@ fn the_scanner_and_the_renderer_read_the_same_line_the_same_way() {
         // `a_title_may_follow_an_angle_destination_without_a_separator`.
         (r#"[t](<x.md>"title")"#, Agrees),
         (r#"[t](x.md"title")"#, Agrees),
+        // …and that acceptance has to survive a `)` inside the title, which is
+        // what made the divergence worth keeping rather than half-working.
+        (r#"[t](<x.md>"a ) b")"#, Agrees),
+        (r"[t](<x.md>'a ) b')", Agrees),
+        ("[t](<x.md>(a b))", Agrees),
+        (r"[t](<a>x'y)", Agrees),
         // -- code spans -------------------------------------------------------
         ("[x](a`b`c)", Agrees),
         ("[x](`docs/x.md`)", Agrees),
@@ -149,7 +155,12 @@ fn the_scanner_and_the_renderer_read_the_same_line_the_same_way() {
         ("[see [x]](y)", Agrees),
         ("[[a]](target)", Agrees),
         ("![[a]](target)", Agrees),
-    ];
+    ]
+}
+
+#[test]
+fn the_scanner_and_the_renderer_read_the_same_line_the_same_way() {
+    let cases = cases();
 
     // The relation is satisfiable by an empty table, so say how much was
     // compared and how the two kinds of case are split.
@@ -165,7 +176,7 @@ fn the_scanner_and_the_renderer_read_the_same_line_the_same_way() {
     );
 
     let mut wrong = Vec::new();
-    for (line, verdict) in cases {
+    for (line, verdict) in &cases {
         let (them, us) = (rendered(line), scanned(line));
         match verdict {
             Agrees if them != us => wrong.push(format!(

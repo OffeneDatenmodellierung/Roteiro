@@ -779,12 +779,12 @@ fn rewrite_wiki_links(md: &str, adr_prefix: &str) -> String {
 fn rewrite_line_outside_code(line: &str, adr_prefix: &str, out: &mut String) {
     let mut at = 0;
     for link in rto_graph::markdown_links(line) {
-        if link.kind != rto_graph::LinkKind::Wiki {
+        if link.kind() != rto_graph::LinkKind::Wiki {
             continue;
         }
-        out.push_str(&line[at..link.span.start]);
-        out.push_str(&wiki_target(&link.target, adr_prefix));
-        at = link.span.end;
+        out.push_str(&line[at..link.span().start]);
+        out.push_str(&wiki_target(link.target(), adr_prefix));
+        at = link.span().end;
     }
     out.push_str(&line[at..]);
 }

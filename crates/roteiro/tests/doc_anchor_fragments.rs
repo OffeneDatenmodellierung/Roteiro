@@ -122,7 +122,7 @@ fn heading_text(raw: &str) -> String {
         // reason: `![diagram](img.png)` reads as "diagram", so folding the
         // source in would anchor the heading at `diagram-img-png`. Wiki-links
         // are left alone, as the helper this replaced left them.
-        if link.kind == rto_graph::LinkKind::Wiki {
+        if link.kind() == rto_graph::LinkKind::Wiki {
             continue;
         }
         // `markdown_links` may report **overlapping** ranges — an inline link
@@ -133,12 +133,12 @@ fn heading_text(raw: &str) -> String {
         // here because that is a fact about the filter one line up, not about
         // the contract, and the contract is what the next reader will trust.
         // Raised in review on #806; kept after checking the claim.
-        if link.span.start < at {
+        if link.span().start < at {
             continue;
         }
-        out.push_str(&raw[at..link.span.start]);
-        out.push_str(&link.text);
-        at = link.span.end;
+        out.push_str(&raw[at..link.span().start]);
+        out.push_str(link.text());
+        at = link.span().end;
     }
     out.push_str(&raw[at..]);
     out
@@ -310,27 +310,30 @@ fn without_code_spans(text: &str) -> String {
 /// Pull every `self#anchor` / `#anchor` link target out of one doc-text line.
 ///
 /// Covers both the inline form and the whole-line reference-definition form.
+///
+/// # The inline half is [`rto_graph::markdown_links`], not a walk of its own
+///
+/// It used to be a hand-rolled one: first `]`, then `](`, then everything up to
+/// the first `)`. That is the sixth implementation of "find a Markdown link"
+/// this change exists to remove, sitting in a file the change already touches —
+/// and it was wrong in the way a first-`)` scan is always wrong. A title may
+/// hold the bracket that would close the link, so
+/// `[t](self#paging "a ) b")` yielded the anchor `paging "a `: a fragment that
+/// matches no heading, reported against a link that is perfectly well formed.
+/// Raised in review on #806 (the example given there, `[see [x]](self#paging)`,
+/// is in fact read correctly — the loop re-enters on the inner `]` — but the
+/// mechanism named was real and this is the input that shows it).
+///
+/// # The reference-definition half stays, and cannot move
+///
+/// `[x]: self#anchor` is a **link reference definition**, which
+/// [`rto_graph::markdown_links`] deliberately does not read: it is a
+/// line-oriented scanner and a definition's meaning depends on the document
+/// around it. Teaching it that form would change what the shared rule accepts
+/// everywhere, to serve one guard. So it is read here, and said so here.
 fn anchor_links(doc: &DocLine<'_>) -> Vec<AnchorLink> {
     let mut found = Vec::new();
-    let stripped = without_code_spans(doc.text);
-    let line_initial = stripped.trim_start().starts_with('[');
-    let mut rest = stripped.as_str();
-    while let Some(close) = rest.find(']') {
-        let after = &rest[close + 1..];
-        let target = if let Some(t) = after.strip_prefix('(') {
-            t.split(')').next().unwrap_or("")
-        } else if let Some(t) = after.strip_prefix(':') {
-            // A reference definition is the whole line, so its target runs to
-            // the end; mid-sentence `]:` is prose and never a link.
-            if !line_initial {
-                rest = after;
-                continue;
-            }
-            t.trim()
-        } else {
-            rest = after;
-            continue;
-        };
+    let push = |target: &str, found: &mut Vec<AnchorLink>| {
         let qualified = target.starts_with("self#");
         let anchor = if qualified {
             Some(&target["self#".len()..])
@@ -345,7 +348,26 @@ fn anchor_links(doc: &DocLine<'_>) -> Vec<AnchorLink> {
                 line_no: doc.line_no,
             });
         }
-        rest = after;
+    };
+
+    // Inline links, from the one scanner. It skips code spans itself, so a link
+    // written *about* links is prose here for the same reason it is everywhere
+    // else. Images carry no anchor worth resolving and wiki-links are not this
+    // file's business, so only `LinkKind::Inline` is read.
+    for link in rto_graph::markdown_links(doc.text) {
+        if link.kind() == rto_graph::LinkKind::Inline {
+            push(link.target(), &mut found);
+        }
+    }
+
+    // A reference definition is the whole line, so its target runs to the end;
+    // mid-sentence `]:` is prose and never a link.
+    let stripped = without_code_spans(doc.text);
+    let trimmed = stripped.trim_start();
+    if trimmed.starts_with('[')
+        && let Some((_, target)) = trimmed.split_once("]:")
+    {
+        push(target.trim(), &mut found);
     }
     found
 }
@@ -784,4 +806,50 @@ fn file_modules_are_not_a_scope_boundary() {
     let report = check_file("x.rs", src);
     assert_eq!(report.links, 1);
     assert!(report.problems.is_empty(), "{:?}", report.problems);
+}
+
+/// The inline half reads links the way the rest of the workspace does.
+///
+/// Every shape here went through a hand-rolled first-`]`/first-`)` walk until
+/// #806's fifth round. The title case is the one that was actually wrong:
+/// `[t](self#paging "a ) b")` yielded the anchor `paging "a `, a fragment that
+/// matches no heading, from a link that is perfectly well formed. The rest are
+/// here because a scan that gets those right by luck should be pinned before
+/// somebody "simplifies" it back.
+#[test]
+fn an_anchor_is_read_by_the_one_scanner() {
+    let anchors = |text: &str| {
+        let doc = DocLine {
+            text,
+            inner: false,
+            top_level: true,
+            line_no: 1,
+        };
+        anchor_links(&doc)
+            .iter()
+            .map(|a| (a.anchor.clone(), a.qualified))
+            .collect::<Vec<_>>()
+    };
+    let paging = vec![("paging".to_owned(), true)];
+    // A `)` inside a title does not end the destination.
+    assert_eq!(anchors(r#"See [t](self#paging "a ) b")"#), paging);
+    // Brackets nest, so the link closes at its own `]`.
+    assert_eq!(anchors("See [see [x]](self#paging)"), paging);
+    // A code span in the label is content; one around the link makes it prose.
+    assert_eq!(anchors("See [a `]` b](self#paging)"), paging);
+    assert_eq!(anchors("Not `[x](self#nope)` a link"), vec![]);
+    // An image's own destination carries no anchor; the link around it does.
+    assert_eq!(anchors("See [![i](i.png)](self#paging)"), paging);
+    // Both forms still read, and the bare one is still unqualified.
+    assert_eq!(
+        anchors("See [x](#paging)"),
+        vec![("paging".to_owned(), false)]
+    );
+    assert_eq!(anchors("[x]: self#paging"), paging);
+    // A reference definition mid-sentence is prose, not a definition.
+    assert_eq!(anchors("see [x]: self#paging"), vec![]);
+    assert_eq!(
+        anchors("See [a](self#one) and [b](self#two)"),
+        vec![("one".to_owned(), true), ("two".to_owned(), true)]
+    );
 }

@@ -658,45 +658,89 @@ impl LinkScope {
 ///
 /// # Its invariants are enforced, not merely documented
 ///
-/// Every claim the fields below make is made true by `MarkdownLink::new`,
-/// which is the only constructor this crate has, and the struct is
-/// `#[non_exhaustive]` so no code outside this crate can build one another way.
-/// That is deliberate and was earned: three rounds of review on #806 and #807
-/// each turned up a field whose doc comment stated a guarantee its constructor
-/// did not keep — `target` promised "trimmed, and never empty" while the
-/// angle-destination branch could return whitespace. A contract a reader trusts
-/// and a caller can violate is worse than no contract, because it is relied on.
-/// New fields belong in `new` as much as they belong here.
+/// Every claim the accessors below make is made true by `MarkdownLink::new`,
+/// which is the only constructor this crate has, and **the fields are private**,
+/// so the guarantees hold for the whole life of the value rather than only at
+/// the moment it is built.
+///
+/// Both halves were earned. Three rounds of review on #806 and #807 each turned
+/// up a field whose doc comment stated a guarantee its constructor did not keep —
+/// `target` promised "trimmed, and never empty" while the angle-destination
+/// branch could return whitespace — so the invariants moved into `new`. The
+/// round after that pointed out that `new` was only half the job: the fields
+/// were `pub`, so a caller holding one could assign to `target`, `scope` or
+/// `span` afterwards and break every one of them, including the one that keeps
+/// `&line[link.span()]` from panicking. A guarantee that lasts until somebody
+/// writes to a field is not a guarantee, and this is now the single link scanner
+/// every crate in the workspace reads through. Hence accessors.
+///
+/// `#[non_exhaustive]` is kept for what it is actually for — letting a field be
+/// added later without breaking a downstream pattern — rather than for the
+/// invariant, which privacy now carries on its own. New fields belong in `new`
+/// as much as they belong here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct MarkdownLink {
-    /// Which syntax it was written in.
-    pub kind: LinkKind,
-    /// Where it points: the inner text for a wiki-link, the destination for an
-    /// inline one. Trimmed, and never empty — a link naming nothing is not a
-    /// link, which is the reading that cannot invent an edge out of stray
-    /// punctuation.
-    pub target: String,
-    /// What a reader sees. For an inline link that is its bracketed text, which
-    /// is the half a citation label needs and which no scanner here used to
-    /// keep. For a wiki-link the visible text **is** the target, so this repeats
-    /// it rather than being empty: a caller labelling links does not have to
-    /// know which kind it is holding.
-    pub text: String,
-    /// Whether [`target`](Self::target) names something outside this repository.
-    /// Always [`LinkScope::Internal`] for a wiki-link, which addresses a graph
-    /// node by key and cannot name a URL.
-    pub scope: LinkScope,
-    /// The byte range the whole link occupies **in the line as given**, so a
-    /// caller can rewrite it in place. Code spans are excluded from the scan but
-    /// not from this range: a link whose brackets straddle one covers it.
-    ///
-    /// Always non-empty, inside the line, and on character boundaries, so
-    /// `&line[link.span]` cannot panic.
-    pub span: Range<usize>,
+    // Private: see the accessors below for what each one guarantees, and the
+    // type docs above for why that has to be enforced rather than described.
+    kind: LinkKind,
+    target: String,
+    text: String,
+    scope: LinkScope,
+    span: Range<usize>,
 }
 
 impl MarkdownLink {
+    /// Which syntax it was written in.
+    #[must_use]
+    pub fn kind(&self) -> LinkKind {
+        self.kind
+    }
+
+    /// Where it points: the inner text for a wiki-link, the destination for an
+    /// inline one.
+    ///
+    /// **Trimmed, and never empty** — a link naming nothing is not a link, which
+    /// is the reading that cannot invent an edge out of stray punctuation. Held
+    /// by `MarkdownLink::new`, which refuses to build one otherwise.
+    #[must_use]
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+
+    /// What a reader sees.
+    ///
+    /// For an inline link that is its bracketed text, which is the half a
+    /// citation label needs and which no scanner here used to keep. For a
+    /// wiki-link the visible text **is** the target, so this repeats it rather
+    /// than being empty: a caller labelling links does not have to know which
+    /// kind it is holding. Derived from the kind rather than passed in, so those
+    /// two sentences cannot come apart.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Whether [`target`](Self::target) names something outside this repository.
+    ///
+    /// Always [`LinkScope::Internal`] for a wiki-link, which addresses a graph
+    /// node by key and cannot name a URL — also derived from the kind.
+    #[must_use]
+    pub fn scope(&self) -> LinkScope {
+        self.scope
+    }
+
+    /// The byte range the whole link occupies **in the line as given**, so a
+    /// caller can rewrite it in place.
+    ///
+    /// Code spans are excluded from the scan but not from this range: a link
+    /// whose brackets straddle one covers it. Always non-empty, inside the line,
+    /// and on character boundaries, so `&line[link.span()]` cannot panic.
+    #[must_use]
+    pub fn span(&self) -> Range<usize> {
+        self.span.clone()
+    }
+
     /// The one constructor, and the one place this type's documented invariants
     /// are made true.
     ///
@@ -716,13 +760,18 @@ impl MarkdownLink {
     ///
     /// `pulldown-cmark` renders `[t](< >)` as a link whose destination is one
     /// space, and `[t](< docs/x.md >)` with the spaces kept. This reports no
-    /// link for the first and `docs/x.md` for the second. That is the one place
-    /// this scanner knowingly diverges from the renderer, it is the divergence
-    /// three of the four destination forms already had, and the reason is what
-    /// this type is *for*: a `target` is a key a graph node is looked up by and
-    /// a label a citation is written from, and `" "` is neither. Nothing in this
-    /// repository writes such a link — `markdown_links_parity.rs` checks that
-    /// over every `.md` and `.rs` in the tree. Raised in review on #806.
+    /// link for the first and `docs/x.md` for the second, which is the
+    /// divergence three of the four destination forms already had. The reason is
+    /// what this type is *for*: a `target` is a key a graph node is looked up by
+    /// and a label a citation is written from, and `" "` is neither. Nothing in
+    /// this repository writes such a link — `markdown_links_parity.rs` checks
+    /// that over every `.md` and `.rs` in the tree.
+    ///
+    /// **`renderer_agreement.rs` is the list, not this comment.** It runs every
+    /// shape through both readers and holds each divergence to a stated reason,
+    /// in both directions. An earlier version of this paragraph said "the one
+    /// place", and by then the table already recorded two — prose restating a
+    /// test is prose that drifts from it. Raised in review on #806, twice.
     ///
     /// # Panics
     ///
@@ -923,7 +972,24 @@ pub fn link_scope(destination: &str) -> LinkScope {
 /// Whether `line` opens or closes a fenced code block — a run of three or more
 /// backticks or tildes, after leading whitespace.
 ///
-/// # This is the `CommonMark` rule, and three scanners in this workspace do not use it
+/// # The **delimiter** is `CommonMark`'s; the indentation deliberately is not
+///
+/// `CommonMark` allows at most three spaces of indentation before a fence *at a
+/// block's content column*, and this accepts any amount. That is not laxness, it
+/// is the limit of a per-line predicate: four spaces at the top level open an
+/// indented code block, and the same four inside a list item open a perfectly
+/// ordinary fence. Checked against `pulldown-cmark`: a four-space-indented
+/// backtick fence is `Indented` on its own and `Fenced` under `- item`, so the
+/// bound is relative to a container this function is never told about. A fixed limit of three would
+/// therefore *break* fences this repository already has: see
+/// `crates/rto-render/tests/fixtures/okf-upstream/acme_retail/skills/run-on-bq.md`,
+/// where a `json` fence sits four spaces deep inside a list.
+///
+/// Callers that need the real rule need a document scan, which is
+/// [`markdown_links`]' "One line" note all over again. Raised in review on #806
+/// as an overstated claim, and it was one.
+///
+/// # Three scanners in this workspace do not use even the delimiter half
 ///
 /// `rto_render::docs` recognises both delimiters. `rto_spec`'s ADR, blueprint,
 /// site-page and lat.md scanners each carry their own
@@ -1315,6 +1381,7 @@ fn destination_end(bytes: &[u8], from: usize) -> Option<usize> {
     // parentheses and quotes that close the link everywhere else, which is the
     // point of writing one. `[t](<https://e.org/a_(b)>)` is a valid link, and
     // counting its `)` against the outer depth rejected it.
+    let mut angle = false;
     if bytes.get(i) == Some(&b'<') {
         i += 1;
         loop {
@@ -1326,10 +1393,19 @@ fn destination_end(bytes: &[u8], from: usize) -> Option<usize> {
                 break;
             }
         }
+        angle = true;
     }
     let mut depth = 1usize;
     let mut quote: Option<u8> = None;
-    let mut after_space = false;
+    // A `>` ends the destination as definitively as whitespace does, so a title
+    // may open on the very next byte — and this scanner accepts one there, see
+    // `a_title_may_follow_an_angle_destination_without_a_separator`. Leaving
+    // this `false` made that acceptance half-work: the quote never opened a
+    // title, so a `)` inside the title closed the outer link and
+    // `[t](<x.md>"a ) b")` — which `pulldown-cmark` renders as a link — was
+    // rejected outright. Raised in review on #806 as the downstream cost of that
+    // divergence; this is the half of it that was simply a bug.
+    let mut after_space = angle;
     while i < bytes.len() {
         if bytes[i] == b'\\' {
             i += 2;
@@ -1623,6 +1699,14 @@ mod link_tests {
         assert!(is_code_fence("   ```rust"));
         assert!(is_code_fence("~~~"));
         assert!(!is_code_fence("a ``` b"));
+        // Indentation is deliberately unbounded, and the reason is in the docs:
+        // four spaces at the top level is an indented code block while the same
+        // four inside a list item is an ordinary fence, so the real bound is
+        // relative to a container one line cannot see. This repository already
+        // has the second shape (`okf-upstream/.../run-on-bq.md`), so a fixed
+        // limit of three would break it. Raised in review on #806.
+        assert!(is_code_fence("    ```json"));
+        assert!(is_code_fence("\t```"));
         // A line *inside* either kind of block still yields its link here…
         assert_eq!(
             wiki_link_targets("[[docs/fenced.md]]"),
@@ -2135,6 +2219,21 @@ mod link_tests {
     #[test]
     fn a_title_may_follow_an_angle_destination_without_a_separator() {
         assert_eq!(scanned(r#"[t](<docs/x.md>"title")"#)[0].1, "docs/x.md");
+        // The acceptance has to survive a `)` inside that title, or it is not
+        // an acceptance. `destination_end` treated the `"` as content because
+        // no whitespace preceded it, so the `)` closed the outer link and this
+        // was rejected — a link `pulldown-cmark` renders. Raised in review on
+        // #806 as the cost of this divergence; it was the divergence being only
+        // half-implemented.
+        let line = r#"[t](<docs/x.md>"a ) b") after"#;
+        let links = markdown_links(line);
+        assert_eq!(links[0].target, "docs/x.md");
+        assert_eq!(&line[links[0].span.clone()], r#"[t](<docs/x.md>"a ) b")"#);
+        assert_eq!(scanned(r"[t](<docs/x.md>'a ) b')")[0].1, "docs/x.md");
+        assert_eq!(scanned("[t](<docs/x.md>(a b))")[0].1, "docs/x.md");
+        // Junk after the destination is still not a title, separator or not.
+        assert!(scanned("[t](<a>junk)").is_empty());
+        assert!(scanned(r"[t](<a>x'y)").is_empty());
         assert_eq!(scanned(r#"[t](<docs/x.md> "title")"#)[0].1, "docs/x.md");
         assert_eq!(
             scanned(r#"[t](docs/x.md"title")"#)[0].1,
