@@ -435,12 +435,23 @@ fn attested_text(field: &Attested<String>) -> Recorded<'_> {
 ///
 /// Where both a DOI and a URL are recorded the DOI wins: "if an online work has
 /// both a DOI and a URL, include only the DOI".
+///
+/// A recorded URL is only printable if it is a **web address**. `Locator::Url`
+/// holds an arbitrary `String`, and an [`EntrySpan::Link`] is a target some UI
+/// will put in an `href` — so a `javascript:`, `data:` or `file:` locator that
+/// travelled through here would be this module handing a renderer a hostile
+/// destination and calling it a citation. Anything else is not printable, which
+/// means the record refuses rather than silently losing its source element.
+/// The accepted set is deliberately narrow: a reference needing another scheme
+/// is a case to argue, not one to admit by default.
 fn printable_locator(reference: &Reference) -> Option<String> {
     match reference.locator.known()? {
+        // A DOI is rendered through the resolver, so it is an `https://` URL by
+        // construction whatever the record spelled.
         Locator::Doi(doi) | Locator::Both { doi, .. } => Some(doi.url()),
         Locator::Url(url) => {
             let url = url.trim();
-            (!url.is_empty()).then(|| url.to_owned())
+            (url.starts_with("https://") || url.starts_with("http://")).then(|| url.to_owned())
         }
     }
 }
@@ -540,6 +551,54 @@ fn retrieval_clause(retrieved: AccessDate) -> String {
     )
 }
 
+/// Whether the source element would repeat the author, in which case APA drops
+/// it.
+///
+/// "Do not include the publisher when it is the same as the author" — a group
+/// author's own website is the common case, and `World Health Organization.
+/// (2018, May 24). The top 10 causes of death. World Health Organization.
+/// https://…` says the name twice for no reader's benefit.
+///
+/// Only for a **single group author**: a person is not their own publisher, and
+/// with several authors the name is not "the author" in the sense the rule
+/// means. And only when a locator will be printed, because otherwise dropping
+/// the publisher would leave the source element empty — the reference would
+/// lose its fourth element to a formatting rule meant to tidy it.
+///
+/// Encoding the rule here is what lets the record stay honest. Without it, the
+/// only way to get APA's output is `publisher = AbsentFromWork`, which claims
+/// the work *has* no publisher — a false statement about the world, made to
+/// satisfy a layout rule, in a module whose entire subject is not doing that.
+fn publisher_repeats_the_author(
+    reference: &Reference,
+    publisher: &str,
+    locator_printed: bool,
+) -> bool {
+    locator_printed
+        && match reference.authors.as_slice() {
+            [Author::Group(name)] => name.trim() == publisher.trim(),
+            _ => false,
+        }
+}
+
+/// `text` with its first character upper-cased.
+///
+/// The one place this module changes recorded text, and the line is worth
+/// stating: a **title** is never recased, because which of its words are proper
+/// nouns is a judgement about the words, and a formatter guessing at that is a
+/// formatter rewriting what somebody wrote down. A **descriptor** is drawn from
+/// the small controlled vocabulary APA itself supplies — `Computer software`,
+/// `Data set`, `Fact sheet` — and "capitalize the first letter of the
+/// description" is a rule about punctuation, with no proper-noun hazard in it.
+/// Without this, a record carrying `computer software` renders `[computer
+/// software]`, which is simply not APA.
+fn capitalise_first(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
+}
+
 /// Whether a period should be added after `text`, which already ends the title
 /// element.
 fn needs_period(text: &str) -> bool {
@@ -589,7 +648,7 @@ pub fn entry(reference: &Reference) -> Result<Entry, Refusal> {
         spans.push(EntrySpan::Plain(text));
     }
     if let Some(descriptor) = attested_text(&reference.descriptor).value() {
-        let text = format!(" [{descriptor}]");
+        let text = format!(" [{}]", capitalise_first(descriptor));
         tail_of_title.clone_from(&text);
         spans.push(EntrySpan::Plain(text));
     }
@@ -598,14 +657,17 @@ pub fn entry(reference: &Reference) -> Result<Entry, Refusal> {
     if needs_period(&tail_of_title) {
         tail.push('.');
     }
-    if let Some(publisher) = attested_text(&reference.publisher).value() {
+    let locator = printable_locator(reference);
+    let publisher = attested_text(&reference.publisher)
+        .value()
+        .filter(|publisher| !publisher_repeats_the_author(reference, publisher, locator.is_some()));
+    if let Some(publisher) = publisher {
         tail.push(' ');
         tail.push_str(publisher);
         if needs_period(publisher) {
             tail.push('.');
         }
     }
-    let locator = printable_locator(reference);
     if locator.is_some() {
         tail.push(' ');
         if let Stability::UnarchivedAndChanging { retrieved } = reference.stability {
@@ -836,8 +898,12 @@ mod tests {
             month: Month::May,
             day: day(24),
         });
-        // APA omits the site name when it is the same as the author.
-        corporate.publisher = Attested::AbsentFromWork;
+        // The publisher is recorded truthfully — the WHO *is* the publisher of
+        // its own fact sheet — and APA's "omit the publisher when it is the
+        // author" rule is what keeps it out of the output. Setting this to
+        // `AbsentFromWork` to get the same line would be a false statement
+        // about the work, made to satisfy a layout rule.
+        corporate.publisher = Attested::Known("World Health Organization".to_owned());
         corporate.locator = Attested::Known(Locator::Url(
             "https://www.who.int/news-room/fact-sheets/detail/the-top-10-causes-of-death"
                 .to_owned(),
@@ -936,6 +1002,9 @@ mod tests {
 
     /// Cases that must refuse, and the fields the refusal must name.
     fn cases_that_refuse() -> Vec<(&'static str, Reference, Vec<Missing>)> {
+        let mut hostile_locator = complete("hostile-locator", WorkKind::Document, "A work");
+        hostile_locator.locator = Attested::Known(Locator::Url("javascript:alert(1)".to_owned()));
+
         // The undated case again, except that nobody has looked the date up.
         let mut date_unknown = population_clock();
         date_unknown.id = "date-unknown".to_owned();
@@ -1017,6 +1086,11 @@ mod tests {
             (
                 "a recorded but blank locator is nobody's answer, not an absence",
                 blank_locator,
+                vec![Missing::Locator],
+            ),
+            (
+                "a locator that is not a web address is refused, never linked",
+                hostile_locator,
                 vec![Missing::Locator],
             ),
         ]
@@ -1358,6 +1432,97 @@ mod tests {
             assert_eq!(requires_locator(kind), locator, "{kind:?}");
             assert_eq!(title_is_italic(kind), italic, "{kind:?}");
         }
+    }
+
+    #[test]
+    fn only_a_web_address_becomes_a_link() {
+        // An `EntrySpan::Link` is an `href` some UI will render. These are the
+        // schemes that must never reach one, and a record carrying one refuses
+        // rather than losing its source element quietly.
+        for hostile in [
+            "javascript:alert(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "file:///etc/passwd",
+            "vbscript:msgbox(1)",
+            "  javascript:alert(1)  ",
+        ] {
+            let mut reference = complete("r", WorkKind::Document, "A title");
+            reference.locator = Attested::Known(Locator::Url(hostile.to_owned()));
+            assert_eq!(
+                entry(&reference).expect_err("refuses").missing,
+                vec![Missing::Locator],
+                "{hostile:?} must never become a link target"
+            );
+        }
+        // …and the schemes a reference actually uses still work.
+        for good in ["https://example.invalid/a", "http://example.invalid/b"] {
+            let mut reference = complete("r", WorkKind::Document, "A title");
+            reference.locator = Attested::Known(Locator::Url(good.to_owned()));
+            let rendered = entry(&reference).expect("renders");
+            assert!(rendered.plain_text().ends_with(good), "{good}");
+            assert!(
+                rendered
+                    .spans
+                    .iter()
+                    .any(|span| matches!(span, EntrySpan::Link { href, .. } if href == good))
+            );
+        }
+    }
+
+    #[test]
+    fn a_descriptor_is_capitalised_but_a_title_is_never_recased() {
+        let mut lowercase = complete("lowercase", WorkKind::Software, "a Deliberately odd TITLE");
+        lowercase.version = Attested::AbsentFromWork;
+        lowercase.descriptor = Attested::Known("computer software".to_owned());
+        let rendered = entry(&lowercase).expect("renders").plain_text();
+        assert!(
+            rendered.contains("[Computer software]"),
+            "APA capitalises the first letter of the description: {rendered}"
+        );
+        assert!(
+            rendered.contains("a Deliberately odd TITLE"),
+            "the title is printed exactly as recorded: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_publisher_that_repeats_a_group_author_is_dropped_rather_than_denied() {
+        let mut page = complete("who", WorkKind::WebPage, "The top 10 causes of death");
+        page.authors = vec![Author::Group("World Health Organization".to_owned())];
+        page.publisher = Attested::Known("World Health Organization".to_owned());
+        let rendered = entry(&page).expect("renders").plain_text();
+        assert_eq!(
+            rendered.matches("World Health Organization").count(),
+            1,
+            "APA omits the publisher when it is the author: {rendered}"
+        );
+
+        // A person is not their own publisher, and a publisher that merely
+        // shares a word is a different name.
+        let mut person_author = complete("person", WorkKind::Document, "A title");
+        person_author.publisher = Attested::Known("Luna".to_owned());
+        assert!(
+            entry(&person_author)
+                .expect("renders")
+                .plain_text()
+                .contains(". Luna."),
+            "only a group author triggers the rule"
+        );
+
+        // With nothing else in the source element, the publisher stays: a
+        // tidying rule must not delete the only source a reader has.
+        let mut no_locator = page.clone();
+        no_locator.kind = WorkKind::Document;
+        no_locator.locator = Attested::AbsentFromWork;
+        assert_eq!(
+            entry(&no_locator)
+                .expect("renders")
+                .plain_text()
+                .matches("World Health Organization")
+                .count(),
+            2,
+            "with no locator the publisher is all the source element has"
+        );
     }
 
     #[test]

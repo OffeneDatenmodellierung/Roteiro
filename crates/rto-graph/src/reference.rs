@@ -80,7 +80,8 @@ use serde::{Deserialize, Serialize};
 /// them into one arm. Closing the set makes every consumer's match a compile
 /// error the day a fourth epistemic state is proposed — which is when that
 /// proposal should be argued, rather than absorbed by a wildcard.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Attested<T> {
     /// We hold the value.
     Known(T),
@@ -140,6 +141,7 @@ impl<T> Attested<T> {
 /// Deliberately not `#[non_exhaustive]`: the Gregorian calendar has twelve
 /// months, and is not expected to grow one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Month {
     /// January.
     January,
@@ -289,7 +291,8 @@ impl From<Day> for u8 {
 /// it says how the new shape is printed, where a wildcard arm would print it as
 /// something else. Rendering a date as a date it is not is the failure this
 /// whole module is about.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum PublicationDate {
     /// The year alone — the commonest case, and all APA requires of most works.
     Year(i32),
@@ -327,7 +330,7 @@ impl PublicationDate {
 /// from …`, so a partial one could not be rendered. It reaches a record only
 /// through [`Stability::UnarchivedAndChanging`], which is the single condition
 /// under which APA wants it at all.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct AccessDate {
     /// The year.
     pub year: i32,
@@ -347,7 +350,8 @@ pub struct AccessDate {
 ///
 /// Deliberately not `#[non_exhaustive]`: APA's condition is a yes-or-no
 /// question about one work, so the set has exactly two answers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Stability {
     /// The work is fixed, or an archived or versioned copy of what was read
     /// still exists. No retrieval date; this is the ordinary case, and APA is
@@ -367,7 +371,8 @@ pub enum Stability {
 /// one that decides whether a name may be reduced to initials, and a consumer
 /// meeting an unknown third kind behind a wildcard would have to guess which
 /// side of that line it fell on.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Author {
     /// An individual.
     Person {
@@ -412,7 +417,7 @@ pub struct Doi(String);
 /// A string that is not a DOI.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "not a DOI: {0:?} (expected a `10.` prefix, optionally behind `https://doi.org/` or `doi:`)"
+    "not a DOI: {0:?} (expected `10.<digits>/<suffix>`, optionally behind `https://doi.org/` or `doi:`)"
 )]
 pub struct NotADoi(pub String);
 
@@ -420,10 +425,19 @@ impl Doi {
     /// Parse a DOI, accepting the bare form, a `doi:` prefix, or a
     /// `https://doi.org/` (or `http://`, or `dx.doi.org`) resolver URL.
     ///
+    /// The shape checked is the one the DOI Handbook defines: a `10.` prefix, a
+    /// registrant code of digits (possibly dot-separated, as in
+    /// `10.1000.10/123`), a `/`, and a non-empty suffix. That is deliberately
+    /// stricter than "starts with `10.` and contains a slash", because
+    /// everything this type accepts is rendered as a resolver link — and a link
+    /// that resolves to nothing is exactly the plausible-looking citation this
+    /// module exists to prevent. Beyond the shape it cannot go: whether a
+    /// well-formed DOI is *registered* is a question only the network answers,
+    /// and this crate has no network by construction.
+    ///
     /// # Errors
     ///
-    /// Returns [`NotADoi`] when what remains after the prefix does not look
-    /// like a DOI — every DOI begins `10.` and carries a `/`.
+    /// Returns [`NotADoi`] when what remains after the prefix is not that shape.
     pub fn new(text: &str) -> Result<Self, NotADoi> {
         let trimmed = text.trim();
         let bare = [
@@ -436,10 +450,16 @@ impl Doi {
         .iter()
         .find_map(|prefix| trimmed.strip_prefix(prefix))
         .unwrap_or(trimmed);
-        if bare.starts_with("10.") && bare.contains('/') {
+        let refused = || NotADoi(text.to_owned());
+        let rest = bare.strip_prefix("10.").ok_or_else(refused)?;
+        let (registrant, suffix) = rest.split_once('/').ok_or_else(refused)?;
+        let registrant_is_numeric = registrant
+            .split('.')
+            .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()));
+        if registrant_is_numeric && !suffix.is_empty() {
             Ok(Self(bare.to_owned()))
         } else {
-            Err(NotADoi(text.to_owned()))
+            Err(refused())
         }
     }
 
@@ -487,7 +507,8 @@ impl fmt::Display for Doi {
 /// formatter: which one wins when several are present is a style rule, not a
 /// default. Closing the set is what makes each formatter answer that question
 /// instead of falling through a wildcard and printing nothing.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Locator {
     /// A DOI.
     Doi(Doi),
@@ -519,7 +540,11 @@ pub enum Locator {
 /// all three for a journal article the way it answers them for a book, and
 /// quietly emit a wrong reference — so a new kind has to break the build in the
 /// renderer until somebody says what it is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+// Kebab-case on the wire so the serialised token is the one `WorkKind::as_str`
+// documents. They were allowed to disagree once, and a token that two parts of
+// one crate spell differently is a format nobody can rely on.
+#[serde(rename_all = "kebab-case")]
 pub enum WorkKind {
     /// A standalone document: a book, a report, a specification, a standard.
     Document,
@@ -559,7 +584,13 @@ impl WorkKind {
 /// is a property of a record **and a citation style together** — APA insists on
 /// a bracketed descriptor for software that another style would not ask for —
 /// so it is decided by the renderer, which is where the style's rules are.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// The derived [`Ord`] is **structural** — field order, so [`Reference::id`]
+/// first — and exists to give [`Reference::list_order`] a last resort that is
+/// total over the whole record. It is not the order a reference list is printed
+/// in; sorting a slice with it directly gives id order, which is nobody's
+/// bibliography.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Reference {
     /// A stable identifier for this work within a reference register. It never
     /// appears in rendered output; it is what a citation points at, what a
@@ -635,58 +666,96 @@ impl Reference {
 
     /// The total order a reference list is printed in.
     ///
-    /// Alphabetical by the first author's surname (or the group's name), as APA
-    /// asks, and then by three further keys that exist so the order is **total**
-    /// rather than merely alphabetical: a rendered bundle is byte-reproducible
-    /// and `okf diff` reads the bytes, so two records that sort equally on
-    /// surname must still sort deterministically against each other.
+    /// APA §9.47 is more than "alphabetical by surname", and the parts people
+    /// leave out are the parts that make two correct-looking lists disagree:
+    ///
+    /// - a one-author entry precedes a multi-author entry beginning with the
+    ///   same surname;
+    /// - entries sharing a first author are ordered by the *second* author's
+    ///   surname, and so on down the list;
+    /// - only then does date break the tie, earliest first, with an undated
+    ///   work before any dated one.
+    ///
+    /// Comparing the **whole** author list, element by element, gets the first
+    /// two for free: `["salas"]` is a prefix of `["salas", "d'agostino"]` and
+    /// so sorts before it, and `["salas", "a"]` sorts before `["salas", "b"]`.
     ///
     /// The keys, in order:
     ///
-    /// 1. first author's sort key, case-insensitively — APA alphabetises
-    ///    letter by letter and does not care about capitals;
-    /// 2. the same key case-sensitively, so the fold in step 1 never decides a
+    /// 1. every author's sort key, in the order the work lists them,
+    ///    case-insensitively — APA alphabetises letter by letter and does not
+    ///    care about capitals;
+    /// 2. the same list case-sensitively, so the fold in step 1 never decides a
     ///    tie by accident of iteration order;
-    /// 3. date, with an undated work first (APA orders `n.d.` before any year
-    ///    for the same author) and a record whose date nobody has looked up
-    ///    last — such a record never reaches a rendered list, but the order
-    ///    must still be defined for it;
-    /// 4. title, then [`Reference::id`], which is unique and therefore makes
-    ///    the whole order total.
+    /// 3. the full publication date — year, then month, then day, so two works
+    ///    from one year are not left to be separated by their titles. An
+    ///    undated work sorts first (APA puts `n.d.` before any year for the
+    ///    same author) and a record whose date nobody has looked up sorts last;
+    ///    such a record never reaches a rendered list, but the order still has
+    ///    to be defined for it. A year-only date precedes a more precise one in
+    ///    the same year, because that is the only placement that does not
+    ///    invent a month for it;
+    /// 4. title, case-insensitively then not;
+    /// 5. [`Reference::id`];
+    /// 6. the record itself, structurally.
     ///
-    /// Deliberately a named function rather than an `Ord` implementation:
-    /// `Ord` must agree with `Eq`, and these keys are a strict subset of the
-    /// fields `PartialEq` compares, so two different records could compare
-    /// `Equal` while being unequal.
+    /// Key 6 is what makes the order genuinely **total** rather than total
+    /// only where ids happen to be unique. `id` is a public `String` and
+    /// nothing enforces uniqueness, so two records could agree on keys 1–5 and
+    /// still differ — in a publisher, say. Without a last resort they would
+    /// compare `Equal`, and a stable sort would then order them by the order
+    /// they arrived in, which is exactly the input-order dependence the
+    /// byte-reproducibility rule forbids.
+    ///
+    /// Deliberately a named function rather than *the* `Ord` implementation:
+    /// `Ord` must agree with `Eq`, and keys 1–5 are a strict subset of the
+    /// fields `PartialEq` compares. The derived `Ord` on [`Reference`] — which
+    /// key 6 uses — is structural and agrees with `Eq`; it is a tiebreak, not
+    /// a reference-list order, and sorting with it directly gives id order.
     #[must_use]
     pub fn list_order(a: &Self, b: &Self) -> Ordering {
-        let author = |r: &Self| {
+        let authors = |r: &Self| -> Vec<String> {
             r.authors
-                .first()
-                .map_or(String::new(), |a| a.sort_key().to_owned())
+                .iter()
+                .map(|author| author.sort_key().to_owned())
+                .collect()
         };
-        let (left, right) = (author(a), author(b));
-        // `Unknown` last, `AbsentFromWork` (n.d.) first, known years between.
+        let folded = |names: &[String]| -> Vec<String> {
+            names.iter().map(|name| name.to_lowercase()).collect()
+        };
+        let (left, right) = (authors(a), authors(b));
+        // `Unknown` last, `AbsentFromWork` (n.d.) first, known dates between —
+        // and a known date compares on all the precision it has.
         let date = |r: &Self| match &r.published {
-            Attested::AbsentFromWork => (0_u8, 0_i32),
-            Attested::Known(published) => (1, published.year()),
-            Attested::Unknown => (2, 0),
+            Attested::AbsentFromWork => (0_u8, 0_i32, 0_u8, 0_u8),
+            Attested::Known(published) => {
+                let (year, month, day) = match published {
+                    PublicationDate::Year(year) => (*year, 0, 0),
+                    PublicationDate::YearMonth { year, month } => (*year, month.number(), 0),
+                    PublicationDate::Full { year, month, day } => {
+                        (*year, month.number(), day.get())
+                    }
+                };
+                (1, year, month, day)
+            }
+            Attested::Unknown => (2, 0, 0, 0),
         };
-        left.to_lowercase()
-            .cmp(&right.to_lowercase())
+        folded(&left)
+            .cmp(&folded(&right))
             .then_with(|| left.cmp(&right))
             .then_with(|| date(a).cmp(&date(b)))
             .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
             .then_with(|| a.title.cmp(&b.title))
             .then_with(|| a.id.cmp(&b.id))
+            .then_with(|| a.cmp(b))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        AccessDate, Attested, Author, Day, Doi, Month, PublicationDate, Reference, Stability,
-        WorkKind,
+        AccessDate, Attested, Author, Day, Doi, Month, Ordering, PublicationDate, Reference,
+        Stability, WorkKind,
     };
 
     fn person(surname: &str) -> Author {
@@ -740,8 +809,8 @@ mod tests {
         let absent_json = serde_json::to_string(&absent).expect("serialize");
         let unknown_json = serde_json::to_string(&unknown).expect("serialize");
         assert_ne!(absent_json, unknown_json);
-        assert_eq!(absent_json, "\"AbsentFromWork\"");
-        assert_eq!(unknown_json, "\"Unknown\"");
+        assert_eq!(absent_json, "\"absent-from-work\"");
+        assert_eq!(unknown_json, "\"unknown\"");
         let back: Attested<String> = serde_json::from_str(&absent_json).expect("deserialize");
         assert_eq!(back, Attested::AbsentFromWork);
     }
@@ -774,9 +843,19 @@ mod tests {
             "https://example.invalid/paper",
             "10.no-slash",
             "not a doi",
+            // A `10.` and a slash is not enough: everything that parses here is
+            // rendered as a resolver link, so these would publish a dead link
+            // dressed as a citation.
+            "10./suffix",
+            "10.foo/suffix",
+            "10.1037/",
         ] {
             assert!(Doi::new(text).is_err(), "{text:?} is not a DOI");
         }
+        // …while a dot-separated numeric registrant is legitimate, and is the
+        // reason the check is "digits and dots" rather than "digits".
+        assert!(Doi::new("10.1000.10/123").is_ok());
+        assert!(Doi::new("10.10.37/x").is_ok());
     }
 
     #[test]
@@ -876,6 +955,95 @@ mod tests {
             order,
             ["u", "b", "x"],
             "n.d. first, then years; a date nobody looked up is not a date and sorts last"
+        );
+    }
+
+    #[test]
+    fn a_kinds_wire_token_is_the_one_it_documents() {
+        // These were allowed to disagree once: serde wrote `"DataSet"` while
+        // `as_str` promised `data-set`, so a report and a serialised record
+        // named one kind two ways.
+        for kind in [
+            WorkKind::Document,
+            WorkKind::Software,
+            WorkKind::DataSet,
+            WorkKind::FactSheet,
+            WorkKind::WebPage,
+        ] {
+            let json = serde_json::to_string(&kind).expect("serialize");
+            assert_eq!(
+                json,
+                format!("\"{}\"", kind.as_str()),
+                "the wire token must be the documented one"
+            );
+        }
+    }
+
+    #[test]
+    fn one_author_precedes_the_same_authors_collaborations() {
+        // APA §9.47: a one-author entry comes before a multi-author entry
+        // beginning with the same surname, and entries sharing a first author
+        // are separated by the second author's surname — both before date is
+        // even consulted.
+        let mut solo = dated("solo", "Salas", 2020);
+        solo.authors = vec![person("Salas")];
+        let mut with_zhang = dated("with-zhang", "Salas", 1990);
+        with_zhang.authors = vec![person("Salas"), person("Zhang")];
+        let mut with_abbott = dated("with-abbott", "Salas", 1999);
+        with_abbott.authors = vec![person("Salas"), person("Abbott")];
+
+        let mut refs = [with_zhang, solo, with_abbott];
+        refs.sort_by(Reference::list_order);
+        let order: Vec<&str> = refs.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(
+            order,
+            ["solo", "with-abbott", "with-zhang"],
+            "the solo work first despite its later year, then by second author"
+        );
+    }
+
+    #[test]
+    fn two_works_from_one_year_are_separated_by_month_not_by_title() {
+        let mut december = dated("december", "Salas", 2020);
+        december.title = "A title".to_owned();
+        december.published = Attested::Known(PublicationDate::YearMonth {
+            year: 2020,
+            month: Month::December,
+        });
+        let mut january = dated("january", "Salas", 2020);
+        // A title that sorts *after* December's, so the assertion fails if the
+        // date key gives up at the year and lets the title decide.
+        january.title = "Z title".to_owned();
+        january.published = Attested::Known(PublicationDate::Full {
+            year: 2020,
+            month: Month::January,
+            day: Day::new(9).expect("valid"),
+        });
+
+        let mut refs = [december, january];
+        refs.sort_by(Reference::list_order);
+        let order: Vec<&str> = refs.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(order, ["january", "december"]);
+    }
+
+    #[test]
+    fn records_alike_in_every_key_still_have_a_defined_order() {
+        // Nothing enforces that `id` is unique, so the last resort has to be
+        // the record itself — otherwise these two compare `Equal`, and a stable
+        // sort then orders them by however they happened to arrive.
+        let mut one = dated("same-id", "Salas", 2020);
+        one.publisher = Attested::Known("A Publisher".to_owned());
+        let mut two = dated("same-id", "Salas", 2020);
+        two.publisher = Attested::Known("B Publisher".to_owned());
+
+        assert_eq!(Reference::list_order(&one, &two), Ordering::Less);
+        let mut forwards = [one.clone(), two.clone()];
+        forwards.sort_by(Reference::list_order);
+        let mut backwards = [two, one];
+        backwards.sort_by(Reference::list_order);
+        assert_eq!(
+            forwards, backwards,
+            "the same pair in either order must sort the same way"
         );
     }
 
