@@ -612,6 +612,19 @@ fn slugify_matches_rustdocs_rule() {
         slugify(&heading_text("See [x [[docs/y.md]]](self#paging)")),
         "see-x-docsymd"
     );
+    // An image whose **whole** alt text is a wiki token reduces the same way.
+    // The scanner used to step over the `[[…]]` before it could see the `](…)`
+    // that makes this an image at all, so no `LinkKind::Image` was reported and
+    // the source came through into the anchor. Raised in review on #806.
+    assert_eq!(
+        slugify(&heading_text("A ![[diagram]](img.png) here")),
+        "a-diagram-here"
+    );
+    // A code span before a `!` does not make what follows an image: the `!` and
+    // the span are outside the link, so only `[label](t.md)` is spliced away.
+    // Reading the `!` off the code-span-stripped string called this an image and
+    // deleted the span with it. Raised in review on #806.
+    assert_eq!(heading_text("A !`x`[label](t.md) here"), "A !`x`label here");
 }
 
 #[test]

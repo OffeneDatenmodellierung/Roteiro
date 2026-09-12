@@ -711,6 +711,17 @@ pub struct MarkdownLink {
 /// destination is read here only where the source closes it, so a malformed line
 /// yields no link rather than whatever a recovering parser makes of it.
 ///
+/// The rule stops at the `]`, though. `CommonMark` parses inlines left to right
+/// and consumes a link's destination and title raw as soon as the `]` is
+/// reached, so a backtick past it never opens a span at all: ``[x](a`b`c.md)``
+/// is a link to ``a`b`c.md`` and ``[t](x.md "a `b`")`` is a titled link to
+/// `x.md`. What a span *can* do is take the `]` (``[not a `link](/foo`)``) or
+/// stand between the `]` and the `(` (``[a]`x`(b)``), and neither of those is a
+/// link. Both halves of this were raised in review on #806 and checked against
+/// `pulldown-cmark`, which renders this repository's documents — where the two
+/// could differ, the renderer's reading wins, because a gate that disagrees with
+/// the renderer is the defect #801 exists to remove.
+///
 /// A backslash escapes the delimiter after it, so `\[not a link](x)` is prose.
 /// Escapes are **not** processed inside `[[…]]`, which is a Roteiro token rather
 /// than `CommonMark` syntax and has never had them.
@@ -753,8 +764,8 @@ pub fn markdown_links(line: &str) -> Vec<MarkdownLink> {
             span: map.start(range.start)..map.end(range.end),
         })
         .collect();
-    out.extend(inline_spans(&stripped, &wiki, &map).into_iter().map(
-        |(kind, range, text, destination)| MarkdownLink {
+    out.extend(inline_spans(line, &stripped, &wiki, &map).into_iter().map(
+        |(kind, span, text, destination)| MarkdownLink {
             scope: link_scope(&destination),
             kind,
             target: destination,
@@ -763,8 +774,8 @@ pub fn markdown_links(line: &str) -> Vec<MarkdownLink> {
             // span removed, so taking the text from there would cite "the
             // type". The span is excluded from the *scan* because a link
             // inside one is an example; its content is still the label.
-            text: line[map.widest(&text)].to_owned(),
-            span: map.start(range.start)..map.end(range.end),
+            text: line[text].to_owned(),
+            span,
         },
     ));
     out.sort_by_key(|l| l.span.start);
@@ -970,6 +981,27 @@ impl SpanMap {
         self.end(range.start)..self.start(range.end)
     }
 
+    /// The stripped-string offset a **source-line** offset reduced to — the
+    /// inverse of [`Self::start`].
+    ///
+    /// Needed because the two halves of an inline link are read in different
+    /// coordinates. Its brackets are matched over the stripped string, because a
+    /// code span may hide the `]` that would otherwise close it; its
+    /// parenthesised part is read from the line, because a backtick there is
+    /// destination or title text and not a span at all. The scan then has to
+    /// resume in stripped coordinates from a line offset, which is this.
+    ///
+    /// A line offset **inside** a removed span has no stripped offset of its
+    /// own. It maps to where that span was cut out, which is the first position
+    /// scanning could sensibly resume at.
+    fn stripped(&self, at: usize) -> usize {
+        self.0
+            .iter()
+            .rev()
+            .find(|(_, source, _)| *source <= at)
+            .map_or(at, |(start, source, len)| start + (at - source).min(*len))
+    }
+
     /// The source offset of `at`, in the last chunk `keep` accepts.
     fn at(&self, at: usize, keep: impl Fn(usize) -> bool) -> usize {
         self.0
@@ -1031,16 +1063,19 @@ fn wiki_spans(stripped: &str) -> Vec<(Range<usize>, String)> {
 /// Every `[text](destination)` on an already-stripped line, as `(whole range,
 /// text range, destination)`.
 ///
-/// Skips the ranges `wiki` already claimed, so `[[a]]` is one wiki-link rather
-/// than also an inline one with a bracket for text. An `![alt](src)` is reported
-/// as [`LinkKind::Image`] and its range **starts at the `!`**, which is the half
-/// that matters to a caller splicing over it.
+/// Ranges are **source-line** offsets, and the text range is the widest source
+/// the label reduced from — a code span inside the label is part of it.
+///
+/// An `![alt](src)` is reported as [`LinkKind::Image`] and its range **starts at
+/// the `!`**, which is the half that matters to a caller splicing over it.
 fn inline_spans(
+    line: &str,
     stripped: &str,
     wiki: &[(Range<usize>, String)],
     map: &SpanMap,
 ) -> Vec<(LinkKind, Range<usize>, Range<usize>, String)> {
     let bytes = stripped.as_bytes();
+    let source = line.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
@@ -1052,40 +1087,47 @@ fn inline_spans(
             i += 1;
             continue;
         }
-        if let Some((claimed, _)) = wiki.iter().find(|(r, _)| r.contains(&i)) {
-            i = claimed.end;
-            continue;
-        }
-        let Some((text, destination, end)) = inline_at(stripped, i) else {
-            i += 1;
+        // A `[` opening a `[[…]]` is usually only that, and stepping over the
+        // claimed range stops it also being read as an inline link whose text is
+        // a bracket. But `![[a]](target)` is a real image whose *whole alt text*
+        // is a wiki token, and skipping the claim outright emitted no
+        // [`LinkKind::Image`] for it — which left the image's source in
+        // `heading_text`, the one thing that variant exists to prevent. So the
+        // claim is honoured only once [`inline_at`] has declined. Raised in
+        // review on #806.
+        let step = wiki
+            .iter()
+            .find(|(r, _)| r.contains(&i))
+            .map_or(i + 1, |(r, _)| r.end);
+        let Some((text, destination, end)) = inline_at(line, stripped, map, i) else {
+            i = step;
             continue;
         };
-        // Removing a code span **joins** what was either side of it, which is
-        // right for a `[[…]]` (that is what the scan this replaced did) and
-        // wrong for a `[…](…)`: `CommonMark` gives code spans precedence over
-        // links, so ``[a]`x`(b)`` is not a link and neither is ``[x](a`b`c)``.
-        // Requiring `](…)` to be the same length in the line as in the stripped
-        // string is that rule — nothing was removed inside it. The **label** is
-        // deliberately not covered: a code span there is part of the label.
-        // Raised in review on #806.
-        let tail = text.end..end;
-        if map.end(tail.end) - map.start(tail.start) != tail.len() {
-            i += 1;
-            continue;
-        }
-        let image = i > 0 && bytes[i - 1] == b'!' && !is_escaped(bytes, i - 1);
-        let (kind, start) = if image {
-            (LinkKind::Image, i - 1)
+        let open = map.start(i);
+        // An image is a `!` immediately before the `[` **in the line**, not in
+        // the stripped string. Removing a code span joins what was either side
+        // of it, so ``!`x`[label](target)`` — a literal `!`, a code span and an
+        // ordinary link — read there as an image, and the span it reported
+        // covered two things that are not part of one. Raised in review on #806.
+        let image = open > 0 && source[open - 1] == b'!' && !is_escaped(source, open - 1);
+        let start = if image { open - 1 } else { open };
+        let kind = if image {
+            LinkKind::Image
         } else {
-            (LinkKind::Inline, i)
+            LinkKind::Inline
         };
-        out.push((kind, start..end, text, destination));
-        i = end;
+        out.push((kind, start..end, map.widest(&text), destination));
+        // `end` is a line offset and the scan runs over the stripped string, so
+        // come back through the map — and never stand still, whatever it says.
+        i = map.stripped(end).max(i + 1);
     }
     out
 }
 
-/// The inline link opening at `open`, as `(text range, destination, end)`.
+/// The inline link whose `[` is at `open` in `stripped`.
+///
+/// Returns the label's range **in `stripped`**, the destination, and the end of
+/// the whole link **in `line`** — see the coordinates section below.
 ///
 /// Brackets and parentheses are matched by depth, so `[see [x]](y)` is one link
 /// with the text `see [x]` rather than two half-read ones, and a destination may
@@ -1093,14 +1135,44 @@ fn inline_spans(
 /// delimiter after it. Anything reaching the end of the line unclosed, or a
 /// parenthesised part that is not a destination and an optional title, yields no
 /// link — the no-recovery reading this scanner exists to keep.
-fn inline_at(line: &str, open: usize) -> Option<(Range<usize>, String, usize)> {
-    let bytes = line.as_bytes();
+///
+/// # Two coordinate systems, and why
+///
+/// The **label** is matched over the stripped string: a code span may hold the
+/// `]` that would otherwise close the link, and `CommonMark` gives the span
+/// precedence — ``[not a `link](/foo`)`` is prose and a code span, not a link.
+/// Removing spans first is what gets that right.
+///
+/// The **parenthesised part** is read from the line. Inline parsing is
+/// left-to-right and a link's destination and title are consumed raw the moment
+/// the `]` is reached, so a backtick past it never opens a span at all:
+/// ``[x](a`b`c)`` is a link to ``a`b`c`` and ``[t](docs/x.md "a `b`")`` is a
+/// link to `docs/x.md` titled ``a `b` ``. Reading those off the stripped string
+/// invented `docs/.md` for the first and rejected the second outright. Raised in
+/// review on #806; `pulldown-cmark`, which renders this repository's documents,
+/// is the oracle both claims were checked against.
+fn inline_at(
+    line: &str,
+    stripped: &str,
+    map: &SpanMap,
+    open: usize,
+) -> Option<(Range<usize>, String, usize)> {
+    let bytes = stripped.as_bytes();
     let close = matching(bytes, open, b'[', b']')?;
     if bytes.get(close + 1) != Some(&b'(') {
         return None;
     }
-    let dest_end = destination_end(bytes, close + 1)?;
-    let destination = destination_of(&line[close + 2..dest_end])?;
+    // The `](` must be contiguous **in the line**. These two bytes are the only
+    // place a removed span makes a link out of what was not one: ``[a]`x`(b)``
+    // is a bracketed literal followed by a code span, and joining its halves
+    // reported a link to `b`. A backtick inside the label or inside the
+    // destination is content and is deliberately not covered here.
+    let paren = map.start(close + 1);
+    if paren != map.start(close) + 1 {
+        return None;
+    }
+    let dest_end = destination_end(line.as_bytes(), paren)?;
+    let destination = destination_of(&line[paren + 1..dest_end])?;
     Some((open + 1..close, destination, dest_end + 1))
 }
 
@@ -1238,6 +1310,14 @@ fn destination_of(raw: &str) -> Option<String> {
         // one destination, not one truncated at the escape. An unclosed one is
         // not a destination at all.
         let end = unescaped(rest, b'>')?;
+        // It may hold a `<` only escaped, for the same reason. `[t](<a<b>)` is
+        // not a link to `a<b`; it is not a link at all, and `pulldown-cmark`
+        // renders it as the literal text it is. Accepting it invented a target
+        // out of malformed punctuation, which is the one thing this function
+        // exists to refuse. Raised in review on #806.
+        if unescaped(&rest[..end], b'<').is_some() {
+            return None;
+        }
         (&rest[..end], rest[end + 1..].trim_start())
     } else {
         let end = raw.find(char::is_whitespace).unwrap_or(raw.len());
@@ -1710,22 +1790,91 @@ mod link_tests {
         }
     }
 
-    /// A code span between the `]` and the `(`, or inside the destination, means
-    /// this is **not** a link.
+    /// A code span between the `]` and the `(` means this is **not** a link — and
+    /// a backtick past the `]` is not a code span at all.
     ///
-    /// Removing a code span joins what was either side of it — which is right
-    /// for a `[[…]]`, because that is what the scan this replaced did, and wrong
-    /// here: `CommonMark` gives code spans precedence over links, so none of
-    /// these is a link to anybody reading the rendered page. Joining them
-    /// invented a destination that is not in the source. Raised in review on
-    /// #806.
+    /// Removing code spans before the scan joins what was either side of them,
+    /// which is right for a `[[…]]` (it is what the scan this replaced did) and
+    /// wrong for the two bytes `](`: ``[a]`x`(b)`` is a bracketed literal
+    /// followed by a code span, and joining its halves reported a link to `b`.
+    ///
+    /// The first version of this guard covered the **whole** `](…)` tail, and
+    /// that was too much. Inline parsing is left-to-right: once the `]` is
+    /// reached the destination and title are consumed raw, so a backtick inside
+    /// them never opens a span. ``[x](a`b`c.md)`` is a link to ``a`b`c.md``, not
+    /// prose, and ``[t](x.md "a `b`")`` is a titled link this rejected outright.
+    /// Both were raised in review on #806 and both were checked against
+    /// `pulldown-cmark`, which is what renders this repository's documents — a
+    /// scanner disagreeing with the renderer is the defect class #801 exists to
+    /// remove, so the renderer's reading is the one that wins.
     #[test]
-    fn a_code_span_inside_the_destination_means_there_is_no_link() {
+    fn a_code_span_splits_a_link_only_between_its_bracket_and_its_paren() {
+        // A span across the `](` — not a link, and never was.
         assert!(scanned("[a]`x`(docs/b.md)").is_empty());
-        assert!(scanned("[x](a`b`c.md)").is_empty());
-        assert!(scanned("[x](`docs/x.md`)").is_empty());
-        // The label is deliberately not covered: a code span there is content.
+        // A span swallowing the `]` — the close is inside code, so no link.
+        assert!(scanned("[not a `link](/foo`)").is_empty());
+        // Past the `]` a backtick is destination or title text.
+        assert_eq!(scanned("[x](a`b`c.md)")[0].1, "a`b`c.md");
+        assert_eq!(scanned("[x](`docs/x.md`)")[0].1, "`docs/x.md`");
+        assert_eq!(scanned("[t](docs/x.md \"a `b`\")")[0].1, "docs/x.md");
+        // The label is deliberately not covered either: a span there is content.
         assert_eq!(scanned("[the `Foo` type](docs/x.md)")[0].1, "docs/x.md");
+        assert_eq!(
+            scanned("[the `Foo` type](docs/x.md)")[0].2,
+            "the `Foo` type"
+        );
+    }
+
+    /// An image is a `!` immediately before the `[` **in the line**, not in the
+    /// string the code spans were cut out of.
+    ///
+    /// ``!`x`[label](target)`` is a literal `!`, a code span and an ordinary
+    /// link. Reading the `!` off the stripped string made the three adjacent and
+    /// reported an [`LinkKind::Image`] whose span covered two things that are
+    /// not part of it — so a caller splicing the span would have deleted the
+    /// code span with it. Raised in review on #806.
+    #[test]
+    fn a_code_span_before_a_link_does_not_make_it_an_image() {
+        let line = "!`x`[label](target)";
+        assert_eq!(scanned(line)[0].0, LinkKind::Inline);
+        assert_eq!(markdown_links(line)[0].span, 4..19);
+        // A code span *before* a real `!` still leaves it an image, and the
+        // span starts at the `!` rather than at the backtick.
+        let line = "`q`![a](b)";
+        assert_eq!(scanned(line)[0].0, LinkKind::Image);
+        assert_eq!(markdown_links(line)[0].span, 3..10);
+        // An escaped `!` is prose, so what follows it is a plain link.
+        assert_eq!(scanned("\\![a](b)")[0].0, LinkKind::Inline);
+    }
+
+    /// An image whose **whole** alt text is a wiki token is still an image.
+    ///
+    /// The scan steps over a range `[[…]]` has already claimed so that `[[a]]`
+    /// is one wiki-link rather than also an inline one with a bracket for text.
+    /// For `![[a]](target)` that stepped straight past the `](…)` and emitted no
+    /// [`LinkKind::Image`], which left the image's *source* in `heading_text` —
+    /// `diagram-img-png` instead of `diagram`, the exact failure that variant
+    /// was added to prevent. The claim is now honoured only after an inline read
+    /// has been attempted. Raised in review on #806.
+    #[test]
+    fn an_image_whose_alt_text_is_a_wiki_token_is_still_an_image() {
+        let line = "![[a]](target)";
+        assert_eq!(
+            scanned(line)
+                .iter()
+                .map(|(k, t, _, _)| (*k, t.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (LinkKind::Image, "target".to_owned()),
+                (LinkKind::Wiki, "a".to_owned()),
+            ]
+        );
+        // The wiki-link is still reported, because `roteiro check` counts it —
+        // see the parity corpus. Without the image beside it the gate is fine
+        // and the *renderer* is not, which is how the two drift apart.
+        assert_eq!(wiki_link_targets(line), vec!["a"]);
+        // A bare `[[a]]` with no `(…)` after it is only a wiki-link.
+        assert_eq!(scanned("[[a]]").len(), 1);
     }
 
     /// An angle-bracket destination is opaque: it may hold the parentheses and
@@ -1745,6 +1894,48 @@ mod link_tests {
         assert_eq!(scanned(r"[t](<a\>b.md>)")[0].1, r"a\>b.md");
         // And one that never closes is still not a link.
         assert!(scanned("[t](<https://e.org/a").is_empty());
+    }
+
+    /// An angle destination may hold `<` and `>` only **escaped**.
+    ///
+    /// `[t](<a<b>)` was reported as a link to `a<b`, which is a target invented
+    /// out of malformed punctuation — the one thing [`destination_of`] exists to
+    /// refuse. `pulldown-cmark` renders that line as the literal text it is, and
+    /// renders `[t](<a\<b>)` as a link. Raised in review on #806.
+    #[test]
+    fn an_unescaped_angle_bracket_is_not_an_angle_destination() {
+        assert!(scanned("[t](<a<b>)").is_empty());
+        assert!(scanned("[t](<docs/<x.md>)").is_empty());
+        // Escaped, it is content and the link stands.
+        assert_eq!(scanned(r"[t](<a\<b>)")[0].1, r"a\<b");
+        // The `>` rule is unchanged and still the one that closes it.
+        assert_eq!(scanned("[t](<a b.md>)")[0].1, "a b.md");
+    }
+
+    /// A title needs no whitespace after an angle destination, because the
+    /// renderer needs none.
+    ///
+    /// `CommonMark`'s prose requires a separator when both a destination and a
+    /// title are present, and `[t](<docs/x.md>"title")` therefore reads as
+    /// malformed against the letter of the spec — raised on that ground in
+    /// review on #806. It is **deliberately accepted**, because
+    /// `pulldown-cmark` accepts it (its `scan_separator` may consume nothing)
+    /// and `pulldown-cmark` is what renders this repository's documents. The
+    /// site publishes `<a href="docs/x.md">`; rejecting it here would take that
+    /// live link out of the gate's reach and leave the one scanner disagreeing
+    /// with the one renderer, which is the defect class #801 exists to remove.
+    ///
+    /// The bare form needs no rule — `[t](docs/x.md"title")` has no separator to
+    /// look for, because the destination runs to the whitespace and swallows the
+    /// quotes. Both scanners agree there too.
+    #[test]
+    fn a_title_may_follow_an_angle_destination_without_a_separator() {
+        assert_eq!(scanned(r#"[t](<docs/x.md>"title")"#)[0].1, "docs/x.md");
+        assert_eq!(scanned(r#"[t](<docs/x.md> "title")"#)[0].1, "docs/x.md");
+        assert_eq!(
+            scanned(r#"[t](docs/x.md"title")"#)[0].1,
+            r#"docs/x.md"title""#
+        );
     }
 
     /// A label is what a **reader** sees, so it keeps the code spans the scan

@@ -26,6 +26,7 @@
 //! deliberately changed, this test is deleted in the same commit that argues for
 //! the change, not edited to agree with it.
 
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
@@ -191,6 +192,33 @@ fn corpus() -> Vec<PathBuf> {
     out
 }
 
+/// The text of one corpus file, or [`None`] if it is not text at all.
+///
+/// **Only `InvalidData` is skipped** — a file whose bytes are not UTF-8 is not a
+/// document either scanner would read, so leaving it out is the corpus being
+/// accurate rather than the corpus being incomplete. Every other error panics.
+///
+/// Both tests below used `let Ok(text) = … else { continue }`, which treats a
+/// permission error, a vanished file or a failing disk exactly like a binary:
+/// the file leaves the corpus and nothing says so. The floors are aggregate, so
+/// they cannot name the file that went missing and a handful of dropped files
+/// does not move them — which means the divergent line these tests exist to
+/// catch could be in a file neither of them read, and both would pass. The
+/// walker above already panics on a `read_dir` failure for this reason; this is
+/// the same rule one level down. Raised in review on #806.
+fn read_text(path: &Path) -> Option<String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == ErrorKind::InvalidData => None,
+        Err(e) => panic!(
+            "cannot read {} while scanning the corpus: {e}. Every file the \
+             walker listed must be read or the corpus is quietly smaller than \
+             the floors below assume",
+            path.display()
+        ),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The test
 // ---------------------------------------------------------------------------
@@ -205,8 +233,9 @@ fn the_shared_scanner_finds_exactly_what_the_old_one_did() {
     let mut divergences = Vec::new();
 
     for file in &files {
-        let Ok(text) = std::fs::read_to_string(file) else {
-            // A non-UTF-8 file is not a document either scanner would read.
+        // A non-UTF-8 file is not a document either scanner would read; any
+        // other read failure panics rather than shrinking the corpus silently.
+        let Some(text) = read_text(file) else {
             continue;
         };
         for (n, line) in text.lines().enumerate() {
@@ -268,7 +297,7 @@ fn every_reported_link_addresses_the_text_it_was_read_from() {
     let mut checked = 0usize;
     let mut inline = 0usize;
     for file in corpus() {
-        let Ok(text) = std::fs::read_to_string(&file) else {
+        let Some(text) = read_text(&file) else {
             continue;
         };
         for (n, line) in text.lines().enumerate() {
