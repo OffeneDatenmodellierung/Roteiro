@@ -532,10 +532,16 @@ fn printable_locator(reference: &Reference) -> Option<String> {
         // A DOI is rendered through the resolver, so it is an `https://` URL by
         // construction whatever the record spelled.
         Locator::Doi(doi) | Locator::Both { doi, .. } => Some(doi.url()),
-        Locator::Url(url) => {
-            let url = url.trim();
-            is_web_url(url).then(|| url.to_owned())
-        }
+        // Validated exactly as recorded, and **not** trimmed first. Trimming
+        // here normalised the value before the allowlist saw it, which is the
+        // bypass the allowlist was built to close: ` https://example.invalid/a `
+        // and a trailing newline both passed, and what reached the `href` was a
+        // value the record does not hold. Whitespace is not printable, so a
+        // locator carrying any refuses on `Missing::Locator` — visible, and
+        // fixable in the record — rather than being quietly cleaned up on the
+        // way to the page. The comment on `is_web_url` says the URL is printed
+        // as recorded; this is what makes that true.
+        Locator::Url(url) => is_web_url(url).then(|| url.clone()),
     }
 }
 
@@ -656,7 +662,8 @@ fn retrieval_clause(retrieved: AccessDate) -> String {
 /// scheme length is a `false` rather than a panic.
 ///
 /// The [printable-character][is_printable_identifier] allowlist is the same one
-/// [`Doi::new`] applies to a DOI suffix, and it is here for the same reason: a
+/// [`Doi::new`](rto_graph::reference::Doi::new) applies to a DOI name, and it is
+/// here for the same reason: a
 /// URL becomes an [`EntrySpan::Link`] whose visible text *is* its `href`, so
 /// `https://example.org/a\nb` is a citation printed across two lines and
 /// resolving to neither of them, and a bidi override is a link that reads as one
@@ -666,11 +673,21 @@ fn retrieval_clause(retrieved: AccessDate) -> String {
 /// not printable, so the record refuses on `Missing::Locator` rather than
 /// quietly losing its source element — the same terms as a blank URL.
 fn is_web_url(url: &str) -> bool {
-    let web_scheme = ["https://", "http://"].iter().any(|scheme| {
+    let authority = ["https://", "http://"].iter().find_map(|scheme| {
         url.get(..scheme.len())
-            .is_some_and(|head| head.eq_ignore_ascii_case(scheme))
+            .filter(|head| head.eq_ignore_ascii_case(scheme))
+            .map(|_| &url[scheme.len()..])
     });
-    web_scheme && is_printable_identifier(url)
+    let Some(authority) = authority else {
+        return false;
+    };
+    // There has to be a host. `https://` and `https://?` carry a scheme and
+    // nothing to resolve, so they satisfied a prefix test while naming no work
+    // at all — a link that cannot locate anything, which is the fabrication this
+    // module refuses rather than a cosmetic defect. The authority ends at the
+    // first delimiter; what matters is only that something precedes it.
+    let host = authority.split(['/', '?', '#']).next().unwrap_or_default();
+    !host.is_empty() && is_printable_identifier(url)
 }
 
 /// Whether the source element would repeat the author, in which case APA drops
@@ -1933,6 +1950,79 @@ mod tests {
                 vec![Missing::Locator],
                 "{hidden:?} must never become a link target"
             );
+        }
+    }
+
+    #[test]
+    fn a_locator_is_validated_exactly_as_recorded() {
+        // The allowlist was bypassed at the call site by normalising before it
+        // ran: `printable_locator` trimmed, so a recorded locator with a leading
+        // space or a trailing newline passed validation and what reached the
+        // `href` was a value the record does not hold. Whitespace is not
+        // printable, so each of these refuses — visibly, and fixable in the
+        // record — rather than being quietly cleaned up on the way to the page.
+        for padded in [
+            " https://example.invalid/a ",
+            "https://example.invalid/a\n",
+            "\thttps://example.invalid/a",
+            "https://example.invalid/a\u{a0}",
+        ] {
+            let mut reference = complete("r", WorkKind::Document, "A title");
+            reference.locator = Attested::Known(Locator::Url(padded.to_owned()));
+            assert_eq!(
+                entry(&reference).expect_err("refuses").missing,
+                vec![Missing::Locator],
+                "{padded:?} must not be trimmed into validity"
+            );
+        }
+        // And what is accepted is emitted byte for byte, which is what the
+        // neighbouring comment promises.
+        let recorded = "https://example.invalid/a";
+        let mut reference = complete("r", WorkKind::Document, "A title");
+        reference.locator = Attested::Known(Locator::Url(recorded.to_owned()));
+        let spans = entry(&reference).expect("renders").spans;
+        let href = spans
+            .iter()
+            .find_map(|span| match span {
+                EntrySpan::Link { href, .. } => Some(href.clone()),
+                _ => None,
+            })
+            .expect("a link span");
+        assert_eq!(href, recorded, "printed as recorded");
+    }
+
+    #[test]
+    fn a_locator_with_no_host_cannot_locate_a_work() {
+        // A scheme and nothing after it satisfied a prefix test while naming no
+        // work at all. An `EntrySpan::Link` that cannot resolve is a citation
+        // that looks like a source and is not one, which is the fabrication this
+        // module exists to refuse rather than a cosmetic defect.
+        for hostless in [
+            "https://",
+            "http://",
+            "https://?",
+            "https://#frag",
+            "https:///path",
+            "HTTPS://",
+        ] {
+            let mut reference = complete("r", WorkKind::Document, "A title");
+            reference.locator = Attested::Known(Locator::Url(hostless.to_owned()));
+            assert_eq!(
+                entry(&reference).expect_err("refuses").missing,
+                vec![Missing::Locator],
+                "{hostless:?} has no authority and cannot locate anything"
+            );
+        }
+        // A host is all that is asked for — this does not start adjudicating
+        // which hosts are real, which it has no way to know without a network.
+        for locatable in [
+            "https://localhost/x",
+            "http://example.invalid",
+            "https://example.invalid/a?b#c",
+        ] {
+            let mut reference = complete("r", WorkKind::Document, "A title");
+            reference.locator = Attested::Known(Locator::Url(locatable.to_owned()));
+            assert!(entry(&reference).is_ok(), "{locatable:?}");
         }
     }
 

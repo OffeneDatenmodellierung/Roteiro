@@ -669,6 +669,20 @@ impl Author {
 /// would render `https://doi.org/https://doi.org/10.…`. [`Doi::new`] accepts
 /// either spelling and stores the bare one, so the prefix is applied exactly
 /// once no matter which form was written down.
+///
+/// # What is stored is the identifier, not a URL
+///
+/// The value held here is the **DOI name itself**, raw: `10.1234/a#b` is a DOI
+/// whose suffix contains a literal `#`. It is never the percent-encoded form.
+/// [`Doi::url`] applies that encoding on the way out, and [`Doi::new`] undoes it
+/// when the input arrived as a resolver URL, so the two are inverses and
+/// `Doi::new(d.url())` returns `d`.
+///
+/// Stating it that way round is what keeps the type coherent. The alternative —
+/// storing the encoded form — makes [`Doi::as_str`] not the identifier but a
+/// fragment of a URL, and leaves no way to tell a DOI containing a literal `%`
+/// from one whose `%` opens an escape. Recording what the thing *is* and
+/// transforming at the boundary is the same rule [`GivenName`] follows.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct Doi(String);
@@ -706,13 +720,71 @@ fn strip_prefix_ignoring_ascii_case<'a>(text: &'a str, prefix: &str) -> Option<&
 /// second is this module's entire subject, so its guards should be shaped that
 /// way too.
 ///
-/// The cost is real and worth stating plainly: a genuinely non-ASCII identifier
-/// — an IRI, or a DOI suffix with a non-Latin character — is refused, and has to
-/// be recorded in its percent-encoded form. That narrows what is *recordable*,
-/// not what is correct, and it announces itself the moment somebody tries.
+/// This is the rule for a value that is **emitted exactly as recorded** — a
+/// `Locator::Url`, which becomes an `href` with no encoding step between the
+/// record and the page. Such a value has to be URL-safe and printable already,
+/// because nothing downstream will make it so.
+///
+/// The cost is real and worth stating plainly: a genuine IRI is refused and has
+/// to be recorded in its percent-encoded form. That narrows what is
+/// *recordable*, not what is correct, and it announces itself the moment
+/// somebody tries.
+///
+/// A DOI is deliberately **not** held to this rule — see `is_doi_name_char`.
+/// The difference is not an inconsistency but the reason the two exist
+/// separately: a DOI is encoded at the boundary by [`Doi::url`], so it can be
+/// recorded as the identifier itself, while a URL is not, so it cannot.
 #[must_use]
 pub fn is_printable_identifier(text: &str) -> bool {
     !text.is_empty() && text.chars().all(|c| c.is_ascii_graphic())
+}
+
+/// Whether `c` may appear in a DOI name.
+///
+/// ASCII graphic characters, **or** any letter or digit of any script. The DOI
+/// Handbook is explicit that a DOI name may incorporate any printable character
+/// from the Unicode Standard, so `10.1234/中文` is a legal identifier and
+/// refusing it would be this type inventing a rule the standard does not have.
+///
+/// Wider than [`is_printable_identifier`] on purpose, and safe to be wider for a
+/// reason that is structural rather than a judgement call: a DOI is never
+/// emitted as recorded. It reaches a page only through [`Doi::url`], which
+/// percent-encodes everything outside RFC 3986's `pchar` — so whatever is
+/// recorded here, the rendered link is pure ASCII, visible, and decodes back to
+/// exactly this. A `Locator::Url` has no such boundary, which is why it keeps
+/// the narrower rule.
+///
+/// Still an allowlist. Letters and digits exclude the whole format category
+/// (`Cf`) — the zero-width set, the bidi controls, the tag characters — and
+/// every separator, so the characters that walked through the denylist this
+/// replaced are refused here by category rather than by enumeration.
+fn is_doi_name_char(c: char) -> bool {
+    c.is_ascii_graphic() || c.is_alphanumeric()
+}
+
+/// Reverse [`Doi::url`]'s escaping: `%XX` becomes the byte it names.
+///
+/// `None` for a truncated escape, a non-hexadecimal one, or bytes that are not
+/// valid UTF-8 once decoded — each of which makes the input not a form
+/// [`Doi::url`] could have produced, and so not one to guess at.
+fn percent_decode(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let hex = text.get(index + 1..index + 3)?;
+            if !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return None;
+            }
+            decoded.push(u8::from_str_radix(hex, 16).ok()?);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
 }
 
 /// Whether `byte` may stand for itself inside the path of a resolver URL.
@@ -746,8 +818,8 @@ impl Doi {
     ///
     /// The shape checked is the one the DOI Handbook defines: a `10.` prefix, a
     /// registrant code of digits (possibly dot-separated, as in
-    /// `10.1000.10/123`), a `/`, and a non-empty suffix carrying no
-    /// [printable characters][is_printable_identifier]. That is deliberately
+    /// `10.1000.10/123`), a `/`, and a non-empty suffix **all of whose
+    /// characters are printable** (`is_doi_name_char`). That is deliberately
     /// stricter than "starts with `10.` and contains a slash", because
     /// everything this type accepts is rendered as a resolver link — and a link
     /// that resolves to nothing is exactly the plausible-looking citation this
@@ -760,37 +832,53 @@ impl Doi {
     /// Returns [`NotADoi`] when what remains after the prefix is not that shape.
     pub fn new(text: &str) -> Result<Self, NotADoi> {
         let trimmed = text.trim();
-        let bare = [
+        let refused = || NotADoi(text.to_owned());
+
+        // Case-insensitively throughout: a URI scheme is case-insensitive by
+        // RFC 3986, and `DOI:10.1234/x` is how plenty of publishers print one.
+        // Matching exactly would send those down the "not a DOI at all" path,
+        // where they are rejected for a reason that is not true of them.
+        //
+        // A **resolver URL carries the DOI percent-encoded**, so stripping the
+        // prefix leaves the encoded form and it has to be decoded back to the
+        // identifier. `doi:` and the bare form are the identifier already, and
+        // are taken exactly as written. Without this split the two input forms
+        // disagree: `https://doi.org/10.1234/a%23b` and `doi:10.1234/a#b` name
+        // one DOI, and only one of them would round-trip through `url`.
+        let bare = match [
             "https://doi.org/",
             "http://doi.org/",
             "https://dx.doi.org/",
             "http://dx.doi.org/",
-            "doi:",
         ]
         .iter()
-        // Case-insensitively: a URI scheme is case-insensitive by RFC 3986, and
-        // `DOI:10.1234/x` is how plenty of publishers print one. Matching
-        // exactly would send those down the "not a DOI at all" path, where they
-        // are rejected for a reason that is not true of them.
         .find_map(|prefix| strip_prefix_ignoring_ascii_case(trimmed, prefix))
-        .unwrap_or(trimmed);
-        let refused = || NotADoi(text.to_owned());
-        let rest = bare.strip_prefix("10.").ok_or_else(refused)?;
-        let (registrant, suffix) = rest.split_once('/').ok_or_else(refused)?;
-        let registrant_is_numeric = registrant
-            .split('.')
-            .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()));
-        // The DOI Handbook lets a suffix be almost any string, and this does not
-        // second-guess that beyond one question: can every character of it be
-        // printed? Everything accepted here becomes a resolver link whose visible
-        // text is the URL itself, so a suffix carrying a newline, a space or a
-        // bidi override produces a link that is not the identifier it appears to
-        // be. A dead link dressed as a citation is the failure this newtype
-        // exists to prevent; an invisible one is the same failure with the
-        // evidence removed. `is_printable_identifier` is an allowlist, so the
-        // next exotic code point is refused rather than discovered later.
-        if registrant_is_numeric && is_printable_identifier(suffix) {
-            Ok(Self(bare.to_owned()))
+        {
+            Some(encoded) => percent_decode(encoded).ok_or_else(refused)?,
+            None => strip_prefix_ignoring_ascii_case(trimmed, "doi:")
+                .unwrap_or(trimmed)
+                .to_owned(),
+        };
+
+        // The DOI Handbook lets a DOI name incorporate any printable character
+        // from the Unicode Standard, and this does not second-guess that beyond
+        // the one question it must ask: can every character of it be printed?
+        // `is_doi_name_char` is an allowlist, so the next exotic code point is
+        // refused rather than discovered by a reviewer.
+        let well_formed = {
+            let Some(rest) = bare.strip_prefix("10.") else {
+                return Err(refused());
+            };
+            let Some((registrant, suffix)) = rest.split_once('/') else {
+                return Err(refused());
+            };
+            let registrant_is_numeric = registrant
+                .split('.')
+                .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()));
+            registrant_is_numeric && !suffix.is_empty() && suffix.chars().all(is_doi_name_char)
+        };
+        if well_formed {
+            Ok(Self(bare))
         } else {
             Err(refused())
         }
@@ -1660,11 +1748,15 @@ mod tests {
             // The recorded identifier is itself printable. Encoding makes the
             // *link* safe, but a bare DOI gets printed too, and a citation
             // carrying a character nobody can see is not one anybody can check.
-            // Spelled out rather than asked of `is_printable_identifier`: a
+            // The recorded form is the identifier, so it may hold any letter
+            // or digit — what must hold is that it carries nothing invisible.
+            // Spelled out rather than asked of the production predicate: a
             // property checked through the same function that enforces it
             // cancels on both sides, and would pass however that function broke.
             assert!(
-                doi.as_str().chars().all(|c| c.is_ascii_graphic()),
+                doi.as_str()
+                    .chars()
+                    .all(|c| c.is_ascii_graphic() || c.is_alphanumeric()),
                 "U+{:04X} was accepted into a DOI but cannot be printed",
                 c as u32
             );
@@ -1689,9 +1781,19 @@ mod tests {
             // And the encoding is reversible, so the link names the DOI that was
             // recorded rather than one that merely looks like it.
             assert_eq!(
-                percent_decode(rest),
+                decode_escapes_independently(rest),
                 doi.as_str(),
                 "U+{:04X}: the URL must decode back to the recorded DOI",
+                c as u32
+            );
+            // The same property through the public API, which is what a caller
+            // actually round-trips: rendering a DOI and parsing the result must
+            // give the DOI back. This is what makes `new` and `url` inverses
+            // rather than two functions that happen to agree on easy input.
+            assert_eq!(
+                Doi::new(&url).expect("a URL this type produced"),
+                doi,
+                "U+{:04X}: {url:?} did not parse back to the DOI it renders",
                 c as u32
             );
         }
@@ -1703,7 +1805,16 @@ mod tests {
 
     /// Reverse [`Doi::url`]'s escaping, so a test can prove the encoding is
     /// lossless rather than merely well-formed.
-    fn percent_decode(text: &str) -> String {
+    ///
+    /// Deliberately a **second implementation**, not the production
+    /// `percent_decode`. A round trip checked with the decoder the encoder
+    /// ships with passes whenever the two share a defect — they cancel, and the
+    /// test proves only that the module agrees with itself. This one is written
+    /// independently, so the byte-level property is checked against something
+    /// other than the code under test. The API-level round trip below
+    /// (`Doi::new(&url) == doi`) uses the production pair on purpose, because
+    /// *that* pairing is the guarantee a caller relies on.
+    fn decode_escapes_independently(text: &str) -> String {
         let mut bytes = Vec::new();
         let mut rest = text.as_bytes();
         while let Some((first, tail)) = rest.split_first() {
@@ -1750,6 +1861,81 @@ mod tests {
             Doi::new("10.3886/ICPSR36966.v1").expect("valid").url(),
             "https://doi.org/10.3886/ICPSR36966.v1"
         );
+    }
+
+    #[test]
+    fn what_is_stored_is_the_identifier_and_never_its_url_form() {
+        // The two halves of this type have to agree on what the recorded value
+        // *is*, and for one round they did not: the suffix rule admitted `%`
+        // and the docs said a non-ASCII DOI should be recorded percent-encoded,
+        // while `url` assumed the recorded form was raw and encoded the `%`
+        // again — so `10.1234/a%23b` rendered `…a%2523b` and resolved to a
+        // different record. The rule is now one sentence: what is stored is the
+        // DOI name, raw.
+
+        // A resolver URL carries the *encoded* form, so parsing one decodes it.
+        // Both spellings of one DOI therefore land on the same value.
+        let from_url = Doi::new("https://doi.org/10.1234/a%23b").expect("a resolver URL");
+        let from_bare = Doi::new("doi:10.1234/a#b").expect("the identifier");
+        assert_eq!(from_url, from_bare, "one DOI, two ways of writing it down");
+        assert_eq!(from_url.as_str(), "10.1234/a#b", "stored raw, not encoded");
+        assert_eq!(from_url.url(), "https://doi.org/10.1234/a%23b");
+
+        // `new` and `url` are inverses, which is the property that makes the
+        // link name the record it claims to.
+        for recorded in [
+            "10.1234/a#b",
+            "10.1234/a%b",
+            "10.1234/a?b",
+            "10.1234/plain",
+            "10.1234/ünïcode",
+        ] {
+            let doi = Doi::new(recorded).expect("a DOI");
+            assert_eq!(doi.as_str(), recorded);
+            assert_eq!(
+                Doi::new(&doi.url()).expect("its own URL"),
+                doi,
+                "{recorded:?} did not survive a render-and-reparse"
+            );
+        }
+        // A literal `%` is kept apart from an escape, which the encoded-storage
+        // reading could not do: these are two different DOIs.
+        assert_ne!(
+            Doi::new("10.1234/a%23b").expect("a literal percent"),
+            Doi::new("10.1234/a#b").expect("a literal hash")
+        );
+        // A malformed escape in a resolver URL is refused rather than guessed at.
+        for broken in [
+            "https://doi.org/10.1234/a%2",
+            "https://doi.org/10.1234/a%zzb",
+            "https://doi.org/10.1234/a%",
+        ] {
+            assert!(Doi::new(broken).is_err(), "{broken:?}");
+        }
+    }
+
+    #[test]
+    fn a_non_ascii_doi_is_recordable_as_itself() {
+        // The DOI Handbook lets a DOI name incorporate any printable character
+        // from the Unicode Standard, so these are legal identifiers and refusing
+        // them would be this type inventing a rule the standard does not have.
+        // They are safe to admit because a DOI is never emitted as recorded — it
+        // reaches a page only through `url`, which encodes.
+        for recorded in ["10.1234/中文", "10.1234/ünïcode", "10.1234/абв"] {
+            let doi = Doi::new(recorded).expect("a legal DOI name");
+            assert_eq!(doi.as_str(), recorded, "recorded as the identifier itself");
+            let url = doi.url();
+            assert!(
+                url.chars().all(|c| c.is_ascii_graphic()),
+                "the rendered link is always ASCII: {url:?}"
+            );
+            assert_eq!(Doi::new(&url).expect("its own URL"), doi);
+        }
+        // A *letter* is admitted; an invisible character still is not, whichever
+        // block it comes from.
+        for hidden in ["10.1234/a\u{200b}b", "10.1234/a\u{061c}b", "10.1234/a b"] {
+            assert!(Doi::new(hidden).is_err(), "{hidden:?}");
+        }
     }
 
     #[test]
