@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.12.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v5.11.0...rto-graph-v5.12.0) - 2026-09-12
+
+### Fixed
+
+- *(docs)* two links that only resolve with a second feature enabled
+- *(docs)* relink what was reachable, and one link that only builds sometimes
+
+### Other
+
+- *(rust)* clear the broken intra-doc link backlog
+
 ## [5.10.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v5.10.0...rto-graph-v5.10.1) - 2026-09-08
 
 ### Fixed

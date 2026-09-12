@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.12.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.11.0...roteiro-v5.12.0) - 2026-09-12
+
+### Added
+
+- *(docs)* `fmt` never reordered frontmatter keys in a release
+- *(docs)* `roteiro docs fmt` — the canonical form of an authored document
+
+### Fixed
+
+- *(test)* the second copy of the walk never got the first one's fix
+- *(spec)* a delimiter is not a table, and a FIFO is not a document
+- *(spec)* three the last two rounds introduced, and one they missed
+- *(spec)* the relabel was firing on nothing, and four more
+- *(docs)* the relabel is one table's, and the symlink check is every component's
+- *(docs)* read the declared kind, close fences properly, isolate the tests
+- *(docs)* the table rules were too loose, and two doc comments moved
+- *(docs)* repair three things the delink sweep got wrong
+
+### Other
+
+- *(fmt)* say what the symlink check guarantees, and what it does not
+- Merge pull request #791 from OffeneDatenmodellierung/feat/non-exhaustive-rto-spec
+- *(rust)* clear the broken intra-doc link backlog
+
 ## [5.11.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.10.2...roteiro-v5.11.0) - 2026-09-11
 
 ### Added

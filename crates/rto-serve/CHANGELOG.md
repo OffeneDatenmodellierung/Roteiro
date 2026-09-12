@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.12.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v5.11.0...rto-serve-v5.12.0) - 2026-09-12
+
+### Fixed
+
+- *(serve)* generate the parameter table in the canonical form
+- *(docs)* relink what was reachable, and one link that only builds sometimes
+
+### Other
+
+- *(rust)* clear the broken intra-doc link backlog
+
 ## [5.10.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v5.9.0...rto-serve-v5.10.0) - 2026-09-08
 
 ### Added
