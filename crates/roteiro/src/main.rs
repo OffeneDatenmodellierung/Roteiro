@@ -2647,7 +2647,9 @@ fn provenance(proj: bool, usr: bool) -> &'static str {
 ///
 /// A non-zero value is reported with the rule that actually applies to it, since
 /// the ceiling never raises a window past the model's own `n_ctx_train` — see
-/// [`rto_llama`]'s `window_for_request`.
+/// `rto_llama`'s `window_for_request`, named rather than linked because that
+/// crate is an optional dependency and this display is compiled into every
+/// build.
 fn max_context_tokens_display(value: Option<u32>) -> String {
     match value {
         None => "unset — each model's trained window".to_owned(),
@@ -4464,9 +4466,10 @@ enum Refreshed {
 /// is a blueprint, which file merely carries `@rto:` annotations, and that a
 /// malformed ADR is drift rather than a skippable warning — is a rule with one
 /// correct answer. It had one caller when there was one tree to build from
-/// ([`build_graph`]); Stage 35b PR 2 added a second ([`build_graph_at_rev`], for
-/// the graph arm's context at a historical `reviewed_sha`); and the read-only
-/// `check` tool surfaces are a third, reaching it through
+/// ([`build_graph`]); Stage 35b PR 2 added a second (`build_graph_at_rev`, for
+/// the graph arm's context at a historical `reviewed_sha`, named rather than
+/// linked because it needs a review backend and this function does not); and
+/// the read-only `check` tool surfaces are a third, reaching it through
 /// [`rto_spec::tool_check`].
 ///
 /// That third caller is why the rule itself now lives in
@@ -13533,8 +13536,18 @@ fn explorer_default_workspace(
 #[cfg(feature = "mcp")]
 type McpSurface = rto_render::mcp::Advertised;
 
-/// The no-MCP stand-in. There is no surface to restrict, and
-/// [`resolve_mcp_surface`] refuses a `--tools` that asked for one.
+/// The no-MCP stand-in. There is no surface to restrict.
+#[cfg_attr(
+    any(feature = "serve", feature = "explorer"),
+    doc = "[`resolve_mcp_surface`] refuses a `--tools` that asked for one."
+)]
+///
+/// What `resolve_mcp_surface` does with a `--tools` that asked for one is
+/// documented here only in the builds that have it: gated with its subject
+/// rather than delinked, because without `serve` or `explorer` that sentence
+/// would not merely be unlinkable — it would be untrue. There is no `--tools`
+/// to refuse there, and no such function either: it is gated exactly as
+/// `Command::Serve` is.
 #[cfg(not(feature = "mcp"))]
 type McpSurface = ();
 

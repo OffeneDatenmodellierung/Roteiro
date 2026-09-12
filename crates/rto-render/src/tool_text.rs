@@ -343,10 +343,12 @@ pub const SEARCH: &str = "Search graph nodes by text — names, keys, paths, and
 
 /// The description for `name`, or `None` for a tool this module does not own.
 ///
-/// The lookup exists so [`crate::mcp`] can set descriptions on its routes at
+/// The lookup exists so `crate::mcp` can set descriptions on its routes at
 /// build time instead of repeating the prose in a `#[tool(description = …)]`
 /// literal. That is what makes this module the **only** definition rather than an
-/// authority with a copy beside it.
+/// authority with a copy beside it — and is why that module is named rather
+/// than linked: it is behind `mcp`, this one is not, and the prose has to be
+/// the single definition in builds that never serve.
 #[must_use]
 pub fn for_tool(name: &str) -> Option<String> {
     let raw = match name {

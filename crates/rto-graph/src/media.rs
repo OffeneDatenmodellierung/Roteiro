@@ -219,14 +219,19 @@ impl MediaKind {
 
     /// Registry name of the model this modality generates with **when nothing
     /// pins one** — the argument to `roteiro model pull` on a stock setup, and
-    /// the value [`crate::ModelTask::default_model`] reads for this modality.
+    /// the value `ModelTask::default_model` reads for this modality.
     /// Unconditional for the same reason as [`MediaKind::feature`].
     ///
     /// Since Stage 33 a project can pin another with `[models] audio` /
     /// `[models] vision`, so a caller that needs the model *this repository*
-    /// actually uses must ask [`crate::resolve_model`] with [`MediaKind::task`],
-    /// not this. The two differ exactly when a pin is set, which is why this one
-    /// is documented as the default rather than as "the" model.
+    /// actually uses must ask `resolve_model` with `MediaKind::task`, not this.
+    /// The two differ exactly when a pin is set, which is why this one is
+    /// documented as the default rather than as "the" model.
+    ///
+    /// Those three are named rather than linked: the resolver is behind
+    /// `models` and this method deliberately is not, so a link would be
+    /// unresolved in precisely the builds where this method *is* the whole
+    /// answer — there is nothing to resolve a pin with.
     #[must_use]
     pub const fn model(self) -> &'static str {
         match self {

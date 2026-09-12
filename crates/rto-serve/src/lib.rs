@@ -5,7 +5,9 @@
 //!
 //! The crate is split so the HTTP surface is testable without a C++ build: the
 //! pure-Rust [`server`] is written against the [`engine::Engine`] trait, and the
-//! real llama.cpp-backed [`llama::LlamaEngine`] lives behind the `llama` feature.
+//! real llama.cpp-backed `llama::LlamaEngine` lives behind the `llama` feature.
+//! That type is named rather than linked, because this page is written for the
+//! pure-Rust half too and there the re-export does not exist.
 //! Graph-tool auto-registration and `/v1/embeddings` land in later PRs.
 
 // The one number the three per-request context constants jointly determine, and

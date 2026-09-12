@@ -1,8 +1,10 @@
 //! The inference-engine abstraction the `/v1` server is written against.
 //!
 //! Keeping the HTTP layer behind a trait lets it be exercised with a mock in
-//! tests without building llama.cpp, and lets the real [`crate::llama`] engine
-//! land behind the `llama` feature (ADR-0006).
+//! tests without building llama.cpp, and lets the real `crate::llama` engine
+//! land behind the `llama` feature (ADR-0006). That module is named rather than
+//! linked for the same reason: this one is among the parts that build without
+//! it.
 
 /// A model the engine can serve, as surfaced by `/v1/models`.
 #[derive(Debug, Clone, PartialEq, Eq)]

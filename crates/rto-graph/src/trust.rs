@@ -21,11 +21,13 @@
 //! # Why it lives here rather than in `rto-remote`
 //!
 //! It was written in `rto-remote` alongside the egress ledger that first
-//! recorded it, and it moved here when [`crate::ModelSource::Remote`] needed to
-//! carry it. The move was forced rather than chosen: `rto-remote` depends on
-//! this crate, so a trust grade named by a `rto-graph` type cannot live there,
-//! and the alternative — a second, parallel enum — would let a record's trust
-//! and a resolution's trust disagree about what "vendor-asserted" means.
+//! recorded it, and it moved here when `ModelSource::Remote` needed to carry
+//! it. That variant is named rather than linked, because the resolver it
+//! belongs to is behind `models` and this module is not. The move was forced
+//! rather than chosen: `rto-remote` depends on this crate, so a trust grade
+//! named by a `rto-graph` type cannot live there, and the alternative — a
+//! second, parallel enum — would let a record's trust and a resolution's trust
+//! disagree about what "vendor-asserted" means.
 //!
 //! Having been forced, it is also where the type belongs. It qualifies
 //! [`crate::Producer`], which is here, and it is what ADR-0019 §5 amends: the
