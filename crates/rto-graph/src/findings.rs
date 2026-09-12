@@ -954,6 +954,8 @@ fn finding_from_row(row: &rusqlite::Row<'_>) -> Result<Finding, StoreError> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::{
         AdvisoryDb, CommandPolicy, EnvironmentPolicy, FindingKey, FindingsError, Isolation,
         MAX_ANALYZER_ID, MAX_IDENTITY_PART, NetworkPolicy, RunnerKind, Severity, WorktreeAccess,
@@ -999,6 +1001,346 @@ mod tests {
         let a = FindingKey::new("semgrep", &["x:y", "z"]).expect("a");
         let b = FindingKey::new("semgrep", &["x", "y:z"]).expect("b");
         assert_ne!(a.render(), b.render());
+    }
+
+    /// A deterministic 64-bit xorshift, so a generated counterexample is
+    /// reproducible from the seed the assertion prints rather than from whatever
+    /// the machine's entropy happened to be that run.
+    ///
+    /// Hand-rolled on purpose: the workspace carries no property-testing crate
+    /// (no `proptest`, `quickcheck` or `arbitrary`, in any manifest or in
+    /// `Cargo.lock`), and a key grammar with two escapable characters does not
+    /// earn a new workspace dependency — see #787.
+    struct Xorshift(u64);
+
+    impl Xorshift {
+        /// The next value in the sequence. Never returns zero for a non-zero
+        /// seed, which is the only state xorshift64 cannot leave.
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+
+        /// A value in `0..bound`. `bound` is a small literal here, so the modulo
+        /// bias is irrelevant and the conversions cannot fail.
+        fn below(&mut self, bound: usize) -> usize {
+            let bound = u64::try_from(bound).expect("bound fits in u64");
+            usize::try_from(self.next_u64() % bound).expect("remainder fits in usize")
+        }
+    }
+
+    /// Analyzer ids the generator draws from. `is_valid_analyzer_id` already
+    /// forbids `\` and `:` in this position, so the analyzer cannot carry an
+    /// escape and only the identity components exercise the grammar.
+    const GENERATED_ANALYZERS: [&str; 4] = ["semgrep", "cargo-audit", "trivy.fs", "a"];
+
+    /// The alphabet identity components are drawn from: the separator, a literal
+    /// backslash, ordinary ASCII, and one multi-byte character (`MAX_IDENTITY_PART`
+    /// is a *byte* bound while `push_escaped` iterates *chars*, so the two need a
+    /// case where they disagree).
+    const GENERATED_ALPHABET: [&str; 7] = ["a", "b", "1", "-", ":", "\\", "é"];
+
+    /// Longest generated component, in symbols drawn from [`GENERATED_ALPHABET`].
+    const GENERATED_PART_LEN: usize = 6;
+
+    /// Most components in a generated key.
+    const GENERATED_PART_COUNT: usize = 4;
+
+    /// How many random keys the property runs over, on top of [`ESCAPE_EDGE_CASES`].
+    const GENERATED_CASES: usize = 400;
+
+    /// Hand-written components covering every shape of the escape grammar, so the
+    /// corpus cannot lose a case to a later edit of the random generator: the
+    /// separator alone, a literal backslash alone, a backslash before an ordinary
+    /// character (the non-canonical form `split_escaped` is permissive about),
+    /// adjacent runs and combinations of all three, and multi-byte characters
+    /// both alone and adjacent to an escape.
+    ///
+    /// The multi-byte cases are deterministic rather than left to
+    /// [`GENERATED_ALPHABET`] on purpose: `MAX_IDENTITY_PART` is a *byte* bound
+    /// while `push_escaped` and `split_escaped` walk *chars*, and a seed or
+    /// alphabet edit must not be able to drop the only case where those two
+    /// disagree. [`SHAPE_NAMES`] tallies the shape as well, so it cannot go
+    /// uncovered silently either.
+    const ESCAPE_EDGE_CASES: [&[&str]; 20] = [
+        &[":"],
+        &["\\"],
+        &["\\a"],
+        &["a\\"],
+        &["\\\\"],
+        &["\\\\\\"],
+        &["::"],
+        &[":::"],
+        &["\\:"],
+        &[":\\"],
+        &["a\\b"],
+        &["a\\\\b"],
+        &["C:\\src\\x.rs"],
+        &["\\:\\:", "a"],
+        &["a:b", "\\", "c\\d"],
+        &[":", "\\", "\\a", "a\\\\:b"],
+        &["é"],
+        &["\\é"],
+        &["é:\\é"],
+        &["日本\\\\:é", "ß"],
+    ];
+
+    /// How many *generated* keys must exhibit each shape of the grammar before
+    /// the property is worth believing. Guards against a future edit to the
+    /// alphabet quietly making the run vacuous.
+    ///
+    /// Applied to the generated half alone, never to the union with
+    /// [`ESCAPE_EDGE_CASES`] — the fixed cases would otherwise carry a shape over
+    /// this floor by themselves and hide the very edit the floor is for.
+    const MIN_PER_SHAPE: usize = 10;
+
+    /// The shapes [`escape_shape_tally`] counts, in the order it returns them.
+    const SHAPE_NAMES: [&str; 5] = [
+        "separator",
+        "backslash",
+        "escaped-ordinary",
+        "adjacent-run",
+        "multi-byte",
+    ];
+
+    /// How many of `keys` carry each shape named by [`SHAPE_NAMES`]: a separator,
+    /// a literal backslash, a backslash before an ordinary character, an adjacent
+    /// run of escapable characters, and a character outside ASCII.
+    fn escape_shape_tally(keys: &[FindingKey]) -> [usize; SHAPE_NAMES.len()] {
+        let mut tally = [0_usize; SHAPE_NAMES.len()];
+        for key in keys {
+            let mut shapes = [false; SHAPE_NAMES.len()];
+            for part in key.parts() {
+                let chars: Vec<char> = part.chars().collect();
+                for (i, &ch) in chars.iter().enumerate() {
+                    shapes[0] |= ch == ':';
+                    shapes[1] |= ch == '\\';
+                    let next = chars.get(i + 1).copied();
+                    if ch == '\\' {
+                        // A backslash before anything other than `\` or `:` is
+                        // the non-canonical escape #787 is about.
+                        shapes[2] |= matches!(next, Some(n) if n != '\\' && n != ':');
+                    }
+                    shapes[3] |= matches!(ch, '\\' | ':')
+                        && matches!(next, Some(n) if matches!(n, '\\' | ':'));
+                    // One char, more than one byte: the seam between the byte
+                    // bound `FindingKey::new` enforces and the char-wise walk
+                    // `push_escaped`/`split_escaped` do.
+                    shapes[4] |= ch.len_utf8() > 1;
+                }
+            }
+            for (slot, seen) in tally.iter_mut().zip(shapes) {
+                *slot += usize::from(seen);
+            }
+        }
+        tally
+    }
+
+    /// One generated key: a valid analyzer id and 1..=[`GENERATED_PART_COUNT`]
+    /// non-empty components drawn from [`GENERATED_ALPHABET`].
+    fn generated_key(rng: &mut Xorshift) -> FindingKey {
+        let analyzer = GENERATED_ANALYZERS[rng.below(GENERATED_ANALYZERS.len())];
+        let count = 1 + rng.below(GENERATED_PART_COUNT);
+        let mut parts = Vec::with_capacity(count);
+        for _ in 0..count {
+            let len = 1 + rng.below(GENERATED_PART_LEN);
+            let mut part = String::new();
+            for _ in 0..len {
+                part.push_str(GENERATED_ALPHABET[rng.below(GENERATED_ALPHABET.len())]);
+            }
+            parts.push(part);
+        }
+        FindingKey::new(analyzer, &parts).expect("generated components are well formed")
+    }
+
+    #[test]
+    fn key_rendering_round_trips_and_is_injective_over_generated_keys() {
+        // #787: `parse(render(x)) == x` over generated keys, including every
+        // shape of the escape grammar. The round trip is what makes a rendered
+        // key a *stable identity*: if it ever stopped holding, two findings
+        // could share one key, or one finding could change key across runs,
+        // with no test failing anywhere else.
+        //
+        // Deterministic seed, printed by every seed-dependent assertion below,
+        // so a failure is reproducible from the message alone. The fixed-corpus
+        // checks omit it deliberately: they do not depend on the seed, and a
+        // seed in their message would imply they did.
+        const SEED: u64 = 0x5150_7787_0BAD_5EED;
+
+        let mut rng = Xorshift(SEED);
+        let fixed: Vec<FindingKey> = ESCAPE_EDGE_CASES
+            .iter()
+            .map(|parts| FindingKey::new("semgrep", parts).expect("edge-case components"))
+            .collect();
+        let generated: Vec<FindingKey> = (0..GENERATED_CASES)
+            .map(|_| generated_key(&mut rng))
+            .collect();
+
+        // The corpus has to contain what it claims to, or the property below is
+        // true of nothing interesting. The two halves are tallied *separately*,
+        // because they go vacuous in different ways and a combined tally hides
+        // both: the fixed corpus must reach every shape on its own, so a seed
+        // change cannot drop one, and the generated half must reach every shape
+        // on its own, so an alphabet edit cannot.
+        //
+        // Tallying the union instead would be the bug this guard exists to
+        // prevent, committed by the guard: eleven of the twenty fixed cases
+        // contain a separator, so with `MIN_PER_SHAPE` at 10 the union clears the
+        // floor on the fixed half alone. Deleting `:` from `GENERATED_ALPHABET`
+        // then leaves the random half exercising no separator at all and this
+        // assertion still green — measured, not supposed.
+        for (shape, count) in SHAPE_NAMES.into_iter().zip(escape_shape_tally(&fixed)) {
+            assert!(
+                count > 0,
+                "no ESCAPE_EDGE_CASES entry contains a {shape}; that shape would rest \
+                 entirely on the random generator"
+            );
+        }
+        for (shape, count) in SHAPE_NAMES.into_iter().zip(escape_shape_tally(&generated)) {
+            assert!(
+                count >= MIN_PER_SHAPE,
+                "seed {SEED:#x}: only {count} of {GENERATED_CASES} generated keys contain \
+                 a {shape}; the random half would be vacuous for that shape"
+            );
+        }
+
+        let mut keys = fixed;
+        keys.extend(generated);
+
+        let mut rendered_to_key: HashMap<String, FindingKey> = HashMap::new();
+        for key in &keys {
+            let rendered = key.render();
+            let parsed = FindingKey::parse(&rendered).unwrap_or_else(|err| {
+                panic!(
+                    "seed {SEED:#x}: counterexample {key:?} rendered as {rendered:?}, \
+                     which does not parse: {err}"
+                )
+            });
+            assert_eq!(
+                parsed, *key,
+                "seed {SEED:#x}: counterexample {key:?} rendered as {rendered:?} \
+                 and parsed back as {parsed:?}"
+            );
+            if let Some(earlier) = rendered_to_key.insert(rendered.clone(), key.clone()) {
+                assert_eq!(
+                    earlier, *key,
+                    "seed {SEED:#x}: counterexample — {earlier:?} and {key:?} \
+                     both render to {rendered:?}"
+                );
+            }
+        }
+    }
+
+    /// Records what the parser does today. **Not** a guarantee that it is right.
+    ///
+    /// `split_escaped` strips a backslash before *any* character, so a string
+    /// `render` would never emit parses to the same identity as the canonical
+    /// one. `parse` is therefore not injective over *arbitrary input strings*.
+    /// It **is** injective over the image of `render` — that is precisely what
+    /// [`key_rendering_round_trips_and_is_injective_over_generated_keys`] holds,
+    /// and `parse ∘ render` is the identity on keys. The gap is between those
+    /// two domains, and none of the inputs below is in the image of `render`.
+    /// That gap is the known `permissive-constraint` debt of review-corpus row
+    /// `4bed7d81`, and this test does not resolve it.
+    ///
+    /// **The decision is deferred to a human — see #798 — and not settled here.**
+    /// It is tracked as its own open decision, #798, carved out of #787 so that
+    /// merging this test does not bury it: this PR settles the property, not the
+    /// semantics. #798 carries the evidence table summarised below.
+    ///
+    /// # The blast radius, measured rather than assumed
+    ///
+    /// Tightening `parse` is still a compatibility decision, but the surface it
+    /// touches was *traced*, not guessed, and it is narrow. It is **not** what
+    /// an earlier draft of this comment claimed: neither `--json` output nor any
+    /// row written by this code is exposed, because both go out through
+    /// [`FindingKey::render`] — the [`Serialize`] impl is
+    /// `serializer.serialize_str(&self.render())` (this file, `impl Serialize
+    /// for FindingKey`), and the findings insert stores `finding.key.render()`.
+    /// Both are canonical by construction. Every in-tree producer likewise
+    /// builds keys from *components* via [`FindingKey::new`] and never by
+    /// parsing a string — including the untrusted path, since a normalized
+    /// report carries `identity: Vec<String>` that `rto_exec::ingest` converts
+    /// with `new`.
+    ///
+    /// The re-verification is cheap and deliberately left to the next reader:
+    /// [`FindingKey::parse`] has exactly **two non-test production call sites** —
+    /// `finding_from_row` and the [`Deserialize`] impl.
+    ///
+    /// That is a negative claim about the rest of the workspace, so it was
+    /// established from the graph rather than from `grep`, per `AGENTS.md`'s
+    /// rule that a *"there is no other X"* must be confirmed with
+    /// `roteiro search` across several vocabularies and cite its node keys. The
+    /// inbound `calls` edges of
+    /// `sym:rust:crates/rto-graph/src/findings.rs#FindingKey::parse` are exactly
+    /// `#FindingKey::deserialize`, `#finding_from_row`, and two `#tests::…`
+    /// functions in this module — nothing else in the workspace. Queries run:
+    /// `roteiro search "FindingKey parse"`, `"parse rendered finding key"`,
+    /// `"finding_from_row"`.
+    ///
+    /// A stricter parser could therefore reject exactly two things in-tree:
+    ///
+    /// 1. **JSON authored outside this codebase**, and
+    /// 2. **a stored row written by something other than this code.**
+    ///
+    /// That is the whole of the *in-tree* blast radius. A third category exists
+    /// beyond it and is real: `parse` is `pub` and [`FindingKey`] is re-exported
+    /// from the crate root (`lib.rs`), so an out-of-tree caller could depend on
+    /// the permissive behaviour. Unlike the two above, that set cannot be
+    /// enumerated from this repository.
+    ///
+    /// What it is **not** is a hard constraint, and it should not be argued as
+    /// one. `AGENTS.md` carves the `rto-*` crates out on purpose: they publish
+    /// only because `crates/roteiro/Cargo.toml` depends on them by version and
+    /// crates.io rejects path-only dependencies, `roteiro` is their sole reverse
+    /// dependency, and a technically-breaking change to their surface — a
+    /// field's type, an enum variant, a signature — ships as a **minor** bump
+    /// and does **not** take a `!`. This crate's own package description agrees:
+    /// *"Implementation detail of the roteiro CLI; no API stability guarantee"*.
+    /// So semver would not block tightening `parse`; the question is whether to
+    /// break a promise that was never made, which is a judgement rather than a
+    /// rule.
+    ///
+    /// What is left is a compatibility policy question about foreign input and
+    /// out-of-tree callers — a human's call, not a test's, and #798 is where it
+    /// gets made rather than here.
+    ///
+    /// Do not read a green run here as a decision that the permissiveness is
+    /// intended: the assertions exist so that a change to it is visible rather
+    /// than silent. What they do establish meanwhile is that the permissiveness
+    /// *normalises* — whatever form came in, what goes back out is the canonical
+    /// rendering, so this code never *writes* a non-canonical key.
+    ///
+    /// That normalisation is in-memory only, and the distinction matters to the
+    /// decision: `finding_from_row` parses a row without rewriting it, so a row
+    /// some other writer put in the table stays non-canonical on disk until a
+    /// re-ingest replaces the whole layer. Reading it is what would start
+    /// failing under a stricter parser — which is case 2 above, not an exception
+    /// to it.
+    #[test]
+    fn parse_is_permissive_about_escapes_pending_a_wire_format_decision() {
+        let canonical = FindingKey::new("semgrep", &["ab"]).expect("key");
+        assert_eq!(canonical.render(), "finding:semgrep:ab");
+        // The baseline: the canonical form parses to the canonical key. Split out
+        // of the loop below so that loop holds only genuinely non-canonical input
+        // and its name describes all of it.
+        assert_eq!(
+            FindingKey::parse("finding:semgrep:ab").expect("parse"),
+            canonical
+        );
+
+        for non_canonical in ["finding:semgrep:a\\b", "finding:semgrep:\\ab"] {
+            let parsed = FindingKey::parse(non_canonical).expect("parse");
+            assert_eq!(
+                parsed, canonical,
+                "{non_canonical:?} parses to the same identity as the canonical key"
+            );
+            assert_eq!(parsed.render(), canonical.render());
+        }
     }
 
     #[test]
