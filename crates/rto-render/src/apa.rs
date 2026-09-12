@@ -742,6 +742,25 @@ fn is_web_url(url: &str) -> bool {
     };
     // What a host *is* beyond being present is a question needing a network, so
     // this asks no more than that one.
+    //
+    // # A stated limitation, rather than a half-built URI parser
+    //
+    // What follows the host is **not** validated. `https://[::1]not-a-port`,
+    // `https://host:notaport/x` and a port above 65535 are all accepted, and
+    // produce a link that will not resolve. That is a known gap and it is left
+    // open deliberately: this is the second round in which extending this
+    // predicate has produced the next gap in the same grammar, which is the
+    // signature of hand-rolling a URI parser one counter-example at a time.
+    // Closing it properly means taking a URI parser as a dependency — a decision
+    // for its own change, not a line added here — and closing it by hand is not
+    // safe, because `https://host:/x` is a *valid* URI with an empty port and a
+    // digits-required rule would refuse it. Refusing a valid locator is the
+    // worse failure of the two.
+    //
+    // The consequence is bounded and worth naming: a locator of this shape is a
+    // broken link, not a link to the wrong work and not an unsafe one. Every
+    // character is still an RFC 3986 URI character with well-formed escapes, so
+    // the guarantee `EntrySpan::Link` documents continues to hold.
     !host.is_empty() && is_printable_identifier(url)
 }
 

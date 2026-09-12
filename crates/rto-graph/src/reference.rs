@@ -817,7 +817,34 @@ fn strip_prefix_ignoring_ascii_case<'a>(text: &'a str, prefix: &str) -> Option<&
 /// representable in the first place.
 #[must_use]
 pub fn is_printable_identifier(text: &str) -> bool {
-    !text.is_empty() && text.chars().all(is_uri_char)
+    !text.is_empty() && text.chars().all(is_uri_char) && percent_escapes_are_well_formed(text)
+}
+
+/// Whether every `%` in `text` introduces a complete `%XX` escape.
+///
+/// `%` is a legal URI character, so [`is_uri_char`] admits it — but only as the
+/// *introducer* of an escape, and whether it is one is a property of the three
+/// characters together rather than of the `%`. Without this,
+/// `https://example.invalid/a%ZZ` and a trailing `%` passed a predicate
+/// documenting that its value holds "only characters RFC 3986 permits in a URI",
+/// which was not true of them: a lone `%` makes the string not a URI at all.
+///
+/// The same shape as the calendar check on [`PublicationDate`] — an invariant
+/// enforced on a part while the composite went unasked — and the same answer.
+fn percent_escapes_are_well_formed(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            match text.get(index + 1..index + 3) {
+                Some(hex) if hex.bytes().all(|byte| byte.is_ascii_hexdigit()) => index += 3,
+                _ => return false,
+            }
+        } else {
+            index += 1;
+        }
+    }
+    true
 }
 
 /// Whether `c` is a character RFC 3986 permits to appear in a URI.
@@ -2166,6 +2193,48 @@ mod tests {
             "https://[::1]:8080/x",
         ] {
             assert!(is_printable_identifier(ordinary), "{ordinary:?}");
+        }
+    }
+
+    #[test]
+    fn a_percent_that_introduces_nothing_is_not_a_uri() {
+        // `%` is a legal URI character, so the character allowlist admits it —
+        // but only as the introducer of an escape, and whether it is one is a
+        // property of the three characters together. A lone `%` makes the string
+        // not a URI, so a predicate promising "only characters RFC 3986 permits
+        // in a URI" was not telling the truth about these.
+        for malformed in [
+            "https://example.invalid/a%ZZ",
+            "https://example.invalid/a%",
+            "https://example.invalid/a%2",
+            "https://example.invalid/%",
+            "https://example.invalid/a%g0b",
+        ] {
+            assert!(
+                !is_printable_identifier(malformed),
+                "{malformed:?} carries a `%` that introduces no escape"
+            );
+        }
+        // Well-formed escapes are untouched, in either case, and so is a `%`
+        // that this type itself emits.
+        for fine in [
+            "https://example.invalid/a%20b",
+            "https://example.invalid/100%25",
+            "https://example.invalid/a%2Fb",
+            "https://example.invalid/a%2fb",
+        ] {
+            assert!(is_printable_identifier(fine), "{fine:?}");
+        }
+        // Every URL `Doi::url` can produce satisfies it, which is what keeps the
+        // two halves of this module consistent.
+        for recorded in [
+            "10.1234/a#b",
+            "10.1234/a%b",
+            "10.1234/中文",
+            "10.1234/plain",
+        ] {
+            let url = Doi::new(recorded).expect("a DOI").url();
+            assert!(is_printable_identifier(&url), "{url:?}");
         }
     }
 
