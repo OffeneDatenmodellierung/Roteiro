@@ -1269,9 +1269,20 @@ mod tests {
     ///
     /// The re-verification is cheap and deliberately left to the next reader:
     /// [`FindingKey::parse`] has exactly **two non-test production call sites** —
-    /// `finding_from_row` and the [`Deserialize`] impl. Grep for them; the only
-    /// other hits are this module's own tests. A stricter parser could therefore
-    /// reject exactly two things in-tree:
+    /// `finding_from_row` and the [`Deserialize`] impl.
+    ///
+    /// That is a negative claim about the rest of the workspace, so it was
+    /// established from the graph rather than from `grep`, per `AGENTS.md`'s
+    /// rule that a *"there is no other X"* must be confirmed with
+    /// `roteiro search` across several vocabularies and cite its node keys. The
+    /// inbound `calls` edges of
+    /// `sym:rust:crates/rto-graph/src/findings.rs#FindingKey::parse` are exactly
+    /// `#FindingKey::deserialize`, `#finding_from_row`, and two `#tests::…`
+    /// functions in this module — nothing else in the workspace. Queries run:
+    /// `roteiro search "FindingKey parse"`, `"parse rendered finding key"`,
+    /// `"finding_from_row"`.
+    ///
+    /// A stricter parser could therefore reject exactly two things in-tree:
     ///
     /// 1. **JSON authored outside this codebase**, and
     /// 2. **a stored row written by something other than this code.**
