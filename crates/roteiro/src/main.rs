@@ -13542,10 +13542,12 @@ type McpSurface = rto_render::mcp::Advertised;
     doc = "[`resolve_mcp_surface`] refuses a `--tools` that asked for one."
 )]
 ///
-/// That sentence is gated with its subject rather than delinked, because it is
-/// not merely unlinkable in a build without `serve` or `explorer` — it is
-/// untrue. There is no `--tools` to refuse there, and no such function either:
-/// it is gated exactly as `Command::Serve` is.
+/// What `resolve_mcp_surface` does with a `--tools` that asked for one is
+/// documented here only in the builds that have it: gated with its subject
+/// rather than delinked, because without `serve` or `explorer` that sentence
+/// would not merely be unlinkable — it would be untrue. There is no `--tools`
+/// to refuse there, and no such function either: it is gated exactly as
+/// `Command::Serve` is.
 #[cfg(not(feature = "mcp"))]
 type McpSurface = ();
 

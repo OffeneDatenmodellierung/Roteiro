@@ -8,9 +8,9 @@
 //! doing what they expected — and a second copy of the check living in the
 //! `roteiro` crate for that purpose is how one of the two ends up laxer than the
 //! other. There is one function; `crate::boxlite::pinned_digest` wraps it into
-//! the backend's error type and adds nothing — named rather than linked,
-//! because it is behind `exec-boxlite` and the first sentence of this page is
-//! that this module is not.
+//! the backend's error type and adds nothing. That wrapper is named rather
+//! than linked because it is behind `exec-boxlite` and this module, as the
+//! paragraph opens by saying, is not.
 //!
 //! # Why a tag is refused at all
 //!

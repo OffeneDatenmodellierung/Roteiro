@@ -248,9 +248,9 @@ impl Clippy {
     /// crate surfaces as a network failure from inside a machine the user cannot
     /// see; with it, cargo says *"attempting to make an HTTP request, but
     /// --offline was specified"*, which `crate::lint_sandbox` turns into the
-    /// one thing that would actually help — fetch it on the host first. Named
-    /// rather than linked: that module needs both backend features and this
-    /// adapter needs neither.
+    /// one thing that would actually help — fetch it on the host first. That
+    /// module is named rather than linked: it needs both backend features and
+    /// this adapter needs neither.
     #[must_use]
     pub fn offline_invocation(features: &FeatureSet) -> Invocation {
         let mut invocation = Self::invocation(features);

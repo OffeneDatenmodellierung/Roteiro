@@ -18,10 +18,11 @@
 //! It does not *always* produce something to store, either. `lint` — named
 //! rather than linked, because that module is behind `exec-subprocess` and this
 //! page is read from builds without it — runs a linter and returns a report the
-//! caller prints: no [`AnalysisRun`], no layer, no store. A lint name is a symbol in a compiler rather than an assigned
-//! identifier, so it is an opinion about the code as it stands today rather than
-//! a durable fact about the repository (ADR-0020 v1.1) — and everything below
-//! about persistence simply does not apply to it.
+//! caller prints: no [`AnalysisRun`], no layer, no store. A lint name is a
+//! symbol in a compiler rather than an assigned identifier, so it is an opinion
+//! about the code as it stands today rather than a durable fact about the
+//! repository (ADR-0020 v1.1) — and everything below about persistence simply
+//! does not apply to it.
 //!
 //! [`AnalysisRun`]: rto_graph::AnalysisRun
 //!

@@ -2,11 +2,11 @@
 //!
 //! Both review arms need the same thing — the hunks for a path over a range —
 //! and before this module only `review_llm` had it, behind a generation-backend
-//! feature gate — named rather than linked here for that reason, since this
-//! module is the unconditional one. The graph arm is unconditional, so reusing
-//! that copy was not possible and adding a second one was the obvious move;
-//! this module exists so that it was not made. There is one definition of "the
-//! diff for this path", and both arms call it.
+//! feature gate. That module is named rather than linked here for exactly that
+//! reason: this one carries no such gate. The graph arm is unconditional, so
+//! reusing that copy was not possible and adding a second one was the obvious
+//! move; this module exists so that it was not made. There is one definition of
+//! "the diff for this path", and both arms call it.
 //!
 //! # Why this shells out rather than using gix
 //!
