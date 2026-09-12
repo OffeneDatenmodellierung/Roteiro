@@ -390,8 +390,8 @@ pub static ADAPTERS: &[&dyn Adapter] = &[
 /// Ungated, unlike the linter itself, for [`crate::lint_grant`]'s reason: what
 /// `roteiro lint` *could* run is a question a build that cannot run it still has
 /// to answer, and `roteiro security prefetch --analyzer clippy` is one of the
-/// callers that asks. Which is also why `crate::lint` above is named and not
-/// linked — a link would be unresolved in precisely the builds this sentence is
+/// callers that asks. That is also why `crate::lint` above is named and not
+/// linked: a link would be unresolved in precisely the builds this sentence is
 /// about.
 pub const LINT_ANALYZERS: &[&str] = &[clippy::ANALYZER];
 
