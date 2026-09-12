@@ -277,6 +277,68 @@ impl From<Day> for u8 {
     }
 }
 
+/// A year a work was published or was retrieved in, 1 or later.
+///
+/// A newtype for the same reason [`Day`] is one, and it was missing for the
+/// same reason `Day`'s bound nearly was: a bare `i32` let `0` and `-1` through
+/// `serde`, and the formatter rendered them as `(0)` and `(-1, January 2)` —
+/// strings that are not dates, printed with a date's authority, in a module
+/// whose subject is not doing that.
+///
+/// Year zero is not a year in the numbering APA's readers use, and a negative
+/// year is BCE, which APA writes as `400 B.C.E.` and not as `-400`. Rendering
+/// either as a plain number states something false about the work, so neither
+/// is constructible. BCE dates are not modelled at all: the alternative is an
+/// era field, and half an era model is worse than none.
+///
+/// There is deliberately **no upper bound**. A year in the future is either a
+/// forthcoming work — a legitimate thing to record — or a typo, and no type can
+/// separate those without a clock. This crate has no clock and will not acquire
+/// one: a record that rendered differently next year would not be reproducible,
+/// which is a harder rule here than tidiness about typos.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "i32", into = "i32")]
+pub struct Year(i32);
+
+impl Year {
+    /// Construct a year, rejecting zero and anything before it.
+    #[must_use]
+    pub fn new(year: i32) -> Option<Self> {
+        (year >= 1).then_some(Self(year))
+    }
+
+    /// The year number.
+    #[must_use]
+    pub fn get(self) -> i32 {
+        self.0
+    }
+}
+
+/// A year of zero or less.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("not a year: {0} (expected 1 or later; BCE dates are not modelled)")]
+pub struct NotAYear(pub i32);
+
+impl TryFrom<i32> for Year {
+    type Error = NotAYear;
+
+    fn try_from(year: i32) -> Result<Self, Self::Error> {
+        Self::new(year).ok_or(NotAYear(year))
+    }
+}
+
+impl From<Year> for i32 {
+    fn from(year: Year) -> Self {
+        year.0
+    }
+}
+
+impl fmt::Display for Year {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// When a work was published.
 ///
 /// An enum rather than a struct of `Option`s so that a day without a month is
@@ -295,18 +357,18 @@ impl From<Day> for u8 {
 #[serde(rename_all = "kebab-case")]
 pub enum PublicationDate {
     /// The year alone — the commonest case, and all APA requires of most works.
-    Year(i32),
+    Year(Year),
     /// A year and a month.
     YearMonth {
         /// The year.
-        year: i32,
+        year: Year,
         /// The month.
         month: Month,
     },
     /// A full calendar date.
     Full {
         /// The year.
-        year: i32,
+        year: Year,
         /// The month.
         month: Month,
         /// The day of the month.
@@ -317,7 +379,7 @@ pub enum PublicationDate {
 impl PublicationDate {
     /// The year, whatever the precision. An in-text citation uses only this.
     #[must_use]
-    pub fn year(self) -> i32 {
+    pub fn year(self) -> Year {
         match self {
             Self::Year(year) | Self::YearMonth { year, .. } | Self::Full { year, .. } => year,
         }
@@ -333,7 +395,7 @@ impl PublicationDate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct AccessDate {
     /// The year.
-    pub year: i32,
+    pub year: Year,
     /// The month.
     pub month: Month,
     /// The day of the month.
@@ -365,6 +427,145 @@ pub enum Stability {
     },
 }
 
+/// One given name, as the work spells it: `Mary`, or `M.` where that is all
+/// anybody recorded.
+///
+/// A validating newtype for the same reason [`Day`] is one, and the defect that
+/// produced it is the sharpest example in this module of the rule the module
+/// exists for. The formatter used to reduce given names to initials with a
+/// `filter_map`, so a fragment it could not turn into an initial was **dropped**
+/// — `given = ["Mary", ""]` rendered `Smith, M.` and `"Jean--Paul"` rendered
+/// `J.-P.`. Both are plausible authors with part of the recorded name missing,
+/// and a citation that looks authoritative and is partly invented is exactly
+/// what this module refuses to emit. Handling it at the one call site would
+/// have left the *spelling* available; making the value unconstructible means
+/// no later renderer can reintroduce it, and `serde` refuses one on the way in
+/// from a file as well.
+///
+/// Accepted: any text whose hyphen-separated parts are each non-blank —
+/// `Mary`, `M.`, `Jean-Paul`. Rejected: the empty string, whitespace alone, and
+/// `Jean--Paul`, `-Paul` or `Jean-`, whose empty parts are precisely what used
+/// to vanish.
+///
+/// Also rejected: a **generational suffix** (`Jr.`, `Sr.`, `II`, `III`, `IV`).
+/// Those are not given names, and APA prints them in a position this record has
+/// no field for — `Smith, J., Jr.`. Recorded among the given names they render
+/// as an invented middle initial, `Smith, J. J.`, which is the same fabrication
+/// by another route. Refusing means a real name is unrecordable until the record
+/// grows a field for it, which is the trade this module already makes for a
+/// mononym author: a visible refusal beats a quiet wrong answer.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct GivenName(String);
+
+/// A string that is not a usable given name.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "not a given name: {0:?} (expected a name, or hyphen-joined names, each non-blank; a generational suffix such as `Jr.` has no field on this record)"
+)]
+pub struct NotAGivenName(pub String);
+
+/// Whether `name` is a generational suffix rather than a given name.
+///
+/// A deliberately short, closed list, and not a rule about spelling — these are
+/// perfectly good strings. It is a statement that the record has nowhere to put
+/// them: APA writes them after the initials, and [`Author::Person`] has two
+/// fields, neither of which is that position.
+///
+/// `Jr` and `Sr` match case-insensitively, with or without the period, because
+/// that is the range of ways they are printed. The Roman numerals match exactly,
+/// since lower-case `iii` is not how anybody writes one. `I` and `V` are left
+/// out on purpose: `V.` is Victor's initial far more often than it is a fifth,
+/// and refusing a real initial to catch a rare suffix is the wrong way round.
+fn is_generational_suffix(name: &str) -> bool {
+    ["jr", "jr.", "sr", "sr."].contains(&name.to_ascii_lowercase().as_str())
+        || ["II", "III", "IV"].contains(&name)
+}
+
+impl GivenName {
+    /// Parse a given name.
+    ///
+    /// Outer whitespace is trimmed and the trimmed form is what is stored: the
+    /// renderer trims, and a leading space no reader can see must not be able to
+    /// decide where an entry lands in a list somebody reads. Nothing *inside*
+    /// the name is rewritten — `Jean - Paul` is stored exactly as written,
+    /// because recognising a shape is not licence to restyle it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NotAGivenName`] for a blank name, a name with a blank
+    /// hyphen-separated part, or a generational suffix.
+    pub fn new(text: &str) -> Result<Self, NotAGivenName> {
+        let trimmed = text.trim();
+        let usable = !trimmed.is_empty()
+            && trimmed.split('-').all(|part| !part.trim().is_empty())
+            && !is_generational_suffix(trimmed);
+        if usable {
+            Ok(Self(trimmed.to_owned()))
+        } else {
+            Err(NotAGivenName(text.to_owned()))
+        }
+    }
+
+    /// The name as recorded.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The hyphen-separated parts, each trimmed, and each non-blank by
+    /// construction.
+    pub fn parts(&self) -> impl Iterator<Item = &str> {
+        self.0.split('-').map(str::trim)
+    }
+
+    /// The initial APA prints for this name: `M.` for `Mary` and for `M.`, and
+    /// `J.-P.` for `Jean-Paul`.
+    ///
+    /// It lives on the record rather than in the formatter because two callers
+    /// need it and they must not be allowed to disagree: the formatter prints
+    /// it, and [`Reference::list_order`] alphabetises on it. APA alphabetises a
+    /// list by what the list *prints*, so ordering on the recorded name instead
+    /// lets `Mary` and `M.` — one rendered author, two spellings — come out in
+    /// an order no reader of the page can account for. One derivation, both
+    /// callers; two copies of it is how they came apart in the first place.
+    ///
+    /// `map` rather than `filter_map`, deliberately: a part is non-blank by
+    /// construction, and if that ever stopped being true this should produce a
+    /// visibly wrong initial rather than quietly one part short.
+    #[must_use]
+    pub fn initial(&self) -> String {
+        self.parts()
+            .map(|part| {
+                part.chars()
+                    .next()
+                    .map_or_else(String::new, |first| format!("{}.", first.to_uppercase()))
+            })
+            .collect::<Vec<_>>()
+            .join("-")
+    }
+}
+
+impl TryFrom<String> for GivenName {
+    type Error = NotAGivenName;
+
+    fn try_from(text: String) -> Result<Self, Self::Error> {
+        Self::new(&text)
+    }
+}
+
+impl From<GivenName> for String {
+    fn from(name: GivenName) -> Self {
+        name.0
+    }
+}
+
+impl fmt::Display for GivenName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Who produced a work.
 ///
 /// Deliberately not `#[non_exhaustive]`. The person/group distinction is the
@@ -382,7 +583,7 @@ pub enum Author {
         /// an initial (`M.`). A renderer that wants initials derives them from
         /// the first character either way, so recording the full name loses
         /// nothing and recording only the initial costs nothing.
-        given: Vec<String>,
+        given: Vec<GivenName>,
     },
     /// A group, organisation or company — a legitimate author in its own right,
     /// spelled out in full. It is not a person, so it is never reduced to
@@ -424,6 +625,43 @@ fn strip_prefix_ignoring_ascii_case<'a>(text: &'a str, prefix: &str) -> Option<&
         .map(|_| &text[prefix.len()..])
 }
 
+/// Whether `text` carries a character that would make printed text not the text
+/// a reader sees.
+///
+/// Every identifier this model hands to a renderer — a DOI, a URL — is printed
+/// as its own visible text *and* used as a link target, so the two have to be
+/// the same string in the reader's eye as well as in the byte stream. Three
+/// kinds of character break that:
+///
+/// - **whitespace**, which splits a single-line identifier across two lines, or
+///   silently truncates it at the space in anything that parses a URL;
+/// - **control characters**, same, and worse in a terminal;
+/// - **zero-width and bidirectional-override characters**, which are invisible
+///   *by design*: they can reorder what a reader sees without changing a byte of
+///   what the link resolves to, which is a link that is not what it looks like.
+///
+/// The last set is listed explicitly rather than tested by general category,
+/// because [`char::is_control`] covers only `Cc` and these are format characters
+/// (`Cf`), for which the standard library has no predicate.
+///
+/// This is not a URL or DOI grammar and does not try to be — it is the one
+/// question both types have to ask and neither should answer twice.
+#[must_use]
+pub fn has_invisible_characters(text: &str) -> bool {
+    text.chars().any(|c| {
+        c.is_whitespace()
+            || c.is_control()
+            || matches!(
+                c,
+                // Zero-width space, non-joiner and joiner; and the byte-order
+                // mark in its zero-width-no-break-space role.
+                '\u{200B}'..='\u{200D}' | '\u{FEFF}'
+                // Bidi marks, embeddings, overrides and isolates.
+                | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+            )
+    })
+}
+
 /// A string that is not a DOI.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
@@ -437,7 +675,8 @@ impl Doi {
     ///
     /// The shape checked is the one the DOI Handbook defines: a `10.` prefix, a
     /// registrant code of digits (possibly dot-separated, as in
-    /// `10.1000.10/123`), a `/`, and a non-empty suffix. That is deliberately
+    /// `10.1000.10/123`), a `/`, and a non-empty suffix carrying no
+    /// [invisible characters][has_invisible_characters]. That is deliberately
     /// stricter than "starts with `10.` and contains a slash", because
     /// everything this type accepts is rendered as a resolver link — and a link
     /// that resolves to nothing is exactly the plausible-looking citation this
@@ -470,7 +709,15 @@ impl Doi {
         let registrant_is_numeric = registrant
             .split('.')
             .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()));
-        if registrant_is_numeric && !suffix.is_empty() {
+        // The DOI Handbook lets a suffix be almost any string, and this does not
+        // second-guess that — except for the characters that cannot survive
+        // being printed. Everything accepted here becomes a resolver link whose
+        // visible text is the URL itself, so a suffix carrying a newline, a
+        // space or a bidi override produces a link that is not the identifier it
+        // appears to be. A dead link dressed as a citation is the failure this
+        // newtype exists to prevent; an invisible one is the same failure with
+        // the evidence removed.
+        if registrant_is_numeric && !suffix.is_empty() && !has_invisible_characters(suffix) {
             Ok(Self(bare.to_owned()))
         } else {
             Err(refused())
@@ -687,8 +934,8 @@ impl Reference {
     ///   same surname;
     /// - entries sharing a first author are ordered by the *second* author's
     ///   surname, and so on down the list;
-    /// - two different people with the same surname are ordered by their given
-    ///   names, before date is consulted at all — `Smith, A.` precedes
+    /// - two different people with the same surname are ordered by their
+    ///   initials, before date is consulted at all — `Smith, A.` precedes
     ///   `Smith, T.`, whatever year either published;
     /// - only then does date break the tie, earliest first, with an undated
     ///   work before any dated one.
@@ -699,9 +946,11 @@ impl Reference {
     ///
     /// The keys, in order:
     ///
-    /// 1. every author, in the order the work lists them — surname then given
-    ///    names, case-insensitively, since APA alphabetises letter by letter
-    ///    and does not care about capitals;
+    /// 1. every author, in the order the work lists them — surname then
+    ///    *initials as rendered*, case-insensitively, since APA alphabetises
+    ///    letter by letter and does not care about capitals. Rendered initials
+    ///    rather than recorded given names, so that nothing invisible on the
+    ///    page can decide the order of the page;
     /// 2. the same list case-sensitively, so the fold in step 1 never decides a
     ///    tie by accident of iteration order;
     /// 3. the full publication date — year, then month, then day, so two works
@@ -736,18 +985,31 @@ impl Reference {
         fn title(reference: &Reference) -> &str {
             reference.title.trim()
         }
-        // Surname **and** given names: a surname alone cannot separate two
+        // Surname **and** initials: a surname alone cannot separate two
         // different people who share one, and APA orders those by their
-        // initials before it looks at the date. Trimmed, because the renderer
-        // trims — a leading space that no reader can see must not decide where
-        // an entry lands in a list somebody reads.
+        // initials before it looks at the date.
+        //
+        // The **initials**, via `GivenName::initial`, and not the recorded given
+        // names — because APA alphabetises a list by what the list prints, and
+        // what it prints is `Smith, M.` whether the register learned `Mary` or
+        // only `M.`. Keying on the recorded spelling let a difference the page
+        // does not show decide an order the page does show: two entries reading
+        // `Smith, M. (2020).` came out in an order no reader could account for,
+        // and swapping one record's `Mary` for `M.` — no change to a single
+        // rendered character — moved it. Two such entries are genuinely
+        // indistinguishable to a reader, so they fall through to date, title and
+        // id, which are things a reader can see.
+        //
+        // Trimmed, because the renderer trims: a leading space that no reader
+        // can see must not decide where an entry lands either. `GivenName`
+        // stores its trimmed form, so only the surname needs it here.
         let authors = |r: &Self| -> Vec<(String, Vec<String>)> {
             r.authors
                 .iter()
                 .map(|author| {
                     let given = match author {
                         Author::Person { given, .. } => {
-                            given.iter().map(|name| name.trim().to_owned()).collect()
+                            given.iter().map(GivenName::initial).collect()
                         }
                         Author::Group(_) => Vec::new(),
                     };
@@ -773,10 +1035,10 @@ impl Reference {
             Attested::AbsentFromWork => (0_u8, 0_i32, 0_u8, 0_u8),
             Attested::Known(published) => {
                 let (year, month, day) = match published {
-                    PublicationDate::Year(year) => (*year, 0, 0),
-                    PublicationDate::YearMonth { year, month } => (*year, month.number(), 0),
+                    PublicationDate::Year(year) => (year.get(), 0, 0),
+                    PublicationDate::YearMonth { year, month } => (year.get(), month.number(), 0),
                     PublicationDate::Full { year, month, day } => {
-                        (*year, month.number(), day.get())
+                        (year.get(), month.number(), day.get())
                     }
                 };
                 (1, year, month, day)
@@ -797,18 +1059,26 @@ impl Reference {
 #[cfg(test)]
 mod tests {
     use super::{
-        AccessDate, Attested, Author, Day, Doi, Month, Ordering, PublicationDate, Reference,
-        Stability, WorkKind,
+        AccessDate, Attested, Author, Day, Doi, GivenName, Month, Ordering, PublicationDate,
+        Reference, Stability, WorkKind, Year, has_invisible_characters,
     };
+
+    fn year(year: i32) -> Year {
+        Year::new(year).expect("a valid year")
+    }
+
+    fn given_name(name: &str) -> GivenName {
+        GivenName::new(name).expect("a valid given name")
+    }
 
     fn person(surname: &str) -> Author {
         Author::Person {
             surname: surname.to_owned(),
-            given: vec!["A".to_owned()],
+            given: vec![given_name("A")],
         }
     }
 
-    fn dated(id: &str, surname: &str, year: i32) -> Reference {
+    fn dated(id: &str, surname: &str, published: i32) -> Reference {
         let mut reference = Reference::new(
             id,
             WorkKind::Document,
@@ -816,7 +1086,7 @@ mod tests {
             Stability::FixedOrArchived,
         );
         reference.authors = vec![person(surname)];
-        reference.published = Attested::Known(PublicationDate::Year(year));
+        reference.published = Attested::Known(PublicationDate::Year(year(published)));
         reference
     }
 
@@ -921,22 +1191,24 @@ mod tests {
     #[test]
     fn a_date_carries_its_own_precision() {
         let day = Day::new(27).expect("valid");
-        assert_eq!(PublicationDate::Year(2026).year(), 2026);
+        assert_eq!(PublicationDate::Year(year(2026)).year().get(), 2026);
         assert_eq!(
             PublicationDate::YearMonth {
-                year: 2026,
+                year: year(2026),
                 month: Month::August
             }
-            .year(),
+            .year()
+            .get(),
             2026
         );
         assert_eq!(
             PublicationDate::Full {
-                year: 2026,
+                year: year(2026),
                 month: Month::August,
                 day
             }
-            .year(),
+            .year()
+            .get(),
             2026
         );
         assert_eq!(Month::August.name(), "August");
@@ -953,14 +1225,14 @@ mod tests {
         // a date in, and `UnarchivedAndChanging` cannot be built without one.
         let changing = Stability::UnarchivedAndChanging {
             retrieved: AccessDate {
-                year: 2020,
+                year: year(2020),
                 month: Month::January,
                 day: Day::new(9).expect("valid"),
             },
         };
         match changing {
             Stability::UnarchivedAndChanging { retrieved } => {
-                assert_eq!(retrieved.year, 2020);
+                assert_eq!(retrieved.year.get(), 2020);
                 assert_eq!(retrieved.month.name(), "January");
                 assert_eq!(retrieved.day.get(), 9);
             }
@@ -993,9 +1265,11 @@ mod tests {
 
     #[test]
     fn an_undated_work_sorts_before_the_same_authors_dated_ones() {
-        let mut undated = dated("u", "Salas", 0);
+        // The year passed here is discarded by the next line in both cases; it
+        // is only a placeholder, and `Year` no longer has a spelling for zero.
+        let mut undated = dated("u", "Salas", 1999);
         undated.published = Attested::AbsentFromWork;
-        let mut unresearched = dated("x", "Salas", 0);
+        let mut unresearched = dated("x", "Salas", 1999);
         unresearched.published = Attested::Unknown;
         let mut refs = [dated("b", "Salas", 2020), unresearched, undated];
         refs.sort_by(Reference::list_order);
@@ -1005,6 +1279,171 @@ mod tests {
             ["u", "b", "x"],
             "n.d. first, then years; a date nobody looked up is not a date and sorts last"
         );
+    }
+
+    #[test]
+    fn a_given_name_that_cannot_be_rendered_cannot_be_written_down() {
+        // The formatter used to reduce given names to initials with a
+        // `filter_map`, so a fragment with no initial in it was dropped and the
+        // author rendered anyway — `Smith, M.` from a record holding two given
+        // names, one of them blank. Each of these is one of those fragments, and
+        // none of them is constructible now.
+        for refused in ["", "   ", "Jean--Paul", "-Paul", "Jean-", "-", " - "] {
+            assert!(
+                GivenName::new(refused).is_err(),
+                "{refused:?} has a part with no initial in it, so it must not be recordable"
+            );
+        }
+        // Not a spelling rule — a statement that the record has nowhere to put
+        // these. APA prints them after the initials, and among the given names
+        // they render as an invented middle initial: `Smith, J., Jr.` becomes
+        // `Smith, J. J.`.
+        for suffix in ["Jr", "Jr.", "jr.", "SR", "Sr.", "II", "III", "IV"] {
+            assert!(
+                GivenName::new(suffix).is_err(),
+                "{suffix:?} is a generational suffix, and this record has no field for one"
+            );
+        }
+        for accepted in ["Mary", "M.", "Jean-Paul", "Ibáñez", "Jean - Paul", "Iva"] {
+            assert!(GivenName::new(accepted).is_ok(), "{accepted:?}");
+        }
+        // Outer whitespace is trimmed, because the renderer trims and a leading
+        // space nobody can see must not decide an order somebody reads. Nothing
+        // inside the name is touched.
+        assert_eq!(given_name("  Mary  ").as_str(), "Mary");
+        assert_eq!(given_name("Jean - Paul").as_str(), "Jean - Paul");
+        // And a file cannot smuggle one past construction either.
+        assert!(serde_json::from_str::<GivenName>("\"Jean--Paul\"").is_err());
+        assert!(serde_json::from_str::<GivenName>("\"\"").is_err());
+        assert_eq!(
+            serde_json::from_str::<GivenName>("\"Mary\"").expect("valid"),
+            given_name("Mary")
+        );
+    }
+
+    #[test]
+    fn an_initial_is_derived_in_one_place_so_two_readers_cannot_disagree() {
+        // `Reference::list_order` alphabetises on this and the formatter prints
+        // it. Two copies of the derivation is how the printed order and the
+        // sorted order came apart.
+        for (recorded, initial) in [
+            ("Mary", "M."),
+            ("M.", "M."),
+            ("Jean-Paul", "J.-P."),
+            ("ibáñez", "I."),
+            ("Jean - Paul", "J.-P."),
+        ] {
+            assert_eq!(given_name(recorded).initial(), initial, "{recorded:?}");
+        }
+    }
+
+    #[test]
+    fn two_authors_the_page_prints_alike_are_not_ordered_by_what_it_hides() {
+        // `Author` permits either `Mary` or `M.`, and both render as `M.` — so
+        // these two entries are the same author, spelled two ways, and a reader
+        // sees `Smith, M.` twice. Ordering on the *recorded* spelling let `M.`
+        // precede `Mary` and put `B title` above `A title`, which is an order
+        // nobody reading the page could account for. The key is the rendered
+        // initial, so the tie falls through to title, which a reader can see.
+        let mut spelled_out = dated("spelled-out", "Smith", 2020);
+        spelled_out.authors = vec![Author::Person {
+            surname: "Smith".to_owned(),
+            given: vec![given_name("Mary")],
+        }];
+        spelled_out.title = "A title".to_owned();
+        let mut initialled = dated("initialled", "Smith", 2020);
+        initialled.authors = vec![Author::Person {
+            surname: "Smith".to_owned(),
+            given: vec![given_name("M.")],
+        }];
+        initialled.title = "B title".to_owned();
+
+        let mut refs = [initialled, spelled_out];
+        refs.sort_by(Reference::list_order);
+        assert_eq!(
+            refs.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["spelled-out", "initialled"],
+            "the title decides, because it is the only difference the page shows"
+        );
+        // …and a genuine difference of initials still outranks the date, which
+        // is the rule this must not have broken on the way past.
+        let mut anne = dated("anne", "Smith", 2020);
+        anne.authors = vec![Author::Person {
+            surname: "Smith".to_owned(),
+            given: vec![given_name("Anne")],
+        }];
+        let mut tom = dated("tom", "Smith", 1990);
+        tom.authors = vec![Author::Person {
+            surname: "Smith".to_owned(),
+            given: vec![given_name("Tom")],
+        }];
+        let mut people = [tom, anne];
+        people.sort_by(Reference::list_order);
+        assert_eq!(
+            people.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["anne", "tom"]
+        );
+    }
+
+    #[test]
+    fn a_year_that_is_not_a_year_cannot_be_written_down() {
+        // A bare `i32` let these through `serde`, and the formatter rendered
+        // them as `(0)` and `(-1, January 2)` — strings that are not dates,
+        // printed with a date's authority. Year zero is not a year in the
+        // numbering APA's readers use, and a negative year is BCE, which APA
+        // writes `400 B.C.E.` and never `-400`.
+        for refused in [0, -1, -400, i32::MIN] {
+            assert!(Year::new(refused).is_none(), "{refused}");
+            assert!(
+                serde_json::from_str::<Year>(&refused.to_string()).is_err(),
+                "deserialisation must validate too: {refused}"
+            );
+        }
+        for accepted in [1, 1899, 2026, i32::MAX] {
+            assert_eq!(Year::new(accepted).expect("a valid year").get(), accepted);
+        }
+        // No upper bound, deliberately: a forthcoming work is a real thing to
+        // record, and separating one from a typo needs a clock this crate does
+        // not have and must not acquire.
+        assert!(Year::new(2999).is_some());
+    }
+
+    #[test]
+    fn an_identifier_cannot_carry_a_character_a_reader_cannot_see() {
+        // Everything that parses here is rendered as a resolver link whose
+        // visible text *is* its target, so a suffix carrying a newline is a
+        // citation printed across two lines and resolving to neither, and a bidi
+        // override is a link that reads as one thing and resolves to another.
+        for hidden in [
+            "10.1234/foo\nbar",
+            "10.1234/foo bar",
+            "10.1234/a\tb",
+            "10.1234/foo\u{7}bar",
+            "10.1234/foo\u{202e}bar",
+            "10.1234/foo\u{200b}bar",
+            "10.1234/foo\u{feff}bar",
+        ] {
+            assert!(
+                Doi::new(hidden).is_err(),
+                "{hidden:?} would become a link that is not what it looks like"
+            );
+            assert!(
+                serde_json::from_str::<Doi>(&serde_json::to_string(hidden).expect("json")).is_err(),
+                "deserialisation must validate too: {hidden:?}"
+            );
+        }
+        // The ordinary shapes are untouched — this is not a DOI grammar, and a
+        // suffix is allowed to be almost anything that can be printed.
+        for fine in [
+            "10.3886/ICPSR36966.v1",
+            "10.1037/abc123",
+            "10.1000.10/123",
+            "10.1234/a(b)c;d",
+        ] {
+            assert!(Doi::new(fine).is_ok(), "{fine:?}");
+        }
+        assert!(!has_invisible_characters("https://example.org/a-b"));
+        assert!(has_invisible_characters("https://example.org/a b"));
     }
 
     #[test]
@@ -1056,7 +1495,7 @@ mod tests {
         let mut december = dated("december", "Salas", 2020);
         december.title = "A title".to_owned();
         december.published = Attested::Known(PublicationDate::YearMonth {
-            year: 2020,
+            year: year(2020),
             month: Month::December,
         });
         let mut january = dated("january", "Salas", 2020);
@@ -1064,7 +1503,7 @@ mod tests {
         // date key gives up at the year and lets the title decide.
         january.title = "Z title".to_owned();
         january.published = Attested::Known(PublicationDate::Full {
-            year: 2020,
+            year: year(2020),
             month: Month::January,
             day: Day::new(9).expect("valid"),
         });
@@ -1083,12 +1522,12 @@ mod tests {
         let mut anne = dated("anne", "Smith", 2020);
         anne.authors = vec![Author::Person {
             surname: "Smith".to_owned(),
-            given: vec!["Anne".to_owned()],
+            given: vec![given_name("Anne")],
         }];
         let mut tom = dated("tom", "Smith", 1990);
         tom.authors = vec![Author::Person {
             surname: "Smith".to_owned(),
-            given: vec!["Tom".to_owned()],
+            given: vec![given_name("Tom")],
         }];
 
         let mut refs = [tom, anne];

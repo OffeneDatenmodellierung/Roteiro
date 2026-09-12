@@ -70,6 +70,28 @@
 //!   reference examples — a retrieval date only where the work is unarchived
 //!   **and** designed to change, written `Retrieved January 9, 2020, from …`.
 //!
+//! # APA rules that are implemented, and easy to assume are not
+//!
+//! Listed because each is a real APA 7 rule that a formatter can plausibly be
+//! missing, and a reader should be able to tell which side of the line it is on
+//! without reading the code:
+//!
+//! - **Same-surname authors are ordered by their initials, before date.**
+//!   `Smith, A. (2020)` precedes `Smith, T. (1990)`. See
+//!   [`Reference::list_order`], whose first key is surname *and rendered
+//!   initials* — rendered, so that `Mary` and `M.`, which print alike, cannot
+//!   order by a difference the page does not show.
+//! - **A single-author work precedes a multi-author work with the same first
+//!   author**, and works sharing a first author are ordered by the second
+//!   author. Both fall out of comparing the whole author list element by
+//!   element: a shorter list is a prefix of a longer one.
+//! - **The first letter of a bracketed description is capitalised** —
+//!   `[Computer software]` from a record spelling it `computer software`. The
+//!   line between this and recasing a *title* is drawn at `capitalise_first`.
+//! - **The publisher is omitted when it is the same as a single group author**,
+//!   which is why APA's WHO example does not print the name twice. See
+//!   `publisher_repeats_the_author`.
+//!
 //! # What is not implemented, and is therefore unspellable
 //!
 //! Each of these is a rule whose inputs the record does not carry, so the
@@ -88,13 +110,31 @@
 //!   a bare surname.
 //! - **`2020a` / `2020b` disambiguation** for one author's works in one year.
 //!   The suffix depends on the whole list and on the in-text citations that
-//!   accompany it, so it belongs to the phase that renders both together.
+//!   accompany it, so it belongs to the phase that renders both together. It is
+//!   not silent: [`reference_list`] reports the collision in
+//!   [`ReferenceList::ambiguous`], so a caller learns that two entries produce
+//!   one citation rather than discovering it in print.
+//! - **First-author initials in an in-text citation**, which APA adds when two
+//!   first authors share a surname — `(J. Smith, 2020)` against `(T. Smith,
+//!   2020)`. [`in_text`] is given one record and cannot see the other, and the
+//!   rule is a property of the pair. Reported through the same
+//!   [`ReferenceList::ambiguous`] channel, for the same reason.
+//! - **Generational suffixes** — APA writes `Smith, J., Jr.`, in a position
+//!   [`Author::Person`] has no field for. Rather than let one be smuggled into
+//!   the given names, where it renders as an invented middle initial (`Smith,
+//!   J. J.`), [`GivenName`] refuses one at construction. The field arrives with
+//!   the phase that needs it; until then the gap is visible rather than wrong.
+//! - **BCE dates and era notation.** [`Year`](rto_graph::reference::Year) starts
+//!   at 1, because APA writes
+//!   `400 B.C.E.` and a bare `-400` is not that date — see the note there on
+//!   why half an era model is worse than none.
 
 use std::collections::BTreeMap;
 use std::fmt;
 
 use rto_graph::reference::{
-    AccessDate, Attested, Author, Locator, PublicationDate, Reference, Stability, WorkKind,
+    AccessDate, Attested, Author, GivenName, Locator, PublicationDate, Reference, Stability,
+    WorkKind, has_invisible_characters,
 };
 use serde::Serialize;
 
@@ -500,28 +540,36 @@ fn printable_locator(reference: &Reference) -> Option<String> {
 }
 
 /// `I. I.` from a list of given names, or `None` when there are none to work
-/// from.
+/// from — a mononym, which [`validate`] turns into a refusal.
 ///
-/// Each given name contributes its first character, uppercased, followed by a
-/// period; a hyphenated given name keeps its hyphen and contributes both
-/// (`Jean-Paul` → `J.-P.`). A name already recorded as an initial passes
-/// through unchanged, so a register that only ever learned `M.` loses nothing
-/// and one that learned `Mary` is not obliged to throw the rest away.
-fn initials(given: &[String]) -> Option<String> {
-    let names: Vec<String> = given
-        .iter()
-        .filter_map(|name| {
-            let parts: Vec<String> = name
-                .split('-')
-                .filter_map(|part| {
-                    let first = part.trim().chars().next()?;
-                    Some(format!("{}.", first.to_uppercase()))
-                })
-                .collect();
-            (!parts.is_empty()).then(|| parts.join("-"))
-        })
-        .collect();
-    (!names.is_empty()).then(|| names.join(" "))
+/// Each given name contributes its initial, from [`GivenName::initial`]: the
+/// first character uppercased and a period, with a hyphenated name keeping its
+/// hyphen and contributing both (`Jean-Paul` → `J.-P.`). A name already recorded
+/// as an initial passes through unchanged, so a register that only ever learned
+/// `M.` loses nothing and one that learned `Mary` is not obliged to throw the
+/// rest away.
+///
+/// One name in, one initial out — `map`, and **never** `filter_map`. That is the
+/// whole point of this function's history. It used to `filter_map` over both the
+/// names and the hyphen parts, so a fragment it could not reduce was silently
+/// dropped: `given = ["Mary", ""]` rendered `Smith, M.`, and `"Jean--Paul"`
+/// rendered `J.-P.`. Each is a plausible author with part of the recorded name
+/// missing — a citation that reads as authoritative and is partly invented,
+/// which is precisely what this module is written to refuse. The drop is now
+/// unspellable twice over: [`GivenName`] cannot hold a fragment that has no
+/// initial, and there is no `filter_map` left here to drop one if it could.
+///
+/// The derivation itself lives on [`GivenName`] rather than here because
+/// [`Reference::list_order`] alphabetises on the same value, and two copies of
+/// one derivation is how the printed order and the sorted order came apart.
+fn initials(given: &[GivenName]) -> Option<String> {
+    (!given.is_empty()).then(|| {
+        given
+            .iter()
+            .map(GivenName::initial)
+            .collect::<Vec<_>>()
+            .join(" ")
+    })
 }
 
 /// One author as a reference list spells them.
@@ -594,21 +642,35 @@ fn retrieval_clause(retrieved: AccessDate) -> String {
     )
 }
 
-/// Whether `url` names a scheme this will turn into a link.
+/// Whether `url` is something this will turn into a link: a web scheme, and
+/// nothing in it that cannot survive being printed.
 ///
-/// Case-insensitively, because a URI scheme is case-insensitive by RFC 3986 and
-/// `HTTPS://example.org` is a perfectly ordinary way to have written one down.
-/// Matching exactly would refuse it as though it were a `javascript:` locator,
-/// which is a true rule applied to a false case. The URL itself is printed as
-/// recorded — recognising a scheme is not licence to rewrite it.
+/// The scheme is matched case-insensitively, because a URI scheme is
+/// case-insensitive by RFC 3986 and `HTTPS://example.org` is a perfectly
+/// ordinary way to have written one down. Matching exactly would refuse it as
+/// though it were a `javascript:` locator, which is a true rule applied to a
+/// false case. The URL itself is printed as recorded — recognising a scheme is
+/// not licence to rewrite it.
 ///
 /// `str::get` rather than a slice, so a multi-byte character straddling the
 /// scheme length is a `false` rather than a panic.
+///
+/// The [invisible-character][has_invisible_characters] test is the same one
+/// [`Doi::new`] applies to a DOI suffix, and it is here for the same reason: a
+/// URL becomes an [`EntrySpan::Link`] whose visible text *is* its `href`, so
+/// `https://example.org/a\nb` is a citation printed across two lines and
+/// resolving to neither of them, and a bidi override is a link that reads as one
+/// host and resolves to another. The two paths share one predicate rather than
+/// each carrying its own: the DOI path was hardened first, and a second copy of
+/// the rule is how the two would drift apart. A recorded URL that fails this is
+/// not printable, so the record refuses on `Missing::Locator` rather than
+/// quietly losing its source element — the same terms as a blank URL.
 fn is_web_url(url: &str) -> bool {
-    ["https://", "http://"].iter().any(|scheme| {
+    let web_scheme = ["https://", "http://"].iter().any(|scheme| {
         url.get(..scheme.len())
             .is_some_and(|head| head.eq_ignore_ascii_case(scheme))
-    })
+    });
+    web_scheme && !has_invisible_characters(url)
 }
 
 /// Whether the source element would repeat the author, in which case APA drops
@@ -894,8 +956,8 @@ mod tests {
         requires_descriptor, requires_locator, title_is_italic,
     };
     use rto_graph::reference::{
-        AccessDate, Attested, Author, Day, Doi, Locator, Month, PublicationDate, Reference,
-        Stability, WorkKind,
+        AccessDate, Attested, Author, Day, Doi, GivenName, Locator, Month, PublicationDate,
+        Reference, Stability, WorkKind, Year,
     };
 
     /// A person author. `given` is a space-separated list of given names, so a
@@ -903,12 +965,23 @@ mod tests {
     fn person(surname: &str, given: &str) -> Author {
         Author::Person {
             surname: surname.to_owned(),
-            given: given.split_whitespace().map(str::to_owned).collect(),
+            given: given
+                .split_whitespace()
+                .map(|name| GivenName::new(name).expect("a valid given name"))
+                .collect(),
         }
     }
 
     fn day(day: u8) -> Day {
         Day::new(day).expect("a valid day")
+    }
+
+    fn year(year: i32) -> Year {
+        Year::new(year).expect("a valid year")
+    }
+
+    fn given_name(name: &str) -> GivenName {
+        GivenName::new(name).expect("a valid given name")
     }
 
     fn doi(text: &str) -> Locator {
@@ -921,7 +994,7 @@ mod tests {
     fn complete(id: &str, kind: WorkKind, title: &str) -> Reference {
         let mut reference = Reference::new(id, kind, title, Stability::FixedOrArchived);
         reference.authors = vec![person("Luna", "R")];
-        reference.published = Attested::Known(PublicationDate::Year(2020));
+        reference.published = Attested::Known(PublicationDate::Year(year(2020)));
         reference.version = Attested::AbsentFromWork;
         reference.descriptor = Attested::AbsentFromWork;
         reference.publisher = Attested::Known("Publisher Name".to_owned());
@@ -946,7 +1019,7 @@ mod tests {
             "Comprehensive meta-analysis",
         );
         software.authors = vec![Author::Group("Biostat".to_owned())];
-        software.published = Attested::Known(PublicationDate::Year(2014));
+        software.published = Attested::Known(PublicationDate::Year(year(2014)));
         software.version = Attested::Known("3.3.070".to_owned());
         software.descriptor = Attested::Known("Computer software".to_owned());
         software.publisher = Attested::AbsentFromWork;
@@ -963,7 +1036,7 @@ mod tests {
             "U.S. and world population clock",
             Stability::UnarchivedAndChanging {
                 retrieved: AccessDate {
-                    year: 2020,
+                    year: year(2020),
                     month: Month::January,
                     day: day(9),
                 },
@@ -1000,7 +1073,7 @@ mod tests {
         let mut corporate = complete("corporate", WorkKind::WebPage, "The top 10 causes of death");
         corporate.authors = vec![Author::Group("World Health Organization".to_owned())];
         corporate.published = Attested::Known(PublicationDate::Full {
-            year: 2018,
+            year: year(2018),
             month: Month::May,
             day: day(24),
         });
@@ -1061,7 +1134,7 @@ mod tests {
             "Content analysis of undergraduate psychology textbooks",
         );
         dataset.authors = vec![person("O'Donohue", "W")];
-        dataset.published = Attested::Known(PublicationDate::Year(2017));
+        dataset.published = Attested::Known(PublicationDate::Year(year(2017)));
         dataset.version = Attested::Known("V1".to_owned());
         dataset.descriptor = Attested::Known("Data set".to_owned());
         dataset.publisher = Attested::Known("ICPSR".to_owned());
@@ -1468,7 +1541,7 @@ mod tests {
         changing.id = "changing".to_owned();
         changing.stability = Stability::UnarchivedAndChanging {
             retrieved: AccessDate {
-                year: 2020,
+                year: year(2020),
                 month: Month::January,
                 day: day(9),
             },
@@ -1517,11 +1590,11 @@ mod tests {
             person("Ibáñez", "Luis Miguel"),
             Author::Person {
                 surname: "Sartre".to_owned(),
-                given: vec!["Jean-Paul".to_owned()],
+                given: vec![GivenName::new("Jean-Paul").expect("a valid given name")],
             },
             Author::Person {
                 surname: "Already".to_owned(),
-                given: vec!["M.".to_owned()],
+                given: vec![GivenName::new("M.").expect("a valid given name")],
             },
         ];
         let rendered = entry(&reference).expect("renders").plain_text();
@@ -1708,10 +1781,10 @@ mod tests {
         // A. Smith still precedes the earlier one by T. Smith.
         let mut anne = complete("anne", WorkKind::Document, "A title");
         anne.authors = vec![person("Smith", "Anne")];
-        anne.published = Attested::Known(PublicationDate::Year(2020));
+        anne.published = Attested::Known(PublicationDate::Year(year(2020)));
         let mut tom = complete("tom", WorkKind::Document, "A title");
         tom.authors = vec![person("Smith", "Tom")];
-        tom.published = Attested::Known(PublicationDate::Year(1990));
+        tom.published = Attested::Known(PublicationDate::Year(year(1990)));
 
         let list = reference_list(&[tom, anne]);
         assert_eq!(
@@ -1767,6 +1840,135 @@ mod tests {
         assert!(
             list.ambiguous.is_empty(),
             "different authors, so the citations themselves are distinct"
+        );
+    }
+
+    #[test]
+    fn no_part_of_a_recorded_name_is_dropped_from_a_rendered_author() {
+        // The module's own thesis, at the place it was leaking. `initials` used
+        // a `filter_map` over both the given names and their hyphenated parts,
+        // so a fragment it could not reduce to an initial was silently dropped
+        // and the author rendered anyway: `given = ["Mary", ""]` produced
+        // `Smith, M.`, and `"Jean--Paul"` produced `J.-P.`. Each is a plausible
+        // author with part of the recorded name missing — a citation that reads
+        // as authoritative and is partly invented.
+        //
+        // The fix is not a guard at this call site; it is that the value no
+        // longer has a spelling. These are the exact fragments Copilot named,
+        // and none of them can be put into a `Reference` at all:
+        for undroppable in ["", "   ", "Jean--Paul", "-Paul", "Jean-"] {
+            assert!(
+                GivenName::new(undroppable).is_err(),
+                "{undroppable:?} must not be constructible, so no renderer can drop it"
+            );
+        }
+        // What remains constructible renders in full — one name in, one initial
+        // out, every time.
+        for (given, rendered) in [
+            (vec!["Mary"], "Smith, M."),
+            (vec!["Mary", "Ann"], "Smith, M. A."),
+            (vec!["Jean-Paul"], "Smith, J.-P."),
+            (vec!["M.", "A."], "Smith, M. A."),
+        ] {
+            let mut reference = complete("r", WorkKind::Document, "A title");
+            reference.authors = vec![Author::Person {
+                surname: "Smith".to_owned(),
+                given: given.iter().map(|n| given_name(n)).collect(),
+            }];
+            let text = entry(&reference).expect("renders").plain_text();
+            assert!(text.starts_with(rendered), "{given:?} rendered {text:?}");
+        }
+        // And the one case with genuinely nothing to render still refuses, by
+        // name, rather than printing a bare surname.
+        let mut mononym = complete("r", WorkKind::Document, "A title");
+        mononym.authors = vec![Author::Person {
+            surname: "Plato".to_owned(),
+            given: Vec::new(),
+        }];
+        assert_eq!(
+            entry(&mononym).expect_err("refuses").missing,
+            vec![Missing::AuthorInitials { position: 1 }]
+        );
+    }
+
+    #[test]
+    fn a_url_a_reader_cannot_see_whole_is_not_a_link() {
+        // The same defect as a DOI suffix carrying a newline, one type along: a
+        // URL becomes an `EntrySpan::Link` whose visible text *is* its `href`,
+        // so these produce a citation printed across two lines and resolving to
+        // neither — or, for the bidi override, one that reads as one host and
+        // resolves to another. Both paths ask the question through one
+        // predicate; a second copy of the rule is how they would drift apart.
+        for hidden in [
+            "https://example.invalid/a\nb",
+            "https://example.invalid/a b",
+            "https://example.invalid/a\tb",
+            "https://example.invalid/a\u{202e}b",
+            "https://example.invalid/a\u{200b}b",
+        ] {
+            let mut reference = complete("r", WorkKind::Document, "A title");
+            reference.locator = Attested::Known(Locator::Url(hidden.to_owned()));
+            assert_eq!(
+                entry(&reference).expect_err("refuses").missing,
+                vec![Missing::Locator],
+                "{hidden:?} must never become a link target"
+            );
+        }
+    }
+
+    #[test]
+    fn a_whole_rendered_list_is_byte_identical_whatever_order_it_arrives_in() {
+        // `a_list_is_ordered_and_byte_identical_whatever_order_it_arrives_in`
+        // reverses its input but compares only the entries and the refusals, and
+        // `rendering_the_same_list_twice_gives_the_same_bytes` serialises one
+        // `set` twice — which proves purity, not order-independence. So the two
+        // reports added since, `duplicate_ids` and `ambiguous`, were covered by
+        // neither: either could have become input-order-dependent with every
+        // test still green.
+        //
+        // This compares the **serialised whole** — entries, refusals, duplicate
+        // ids, ambiguities, and the order of each — across a reversed input.
+        let mut first = complete("first", WorkKind::Document, "A first title");
+        first.authors = vec![person("Luna", "R")];
+        let mut second = complete("second", WorkKind::Document, "A second title");
+        second.authors = vec![person("Luna", "R")];
+        let mut shared_id = complete("shared", WorkKind::Document, "A third title");
+        shared_id.authors = vec![person("Abbott", "K")];
+        let mut shared_id_too = complete("shared", WorkKind::Document, "A fourth title");
+        shared_id_too.authors = vec![person("Zhang", "I")];
+        let mut refuses = complete("refuses", WorkKind::Document, "A fifth title");
+        refuses.authors = vec![person("Martin", "P")];
+        refuses.published = Attested::Unknown;
+
+        let forwards = vec![
+            first.clone(),
+            second.clone(),
+            shared_id.clone(),
+            shared_id_too.clone(),
+            refuses.clone(),
+        ];
+        let backwards: Vec<Reference> = forwards.iter().rev().cloned().collect();
+
+        let list = reference_list(&forwards);
+        // Not vacuous: every report this is meant to pin down has something in
+        // it. A test that compared two empty lists would pass for ever.
+        assert_eq!(list.entries.len(), 4);
+        assert_eq!(list.refused.len(), 1);
+        assert_eq!(list.duplicate_ids, ["shared"]);
+        assert_eq!(
+            list.ambiguous,
+            vec![Ambiguity {
+                citation: "(Luna, 2020)".to_owned(),
+                reference_ids: vec!["first".to_owned(), "second".to_owned()],
+            }]
+        );
+
+        let serialised =
+            |set: &[Reference]| serde_json::to_string(&reference_list(set)).expect("serialize");
+        assert_eq!(
+            serialised(&forwards),
+            serialised(&backwards),
+            "the whole report, not just the entries, must be a function of the input set"
         );
     }
 
