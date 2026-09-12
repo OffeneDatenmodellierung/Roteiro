@@ -1271,16 +1271,28 @@ mod tests {
     /// [`FindingKey::parse`] has exactly **two non-test production call sites** —
     /// `finding_from_row` and the [`Deserialize`] impl.
     ///
-    /// That is a negative claim about the rest of the workspace, so it was
-    /// established from the graph rather than from `grep`, per `AGENTS.md`'s
-    /// rule that a *"there is no other X"* must be confirmed with
-    /// `roteiro search` across several vocabularies and cite its node keys. The
-    /// inbound `calls` edges of
-    /// `sym:rust:crates/rto-graph/src/findings.rs#FindingKey::parse` are exactly
-    /// `#FindingKey::deserialize`, `#finding_from_row`, and two `#tests::…`
-    /// functions in this module — nothing else in the workspace. Queries run:
+    /// That is a negative claim about the rest of the workspace, so per
+    /// `AGENTS.md` it was confirmed with `roteiro search` across several
+    /// vocabularies and its node keys cited, rather than with `grep` alone.
+    /// Queries run, all returning only nodes in this file:
     /// `roteiro search "FindingKey parse"`, `"parse rendered finding key"`,
-    /// `"finding_from_row"`.
+    /// `"finding_from_row"`. The inbound `calls` edges of
+    /// `sym:rust:crates/rto-graph/src/findings.rs#FindingKey::parse` are
+    /// `#FindingKey::deserialize` and `#finding_from_row` — the two production
+    /// call sites — plus test functions in this module, and nothing anywhere
+    /// else in the workspace.
+    ///
+    /// The test callers are `key_round_trips_including_components_containing_colons`,
+    /// `key_rendering_round_trips_and_is_injective_over_generated_keys`,
+    /// `parse_is_permissive_about_escapes_pending_a_wire_format_decision` and
+    /// `key_rejects_ill_formed_identities` — **four**, not the two the graph
+    /// reports. The graph is right about the production callers and short by two
+    /// on the tests, because a call written inside a macro (`assert_eq!` in the
+    /// first, `matches!` in the last) yields no `calls` edge. So the two methods
+    /// are complements here rather than alternatives: the graph is what makes
+    /// the *workspace-wide* negative safe to assert, and `grep` is what gets the
+    /// within-file inventory right. Only the production count carries the
+    /// argument below, and that count is the one both agree on.
     ///
     /// A stricter parser could therefore reject exactly two things in-tree:
     ///
