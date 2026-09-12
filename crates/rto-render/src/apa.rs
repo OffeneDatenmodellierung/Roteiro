@@ -90,6 +90,7 @@
 //!   The suffix depends on the whole list and on the in-text citations that
 //!   accompany it, so it belongs to the phase that renders both together.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use rto_graph::reference::{
@@ -167,6 +168,13 @@ impl Entry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Missing {
+    /// The record has no [`Reference::id`].
+    ///
+    /// Not an APA element — APA never prints it. It is required because an
+    /// entry nobody can point at cannot be paired with the in-text citation
+    /// that cites it, and an in-text citation whose entry cannot be found is
+    /// the dangling citation this module exists to prevent.
+    Identifier,
     /// There are no authors, or one of them has an empty name.
     Author,
     /// A person author with no given names, so no initials can be formed.
@@ -183,14 +191,16 @@ pub enum Missing {
     Title,
     /// Nobody has recorded whether the work carries a version.
     Version,
-    /// A bracketed descriptor is required for this kind of work and the record
-    /// does not carry one.
+    /// Nobody has recorded whether this work carries a bracketed descriptor —
+    /// or, for a kind that requires one, the record does not carry it.
     ///
-    /// Uniquely, [`Attested::AbsentFromWork`] does not satisfy this for a kind
-    /// that requires a descriptor. A descriptor is a requirement of the
-    /// *format* — it exists so a reader is not left thinking a data set is a
-    /// book — rather than a property of the work, so "this work has no
-    /// descriptor" is not a state it can be in.
+    /// Both cases, because every kind consults the field. For a `Document` or a
+    /// `WebPage` a descriptor is optional, so [`Attested::AbsentFromWork`]
+    /// satisfies it and only [`Attested::Unknown`] refuses. For software, a
+    /// data set or a fact sheet it is required, and *neither* satisfies it: a
+    /// descriptor is a requirement of the **format** — it exists so a reader is
+    /// not left thinking a data set is a book — rather than a property of the
+    /// work, so "this work has no descriptor" is not a state it can be in.
     Descriptor,
     /// Nobody has recorded a publisher.
     Publisher,
@@ -210,6 +220,7 @@ impl Missing {
     #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::Identifier => "identifier",
             Self::Author => "author",
             Self::AuthorInitials { .. } => "author-initials",
             Self::PublicationDate => "publication-date",
@@ -273,13 +284,41 @@ pub enum CitationForm {
     Narrative,
 }
 
-/// A rendered reference list: what could be cited, and what could not.
+/// Two or more entries whose in-text citation is the same text.
+///
+/// APA resolves these with a year suffix (`2020a`, `2020b`) or by adding the
+/// first author's initials when two first authors share a surname. Both rules
+/// need the whole list at once *and* the citations that accompany it, so
+/// neither belongs to a function that renders one record — see the module
+/// documentation. What belongs here is saying so: a list that silently emits
+/// two indistinguishable citations is a list whose references cannot be
+/// resolved, and the caller is the only one placed to fix it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Ambiguity {
+    /// The parenthetical citation they share.
+    pub citation: String,
+    /// The records that produce it, in list order.
+    pub reference_ids: Vec<String>,
+}
+
+/// A rendered reference list: what could be cited, what could not, and what a
+/// reader would not be able to tell apart.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ReferenceList {
     /// The entries, in APA order — see [`Reference::list_order`].
     pub entries: Vec<Entry>,
     /// The records that refused, in the same order they would have appeared in.
     pub refused: Vec<Refusal>,
+    /// Ids carried by more than one rendered record, sorted and deduplicated.
+    ///
+    /// [`Entry::reference_id`] is the key a caller pairs an in-text citation
+    /// with its entry by, and nothing in [`Reference`] enforces that ids are
+    /// unique. Where they are not, that pairing is ambiguous — so it is
+    /// reported rather than assumed away. The entries are still rendered:
+    /// dropping them would turn a naming problem into a missing citation.
+    pub duplicate_ids: Vec<String>,
+    /// Sets of entries whose in-text citations are identical, in list order.
+    pub ambiguous: Vec<Ambiguity>,
 }
 
 /// Whether APA requires a bracketed descriptor for this kind of work.
@@ -322,6 +361,10 @@ fn title_is_italic(kind: WorkKind) -> bool {
 /// Every field that stops this record from being cited, in a fixed order.
 fn validate(reference: &Reference) -> Vec<Missing> {
     let mut missing = Vec::new();
+
+    if reference.id.trim().is_empty() {
+        missing.push(Missing::Identifier);
+    }
 
     let nameless = reference
         .authors
@@ -778,7 +821,10 @@ pub fn in_text(reference: &Reference, form: CitationForm) -> Result<Entry, Refus
 ///
 /// Records that refuse are returned separately rather than dropped: a
 /// bibliography that silently shrinks is how a citation goes missing without
-/// anybody noticing.
+/// anybody noticing. For the same reason the two ways a rendered list can still
+/// fail its reader — [`ReferenceList::duplicate_ids`] and
+/// [`ReferenceList::ambiguous`] — are reported rather than left to be
+/// discovered downstream.
 ///
 /// The output is a pure function of the input *set*: the records are put into
 /// [`Reference::list_order`], which is total, before any of them is rendered,
@@ -790,19 +836,61 @@ pub fn reference_list(references: &[Reference]) -> ReferenceList {
 
     let mut entries = Vec::new();
     let mut refused = Vec::new();
+    let mut rendered_records = Vec::new();
     for reference in ordered {
         match entry(reference) {
-            Ok(rendered) => entries.push(rendered),
+            Ok(rendered) => {
+                entries.push(rendered);
+                rendered_records.push(reference);
+            }
             Err(refusal) => refused.push(refusal),
         }
     }
-    ReferenceList { entries, refused }
+
+    let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+    for reference in &rendered_records {
+        *seen.entry(reference.id.as_str()).or_default() += 1;
+    }
+    let duplicate_ids = seen
+        .into_iter()
+        .filter(|(_, count)| *count > 1)
+        .map(|(id, _)| id.to_owned())
+        .collect();
+
+    // Grouped by the citation text itself, in list order, so the report reads
+    // the way the page does.
+    let mut citations: Vec<(String, Vec<String>)> = Vec::new();
+    for reference in &rendered_records {
+        let Ok(citation) = in_text(reference, CitationForm::Parenthetical) else {
+            continue;
+        };
+        let text = citation.plain_text();
+        match citations.iter_mut().find(|(seen, _)| *seen == text) {
+            Some((_, ids)) => ids.push(reference.id.clone()),
+            None => citations.push((text, vec![reference.id.clone()])),
+        }
+    }
+    let ambiguous = citations
+        .into_iter()
+        .filter(|(_, ids)| ids.len() > 1)
+        .map(|(citation, reference_ids)| Ambiguity {
+            citation,
+            reference_ids,
+        })
+        .collect();
+
+    ReferenceList {
+        entries,
+        refused,
+        duplicate_ids,
+        ambiguous,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        CitationForm, Entry, EntrySpan, Missing, entry, in_text, reference_list,
+        Ambiguity, CitationForm, Entry, EntrySpan, Missing, entry, in_text, reference_list,
         requires_descriptor, requires_locator, title_is_italic,
     };
     use rto_graph::reference::{
@@ -1054,6 +1142,8 @@ mod tests {
         );
         nothing_known.authors = Vec::new();
 
+        let no_id = complete("", WorkKind::Document, "A work nobody can point at");
+
         let mut no_source = complete("no-source", WorkKind::Document, "A work from nowhere");
         no_source.publisher = Attested::AbsentFromWork;
         no_source.locator = Attested::AbsentFromWork;
@@ -1110,6 +1200,11 @@ mod tests {
                 "a locator that is not a web address is refused, never linked",
                 hostile_locator,
                 vec![Missing::Locator],
+            ),
+            (
+                "an entry nobody can point at cannot be cited",
+                no_id,
+                vec![Missing::Identifier],
             ),
         ]
     }
@@ -1603,6 +1698,75 @@ mod tests {
             rendered(&backwards),
             (entries, refusals),
             "the same set in a different order must render to the same bytes"
+        );
+    }
+
+    #[test]
+    fn two_people_with_one_surname_are_ordered_by_their_given_names() {
+        // A surname alone cannot separate two different people, and APA orders
+        // them by initials *before* it looks at the date — so the later work by
+        // A. Smith still precedes the earlier one by T. Smith.
+        let mut anne = complete("anne", WorkKind::Document, "A title");
+        anne.authors = vec![person("Smith", "Anne")];
+        anne.published = Attested::Known(PublicationDate::Year(2020));
+        let mut tom = complete("tom", WorkKind::Document, "A title");
+        tom.authors = vec![person("Smith", "Tom")];
+        tom.published = Attested::Known(PublicationDate::Year(1990));
+
+        let list = reference_list(&[tom, anne]);
+        assert_eq!(
+            list.entries
+                .iter()
+                .map(|e| e.reference_id.as_str())
+                .collect::<Vec<_>>(),
+            ["anne", "tom"]
+        );
+    }
+
+    #[test]
+    fn a_list_says_which_citations_a_reader_could_not_tell_apart() {
+        // Two works, one author, one year: APA disambiguates with `2020a` /
+        // `2020b`, which needs the whole list and the citations that accompany
+        // it. This module does not do that — so it says so, rather than
+        // emitting two identical citations and leaving a reader to discover
+        // that neither resolves.
+        let mut first = complete("first", WorkKind::Document, "A first title");
+        first.authors = vec![person("Luna", "R")];
+        let mut second = complete("second", WorkKind::Document, "A second title");
+        second.authors = vec![person("Luna", "R")];
+        let mut other = complete("other", WorkKind::Document, "Another title");
+        other.authors = vec![person("Abbott", "K")];
+
+        let list = reference_list(&[first, second, other]);
+        assert_eq!(list.entries.len(), 3, "every entry is still rendered");
+        assert_eq!(
+            list.ambiguous,
+            vec![Ambiguity {
+                citation: "(Luna, 2020)".to_owned(),
+                reference_ids: vec!["first".to_owned(), "second".to_owned()],
+            }],
+            "the unambiguous entry is not reported"
+        );
+        assert!(list.duplicate_ids.is_empty());
+    }
+
+    #[test]
+    fn a_list_says_when_two_records_share_an_identifier() {
+        // `reference_id` is what pairs a citation with its entry, and nothing
+        // in `Reference` enforces that ids are unique. Where they are not, the
+        // entries are still rendered — dropping one would turn a naming problem
+        // into a missing citation — and the collision is reported.
+        let mut one = complete("same", WorkKind::Document, "A first title");
+        one.authors = vec![person("Luna", "R")];
+        let mut two = complete("same", WorkKind::Document, "A second title");
+        two.authors = vec![person("Abbott", "K")];
+
+        let list = reference_list(&[one, two]);
+        assert_eq!(list.entries.len(), 2);
+        assert_eq!(list.duplicate_ids, ["same"]);
+        assert!(
+            list.ambiguous.is_empty(),
+            "different authors, so the citations themselves are distinct"
         );
     }
 

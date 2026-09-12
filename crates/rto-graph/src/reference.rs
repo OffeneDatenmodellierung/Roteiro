@@ -427,7 +427,7 @@ fn strip_prefix_ignoring_ascii_case<'a>(text: &'a str, prefix: &str) -> Option<&
 /// A string that is not a DOI.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "not a DOI: {0:?} (expected `10.<digits>/<suffix>`, optionally behind `https://doi.org/` or `doi:`)"
+    "not a DOI: {0:?} (expected `10.<digits>/<suffix>`, optionally behind a doi.org resolver URL or a `doi:` prefix)"
 )]
 pub struct NotADoi(pub String);
 
@@ -687,6 +687,9 @@ impl Reference {
     ///   same surname;
     /// - entries sharing a first author are ordered by the *second* author's
     ///   surname, and so on down the list;
+    /// - two different people with the same surname are ordered by their given
+    ///   names, before date is consulted at all — `Smith, A.` precedes
+    ///   `Smith, T.`, whatever year either published;
     /// - only then does date break the tie, earliest first, with an undated
     ///   work before any dated one.
     ///
@@ -696,9 +699,9 @@ impl Reference {
     ///
     /// The keys, in order:
     ///
-    /// 1. every author's sort key, in the order the work lists them,
-    ///    case-insensitively — APA alphabetises letter by letter and does not
-    ///    care about capitals;
+    /// 1. every author, in the order the work lists them — surname then given
+    ///    names, case-insensitively, since APA alphabetises letter by letter
+    ///    and does not care about capitals;
     /// 2. the same list case-sensitively, so the fold in step 1 never decides a
     ///    tie by accident of iteration order;
     /// 3. the full publication date — year, then month, then day, so two works
@@ -733,16 +736,35 @@ impl Reference {
         fn title(reference: &Reference) -> &str {
             reference.title.trim()
         }
-        // Trimmed, because the renderer trims: a leading space that no reader
-        // can see must not decide where an entry lands in the list.
-        let authors = |r: &Self| -> Vec<String> {
+        // Surname **and** given names: a surname alone cannot separate two
+        // different people who share one, and APA orders those by their
+        // initials before it looks at the date. Trimmed, because the renderer
+        // trims — a leading space that no reader can see must not decide where
+        // an entry lands in a list somebody reads.
+        let authors = |r: &Self| -> Vec<(String, Vec<String>)> {
             r.authors
                 .iter()
-                .map(|author| author.sort_key().trim().to_owned())
+                .map(|author| {
+                    let given = match author {
+                        Author::Person { given, .. } => {
+                            given.iter().map(|name| name.trim().to_owned()).collect()
+                        }
+                        Author::Group(_) => Vec::new(),
+                    };
+                    (author.sort_key().trim().to_owned(), given)
+                })
                 .collect()
         };
-        let folded = |names: &[String]| -> Vec<String> {
-            names.iter().map(|name| name.to_lowercase()).collect()
+        let folded = |names: &[(String, Vec<String>)]| -> Vec<(String, Vec<String>)> {
+            names
+                .iter()
+                .map(|(surname, given)| {
+                    (
+                        surname.to_lowercase(),
+                        given.iter().map(|name| name.to_lowercase()).collect(),
+                    )
+                })
+                .collect()
         };
         let (left, right) = (authors(a), authors(b));
         // `Unknown` last, `AbsentFromWork` (n.d.) first, known dates between —
@@ -1051,6 +1073,30 @@ mod tests {
         refs.sort_by(Reference::list_order);
         let order: Vec<&str> = refs.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(order, ["january", "december"]);
+    }
+
+    #[test]
+    fn two_people_with_one_surname_are_ordered_by_their_given_names() {
+        // A surname alone cannot separate two different people, and APA orders
+        // them by initials before it looks at the date — so A. Smith's later
+        // work still precedes T. Smith's earlier one.
+        let mut anne = dated("anne", "Smith", 2020);
+        anne.authors = vec![Author::Person {
+            surname: "Smith".to_owned(),
+            given: vec!["Anne".to_owned()],
+        }];
+        let mut tom = dated("tom", "Smith", 1990);
+        tom.authors = vec![Author::Person {
+            surname: "Smith".to_owned(),
+            given: vec!["Tom".to_owned()],
+        }];
+
+        let mut refs = [tom, anne];
+        refs.sort_by(Reference::list_order);
+        assert_eq!(
+            refs.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["anne", "tom"]
+        );
     }
 
     #[test]
