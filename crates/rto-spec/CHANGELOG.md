@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.12.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v5.11.0...rto-spec-v5.12.0) - 2026-09-12
+
+### Added
+
+- *(docs)* `fmt` never reordered frontmatter keys in a release
+- *(docs)* `roteiro docs fmt` — the canonical form of an authored document
+
+### Fixed
+
+- *(spec)* the delimiter is row two, and the churn outlived its feature
+- *(spec)* a delimiter is not a table, and a FIFO is not a document
+- *(spec)* three the last two rounds introduced, and one they missed
+- *(spec)* the relabel was firing on nothing, and four more
+- *(spec)* indentation is structure, and an escaped backtick opens nothing
+- *(spec)* the frontmatter split for parsing is not the one for preserving
+- *(spec)* a fresh scaffold was not in the form `docs fmt` demands
+- *(docs)* decide frontmatter blocks with the whole picture, not line by line
+- *(docs)* a YAML sequence was detached from its key
+- *(docs)* a CRLF document was formatted twice and flattened once
+- *(docs)* use the crate's own code-span rule instead of a fourth scanner
+- *(docs)* measure indentation the way markdown measures it
+- *(docs)* two content-destroying cases, and a property test over the rest
+- *(docs)* the relabel is one table's, and the symlink check is every component's
+- *(docs)* read the declared kind, close fences properly, isolate the tests
+- *(docs)* the table rules were too loose, and two doc comments moved
+- *(docs)* relink what was reachable, and one link that only builds sometimes
+- *(docs)* repair three things the delink sweep got wrong
+
+### Other
+
+- Merge pull request #791 from OffeneDatenmodellierung/feat/non-exhaustive-rto-spec
+- *(rust)* clear the broken intra-doc link backlog
+
 ## [5.9.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v5.8.1...rto-spec-v5.9.0) - 2026-09-08
 
 ### Fixed

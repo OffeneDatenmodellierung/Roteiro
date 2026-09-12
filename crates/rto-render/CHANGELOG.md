@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.12.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v5.11.0...rto-render-v5.12.0) - 2026-09-12
+
+### Other
+
+- *(rust)* clear the broken intra-doc link backlog
+
 ## [5.11.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v5.10.2...rto-render-v5.11.0) - 2026-09-11
 
 ### Fixed
