@@ -105,29 +105,27 @@ fn slugify(text: &str) -> String {
 /// `text` alone, whereas slugifying the raw source would fold the target in
 /// too. Backticks, `*` and `#` need no stripping: `slugify` already drops every
 /// character that is neither alphanumeric nor `-`/`_`/whitespace.
+///
+/// Finding those links is [`rto_graph::markdown_links`]'s job rather than this
+/// file's (#801): it is the one Markdown link reader in the workspace, it keeps
+/// the link **text** — which is exactly the half this needs and the half no
+/// other reader used to keep — and it reports the byte range to splice over.
+/// The copy this replaced read to the *first* `]`, so `[see [x]](y)` reduced to
+/// `see [x](y)` rather than `see [x]`; and it did not know about code spans, so
+/// a heading documenting the `[a](b)` form was reduced instead of left alone —
+/// which is what rustdoc does to it, since a code span's content is literal.
 fn heading_text(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
-    let mut rest = raw;
-    while let Some(open) = rest.find('[') {
-        out.push_str(&rest[..open]);
-        let after = &rest[open + 1..];
-        // `[text](target)` — keep `text`, drop `(target)`. Anything else falls
-        // through as literal text, which slugify then handles.
-        match (after.find(']'), after.find("](")) {
-            (Some(close), Some(link)) if close == link => {
-                out.push_str(&after[..close]);
-                match after[close + 2..].find(')') {
-                    Some(end) => rest = &after[close + 2 + end + 1..],
-                    None => return out,
-                }
-            }
-            _ => {
-                out.push('[');
-                rest = after;
-            }
+    let mut at = 0;
+    for link in rto_graph::markdown_links(raw) {
+        if link.kind != rto_graph::LinkKind::Inline {
+            continue;
         }
+        out.push_str(&raw[at..link.span.start]);
+        out.push_str(&link.text);
+        at = link.span.end;
     }
-    out.push_str(rest);
+    out.push_str(&raw[at..]);
     out
 }
 
@@ -283,23 +281,15 @@ struct AnchorLink {
 /// unterminated run is literal and shields nothing, matching the markdown spec
 /// and `rto_render::docs`'s own renderer. Without this, documenting the very
 /// pattern this file checks would trip the check.
+///
+/// That last claim used to be made by a private copy of the rule, and the copy
+/// did not keep it (#801): it closed on the first run of *at least* `n`
+/// backticks rather than exactly `n`, and an escaped `` \` `` opened a span —
+/// the two ways #790 found of swallowing the rest of a line. It is
+/// [`rto_graph::strip_code_spans`] now, which is the rule the renderer actually
+/// uses, so "matching" is by construction rather than by agreement.
 fn without_code_spans(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(open) = rest.find('`') {
-        let ticks = rest[open..].len() - rest[open..].trim_start_matches('`').len();
-        let fence = &rest[open..open + ticks];
-        let body = &rest[open + ticks..];
-        let Some(close) = body.find(fence) else {
-            // Unterminated: the rest of the line is literal text.
-            out.push_str(rest);
-            return out;
-        };
-        out.push_str(&rest[..open]);
-        rest = &body[close + ticks..];
-    }
-    out.push_str(rest);
-    out
+    rto_graph::strip_code_spans(text)
 }
 
 /// Pull every `self#anchor` / `#anchor` link target out of one doc-text line.

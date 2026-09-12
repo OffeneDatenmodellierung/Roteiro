@@ -2,6 +2,7 @@
 
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use std::collections::BTreeMap;
+use std::ops::Range;
 
 /// A URL-safe slug: lowercase, non-alphanumeric runs collapsed to a single `-`,
 /// trimmed of leading/trailing `-`.
@@ -575,4 +576,884 @@ pub fn headings(md: &str) -> Vec<Heading> {
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Markdown links
+// ---------------------------------------------------------------------------
+
+/// Which Markdown syntax a [`MarkdownLink`] was written in.
+///
+/// Both are links in this project's dialect and both are read by one scanner,
+/// which is the point: "find a Markdown link" had five implementations sharing
+/// no code, and the two kinds were never found by the same one.
+///
+/// # Deliberately closed, and not `#[non_exhaustive]`
+///
+/// `CommonMark` has link forms this does not read — reference links (`[a][b]`),
+/// autolinks (`<https://…>`), images — so a third variant is imaginable, which
+/// is exactly why the set is shut rather than left open. A caller decides what
+/// to *do* per kind: [`crate::markdown_links`]' own callers rewrite an inline
+/// link's text over the whole link and resolve a wiki-link's target against a
+/// node key, and there is no behaviour that is right for a kind nobody has seen.
+/// Left open, every one of them grows a wildcard arm and a new kind is silently
+/// handled as whichever of these it is least like. Shut, adding one is a major
+/// version and a compile error at each place that has to decide — which is the
+/// cost that should be paid, and the same argument `rto_faithful::Segment` makes
+/// for the same reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum LinkKind {
+    /// A Roteiro `[[target]]` wiki-link — the authored layer's citation into the
+    /// graph, resolved by `rto_spec` against a node key.
+    Wiki,
+    /// A `CommonMark` `[text](destination)` inline link.
+    Inline,
+}
+
+/// Whether a link destination addresses something this repository holds, or
+/// somewhere outside it.
+///
+/// The distinction is one rule because it is asked in three places that each had
+/// their own answer: the site renderer deciding whether a destination can be
+/// rewritten to a page it serves, the rendered-site link gate deciding whose
+/// uptime a href depends on, and — the reason this is `pub` rather than private
+/// to either — a citation needing to know whether a locator names a work someone
+/// else published.
+///
+/// # Deliberately closed, and not `#[non_exhaustive]`
+///
+/// The question is a yes/no one — a destination either names something this
+/// repository is expected to contain or it does not — so this is a `bool` that
+/// says which way round it is, and a `bool` cannot acquire a third value. Any
+/// finer distinction anybody wants later (which scheme, which host, whether the
+/// path exists) is a different question with a different answer type, not a
+/// variant here; making it one would change what every existing arm means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum LinkScope {
+    /// A relative or root-relative path, or a bare `#fragment`: something this
+    /// repository is expected to contain.
+    Internal,
+    /// A destination carrying a URL scheme (`https:`, `mailto:`, …) or written
+    /// protocol-relative (`//host/…`): somebody else's.
+    External,
+}
+
+impl LinkScope {
+    /// Whether this scope is [`LinkScope::External`].
+    #[must_use]
+    pub fn is_external(self) -> bool {
+        matches!(self, Self::External)
+    }
+}
+
+/// One Markdown link found on one line by [`markdown_links`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkdownLink {
+    /// Which syntax it was written in.
+    pub kind: LinkKind,
+    /// Where it points: the inner text for a wiki-link, the destination for an
+    /// inline one. Trimmed, and never empty — a link naming nothing is not a
+    /// link, which is the reading that cannot invent an edge out of stray
+    /// punctuation.
+    pub target: String,
+    /// What a reader sees. For an inline link that is its bracketed text, which
+    /// is the half a citation label needs and which no scanner here used to
+    /// keep. For a wiki-link the visible text **is** the target, so this repeats
+    /// it rather than being empty: a caller labelling links does not have to
+    /// know which kind it is holding.
+    pub text: String,
+    /// Whether [`target`](Self::target) names something outside this repository.
+    /// Always [`LinkScope::Internal`] for a wiki-link, which addresses a graph
+    /// node by key and cannot name a URL.
+    pub scope: LinkScope,
+    /// The byte range the whole link occupies **in the line as given**, so a
+    /// caller can rewrite it in place. Code spans are excluded from the scan but
+    /// not from this range: a link whose brackets straddle one covers it.
+    pub span: Range<usize>,
+}
+
+/// Every Markdown link on `line`, of both kinds, in the order they are written.
+///
+/// # The one scanner
+///
+/// "Find a Markdown link" was implemented five times across this workspace with
+/// no shared code — a `[[…]]` scanner in `rto_spec`, a `pulldown-cmark` event
+/// filter in `rto_render`, a hand-rolled target reader in the OKF bundle reader,
+/// and two more in the test suite. This is that rule, once. The failure mode is
+/// not that one of them is wrong: it is that they quietly disagree, which is
+/// exactly the defect two Markdown *walkers* produced in #790 and which
+/// `docs_are_canonical.rs` records verbatim.
+///
+/// It sits beside [`slugify`] and [`heading_text`] for the reason those do:
+/// `rto_spec` and `rto_render` both depend on this crate unconditionally and on
+/// each other only under a feature, so this is the one place the rule can be the
+/// only copy of itself.
+///
+/// # What it does and does not read
+///
+/// **One line.** Every caller scanning a document already tracks its own fenced
+/// code state and attributes each link to the section enclosing it, so a
+/// document-level scan would answer a question none of them asked and would take
+/// the fence rule away from the four scanners that disagree about it (see
+/// [`is_code_fence`]).
+///
+/// **Inline code spans are not scanned**, so a `` `[[path#Symbol]]` `` or a
+/// `` `[text](x)` `` written as a documentation example is not a link. That is
+/// [`strip_code_spans`]' rule, and it is why this is not `pulldown-cmark`: a
+/// destination is read here only where the source closes it, so a malformed line
+/// yields no link rather than whatever a recovering parser makes of it.
+///
+/// A backslash escapes the delimiter after it, so `\[not a link](x)` is prose.
+/// Escapes are **not** processed inside `[[…]]`, which is a Roteiro token rather
+/// than `CommonMark` syntax and has never had them.
+#[must_use]
+pub fn markdown_links(line: &str) -> Vec<MarkdownLink> {
+    let (stripped, map) = strip_and_map(line);
+    let wiki = wiki_spans(&stripped);
+    let mut out: Vec<MarkdownLink> = wiki
+        .iter()
+        .map(|(range, target)| MarkdownLink {
+            kind: LinkKind::Wiki,
+            target: target.clone(),
+            text: target.clone(),
+            scope: LinkScope::Internal,
+            span: map.start(range.start)..map.end(range.end),
+        })
+        .collect();
+    out.extend(
+        inline_spans(&stripped, &wiki)
+            .into_iter()
+            .map(|(range, text, destination)| MarkdownLink {
+                scope: link_scope(&destination),
+                kind: LinkKind::Inline,
+                target: destination,
+                text,
+                span: map.start(range.start)..map.end(range.end),
+            }),
+    );
+    out.sort_by_key(|l| l.span.start);
+    out
+}
+
+/// The inner text of every `[[…]]` on `line`, ignoring any inside an inline code
+/// span — [`markdown_links`] narrowed to the kind the authored-layer scanners
+/// read.
+///
+/// A convenience over the one scanner rather than a second one: `rto_spec`'s ADR,
+/// blueprint, site-page and lat.md parsers all want this exact list, and giving
+/// each of them a filter to write is how a sixth implementation starts.
+#[must_use]
+pub fn wiki_link_targets(line: &str) -> Vec<String> {
+    markdown_links(line)
+        .into_iter()
+        .filter(|l| l.kind == LinkKind::Wiki)
+        .map(|l| l.target)
+        .collect()
+}
+
+/// Whether `destination` names something outside this repository.
+///
+/// External is "carries a URL scheme" (RFC 3986 §3.1 — an ASCII letter then
+/// letters, digits, `+`, `-` or `.`, then `:`) or "is protocol-relative"
+/// (`//host/…`). Everything else — a relative path, a root-relative one, a bare
+/// `#fragment` — is internal.
+///
+/// Written as the scheme rule rather than as a list of the four prefixes the two
+/// call sites happened to enumerate (`http://`, `https://`, `mailto:`, `//`),
+/// because a list is a thing to forget an entry from: `tel:`, `ftp:` and `data:`
+/// were external before this and were classified internal by both of them.
+#[must_use]
+pub fn link_scope(destination: &str) -> LinkScope {
+    let destination = destination.trim();
+    if destination.starts_with("//") {
+        return LinkScope::External;
+    }
+    let Some((scheme, _)) = destination.split_once(':') else {
+        return LinkScope::Internal;
+    };
+    let mut chars = scheme.chars();
+    let valid = chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+    if valid {
+        LinkScope::External
+    } else {
+        LinkScope::Internal
+    }
+}
+
+/// Whether `line` opens or closes a fenced code block — a run of three or more
+/// backticks or tildes, after leading whitespace.
+///
+/// # This is the `CommonMark` rule, and three scanners in this workspace do not use it
+///
+/// `rto_render::docs` recognises both delimiters. `rto_spec`'s ADR, blueprint,
+/// site-page and lat.md scanners each carry their own
+/// `trim_start().starts_with("```")`, which recognises only backticks — noted at
+/// the ADR one as a known narrowing. So a `~~~`-fenced example is code to the
+/// renderer and prose to the gate, and a `[[…]]` inside one is a link the gate
+/// resolves and the site renders literally.
+///
+/// That divergence is **not** closed here, because closing it changes what the
+/// gate counts and this rule's introduction is not the change that should decide
+/// it: no document in this repository fences with `~~~` today, so unifying them
+/// moves nothing now and would move the count the first time somebody wrote one.
+/// It is written down here instead of staying an accident of five copies.
+#[must_use]
+pub fn is_code_fence(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("```") || trimmed.starts_with("~~~")
+}
+
+/// Return `line` with inline code spans removed, so tokens documented as
+/// examples (e.g. `` `[[path#Symbol]]` `` or ``` ``@rto:0001`` ```) are not
+/// scanned as real links or annotations.
+///
+/// Follows the `CommonMark` rule for code spans: a span opens with a run of *n*
+/// backticks and closes with the next run of exactly *n* backticks. An opening
+/// run with no matching close is literal text and is kept. Non-backtick text is
+/// preserved verbatim (backticks are ASCII, so all slice boundaries are valid).
+#[must_use]
+pub fn strip_code_spans(line: &str) -> String {
+    strip_and_map(line).0
+}
+
+/// The byte ranges of `line`'s **matched** inline code spans, in order.
+///
+/// The `CommonMark` rule, in one place: a span opens with a run of *n* backticks
+/// and closes with the next run of exactly *n*; an opening run with no matching
+/// close is literal text and yields no span. A **backslash-escaped** backtick is
+/// literal and opens nothing — without that, `` \` `` paired with a later real
+/// opener and swallowed everything between them, which hid a table column from
+/// `rto_spec::fmt` and would hide a `[[…]]` link or a `@rto:` annotation from
+/// the scanners that read this. The rule is **asymmetric**: escapes do not work
+/// *inside* a code span, so a backslash before the closing run is content and
+/// the run still closes.
+///
+/// Separate from [`strip_code_spans`] because removing a span and knowing where
+/// one *is* are different questions, and `rto_spec::fmt` needs the second — a
+/// table row's `|` inside a code span is content rather than a column boundary.
+/// It had its own backtick scanner until #790 found that it entered code mode on
+/// an unmatched run and hid the rest of the row, which is exactly the case this
+/// rule exists to get right.
+#[must_use]
+pub fn code_spans(line: &str) -> Vec<(usize, usize)> {
+    let bytes = line.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    // Whether the byte at `at` is escaped by an unbalanced run of backslashes.
+    let escaped = |at: usize| {
+        bytes[..at]
+            .iter()
+            .rev()
+            .take_while(|b| **b == b'\\')
+            .count()
+            % 2
+            == 1
+    };
+    while i < bytes.len() {
+        if bytes[i] != b'`' || escaped(i) {
+            i += 1;
+            continue;
+        }
+        // Measure the opening backtick run.
+        let run_start = i;
+        while i < bytes.len() && bytes[i] == b'`' {
+            i += 1;
+        }
+        let run = i - run_start;
+        // Find a closing run of exactly the same length.
+        let mut j = i;
+        let mut close = None;
+        while j < bytes.len() {
+            // **No escape check on the close.** `CommonMark`: backslash
+            // escapes do not work inside a code span, so a backslash before the
+            // closing run is literal content and the run still closes. Applying
+            // the opener's rule here made `` `a\` `` run on to the next
+            // backtick and swallow whatever lay between.
+            if bytes[j] == b'`' {
+                let s = j;
+                while j < bytes.len() && bytes[j] == b'`' {
+                    j += 1;
+                }
+                if j - s == run {
+                    close = Some(j);
+                    break;
+                }
+            } else {
+                j += 1;
+            }
+        }
+        // An unmatched opening run is literal, and the scan continues *after*
+        // it rather than restarting inside it.
+        if let Some(end) = close {
+            out.push((run_start, end));
+            i = end;
+        }
+    }
+    out
+}
+
+/// The pieces of a line that survived [`code_spans`], and where each of them
+/// started in the line itself.
+///
+/// Scanning happens on the stripped string so that the answer is the one the
+/// `[[…]]` scanner has always given — a link whose brackets straddle a code span
+/// is found, because removing the span joins its halves. Reporting happens in
+/// the caller's coordinates, so a rewriter can act on what it was handed. The
+/// two are different, so the stripping keeps a map rather than throwing it away.
+struct SpanMap(
+    /// `(offset in the stripped string, offset in the source line, length)`, in
+    /// order and non-empty.
+    Vec<(usize, usize, usize)>,
+);
+
+impl SpanMap {
+    /// The source-line offset a stripped-string range **starts** at: the chunk
+    /// holding that offset, which is the one the first byte of the link is in.
+    fn start(&self, at: usize) -> usize {
+        self.at(at, |chunk_start| at >= chunk_start)
+    }
+
+    /// The source-line offset a stripped-string range **ends** at.
+    ///
+    /// Deliberately a different lookup from [`Self::start`], and the difference
+    /// is the whole reason the two exist. An exclusive end that lands exactly on
+    /// a chunk boundary belongs to the chunk it closes, not the one beginning
+    /// there — so it maps to the end of the text the link was read from. Taking
+    /// the later chunk instead extends the range over the code span that
+    /// separates them, which is how `[[…]]`` ::x` came back as a span running
+    /// past its own `]]`.
+    fn end(&self, at: usize) -> usize {
+        self.at(at, |chunk_start| at > chunk_start)
+    }
+
+    /// The source offset of `at`, in the last chunk `keep` accepts.
+    fn at(&self, at: usize, keep: impl Fn(usize) -> bool) -> usize {
+        self.0
+            .iter()
+            .rev()
+            .find(|(start, _, _)| keep(*start))
+            .map_or(at, |(start, source, _)| source + (at - start))
+    }
+}
+
+/// `line` with its code spans removed, and the map back to it.
+fn strip_and_map(line: &str) -> (String, SpanMap) {
+    let mut stripped = String::with_capacity(line.len());
+    let mut chunks = Vec::new();
+    let mut at = 0;
+    for (start, end) in code_spans(line) {
+        if start > at {
+            chunks.push((stripped.len(), at, start - at));
+            stripped.push_str(&line[at..start]);
+        }
+        at = end;
+    }
+    if at < line.len() {
+        chunks.push((stripped.len(), at, line.len() - at));
+        stripped.push_str(&line[at..]);
+    }
+    (stripped, SpanMap(chunks))
+}
+
+/// Every `[[…]]` on an already-stripped line: its range there, and its trimmed
+/// inner text.
+///
+/// Deliberately the scan `rto_spec::text::scan_wiki_links` ran before this
+/// existed, down to the rest-of-line walk: an unclosed `[[` stops the scan
+/// rather than being skipped past, and an empty `[[]]` is consumed without being
+/// reported. `markdown_links_parity.rs` holds that claim to a frozen copy of the
+/// original over every Markdown file in the tree.
+fn wiki_spans(stripped: &str) -> Vec<(Range<usize>, String)> {
+    let mut out = Vec::new();
+    let mut base = 0usize;
+    let mut rest = stripped;
+    while let Some(open) = rest.find("[[") {
+        let after = &rest[open + 2..];
+        let Some(close) = after.find("]]") else {
+            break;
+        };
+        let inner = after[..close].trim();
+        let start = base + open;
+        let end = start + 2 + close + 2;
+        if !inner.is_empty() {
+            out.push((start..end, inner.to_owned()));
+        }
+        base = end;
+        rest = &after[close + 2..];
+    }
+    out
+}
+
+/// Every `[text](destination)` on an already-stripped line, skipping the ranges
+/// `wiki` already claimed so `[[a]]` is one wiki-link rather than also an inline
+/// one with a bracket for text.
+fn inline_spans(
+    stripped: &str,
+    wiki: &[(Range<usize>, String)],
+) -> Vec<(Range<usize>, String, String)> {
+    let bytes = stripped.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i += 2;
+            continue;
+        }
+        if bytes[i] != b'[' {
+            i += 1;
+            continue;
+        }
+        if let Some((claimed, _)) = wiki.iter().find(|(r, _)| r.contains(&i)) {
+            i = claimed.end;
+            continue;
+        }
+        let Some((text, destination, end)) = inline_at(stripped, i) else {
+            i += 1;
+            continue;
+        };
+        // A link naming nothing is not a link — the same reading the OKF bundle
+        // reader applies, and the one that cannot invent an edge out of `[a]()`.
+        if !destination.is_empty() {
+            out.push((i..end, text, destination));
+        }
+        i = end;
+    }
+    out
+}
+
+/// The inline link opening at `open`, as `(text, destination, end)`.
+///
+/// Brackets and parentheses are matched by depth, so `[see [x]](y)` is one link
+/// with the text `see [x]` rather than two half-read ones, and a destination may
+/// hold the balanced parentheses a Wikipedia URL does. A backslash escapes the
+/// delimiter after it. Either run reaching the end of the line unclosed yields
+/// no link.
+fn inline_at(line: &str, open: usize) -> Option<(String, String, usize)> {
+    let close = matching(line.as_bytes(), open, b'[', b']')?;
+    if line.as_bytes().get(close + 1) != Some(&b'(') {
+        return None;
+    }
+    let dest_end = matching(line.as_bytes(), close + 1, b'(', b')')?;
+    Some((
+        line[open + 1..close].to_owned(),
+        destination_of(&line[close + 2..dest_end]),
+        dest_end + 1,
+    ))
+}
+
+/// The offset of the `shut` byte closing the `open` byte at `from`, counting
+/// nesting and honouring backslash escapes.
+fn matching(bytes: &[u8], from: usize, open: u8, shut: u8) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut i = from;
+    while i < bytes.len() {
+        // A continuation byte of a multi-byte character is never one of the
+        // ASCII delimiters below, so stepping over one byte after a backslash
+        // cannot mis-read a character — and every offset returned is at an
+        // ASCII delimiter, so it is always a char boundary.
+        if bytes[i] == b'\\' {
+            i += 2;
+            continue;
+        }
+        if bytes[i] == open {
+            depth += 1;
+        } else if bytes[i] == shut {
+            // A close with nothing open is malformed rather than a link, and
+            // saying so here is also what keeps the subtraction from wrapping.
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                return Some(i);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The destination out of an inline link's parenthesised part, dropping the
+/// optional title `CommonMark` allows after it and unwrapping the `<…>` form.
+fn destination_of(raw: &str) -> String {
+    let raw = raw.trim();
+    if let Some(rest) = raw.strip_prefix('<')
+        && let Some(end) = rest.find('>')
+    {
+        return rest[..end].to_owned();
+    }
+    // A destination cannot hold unescaped whitespace, so whatever follows the
+    // first run of it is a title: metadata about the link, not where it points.
+    raw.split_whitespace().next().unwrap_or("").to_owned()
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::{
+        LinkKind, LinkScope, code_spans, is_code_fence, link_scope, markdown_links,
+        strip_code_spans, wiki_link_targets,
+    };
+
+    /// Every link on a line, as `(kind, target, text, external)`, so a case can
+    /// state the whole answer rather than one field of it.
+    fn scanned(line: &str) -> Vec<(LinkKind, String, String, bool)> {
+        markdown_links(line)
+            .into_iter()
+            .map(|l| (l.kind, l.target, l.text, l.scope.is_external()))
+            .collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // Code spans — the rule `rto_spec::text` held before this, moved with it.
+    // -----------------------------------------------------------------------
+
+    /// A backslash-escaped backtick is literal and opens no span.
+    ///
+    /// It used to pair with the next real opener and swallow everything
+    /// between, which hid a table column from `rto_spec::fmt` — and would hide
+    /// a `[[…]]` link or a `@rto:` annotation from the scanners that read this,
+    /// since they share this rule. Raised on #790.
+    #[test]
+    fn an_escaped_backtick_opens_no_span() {
+        assert_eq!(code_spans(r"a \` b `code` c").len(), 1);
+        assert_eq!(strip_code_spans(r"a \` b `code` c"), r"a \` b  c");
+        // A doubled backslash escapes itself, so the backtick is real again.
+        assert_eq!(code_spans(r"a \\`code` b").len(), 1);
+        // And the link scanner is not fooled by one.
+        assert_eq!(wiki_link_targets(r"\` [[docs/x.md]]"), vec!["docs/x.md"]);
+    }
+
+    /// The rule is asymmetric: an escape opens nothing, but closes normally.
+    ///
+    /// `CommonMark` does not process backslash escapes inside a code span, so a
+    /// backslash before the closing run is literal content and the run still
+    /// closes. Treating the close like the open made a span run on to the next
+    /// backtick and swallow everything between. Raised on #790.
+    #[test]
+    fn an_escape_before_a_closing_run_still_closes_the_span() {
+        // One span, ending at the backtick after the backslash.
+        assert_eq!(code_spans(r"`a\` and [[docs/x.md]]").len(), 1);
+        assert_eq!(
+            wiki_link_targets(r"`a\` and [[docs/x.md]]"),
+            vec!["docs/x.md"]
+        );
+        assert_eq!(strip_code_spans(r"`a\` rest"), " rest");
+    }
+
+    #[test]
+    fn removes_single_and_multi_backtick_spans() {
+        assert_eq!(strip_code_spans("a `code` b"), "a  b");
+        // A run of two backticks (used to embed a literal backtick) is a span too.
+        assert_eq!(strip_code_spans("see ``@rto:0001`` here"), "see  here");
+        assert_eq!(strip_code_spans("x ```fenced inline``` y"), "x  y");
+    }
+
+    #[test]
+    fn keeps_unmatched_backticks_and_plain_text() {
+        assert_eq!(strip_code_spans("no code here"), "no code here");
+        assert_eq!(strip_code_spans("unmatched ` tick"), "unmatched ` tick");
+        // Mismatched run lengths do not close the span.
+        assert_eq!(strip_code_spans("``open ` mid"), "``open ` mid");
+    }
+
+    #[test]
+    fn preserves_utf8_outside_spans() {
+        assert_eq!(strip_code_spans("café `x` — ok"), "café  — ok");
+    }
+
+    // -----------------------------------------------------------------------
+    // Code-span exclusion, for both kinds
+    // -----------------------------------------------------------------------
+
+    /// A link of either kind inside single backticks is a documentation
+    /// example, not a link — the property the four `rto_spec` scanners depend
+    /// on and the one most likely to be lost in a rewrite of this scanner.
+    #[test]
+    fn a_link_inside_a_code_span_is_not_a_link() {
+        assert!(scanned("see `[[docs/x.md#Sym]]` for the form").is_empty());
+        assert!(scanned("write `[label](target.md)` like this").is_empty());
+        // A run of two backticks is a span too, and so is a triple-backtick
+        // *inline* run — which is not a fence, because a fence is a whole line.
+        assert!(scanned("``[[a/b.md]]`` and ```[c](d.md)```").is_empty());
+        // The example and a real link on one line: only the real one counts.
+        assert_eq!(
+            scanned("`[[example]]` but [[docs/real.md]] resolves")
+                .iter()
+                .map(|(_, t, _, _)| t.as_str())
+                .collect::<Vec<_>>(),
+            vec!["docs/real.md"]
+        );
+    }
+
+    /// An **unmatched** backtick run shields nothing, so a link after one is
+    /// still a link. This is the half #790 got wrong in `rto_spec::fmt`: a
+    /// scanner that enters code mode on an opener it never closes hides the
+    /// rest of the line.
+    #[test]
+    fn an_unclosed_code_span_hides_nothing() {
+        assert_eq!(wiki_link_targets("` [[docs/x.md]]"), vec!["docs/x.md"]);
+        assert_eq!(
+            scanned("`` [text](docs/x.md)")
+                .iter()
+                .map(|(_, t, _, _)| t.as_str())
+                .collect::<Vec<_>>(),
+            vec!["docs/x.md"]
+        );
+    }
+
+    /// Removing a code span **joins** what was either side of it, which is what
+    /// the scan has always done and is therefore what it must keep doing: a
+    /// link whose brackets straddle a span is found, and its reported range
+    /// covers the span it straddles so a rewriter replaces the whole thing.
+    #[test]
+    fn a_link_straddling_a_code_span_is_one_link() {
+        let line = "[[docs/`x`.md]]";
+        assert_eq!(wiki_link_targets(line), vec!["docs/.md"]);
+        assert_eq!(markdown_links(line)[0].span, 0..line.len());
+    }
+
+    /// A link whose close **abuts** a code span ends at its own `]]`, not at the
+    /// far side of the span.
+    ///
+    /// The two offsets are the same number in the stripped string and different
+    /// numbers in the line, so this is the one case where mapping an exclusive
+    /// end like a start silently over-extends every such range. It was a real
+    /// defect, found by `markdown_links_parity.rs` over
+    /// `docs/adr/0009-…:232` while none of the cases here noticed; it is pinned
+    /// here so the corpus is not the only thing standing between the bug and a
+    /// rewriter splicing over a reader's backticks.
+    #[test]
+    fn a_link_ending_where_a_code_span_begins_stops_at_its_own_close() {
+        let line = "[[crates/x.rs#Sym]]`::field` and prose";
+        let links = markdown_links(line);
+        assert_eq!(&line[links[0].span.clone()], "[[crates/x.rs#Sym]]");
+        // The same shape for an inline link, whose close is a single `)`.
+        let line = "[t](docs/x.md)`::field`";
+        assert_eq!(
+            &line[markdown_links(line)[0].span.clone()],
+            "[t](docs/x.md)"
+        );
+    }
+
+    /// A fenced or indented code block is **not** this function's business, and
+    /// saying so is the point: it reads one line and cannot see a fence at all.
+    ///
+    /// # This is a reported inconsistency, not a design
+    ///
+    /// Every document scanner in `rto_spec` tracks fences itself and skips the
+    /// lines inside them, so a fenced `[[…]]` is not an authored link. **No
+    /// scanner in this workspace excludes an indented code block**, so a
+    /// four-space-indented `[[…]]` *is* one, and the gate resolves a link the
+    /// renderer shows as literal code. That predates this function, is
+    /// unchanged by it, and is recorded here rather than silently fixed —
+    /// fixing it moves what `roteiro check` counts.
+    #[test]
+    fn a_fence_is_not_visible_from_one_line() {
+        // The fence delimiter itself, which callers key on.
+        assert!(is_code_fence("```"));
+        assert!(is_code_fence("   ```rust"));
+        assert!(is_code_fence("~~~"));
+        assert!(!is_code_fence("a ``` b"));
+        // A line *inside* either kind of block still yields its link here…
+        assert_eq!(
+            wiki_link_targets("[[docs/fenced.md]]"),
+            vec!["docs/fenced.md"]
+        );
+        // …including a four-space-indented one, which nothing filters today.
+        assert_eq!(
+            wiki_link_targets("    [[docs/indented.md]]"),
+            vec!["docs/indented.md"]
+        );
+        // A line that both opens a fence and carries a link: the delimiter test
+        // and the scan are independent, so a caller sees both facts.
+        assert!(is_code_fence("``` [[docs/straddle.md]]"));
+        assert_eq!(
+            wiki_link_targets("``` [[docs/straddle.md]]"),
+            vec!["docs/straddle.md"]
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Wiki links — the semantics that must not move
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn wiki_links_are_trimmed_and_never_empty() {
+        assert_eq!(
+            wiki_link_targets("[[  docs/x.md#Sym  ]]"),
+            vec!["docs/x.md#Sym"]
+        );
+        assert!(wiki_link_targets("[[]] and [[   ]]").is_empty());
+        assert_eq!(
+            wiki_link_targets("[[a.md]] then [[b.md]]"),
+            vec!["a.md", "b.md"]
+        );
+    }
+
+    /// An unclosed `[[` **stops** the scan rather than being skipped past, and
+    /// an *earlier* one swallows a later well-formed link into its own target
+    /// instead of yielding two.
+    ///
+    /// Both are what `rto_spec::text::scan_wiki_links` did, so both are what
+    /// this has to keep doing. Neither is what a reader would call right, and
+    /// the second produces a target that resolves to nothing — which is why it
+    /// is safe as well as required: it costs the gate a violation it already
+    /// reported, not a link it already counted. Recorded rather than fixed;
+    /// fixing it changes what `roteiro check` counts.
+    #[test]
+    fn an_unclosed_wiki_link_ends_the_scan() {
+        // The close belongs to the *first* opener, so this is one target.
+        assert_eq!(
+            wiki_link_targets("[[unclosed and [[docs/x.md]]"),
+            vec!["unclosed and [[docs/x.md"]
+        );
+        // An opener with no close at all ends the scan where it stands.
+        assert_eq!(
+            wiki_link_targets("[[docs/x.md]] then [[unclosed"),
+            vec!["docs/x.md"]
+        );
+    }
+
+    /// A wiki-link is never external and its text is its target, so a caller
+    /// labelling links does not have to special-case the kind.
+    #[test]
+    fn a_wiki_link_is_internal_and_labels_itself() {
+        assert_eq!(
+            scanned("[[docs/adr/0001-x.md#Design]]"),
+            vec![(
+                LinkKind::Wiki,
+                "docs/adr/0001-x.md#Design".to_owned(),
+                "docs/adr/0001-x.md#Design".to_owned(),
+                false,
+            )]
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Inline links — the new capability
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn an_inline_link_yields_its_text_and_destination() {
+        assert_eq!(
+            scanned("see [the ADR](docs/adr/0026-x.md) for why"),
+            vec![(
+                LinkKind::Inline,
+                "docs/adr/0026-x.md".to_owned(),
+                "the ADR".to_owned(),
+                false,
+            )]
+        );
+    }
+
+    /// The classification a citation needs: whose work this names.
+    #[test]
+    fn a_destination_is_internal_or_external_by_its_scheme() {
+        for internal in [
+            "docs/x.md",
+            "../README.md",
+            "/docs/x.md",
+            "#a-section",
+            "x.md#a:b",
+            "C/x.md",
+        ] {
+            assert_eq!(
+                link_scope(internal),
+                LinkScope::Internal,
+                "{internal} is in this repository"
+            );
+        }
+        for external in [
+            "https://example.org/a",
+            "http://example.org",
+            "mailto:a@b.c",
+            "//example.org/a",
+            "ftp://example.org",
+            "tel:+441234",
+        ] {
+            assert_eq!(
+                link_scope(external),
+                LinkScope::External,
+                "{external} is somebody else's"
+            );
+        }
+    }
+
+    /// Brackets and parentheses nest, and a title is metadata rather than a
+    /// destination — both cases where reading to the *first* delimiter gives a
+    /// target nothing resolves.
+    #[test]
+    fn nesting_and_titles_are_read_the_way_commonmark_writes_them() {
+        assert_eq!(
+            scanned("[see [x]](docs/y.md)"),
+            vec![(
+                LinkKind::Inline,
+                "docs/y.md".to_owned(),
+                "see [x]".to_owned(),
+                false,
+            )]
+        );
+        assert_eq!(
+            scanned(r#"[t](docs/y.md "A title")"#)
+                .iter()
+                .map(|(_, t, _, _)| t.as_str())
+                .collect::<Vec<_>>(),
+            vec!["docs/y.md"]
+        );
+        // Balanced parentheses inside a destination, as a Wikipedia URL has.
+        assert_eq!(
+            scanned("[t](https://e.org/A_(b))")
+                .iter()
+                .map(|(_, t, _, _)| t.as_str())
+                .collect::<Vec<_>>(),
+            vec!["https://e.org/A_(b)"]
+        );
+        // The angle-bracket form, which may hold a space.
+        assert_eq!(
+            scanned("[t](<a b.md>)")
+                .iter()
+                .map(|(_, t, _, _)| t.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a b.md"]
+        );
+    }
+
+    /// A link that does not close is not a link, and neither is one naming
+    /// nothing — the reading the OKF bundle reader argued for, kept here so it
+    /// cannot invent an edge out of stray punctuation.
+    #[test]
+    fn malformed_and_empty_inline_links_are_not_links() {
+        assert!(scanned("[text](unclosed").is_empty());
+        assert!(scanned("[text without a destination]").is_empty());
+        assert!(scanned("[text]()").is_empty());
+        assert!(scanned(r"\[not a link](docs/x.md)").is_empty());
+    }
+
+    /// `[[a]]` is one wiki-link, not also an inline link whose text is `[a`.
+    #[test]
+    fn the_two_kinds_do_not_double_count_one_link() {
+        assert_eq!(
+            scanned("[[docs/x.md]]")
+                .iter()
+                .map(|(k, _, _, _)| *k)
+                .collect::<Vec<_>>(),
+            vec![LinkKind::Wiki]
+        );
+    }
+
+    /// Links come back in source order however they are written, because a
+    /// caller rewriting them in place walks the list once.
+    #[test]
+    fn links_are_reported_in_source_order_with_usable_ranges() {
+        let line = "a [t](x.md) b [[y.md]] c [u](https://e.org)";
+        let links = markdown_links(line);
+        assert_eq!(
+            links.iter().map(|l| l.target.as_str()).collect::<Vec<_>>(),
+            vec!["x.md", "y.md", "https://e.org"]
+        );
+        // Every range addresses the link it was reported for, so a rewriter can
+        // splice over it without re-finding anything.
+        assert_eq!(&line[links[0].span.clone()], "[t](x.md)");
+        assert_eq!(&line[links[1].span.clone()], "[[y.md]]");
+        assert_eq!(&line[links[2].span.clone()], "[u](https://e.org)");
+        assert!(links[2].scope.is_external());
+    }
 }

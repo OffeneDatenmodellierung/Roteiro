@@ -191,11 +191,15 @@ fn every_local_link_in_the_rendered_site_resolves() {
             let Some(end) = rest.find('"') else { continue };
             let href = rest[..end].replace("&amp;", "&");
             // External and protocol-relative links are somebody else's uptime.
-            if href.starts_with("http://")
-                || href.starts_with("https://")
-                || href.starts_with("mailto:")
-                || href.starts_with("//")
-            {
+            //
+            // This scrapes **emitted HTML**, so it is not one of the Markdown
+            // link readers #801 consolidated — but "whose is this?" is the same
+            // question the renderer asks about a Markdown destination, and it
+            // had a copy of the answer here and another in `rewrite_doc_link`.
+            // Both listed four prefixes; both therefore read `tel:`, `ftp:` and
+            // `data:` as repository-relative and would have reported a real
+            // external href as a broken local one.
+            if rto_graph::link_scope(&href).is_external() {
                 continue;
             }
             checked += 1;

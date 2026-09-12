@@ -721,6 +721,33 @@ fn parse_relationships(body: &str) -> (Vec<RelLink>, usize) {
 /// *different* one for a malformed bundle, because it recovers. Here a link that
 /// does not close is not a link, which is the reading that cannot invent an edge
 /// out of stray punctuation.
+///
+/// # Why this is not [`rto_graph::markdown_links`] either (#801)
+///
+/// That function is the workspace's one Markdown link reader, and four of the
+/// five scanners this one was counted among now are it. It is **not**
+/// `pulldown-cmark`, so the paragraph above is not an argument against it — it
+/// is a line scanner with the same refusal to recover, and on every well-formed
+/// bundle line the two agree.
+///
+/// They differ on input this reader does not get to choose, and that is the
+/// reason to keep this one:
+///
+/// - **It skips inline code spans.** That is right for a document *we* author,
+///   where `` `[a](b)` `` is an example of the form. It is wrong for a bundle
+///   somebody else produced, whose author never agreed to our convention: a
+///   concept file that happens to write a link inside backticks means the link,
+///   and dropping it loses an edge a peer published. A reader's contract is to
+///   import what the producer wrote.
+/// - **It matches brackets by depth**, so `[a [b](x)](y)` is one link to `y`
+///   where this reads one to `x`. Neither is obviously right for a malformed
+///   file; changing it silently re-points an imported edge.
+///
+/// Both are behaviour changes to third-party input with no test that would fail,
+/// which is the shape of drift this consolidation exists to remove rather than
+/// introduce. So this stays, and says why — the alternative to sharing is a
+/// written reason, not silence. Anything that reads a document *this repository*
+/// authors must use the shared reader.
 fn markdown_link_targets(line: &str) -> Vec<String> {
     let mut out = Vec::new();
     let bytes = line.as_bytes();

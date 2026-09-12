@@ -183,8 +183,9 @@ pub use sync::{
     sync_index, sync_tree, sync_worktree,
 };
 pub use text::{
-    Heading, first_h1, heading_id, heading_id_from, heading_text, headings, markdown_dialect,
-    slugify,
+    Heading, LinkKind, LinkScope, MarkdownLink, code_spans, first_h1, heading_id, heading_id_from,
+    heading_text, headings, is_code_fence, link_scope, markdown_dialect, markdown_links, slugify,
+    strip_code_spans, wiki_link_targets,
 };
 pub use trust::ProducerTrust;
 pub use workspace::{

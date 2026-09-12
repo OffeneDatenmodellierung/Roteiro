@@ -60,125 +60,36 @@ pub(crate) use rto_graph::heading_id;
 /// another in the rendered page. See those functions for the full argument.
 pub(crate) use rto_graph::{first_h1, heading_text};
 
-/// Extract the inner text of every `[[…]]` on `line`, ignoring any inside an
-/// inline code span (so `` `[[path#Symbol]]` `` written as a documentation
-/// example is not treated as a real link). Shared by the ADR and lat.md parsers.
-#[must_use]
-pub(crate) fn scan_wiki_links(line: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let stripped = strip_code_spans(line);
-    let mut rest = stripped.as_str();
-    while let Some(open) = rest.find("[[") {
-        let after = &rest[open + 2..];
-        if let Some(close) = after.find("]]") {
-            let inner = after[..close].trim();
-            if !inner.is_empty() {
-                out.push(inner.to_owned());
-            }
-            rest = &after[close + 2..];
-        } else {
-            break;
-        }
-    }
-    out
-}
+/// The inner text of every `[[…]]` on a line, ignoring any inside an inline
+/// code span (so `` `[[path#Symbol]]` `` written as a documentation example is
+/// not treated as a real link). Read by the ADR, blueprint, site-page and lat.md
+/// parsers.
+///
+/// Re-exported from [`rto_graph::wiki_link_targets`] for the reason [`slugify`]
+/// above is, and it is a sharper case of it: "find a Markdown link" had **five**
+/// implementations across this workspace sharing no code, and only this one knew
+/// about code spans. A `[[…]]` scanner that disagrees with the renderer's about
+/// where a link is does not fail — it resolves a link the site renders as
+/// literal brackets, which is the shape #790's two Markdown walkers had.
+///
+/// [`rto_graph::markdown_links`] is the whole rule; this is the half this crate
+/// reads. The inline `[text](destination)` half is not used here yet.
+pub(crate) use rto_graph::wiki_link_targets;
 
-/// Return `line` with inline code spans removed, so tokens documented as
-/// examples (e.g. `` `[[path#Symbol]]` `` or ``` ``@rto:0001`` ```) are not
-/// scanned as real links or annotations.
+/// Return a line with inline code spans removed, and the byte ranges of the
+/// spans themselves — so tokens documented as examples (e.g.
+/// `` `[[path#Symbol]]` `` or ``` ``@rto:0001`` ```) are not scanned as real
+/// links or annotations, and so [`crate::fmt`] can tell a table row's column
+/// separator from a `|` inside a code span.
 ///
-/// Follows the `CommonMark` rule for code spans: a span opens with a run of *n*
-/// backticks and closes with the next run of exactly *n* backticks. An opening
-/// run with no matching close is literal text and is kept. Non-backtick text is
-/// preserved verbatim (backticks are ASCII, so all slice boundaries are valid).
-#[must_use]
-pub(crate) fn strip_code_spans(line: &str) -> String {
-    let spans = code_spans(line);
-    let mut out = String::with_capacity(line.len());
-    let mut at = 0;
-    for (start, end) in spans {
-        out.push_str(&line[at..start]);
-        at = end;
-    }
-    out.push_str(&line[at..]);
-    out
-}
-
-/// The byte ranges of `line`'s **matched** inline code spans, in order.
-///
-/// The `CommonMark` rule, in one place: a span opens with a run of *n* backticks
-/// and closes with the next run of exactly *n*; an opening run with no matching
-/// close is literal text and yields no span. A **backslash-escaped** backtick is
-/// literal and opens nothing — without that, `` \` `` paired with a later real
-/// opener and swallowed everything between them, which hid a table column from
-/// `rto_spec::fmt` and would hide a `[[…]]` link or a `@rto:` annotation from
-/// the scanners below. The rule is **asymmetric**: escapes do not work *inside*
-/// a code span, so a backslash before the closing run is content and the run
-/// still closes.
-///
-/// Separate from [`strip_code_spans`] because removing a span and knowing where
-/// one *is* are different questions, and `rto_spec::fmt` needs the second — a
-/// table row's `|` inside a code span is content rather than a column boundary.
-/// It had its own backtick scanner until #790 found that it entered code mode on
-/// an unmatched run and hid the rest of the row, which is exactly the case this
-/// rule exists to get right.
-#[must_use]
-pub(crate) fn code_spans(line: &str) -> Vec<(usize, usize)> {
-    let bytes = line.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0;
-    // Whether the byte at `at` is escaped by an unbalanced run of backslashes.
-    let escaped = |at: usize| {
-        bytes[..at]
-            .iter()
-            .rev()
-            .take_while(|b| **b == b'\\')
-            .count()
-            % 2
-            == 1
-    };
-    while i < bytes.len() {
-        if bytes[i] != b'`' || escaped(i) {
-            i += 1;
-            continue;
-        }
-        // Measure the opening backtick run.
-        let run_start = i;
-        while i < bytes.len() && bytes[i] == b'`' {
-            i += 1;
-        }
-        let run = i - run_start;
-        // Find a closing run of exactly the same length.
-        let mut j = i;
-        let mut close = None;
-        while j < bytes.len() {
-            // **No escape check on the close.** `CommonMark`: backslash
-            // escapes do not work inside a code span, so a backslash before the
-            // closing run is literal content and the run still closes. Applying
-            // the opener's rule here made `` `a\` `` run on to the next
-            // backtick and swallow whatever lay between.
-            if bytes[j] == b'`' {
-                let s = j;
-                while j < bytes.len() && bytes[j] == b'`' {
-                    j += 1;
-                }
-                if j - s == run {
-                    close = Some(j);
-                    break;
-                }
-            } else {
-                j += 1;
-            }
-        }
-        // An unmatched opening run is literal, and the scan continues *after*
-        // it rather than restarting inside it.
-        if let Some(end) = close {
-            out.push((run_start, end));
-            i = end;
-        }
-    }
-    out
-}
+/// Re-exported from [`rto_graph`] because the link scanner above is: stripping
+/// code spans is the *first step* of finding a link, so leaving a copy of it
+/// here would mean the one scanner and this crate's `@rto:`/table readers could
+/// still disagree about where a code span ends. They are two functions rather
+/// than one because removing a span and knowing where one *is* are different
+/// questions; see [`rto_graph::code_spans`] for the `CommonMark` rule and the
+/// escaping asymmetry #790 turned up.
+pub(crate) use rto_graph::{code_spans, strip_code_spans};
 
 /// Trim leading and trailing **blank lines** — lines that are empty or hold only
 /// whitespace — from a Markdown span, and nothing else.
@@ -219,40 +130,7 @@ pub(crate) fn trim_blank_lines(span: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{code_spans, lang_for, scan_wiki_links, strip_code_spans, trim_blank_lines};
-
-    /// A backslash-escaped backtick is literal and opens no span.
-    ///
-    /// It used to pair with the next real opener and swallow everything
-    /// between, which hid a table column from `rto_spec::fmt` — and would hide
-    /// a `[[…]]` link or a `@rto:` annotation from the scanners here, since
-    /// they share this rule. Raised on #790.
-    #[test]
-    fn an_escaped_backtick_opens_no_span() {
-        assert_eq!(code_spans(r"a \` b `code` c").len(), 1);
-        assert_eq!(strip_code_spans(r"a \` b `code` c"), r"a \` b  c");
-        // A doubled backslash escapes itself, so the backtick is real again.
-        assert_eq!(code_spans(r"a \\`code` b").len(), 1);
-        // And the link scanner is not fooled by one.
-        assert_eq!(scan_wiki_links(r"\` [[docs/x.md]]"), vec!["docs/x.md"]);
-    }
-
-    /// The rule is asymmetric: an escape opens nothing, but closes normally.
-    ///
-    /// `CommonMark` does not process backslash escapes inside a code span, so a
-    /// backslash before the closing run is literal content and the run still
-    /// closes. Treating the close like the open made a span run on to the next
-    /// backtick and swallow everything between. Raised on #790.
-    #[test]
-    fn an_escape_before_a_closing_run_still_closes_the_span() {
-        // One span, ending at the backtick after the backslash.
-        assert_eq!(code_spans(r"`a\` and [[docs/x.md]]").len(), 1);
-        assert_eq!(
-            scan_wiki_links(r"`a\` and [[docs/x.md]]"),
-            vec!["docs/x.md"]
-        );
-        assert_eq!(strip_code_spans(r"`a\` rest"), " rest");
-    }
+    use super::{lang_for, trim_blank_lines};
 
     #[test]
     fn lang_for_lowercases_extension_to_match_the_extractor() {
@@ -260,27 +138,6 @@ mod tests {
         assert_eq!(lang_for("a/b.rs"), "rust");
         assert_eq!(lang_for("x.PY"), "py", "other extensions lowercased");
         assert_eq!(lang_for("README"), "text", "no extension");
-    }
-
-    #[test]
-    fn removes_single_and_multi_backtick_spans() {
-        assert_eq!(strip_code_spans("a `code` b"), "a  b");
-        // A run of two backticks (used to embed a literal backtick) is a span too.
-        assert_eq!(strip_code_spans("see ``@rto:0001`` here"), "see  here");
-        assert_eq!(strip_code_spans("x ```fenced inline``` y"), "x  y");
-    }
-
-    #[test]
-    fn keeps_unmatched_backticks_and_plain_text() {
-        assert_eq!(strip_code_spans("no code here"), "no code here");
-        assert_eq!(strip_code_spans("unmatched ` tick"), "unmatched ` tick");
-        // Mismatched run lengths do not close the span.
-        assert_eq!(strip_code_spans("``open ` mid"), "``open ` mid");
-    }
-
-    #[test]
-    fn preserves_utf8_outside_spans() {
-        assert_eq!(strip_code_spans("café `x` — ok"), "café  — ok");
     }
 
     #[test]

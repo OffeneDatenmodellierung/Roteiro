@@ -744,7 +744,7 @@ fn scan_body(id: &str, body: &str, body_line1: usize) -> BodyScan {
                     version,
                 }));
         }
-        for raw in crate::text::scan_wiki_links(line) {
+        for raw in crate::text::wiki_link_targets(line) {
             let from = match &current {
                 Some(slug) => format!("adr:{id}#{slug}"),
                 None => format!("adr:{id}"),

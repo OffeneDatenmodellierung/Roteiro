@@ -426,13 +426,15 @@ fn rewrite_doc_link(
     source: Option<&SourceBase>,
     depth: usize,
 ) -> Option<String> {
-    if dest.starts_with("http://")
-        || dest.starts_with("https://")
-        || dest.starts_with("//")
-        || dest.starts_with("mailto:")
-        || dest.starts_with('#')
-        || dest.starts_with('/')
-    {
+    // Nothing this function does can make these land on a page the site serves.
+    // The scope half is [`rto_graph::link_scope`] rather than the four prefixes
+    // that used to be listed here, so the renderer and the rendered-site link
+    // gate answer "whose is this?" with one rule: they had a prefix list each,
+    // both of which read `tel:`, `ftp:` and `data:` as repository-relative.
+    // The other two are site-relative rather than foreign — a bare `#fragment`
+    // addresses the page it is written on, and a leading `/` is already the
+    // site root — so they stay a separate test.
+    if rto_graph::link_scope(dest).is_external() || dest.starts_with(['#', '/']) {
         return None;
     }
     let (path, frag) = dest
@@ -739,8 +741,11 @@ fn rewrite_wiki_links(md: &str, adr_prefix: &str) -> String {
     let mut out = String::new();
     let mut in_fence = false;
     for line in md.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+        // [`rto_graph::is_code_fence`] rather than a local prefix test, so the
+        // one place that says what a fence delimiter is can also say — where a
+        // reader will find it — that `rto_spec`'s four document scanners
+        // recognise only the backtick half of it.
+        if rto_graph::is_code_fence(line) {
             in_fence = !in_fence;
             out.push_str(line);
             out.push('\n');
