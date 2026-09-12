@@ -18,7 +18,7 @@ confluence-url:
 
 # ADR-0008: Multi-repo workspace serve — one instance, many project graphs, one model
 
-| | |
+|  |  |
 |---|---|
 | **State** | Accepted |
 | **Architectural Significance** | HIGH |
@@ -318,7 +318,7 @@ person to tidy it away would reintroduce diamonds silently.
 ## Document version history
 
 | Version | Date | Notes |
-|---------|------|-------|
+|---|---|---|
 | 0.1 | 2026-08-11 | Draft for review. Proposes an opt-in workspace `serve`: one process, one resident model, per-repo graphs opened on demand behind a store cache, explicit `project` selection on the tools (+ `list_projects`). Keeps single-repo cwd serve as the default; rejects N-servers, a proxy, and a merged mega-store. Grounded in `open_graph`, the two serve entry points, and the `[workspace]` config layer. |
 | 1.0 | 2026-08-11 | Accepted and implemented. Added `rto_graph::Workspace` (name→store registry, opened on demand, cached), a `[workspace]` config table (`roots`/`repos`) and `serve --workspace <root>` (shallow repo discovery). Both tool surfaces are workspace-backed: the MCP tools and the `/v1` graph tools gained an optional `project` argument and a `list_projects` tool, exposed only when several projects are hosted. Single-repo serve is unchanged (the cwd repo is the sole default project). **Realised `/v1` selection as a uniform `project` tool argument, not a `/v1/<project>/…` path prefix** — one mechanism across MCP and `/v1`, no bespoke routing. |
 | 1.1 | 2026-08-11 | Added `busy_timeout` on every store connection (a workspace read that lands during a project's concurrent `sync`-commit waits briefly instead of failing with `database is locked`), and **live registry reload on `SIGHUP`** — a dedicated thread re-scans the workspace roots and swaps the registry in place (added/removed repos, no restart). Content freshness already needed no reload (in-place `graph.db` writes are read on the next query). |

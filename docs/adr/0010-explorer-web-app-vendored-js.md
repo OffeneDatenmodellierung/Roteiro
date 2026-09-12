@@ -18,7 +18,7 @@ confluence-url:
 
 # ADR-0010: Explorer web app — vendored client-side JS (cytoscape.js) for the served UI
 
-| | |
+|  |  |
 |---|---|
 | **State** | Accepted |
 | **Architectural Significance** | MEDIUM |
@@ -152,5 +152,5 @@ serve it same-origin from the `explorer` server — no npm, no build step.**
 ## Document version history
 
 | Version | Date | Notes |
-|---------|------|-------|
+|---|---|---|
 | 1.0 | 2026-08-13 | Accepted and implemented (PR 4, the workspace-view UI). Introduces Roteiro's first vendored client-side JavaScript: a hand-written ES app plus cytoscape.js **v3.30.4** (MIT) committed as a single prebuilt UMD file and `include_str!`-embedded, served same-origin by the `explorer` server ([[crates/roteiro/src/explorer_app.rs#router]], mounted in [[crates/roteiro/src/main.rs#run_explorer]]) at `GET /`, `/app.js`, `/vendor/cytoscape.min.js`. **No npm, no bundler, no build step; no CDN, no CORS, no runtime fetch.** Consumes only the existing read-only API of [[docs/adr/0008-multi-repo-workspace-serve.md]] / [[docs/adr/0009-cross-repo-workspace-links.md]] (`/v1/graph/workspaces`, `.../topology`, `.../matrix`) via [[crates/roteiro/src/graph_api.rs#router]]. The script-free static export [[crates/roteiro/src/overview.rs#render_html]] is explicitly kept JavaScript-free. Rejects hand-rolled SVG (re-implements a graph library badly), a CDN tag (third-party runtime dep, breaks offline, non-reproducible), and npm+bundler (a parallel toolchain for one library). |

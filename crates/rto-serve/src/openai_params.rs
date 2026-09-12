@@ -805,7 +805,12 @@ impl Param {
 /// `docs/SERVING.md` carries this verbatim.
 #[must_use]
 pub fn published_table() -> String {
-    let mut out = String::from("| parameter | status | what happens |\n| --- | --- | --- |\n");
+    // Separator in the canonical form `roteiro docs fmt` writes (ADR-0023).
+    // This table is generated *into* a document that `fmt` also owns, and the
+    // test below compares the two byte for byte — so the generator and the
+    // formatter have to agree on one spelling, or every `fmt` run breaks the
+    // test and every regeneration breaks `fmt`.
+    let mut out = String::from("| parameter | status | what happens |\n|---|---|---|\n");
     for p in OPENAI_CHAT_PARAMS {
         out.push_str(&p.published_row());
         out.push('\n');

@@ -18,7 +18,7 @@ confluence-url:
 
 # ADR-0019: Remote model tier — an explicitly consented egress path, and the promises it changes
 
-| | |
+|  |  |
 |---|---|
 | **State** | Accepted |
 | **Architectural Significance** | VERY HIGH |

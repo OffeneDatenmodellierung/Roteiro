@@ -18,7 +18,7 @@ confluence-url:
 
 # ADR-0004: Spec/Blueprint authoring pillar — tiered, graph-grounded, check-gated
 
-| | |
+|  |  |
 |---|---|
 | **State** | Accepted |
 | **Architectural Significance** | HIGH |
@@ -120,6 +120,6 @@ Project direction incorporated above: light-mode generation must run **offline o
 ## Document version history
 
 | Version | Date | Notes |
-|---------|------|-------|
+|---|---|---|
 | 0.1 | 2026-08-09 | For Review. Tiered (0: offline scaffold → 1: local GGUF instruct → 2: larger local → 3: agent), graph-grounded, house-style, `check`-gated authoring pillar; spec-kit phases mapped to house artifacts; generative tier extends ADR-0003's registry/consent/candle machinery; agent-vs-tool boundary defined. |
 | 1.0 | 2026-08-09 | Accepted. Tier 0 implementation began with `roteiro spec context` (graph-grounded context assembly, no model). |

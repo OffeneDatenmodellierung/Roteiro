@@ -10,7 +10,7 @@ Two commands run somebody else's code inside a microVM, and each of them needs a
 image to run it in:
 
 | Command | What runs in the guest | Where its image comes from |
-| --- | --- | --- |
+|---|---|---|
 | `roteiro lint clippy` | a **builder** — it compiles your tree, so your build scripts execute | `[lint] image`, always yours |
 | `roteiro security run <analyzer>` | a **reader** — it parses your tree | a built-in pin where Roteiro has one, `[security.images]` otherwise |
 
@@ -159,7 +159,7 @@ one does, because expanding it would be a write.
 #### What is mounted, and what is deliberately not
 
 | mount | mode |
-| --- | --- |
+|---|---|
 | the worktree | read-only |
 | a scratch build directory outside it | **writable** |
 | `$CARGO_HOME/registry` | read-only |
@@ -427,7 +427,7 @@ image you declare must be pullable without authentication.
 Less than a builder's, because a reader needs less:
 
 | mount | mode |
-| --- | --- |
+|---|---|
 | the worktree | read-only |
 | the pinned asset cache (rule sets, advisory databases) | read-only |
 

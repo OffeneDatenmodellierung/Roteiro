@@ -18,7 +18,7 @@ confluence-url:
 
 # ADR-0011: Structured file logging — OpenTelemetry-shaped JSON, rotated, groundwork for OTLP
 
-| | |
+|  |  |
 |---|---|
 | **State** | Accepted |
 | **Architectural Significance** | MEDIUM |

@@ -850,6 +850,14 @@ enum Command {
         #[arg(long = "workspace-name", short = 'w', value_name = "NAME")]
         workspace_name: Option<String>,
     },
+    /// Mechanical edits to the authored documents themselves (ADR-0023).
+    ///
+    /// Offline and deterministic. Every verb in this family is admitted only
+    /// where its rule is decidable; `fmt` is the one with nothing to decide.
+    Docs {
+        #[command(subcommand)]
+        action: DocsAction,
+    },
     /// Graph-grounded spec/blueprint authoring (ADR-0004). Tier 0: offline,
     /// deterministic — no model required.
     Spec {
@@ -1430,6 +1438,25 @@ enum OkfAction {
         /// Emit the report as JSON.
         #[arg(long)]
         json: bool,
+    },
+}
+
+/// ADR-0023's authoring verbs. `fmt` is step 1; the rest follow.
+#[derive(Subcommand)]
+enum DocsAction {
+    /// Rewrite authored documents into their canonical form.
+    ///
+    /// Purely syntactic — table spacing and ISO dates — so the document's
+    /// meaning cannot change. It does **not** reorder frontmatter keys: that
+    /// was built, measured, and removed (ADR-0023 v1.0). **Prints a diff and writes
+    /// nothing** unless `--write` is given: a tool that rewrites documents
+    /// under version control by default is one people run once.
+    Fmt {
+        /// Files or directories to format. Defaults to `docs/`.
+        paths: Vec<std::path::PathBuf>,
+        /// Apply the changes instead of printing them.
+        #[arg(long)]
+        write: bool,
     },
 }
 
@@ -2169,6 +2196,7 @@ fn is_long_lived_server(cmd: &Command) -> bool {
         | Command::Import { .. }
         | Command::Okf { .. }
         | Command::Render { .. }
+        | Command::Docs { .. }
         | Command::Spec { .. } => false,
         #[cfg(feature = "remote")]
         Command::Remote { .. } => false,
@@ -2477,6 +2505,7 @@ fn main() -> anyhow::Result<()> {
         // can reach the remote tier, and ADR-0019 §3's consent gate has to read
         // the project and user layers *separately* — a merged `[remote] enabled`
         // cannot tell a grant that may stand from one that may not.
+        Command::Docs { action } => run_docs(action),
         Command::Spec { action } => run_spec(&cfg, ingest, action),
         Command::Config { json } => run_config(&cfg, json),
         #[cfg(feature = "remote")]
@@ -7045,6 +7074,150 @@ fn read_bundle_files(root: &std::path::Path) -> anyhow::Result<Vec<(String, Stri
     // the order files arrive in, and `read_dir` does not promise one.
     out.sort();
     Ok(out)
+}
+
+/// `roteiro docs` — ADR-0023's authoring verbs over the authored documents.
+fn run_docs(action: DocsAction) -> anyhow::Result<()> {
+    match action {
+        DocsAction::Fmt { paths, write } => run_docs_fmt(&paths, write),
+    }
+}
+
+/// `roteiro docs fmt` — the canonical form, as a diff or as a rewrite.
+///
+/// # Why this takes paths rather than the authored layer
+///
+/// ADR-0023 says these verbs act through `rto_spec::layer::authored_docs`, and
+/// for `mv`, `rm` and `index` that is right: they need the link graph. `fmt`
+/// does not. It is a syntactic rewrite of one file at a time, and requiring a
+/// repository and a built graph to reformat a table would make the cheapest
+/// verb in the family the one with the heaviest precondition — and would make
+/// it unusable on the document you are drafting before it is committed.
+///
+/// # Exit code
+///
+/// Without `--write`, a document that is not canonical is a **failure**, so
+/// `roteiro docs fmt` is usable as a check in the way `cargo fmt --check` is.
+/// With `--write` it rewrites and succeeds.
+fn run_docs_fmt(paths: &[std::path::PathBuf], write: bool) -> anyhow::Result<()> {
+    let roots: Vec<std::path::PathBuf> = if paths.is_empty() {
+        vec![std::path::PathBuf::from("docs")]
+    } else {
+        paths.to_vec()
+    };
+    let mut files = Vec::new();
+    for root in &roots {
+        markdown_files(root, &mut files)?;
+    }
+    // Overlapping roots are one file, not two. `docs fmt docs docs/adr` reached
+    // every ADR twice, so a check run printed each diff twice and counted it
+    // twice, and a write run formatted it twice — harmless only because the
+    // second pass is a no-op on canonical output.
+    //
+    // Deduplicated by **resolved** path, not by spelling: `docs` and `./docs`
+    // name the same tree and sort differently, so comparing the strings alone
+    // left the duplicate in. The reported path stays as the caller wrote it.
+    let mut seen = std::collections::HashSet::new();
+    files.retain(|f| {
+        let key = std::fs::canonicalize(f).unwrap_or_else(|_| f.clone());
+        seen.insert(key)
+    });
+    files.sort();
+
+    let (mut changed, mut written) = (0_usize, 0_usize);
+    for file in &files {
+        let before = std::fs::read_to_string(file)
+            .map_err(|e| anyhow::anyhow!("reading {}: {e}", file.display()))?;
+        let after = rto_spec::fmt::canonical(&before);
+        let Some(diff) = rto_spec::fmt::unified_diff(&file.display().to_string(), &before, &after)
+        else {
+            continue;
+        };
+        changed += 1;
+        if write {
+            std::fs::write(file, &after)
+                .map_err(|e| anyhow::anyhow!("writing {}: {e}", file.display()))?;
+            written += 1;
+        } else {
+            print!("{diff}");
+        }
+    }
+
+    if write {
+        println!("{written} of {} file(s) rewritten", files.len());
+        return Ok(());
+    }
+    if changed == 0 {
+        println!("{} file(s) already canonical", files.len());
+        return Ok(());
+    }
+    // Named rather than merely counted: a reader who sees "3 files" and no list
+    // has to re-run the command to learn which, which is the shape of report
+    // this repository keeps deciding against.
+    anyhow::bail!(
+        "{changed} of {} file(s) are not canonical; re-run with --write",
+        files.len()
+    )
+}
+
+/// Every `.md` under `root`, or `root` itself when it names a file.
+///
+/// **Symlinks are not followed**, checked via
+/// [`std::fs::DirEntry::file_type`], which does not traverse the link. The
+/// sibling `collect_markdown` refuses them so a link cannot pull outside
+/// content *in*; here the risk runs the other way — `--write` through a
+/// symlink would rewrite a file outside the tree the caller named.
+fn markdown_files(root: &std::path::Path, out: &mut Vec<std::path::PathBuf>) -> anyhow::Result<()> {
+    // `symlink_metadata` rather than `is_file`, which follows the link: an
+    // explicitly named symlink is the one path that does not go through the
+    // directory walk below, so checking only there left `roteiro docs fmt
+    // --write link.md` able to rewrite a file outside the tree the caller
+    // named — the exact thing the walk refuses. Raised on #790.
+    //
+    // **This is a scope guarantee, not a security boundary**, and the
+    // distinction is deliberate: the check and the later write are not atomic,
+    // so a rename between them is not prevented. That race has nothing on the
+    // other side of it — `fmt` runs with the caller's own privileges on a tree
+    // they already own, so anyone who could win it could edit the file
+    // directly. What the check buys is that an ordinary symlink sitting in
+    // `docs/` does not get quietly written through.
+    // **Every component**, not just the last. `symlink_metadata("a/b.md")`
+    // reports a regular file even when `a` is a symlink, so checking only the
+    // leaf let an explicit path reach outside the tree through a symlinked
+    // parent — the same escape the walk refuses, by a different door.
+    let mut prefix = std::path::PathBuf::new();
+    for part in root.components() {
+        prefix.push(part);
+        if std::fs::symlink_metadata(&prefix).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Ok(());
+        }
+    }
+    let meta = std::fs::symlink_metadata(root)
+        .map_err(|e| anyhow::anyhow!("reading {}: {e}", root.display()))?;
+    if meta.is_file() {
+        out.push(root.to_path_buf());
+        return Ok(());
+    }
+    let entries = std::fs::read_dir(root)
+        .map_err(|e| anyhow::anyhow!("reading directory {}: {e}", root.display()))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|e| anyhow::anyhow!("reading an entry of {}: {e}", root.display()))?;
+        if entry.file_type()?.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            markdown_files(&path, out)?;
+        } else if kind.is_file() && path.extension().is_some_and(|e| e == "md") {
+            // **Regular files only.** "not a directory" also admits a FIFO, a
+            // socket and a device node, and `read_to_string` on a FIFO blocks
+            // forever — a formatter that hangs on a named pipe called `x.md`.
+            out.push(path);
+        }
+    }
+    Ok(())
 }
 
 /// Graph-grounded spec/blueprint authoring (ADR-0004).

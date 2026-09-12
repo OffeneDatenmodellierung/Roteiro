@@ -17,7 +17,7 @@ Everything here is verifiable. A **default build** contacts exactly **three
 hosts**, from exactly **two** call sites in the whole workspace:
 
 | Host | What | Reached by |
-| --- | --- | --- |
+|---|---|---|
 | `huggingface.co` | GGUF models | `roteiro model pull` |
 | `ocrs-models.s3-accelerate.amazonaws.com` | the OCR model only | `roteiro model pull ocrs-text` |
 | `osv-vulnerabilities.storage.googleapis.com` | OSV databases | `roteiro security prefetch --allow-download` |
@@ -26,7 +26,7 @@ hosts**, from exactly **two** call sites in the whole workspace:
 Stage 24). Leave the feature off and none of this applies:
 
 | Host | What | Reached by |
-| --- | --- | --- |
+|---|---|---|
 | `github.com` | the boxlite sandbox runtime archive | `roteiro security prefetch --analyzer sandbox --allow-download`, **or `boxlite`'s own build script** — see below |
 | `docker.io` | the pinned analyzer image | `roteiro security prefetch --analyzer semgrep --allow-download` |
 
@@ -214,7 +214,7 @@ anything.
 they overlap deliberately little:
 
 | Analyzer | `security run --analyzer` | What it finds | Languages |
-| --- | --- | --- | --- |
+|---|---|---|---|
 | **semgrep** | `semgrep` | Static analysis (SAST) of your *own* code, against a rule set vendored in the binary | Rust, Python, Java, JavaScript, TypeScript, SQL (generic mode) |
 | **cargo-audit** | `cargo-audit` | RustSec advisories against `Cargo.lock` — your *dependencies* | Rust only |
 | **osv-scanner** | `osv-scanner` | OSV.dev advisories against resolved lockfiles — your *dependencies*, across ecosystems | Python, Java, JavaScript, TypeScript, Rust |
@@ -268,7 +268,7 @@ adapters were written against. Those reference versions, for a known-good
 comparison, are the ones Stage 22/22b were developed and measured on:
 
 | Analyzer | Developed and measured against |
-| --- | --- |
+|---|---|
 | `semgrep` | **1.173.0** (subprocess/sandbox parity run, 4 identical findings) |
 | `osv-scanner` | **2.5.0** (fixtures are real captured output at this version) |
 | `cargo-audit` | **0.22.2** (`0.21.2` for the committed report fixtures) |
@@ -448,7 +448,7 @@ Fetch it elsewhere, copy it to that path, and `roteiro model list` will see it.
 ## Store locations
 
 | Store | Resolution order |
-| --- | --- |
+|---|---|
 | Models | `ROTEIRO_MODEL_STORE` → `ROTEIRO_HOME/models` → `~/.roteiro/models` |
 | Analyzer assets | `ROTEIRO_SECURITY_ASSETS` → `ROTEIRO_HOME/security` → `~/.roteiro/security` |
 

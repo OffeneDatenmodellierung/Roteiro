@@ -18,7 +18,7 @@ confluence-url:
 
 # ADR-0012: Analyzer findings — a separate artifact model, never a provenance class
 
-| | |
+|  |  |
 |---|---|
 | **State** | Accepted |
 | **Architectural Significance** | HIGH |

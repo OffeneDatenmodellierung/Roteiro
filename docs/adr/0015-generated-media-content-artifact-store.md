@@ -18,7 +18,7 @@ confluence-url:
 
 # ADR-0015: Generated media content — its own artifact store, rebuildable on demand
 
-| | |
+|  |  |
 |---|---|
 | **State** | Accepted |
 | **Architectural Significance** | HIGH |
@@ -205,7 +205,7 @@ cheap and helps, not because it addresses the defect in #300.
 
 #### As built
 
-| | Audio | Images |
+|  | Audio | Images |
 |---|---|---|
 | Measured | RMS amplitude over the whole clip, full scale `1.0` | variance of the luma plane, a pixel being `0.0`…`1.0` |
 | Default threshold | `silence_rms = 0.0001` (≈ **-80 dBFS**) | `image_variance = 0.00001` (σ ≈ **0.8 levels of 255**) |

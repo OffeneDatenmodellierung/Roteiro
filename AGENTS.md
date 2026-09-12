@@ -100,6 +100,11 @@ CI (`.github/workflows/ci.yml`) enforces these; run them locally before pushing.
   denied in `Cargo.toml`, so this needs no `RUSTDOCFLAGS`. Use **`--keep-going`**
   when you are clearing a backlog: `cargo doc` stops at the first failing crate,
   which is how #783's "66 links" turned out to be 136 across eight crates.
+- `roteiro docs fmt` — clean. Canonical form for the authored documents
+  (ADR-0023): single-space table cells and ISO dates. It writes nothing without
+  `--write` and exits non-zero on drift, so it reads like `cargo fmt --check`.
+  `docs_are_canonical.rs` fails in the same run if you forget. **It does not
+  reorder frontmatter keys** — that was removed on measurement; see ADR-0023.
 - `cargo test --workspace --all-features` — green. **`--all-features` includes
   `exec-boxlite`.** That builds without a pre-step now: `boxlite` fetches the
   runtime archive over TLS and `rto-exec`'s build script verifies **every

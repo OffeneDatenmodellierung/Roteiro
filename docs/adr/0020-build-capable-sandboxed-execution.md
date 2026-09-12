@@ -18,10 +18,10 @@ confluence-url:
 
 # ADR-0020: Build-capable sandboxed execution — running the repository's own build, and the non-goal it narrows
 
-| | |
+|  |  |
 |---|---|
 | **Document version** | 1.6 |
-| **Status** | Draft |
+| **State** | Draft |
 | **Decision makers** | The Roteiro Project Team |
 | **Amends** | [[docs/adr/0014-sandboxed-analyzer-execution.md]] |
 | **Related** | [[docs/adr/0012-analyzer-findings-artifact-model.md]] · [[docs/adr/0017-dependency-security-policy.md]] · [[docs/adr/0019-remote-model-tier.md]] |
@@ -376,7 +376,7 @@ because neither has a plugin system.
 So **reader-versus-builder is a property of the repository, not of the tool**,
 and the two axes are orthogonal:
 
-| | is a property of | tabulable |
+|  | is a property of | tabulable |
 |---|---|---|
 | **Writable surface** | `(tool, invocation)` | **yes** — in every case measured, a flag or a variable removed the requirement |
 | **Code execution** | `(tool, repository)` | **no** — the repository decides, not the tool |
@@ -618,7 +618,7 @@ of scope for a sandboxed run of this repository, though not for others.
 ## Document version history
 
 | Version | Date | Notes |
-|---------|------|-------|
+|---|---|---|
 | 1.0 | 2026-08-18 | Initial draft. Narrows ADR-0014's `code_interpreter` non-goal to exclude only model-authored code, scopes its "security argument is weaker" reasoning to parse-only analyzers, and relaxes the read-only worktree invariant for a builder runner only. Records the measured build-script and proc-macro counts that make the case, the inverted threat model, and the five conditions — of which condition 4, the store's inability to distinguish two builds of one commit, is unresolved and blocks acceptance. |
 | 1.1 | 2026-08-18 | Condition 4 reversed on the owner's ruling that builder output is local to the person running it rather than an artifact stored for later. Storing a lint was the source of every identity problem the draft catalogued — an advisory id is *assigned* and permanent, a lint name is a symbol in a compiler — so not storing is the fix rather than a workaround. This unblocks acceptance: what remains is engineering, not an open question. Condition 5 softened accordingly, since with no stored history a renamed lint is a surprise rather than a corruption. |
 | 1.2 | 2026-08-18 | Records what landed rather than changing any decision: `roteiro lint <analyzer>`, with a `clippy` adapter that reuses the shared normalisation shape and is deliberately absent from the registry `ingest` resolves against. Conditions 3–5 are built and tested — an unstored report, an `isolation: none` read out of the runner, and the renamed / removed / `[workspace.lints]` readings surfaced in both output shapes. Conditions 1–2 are untouched: the run has no boundary, and the read-only preflight was **not** relaxed to fit a builder through it. |

@@ -18,7 +18,7 @@ confluence-url:
 
 # ADR-0006: Local model serving — a llama.cpp-backed, code-aware OpenAI-compatible endpoint
 
-| | |
+|  |  |
 |---|---|
 | **State** | Accepted |
 | **Architectural Significance** | HIGH |
@@ -91,7 +91,7 @@ Forces to reconcile: offline-first & self-contained (ADR-0001); don't become a g
 
 ### Engine — candle vs mistral.rs vs llama.cpp (de-risked on MSRV 1.94 + strict `cargo deny`)
 
-| | **llama.cpp** (`llama-cpp-2`) — chosen | **mistral.rs** | **candle** (hand-roll) |
+|  | **llama.cpp** (`llama-cpp-2`) — chosen | **mistral.rs** | **candle** (hand-roll) |
 |---|---|---|---|
 | Metal tok/s (0.6B) | **~129** (2.75× CPU) | ~125 | slower (quant-decode ties CPU) |
 | `cargo deny` | ✅ **passes unchanged** | ❌ fails (MPL-2.0/CDLA/0BSD core deps) | ✅ |
@@ -127,7 +127,7 @@ Project direction incorporated: **prioritise performance** (background use; deve
 ## Document version history
 
 | Version | Date | Notes |
-|---------|------|-------|
+|---|---|---|
 | 1.0 | 2026-08-09 | Accepted. Opt-in loopback OpenAI-compatible endpoint reusing installed models, warm + serialised over the ADR-0002 stack; scoped to reuse; candle-implied engine; rejected Ollama-replacement and MCP-only as the front door. |
 | 1.1 | 2026-08-09 | Revised after a head-to-head engine de-risk. **Engine → llama.cpp (`llama-cpp-2`)** — fastest, and the only candidate passing `cargo deny` unchanged (mistral.rs fails on MPL-2.0/CDLA/0BSD; candle is slower). **Serving via our own thin `/v1`** (not stock `llama-server`) so **Roteiro's graph tools auto-register** into the model (code-aware serving). Accepts a C/C++ toolchain for the opt-in `serve` feature; no `deny` change needed. States the candle→llama.cpp inference-core unify as the direction (follow-up ADR-0003 amendment). |
 | 1.2 | 2026-08-15 | Consequence added: llama.cpp's backend is a process-global, initialised once and shared by every engine, so a long-lived `serve` process can hold more than one engine instead of silently losing every engine after the first (issue #296). No decision changed. |

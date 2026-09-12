@@ -18,7 +18,7 @@ confluence-url:
 
 # ADR-0026: A research knowledge layer — raw sources in, an authored wiki out
 
-| | |
+|  |  |
 |---|---|
 | **State** | Draft |
 | **Architectural Significance** | HIGH |

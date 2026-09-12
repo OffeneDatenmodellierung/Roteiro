@@ -18,7 +18,7 @@ confluence-url:
 
 # ADR-0017: Dependency security — current by default, monitored, and held for a minimum release age of at least 48 hours
 
-| | |
+|  |  |
 |---|---|
 | **State** | Accepted |
 | **Architectural Significance** | HIGH |

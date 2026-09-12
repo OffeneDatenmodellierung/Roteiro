@@ -846,7 +846,7 @@ broken by key, so identical input gives byte-identical output.
 **Surfaced on six of the seven stages; the seventh is a deliberate no-op.**
 
 | Stage | Q3 |
-| --- | --- |
+|---|---|
 | Extraction (`scan_markers` + `augment`) | **Untouched by design** — Q3 adds no derived metadata, so `EXTRACT_VERSION` stays **11**. Confirmed live: `sync` after the change reported *237 of 239 blobs cached*. |
 | Query fn | `rto_graph::coupling` |
 | Query result types | `CouplingReport` / `CouplingItem` / `CouplingOrder` |
@@ -893,7 +893,7 @@ vendored `cytoscape.min.js` that dominates the ranking).
 2887 coupled nodes), release build, warm, whole-process wall clock, best of 5:
 
 | Command | Time |
-| --- | --- |
+|---|---|
 | `roteiro coupling --limit 20` | **0.05 s** |
 | `roteiro coupling --limit 0` (all 2887) | **0.07 s** |
 | `roteiro debt` (existing baseline) | 0.04 s |
@@ -954,7 +954,7 @@ fourth decimal do not tie and silently reorder on path.
 **Surfaced on six of the seven stages; the seventh is a deliberate no-op.**
 
 | Stage | Q1 |
-| --- | --- |
+|---|---|
 | Extraction (`scan_markers` + `augment`) | **Untouched by design** — the denominator was already extracted, so `EXTRACT_VERSION` stays **11**. Confirmed live: a rebuild from an empty store reported *257 of 258 blobs cached, 0 extracted*. |
 | Query fn | `rto_graph::debt_density` |
 | Query result types | `DebtDensityReport` / `DensityItem` / `DensityOrder` / `DEFAULT_MIN_LINES` |
@@ -1000,7 +1000,7 @@ names, and whether each value was redacted before persistence — in three state
 because collapsing any two would misreport them:
 
 | State | Meaning |
-| --- | --- |
+|---|---|
 | `redacted` | The value was read from a config file and replaced with the placeholder before anything was stored. The expected state. |
 | `declared` | The key carries **no value at all** — a `@rto:config` struct field, declared in Rust with no literal to redact. Neither a redaction nor a leak. |
 | `present` | A value that is **not** the placeholder. Extraction cannot produce this; `Store::apply_import_layer` can, so a non-zero count is a finding about **this store**, pointing at the importing tool rather than the source repository. |
@@ -1035,7 +1035,7 @@ body (where it becomes nothing this lens reads), so the boundary is a test.
 **Surfaced on six of the seven stages; the seventh is a deliberate no-op.**
 
 | Stage | S1 |
-| --- | --- |
+|---|---|
 | Extraction (`scan_markers` + `augment`) | **Untouched by design** — the redaction already happens there, so `EXTRACT_VERSION` stays **11**. Confirmed live: *259 of 260 blobs cached, 0 extracted*. |
 | Query fn | `rto_graph::config_secrets` |
 | Query result types | `ConfigSecretReport` / `ConfigSecretItem` / `RedactionState` |
@@ -1055,7 +1055,7 @@ markers over 20 files, 32,444 ranked lines), release build, warm, whole-process
 wall clock, best of 5:
 
 | Command | Time |
-| --- | --- |
+|---|---|
 | `roteiro debt-density --limit 20` | **0.04 s** |
 | `roteiro debt-density --limit 0` (all 20 ranked) | **0.04 s** |
 | `roteiro debt-density --limit 0 --min-lines 0` (floor off) | **0.04 s** |
@@ -1076,7 +1076,7 @@ redacted, none unredacted — which is also a fair illustration of its reach.
 figure each was measured against:
 
 | Lens | Files | Insertions |
-| --- | --- | --- |
+|---|---|---|
 | Q3 (#346) | 8 | 1,121 |
 | Q1 ([#372](https://github.com/OffeneDatenmodellierung/Roteiro/pull/372)) | 8 | 1,509 |
 | S1 | 10 | 1,523 |
@@ -2150,7 +2150,7 @@ the wrong place to spend three hours.
 
 #### What the reviewer actually emits, which is the adoption verdict
 
-| | diff-only arm |
+|  | diff-only arm |
 |---|---|
 | findings | **1,995** over 183 files — **10.9 per file** |
 | exact duplicate lines | **346 (17.3%)** |
@@ -2198,7 +2198,7 @@ density rather than by insight.
 own reconstructed diff actually shows; leave the run's findings byte-for-byte as
 emitted; rescore with the same greedy one-to-one rule. Over 2,000 trials:
 
-| | observed | null mean | P(≥ observed) |
+|  | observed | null mean | P(≥ observed) |
 |---|---|---|---|
 | real rows matched | **4** | **4.19** | 0.72 |
 | known-false reproduced | 1 | 0.49 | 0.49 |
@@ -2256,7 +2256,7 @@ could show.
 The graph arm completed and was scored against the same corpus with the same
 binary, so the two arms differ in exactly one variable.
 
-| | diff-only | **graph** |
+|  | diff-only | **graph** |
 |---|---|---|
 | real rows found | 4 / 22 | **5 / 22** |
 | `contract-drift` | 1 / 5 | **1 / 5** |
@@ -2396,7 +2396,7 @@ is worth one paragraph.)*
 | v1.12.0 ✅ | Stage 32 — guardrails: four confident wrong answers (#324, #321, #319, #330) | Two ADRs on one id fail `check` naming both files; API and CLI debt agree, per repo; coverage measured (87.51% lines, 7/64 files under 85%) with no document claiming a gate that does not run; a new ADR on disk is never silently uncounted — **met** |
 | v1.16.0 ✅ | Stage 33 — local model resolution | Vision/audio/OCR pinnable per project; `roteiro config` answers *why that model* for every surface |
 | v1.17.0 ✅ | Stage 34 — remote model tier | **ADR-0019 Accepted.** Cut in three, all delivered. **1 — the guard** (#381): consent gate, payload allow-list, dry-run, egress ledger, in a build compiling no backend. **2a — the transport**: `ureq` behind the off-by-default `remote` feature, the TTY invocation grant (`status`/`dry-run` never prompt), the response reader that refuses a truncated generation, and the README/website promise amendments on the commit that made them false. **2b — the surfaces**: `ModelSource::Remote { trust }` with `installed: None` in the shared resolver (which forced `ProducerTrust` from `rto-remote` into `rto-graph` — one definition, or a ledger entry and a resolution could disagree about what "vendor-asserted" means), then `spec draft --allow-remote` and `serve --allow-remote` over it. Neither prompts — the flag is the only way on a surface whose default is local — and a **refused** `--allow-remote` stops the run rather than answering locally, which is the same silent downgrade a network failure would be. Both rebuild the request through the payload allow-list rather than forwarding a local prompt or a chat transcript, so the guard still assembles what leaves. Ask is wired by wrapping the served `Engine` **in the binary**, so `rto-serve` gains nothing. Project file may deny, never grant; no learned router on the local→remote edge; no reachability probe; no test can reach a network |
-| v1.18.0 ✅ | Stage 35 — `roteiro review` LLM mode | **35a delivered** (#380): `roteiro review --score`, per-class recall with denominators, and `compile_claim`'s four axes — the instrument, with **no verdict**. **35b PR 1 delivered**: `ModelTask::Review` on the shared `generative` key (a seventh task, not a fourth bespoke rule), the per-file reviewer, `review --llm`, and the `review --replay` harness. It overturned 35a's budget conclusion in the useful direction — per file the corpus is **mean 3,275 / median 1,758 tokens as sent**, and the largest reviewable *source* file-diff is **17,202**, so ~28k of the single-call budget is free on a median file and the graph arm of PR 2 has room to be tested. It also found a **vacuous measurement in the instrument itself**: a reasoning model spent a 1,200-token cap entirely inside `<think>` on 4 files of 4 and the run reported *"0 finding(s) over 4 file(s)"* — zero recall that measured nothing, now detected, reported as *not reviewed*, and never scored. **No per-class recall figure yet**, deliberately: the honest remaining number is ~15 findings per file against 22 adjudicated rows over 184 files, unmoved by two precision-targeted prompt revisions | 
+| v1.18.0 ✅ | Stage 35 — `roteiro review` LLM mode | **35a delivered** (#380): `roteiro review --score`, per-class recall with denominators, and `compile_claim`'s four axes — the instrument, with **no verdict**. **35b PR 1 delivered**: `ModelTask::Review` on the shared `generative` key (a seventh task, not a fourth bespoke rule), the per-file reviewer, `review --llm`, and the `review --replay` harness. It overturned 35a's budget conclusion in the useful direction — per file the corpus is **mean 3,275 / median 1,758 tokens as sent**, and the largest reviewable *source* file-diff is **17,202**, so ~28k of the single-call budget is free on a median file and the graph arm of PR 2 has room to be tested. It also found a **vacuous measurement in the instrument itself**: a reasoning model spent a 1,200-token cap entirely inside `<think>` on 4 files of 4 and the run reported *"0 finding(s) over 4 file(s)"* — zero recall that measured nothing, now detected, reported as *not reviewed*, and never scored. **No per-class recall figure yet**, deliberately: the honest remaining number is ~15 findings per file against 22 adjudicated rows over 184 files, unmoved by two precision-targeted prompt revisions |
 | **v2.0.0** ⏸️ | Stage 27 — hardening | Full gates; semver review complete — **hardening delivered**, findings filed as #431/#447–#450; the release itself is held on the owner's call (#429) and the `Release-plz` workflow is disabled so it cannot cut by accident |
 
 ---
