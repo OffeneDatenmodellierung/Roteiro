@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.12.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v5.12.0...rto-graph-v5.12.1) - 2026-09-12
+
+### Other
+
+- Merge branch 'main' into polly/i792-nodefault-doclinks
+- *(findings)* ground the caller claim in the graph, not in grep
+- *(findings)* the normalisation is in-memory, and the seed claim was too broad
+- *(findings)* tally the generated half on its own; the union hid the vacuity
+- *(findings)* settle the three Copilot findings on #795
+- *(findings)* mark the permissive escape parse as deferred debt, not a guarantee
+- *(findings)* property-test `FindingKey` render/parse round-trip injectivity
+
 ## [5.12.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v5.11.0...rto-graph-v5.12.0) - 2026-09-12
 
 ### Fixed
