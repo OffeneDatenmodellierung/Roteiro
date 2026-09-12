@@ -727,7 +727,12 @@ pub fn markdown_links(line: &str) -> Vec<MarkdownLink> {
                 scope: link_scope(&destination),
                 kind: LinkKind::Inline,
                 target: destination,
-                text,
+                // Read back out of the **line**, not the stripped string: a
+                // label like ``[the `Foo` type](x.md)`` is scanned with its code
+                // span removed, so taking the text from there would cite "the
+                // type". The span is excluded from the *scan* because a link
+                // inside one is an example; its content is still the label.
+                text: line[map.widest(&text)].to_owned(),
                 span: map.start(range.start)..map.end(range.end),
             }),
     );
@@ -840,18 +845,8 @@ pub fn code_spans(line: &str) -> Vec<(usize, usize)> {
     let bytes = line.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;
-    // Whether the byte at `at` is escaped by an unbalanced run of backslashes.
-    let escaped = |at: usize| {
-        bytes[..at]
-            .iter()
-            .rev()
-            .take_while(|b| **b == b'\\')
-            .count()
-            % 2
-            == 1
-    };
     while i < bytes.len() {
-        if bytes[i] != b'`' || escaped(i) {
+        if bytes[i] != b'`' || is_escaped(bytes, i) {
             i += 1;
             continue;
         }
@@ -927,6 +922,23 @@ impl SpanMap {
         self.at(at, |chunk_start| at > chunk_start)
     }
 
+    /// The **widest** source range a stripped-string range came from: every byte
+    /// that reduced to it, code spans included.
+    ///
+    /// The opposite of pairing [`Self::start`] with [`Self::end`], and needed
+    /// for the opposite question. A link's *extent* should stop at its own
+    /// delimiters; a link's *text* is what a reader sees, and a reader sees the
+    /// code span the scan removed. `` [the `Foo` type](x.md) `` scans as the text
+    /// `the  type` and reads as `` the `Foo` type ``, and it is the second that
+    /// is the citation label.
+    ///
+    /// Also the only form that cannot invert: an empty stripped range sitting on
+    /// a chunk boundary — `` [`x`](y) ``, whose whole label is one code span —
+    /// has `start` land after `end`, and this widens to the span instead.
+    fn widest(&self, range: &Range<usize>) -> Range<usize> {
+        self.end(range.start)..self.start(range.end)
+    }
+
     /// The source offset of `at`, in the last chunk `keep` accepts.
     fn at(&self, at: usize, keep: impl Fn(usize) -> bool) -> usize {
         self.0
@@ -985,13 +997,19 @@ fn wiki_spans(stripped: &str) -> Vec<(Range<usize>, String)> {
     out
 }
 
-/// Every `[text](destination)` on an already-stripped line, skipping the ranges
-/// `wiki` already claimed so `[[a]]` is one wiki-link rather than also an inline
-/// one with a bracket for text.
+/// Every `[text](destination)` on an already-stripped line, as `(whole range,
+/// text range, destination)`.
+///
+/// Skips the ranges `wiki` already claimed, so `[[a]]` is one wiki-link rather
+/// than also an inline one with a bracket for text — and skips **images**,
+/// whose `![alt](src)` would otherwise be read as a link starting one byte late.
+/// An image is passed over whole, so a link written inside its alt text is not
+/// read either; that is the same refusal as everywhere else here, since an
+/// image's alt text is not a place a citation can be written.
 fn inline_spans(
     stripped: &str,
     wiki: &[(Range<usize>, String)],
-) -> Vec<(Range<usize>, String, String)> {
+) -> Vec<(Range<usize>, Range<usize>, String)> {
     let bytes = stripped.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;
@@ -1012,9 +1030,8 @@ fn inline_spans(
             i += 1;
             continue;
         };
-        // A link naming nothing is not a link — the same reading the OKF bundle
-        // reader applies, and the one that cannot invent an edge out of `[a]()`.
-        if !destination.is_empty() {
+        let image = i > 0 && bytes[i - 1] == b'!' && !is_escaped(bytes, i - 1);
+        if !image {
             out.push((i..end, text, destination));
         }
         i = end;
@@ -1022,24 +1039,75 @@ fn inline_spans(
     out
 }
 
-/// The inline link opening at `open`, as `(text, destination, end)`.
+/// The inline link opening at `open`, as `(text range, destination, end)`.
 ///
 /// Brackets and parentheses are matched by depth, so `[see [x]](y)` is one link
 /// with the text `see [x]` rather than two half-read ones, and a destination may
 /// hold the balanced parentheses a Wikipedia URL does. A backslash escapes the
-/// delimiter after it. Either run reaching the end of the line unclosed yields
-/// no link.
-fn inline_at(line: &str, open: usize) -> Option<(String, String, usize)> {
-    let close = matching(line.as_bytes(), open, b'[', b']')?;
-    if line.as_bytes().get(close + 1) != Some(&b'(') {
+/// delimiter after it. Anything reaching the end of the line unclosed, or a
+/// parenthesised part that is not a destination and an optional title, yields no
+/// link — the no-recovery reading this scanner exists to keep.
+fn inline_at(line: &str, open: usize) -> Option<(Range<usize>, String, usize)> {
+    let bytes = line.as_bytes();
+    let close = matching(bytes, open, b'[', b']')?;
+    if bytes.get(close + 1) != Some(&b'(') {
         return None;
     }
-    let dest_end = matching(line.as_bytes(), close + 1, b'(', b')')?;
-    Some((
-        line[open + 1..close].to_owned(),
-        destination_of(&line[close + 2..dest_end]),
-        dest_end + 1,
-    ))
+    let dest_end = destination_end(bytes, close + 1)?;
+    let destination = destination_of(&line[close + 2..dest_end])?;
+    Some((open + 1..close, destination, dest_end + 1))
+}
+
+/// Whether the byte at `at` is escaped by an unbalanced run of backslashes.
+fn is_escaped(bytes: &[u8], at: usize) -> bool {
+    bytes[..at]
+        .iter()
+        .rev()
+        .take_while(|b| **b == b'\\')
+        .count()
+        % 2
+        == 1
+}
+
+/// The offset of the `)` closing the `(` at `from`, counting nested parentheses
+/// and **ignoring the ones inside a quoted title**.
+///
+/// Not [`matching`]: `CommonMark` allows `[t](x.md "a ) b")`, where the first
+/// `)` is title text. Counting it closed the link early and left a range ending
+/// inside itself, which a caller splicing over the span turns into rubble.
+///
+/// A quote only opens a title, and a title only begins after whitespace — so the
+/// apostrophe in `(https://e.org/a'b)` is part of the destination rather than an
+/// unterminated title swallowing the rest of the line.
+fn destination_end(bytes: &[u8], from: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut quote: Option<u8> = None;
+    let mut after_space = false;
+    let mut i = from;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i += 2;
+            continue;
+        }
+        match quote {
+            Some(open) if bytes[i] == open => quote = None,
+            Some(_) => {}
+            None => match bytes[i] {
+                b'"' | b'\'' if after_space && depth == 1 => quote = Some(bytes[i]),
+                b'(' => depth += 1,
+                b')' => {
+                    depth = depth.checked_sub(1)?;
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                }
+                b if b.is_ascii_whitespace() => after_space = true,
+                _ => {}
+            },
+        }
+        i += 1;
+    }
+    None
 }
 
 /// The offset of the `shut` byte closing the `open` byte at `from`, counting
@@ -1071,18 +1139,35 @@ fn matching(bytes: &[u8], from: usize, open: u8, shut: u8) -> Option<usize> {
     None
 }
 
-/// The destination out of an inline link's parenthesised part, dropping the
-/// optional title `CommonMark` allows after it and unwrapping the `<…>` form.
-fn destination_of(raw: &str) -> String {
+/// The destination out of an inline link's parenthesised part, or `None` when
+/// that part is not a destination and an optional title.
+///
+/// `CommonMark` allows exactly two forms — a bare destination holding no
+/// unescaped whitespace, or a `<…>`-wrapped one that may — each optionally
+/// followed by a title in `"…"`, `'…'` or `(…)`. **Anything else is not a
+/// link**, and saying so is the whole difference between this and a recovering
+/// parser: `[t](foo bar)` reads as a citation of `foo` the moment the trailing
+/// junk is ignored, and `[t](<unclosed)` as one of `<unclosed`. Neither names
+/// anything, and a plausible wrong citation is worse than none.
+fn destination_of(raw: &str) -> Option<String> {
     let raw = raw.trim();
-    if let Some(rest) = raw.strip_prefix('<')
-        && let Some(end) = rest.find('>')
-    {
-        return rest[..end].to_owned();
+    let (destination, rest) = if let Some(rest) = raw.strip_prefix('<') {
+        // The angle form must close; an unclosed one is not a destination.
+        let end = rest.find('>')?;
+        (&rest[..end], rest[end + 1..].trim_start())
+    } else {
+        let end = raw.find(char::is_whitespace).unwrap_or(raw.len());
+        (&raw[..end], raw[end..].trim_start())
+    };
+    let titled = rest.is_empty()
+        || (rest.len() >= 2
+            && (rest.starts_with('"') && rest.ends_with('"')
+                || rest.starts_with('\'') && rest.ends_with('\'')
+                || rest.starts_with('(') && rest.ends_with(')')));
+    if destination.is_empty() || !titled {
+        return None;
     }
-    // A destination cannot hold unescaped whitespace, so whatever follows the
-    // first run of it is a title: metadata about the link, not where it points.
-    raw.split_whitespace().next().unwrap_or("").to_owned()
+    Some(destination.to_owned())
 }
 
 #[cfg(test)]
@@ -1419,12 +1504,91 @@ mod link_tests {
     /// A link that does not close is not a link, and neither is one naming
     /// nothing — the reading the OKF bundle reader argued for, kept here so it
     /// cannot invent an edge out of stray punctuation.
+    ///
+    /// The last three are the same rule reaching further than "closes": a
+    /// parenthesised part that is not a destination and an optional title is
+    /// **not a link either**. Ignoring the junk instead turns `[t](foo bar)`
+    /// into a citation of `foo` and `[t](<unclosed)` into one of `<unclosed`,
+    /// and a plausible wrong citation is worse than none (#801, raised in
+    /// review on #806).
     #[test]
     fn malformed_and_empty_inline_links_are_not_links() {
         assert!(scanned("[text](unclosed").is_empty());
         assert!(scanned("[text without a destination]").is_empty());
         assert!(scanned("[text]()").is_empty());
         assert!(scanned(r"\[not a link](docs/x.md)").is_empty());
+        assert!(scanned("[t](<unclosed)").is_empty());
+        assert!(scanned("[t](foo bar)").is_empty());
+        assert!(scanned("[t](docs/x.md not-a-title)").is_empty());
+    }
+
+    /// An image is not a link, which the `LinkKind` docs say and the scan has to
+    /// mean: `![alt](src)` would otherwise be read as a link starting one byte
+    /// late, putting a `.png` into a reference list. Raised in review on #806.
+    #[test]
+    fn an_image_is_not_a_link() {
+        assert!(scanned("![a diagram](docs/x.png)").is_empty());
+        // An escaped `!` is literal text, so what follows it *is* a link.
+        assert_eq!(
+            scanned(r"\![t](docs/x.md)")
+                .iter()
+                .map(|(_, t, _, _)| t.as_str())
+                .collect::<Vec<_>>(),
+            vec!["docs/x.md"]
+        );
+        // A real link on the same line as an image is still found.
+        assert_eq!(
+            scanned("![img](a.png) and [t](docs/x.md)")
+                .iter()
+                .map(|(_, t, _, _)| t.as_str())
+                .collect::<Vec<_>>(),
+            vec!["docs/x.md"]
+        );
+    }
+
+    /// A label is what a **reader** sees, so it keeps the code spans the scan
+    /// removed.
+    ///
+    /// Excluding a code span from the scan and excluding it from the label are
+    /// different decisions: a link *inside* backticks is an example, but
+    /// backticks *inside a label* are how this repository writes the name of a
+    /// type. Taking the text from the stripped string cited "the  type".
+    /// Raised in review on #806.
+    #[test]
+    fn a_label_keeps_the_code_spans_the_scan_removed() {
+        assert_eq!(
+            scanned("see [the `Foo` type](docs/x.md)"),
+            vec![(
+                LinkKind::Inline,
+                "docs/x.md".to_owned(),
+                "the `Foo` type".to_owned(),
+                false,
+            )]
+        );
+        // A label that is *entirely* one code span: the stripped range is empty
+        // and sits on a chunk boundary, which is the case that inverts if the
+        // two ends are mapped the same way.
+        assert_eq!(scanned("[`Foo`](docs/x.md)")[0].2, "`Foo`");
+    }
+
+    /// A title may contain the `)` that would otherwise close the link.
+    ///
+    /// `CommonMark` allows it, and counting it ended the span inside the link —
+    /// which a caller splicing over that span (`doc_anchor_fragments.rs`'s
+    /// heading reader does) turns into rubble. An apostrophe with no whitespace
+    /// before it is destination content, not a title nobody closed. Raised in
+    /// review on #806.
+    #[test]
+    fn a_title_may_hold_the_bracket_that_would_close_the_link() {
+        let line = r#"[t](docs/x.md "a ) b") after"#;
+        let links = markdown_links(line);
+        assert_eq!(links[0].target, "docs/x.md");
+        assert_eq!(&line[links[0].span.clone()], r#"[t](docs/x.md "a ) b")"#);
+        // Single-quoted and parenthesised titles are the other two forms.
+        assert_eq!(scanned("[t](docs/x.md 'a ) b')")[0].1, "docs/x.md");
+        assert_eq!(scanned("[t](docs/x.md (a title))")[0].1, "docs/x.md");
+        // An apostrophe inside a destination opens nothing.
+        assert_eq!(scanned("[t](https://e.org/a'b)")[0].1, "https://e.org/a'b");
     }
 
     /// `[[a]]` is one wiki-link, not also an inline link whose text is `[a`.

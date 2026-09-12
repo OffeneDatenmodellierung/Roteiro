@@ -132,14 +132,25 @@ fn repo_root() -> PathBuf {
 /// `file_type` test the production walker uses, and for the same reason
 /// `docs_are_canonical.rs` gives: "not a directory" also admits a FIFO, and
 /// `read_to_string` blocks on one forever.
+///
+/// Every I/O error **panics** rather than pruning the subtree quietly. The floor
+/// assertions below are the only thing standing between this test and a vacuous
+/// pass, and an unreadable directory costs coverage without costing enough of it
+/// to trip them — so a skipped subtree would be a silently smaller corpus, which
+/// is exactly what the floors exist to catch. Raised in review on #806.
 fn walk(dir: &Path, exts: &[&str], out: &mut Vec<PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in rd.flatten() {
-        let Ok(kind) = entry.file_type() else {
-            continue;
-        };
+    let rd = std::fs::read_dir(dir).unwrap_or_else(|e| {
+        panic!(
+            "cannot read {} while building the corpus: {e}",
+            dir.display()
+        )
+    });
+    for entry in rd {
+        let entry =
+            entry.unwrap_or_else(|e| panic!("cannot read an entry of {}: {e}", dir.display()));
+        let kind = entry
+            .file_type()
+            .unwrap_or_else(|e| panic!("cannot stat {}: {e}", entry.path().display()));
         if kind.is_symlink() {
             continue;
         }
