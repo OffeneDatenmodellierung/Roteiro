@@ -1057,8 +1057,16 @@ mod tests {
     /// corpus cannot lose a case to a later edit of the random generator: the
     /// separator alone, a literal backslash alone, a backslash before an ordinary
     /// character (the non-canonical form `split_escaped` is permissive about),
-    /// and adjacent runs and combinations of all three.
-    const ESCAPE_EDGE_CASES: [&[&str]; 16] = [
+    /// adjacent runs and combinations of all three, and multi-byte characters
+    /// both alone and adjacent to an escape.
+    ///
+    /// The multi-byte cases are deterministic rather than left to
+    /// [`GENERATED_ALPHABET`] on purpose: `MAX_IDENTITY_PART` is a *byte* bound
+    /// while `push_escaped` and `split_escaped` walk *chars*, and a seed or
+    /// alphabet edit must not be able to drop the only case where those two
+    /// disagree. [`SHAPE_NAMES`] tallies the shape as well, so it cannot go
+    /// uncovered silently either.
+    const ESCAPE_EDGE_CASES: [&[&str]; 20] = [
         &[":"],
         &["\\"],
         &["\\a"],
@@ -1075,20 +1083,34 @@ mod tests {
         &["\\:\\:", "a"],
         &["a:b", "\\", "c\\d"],
         &[":", "\\", "\\a", "a\\\\:b"],
+        &["é"],
+        &["\\é"],
+        &["é:\\é"],
+        &["日本\\\\:é", "ß"],
     ];
 
     /// How many generated keys must exhibit each shape of the grammar before the
     /// property is worth believing. Guards against a future edit to the alphabet
-    /// quietly making the run vacuous.
+    /// quietly making the run vacuous — the random half has to reach every shape,
+    /// not merely the deterministic half that [`ESCAPE_EDGE_CASES`] guarantees.
     const MIN_PER_SHAPE: usize = 10;
 
-    /// How many of `keys` carry a separator, a literal backslash, a backslash
-    /// before an ordinary character, and an adjacent run of escapable characters,
-    /// in that order.
-    fn escape_shape_tally(keys: &[FindingKey]) -> [usize; 4] {
-        let mut tally = [0_usize; 4];
+    /// The shapes [`escape_shape_tally`] counts, in the order it returns them.
+    const SHAPE_NAMES: [&str; 5] = [
+        "separator",
+        "backslash",
+        "escaped-ordinary",
+        "adjacent-run",
+        "multi-byte",
+    ];
+
+    /// How many of `keys` carry each shape named by [`SHAPE_NAMES`]: a separator,
+    /// a literal backslash, a backslash before an ordinary character, an adjacent
+    /// run of escapable characters, and a character outside ASCII.
+    fn escape_shape_tally(keys: &[FindingKey]) -> [usize; SHAPE_NAMES.len()] {
+        let mut tally = [0_usize; SHAPE_NAMES.len()];
         for key in keys {
-            let mut shapes = [false; 4];
+            let mut shapes = [false; SHAPE_NAMES.len()];
             for part in key.parts() {
                 let chars: Vec<char> = part.chars().collect();
                 for (i, &ch) in chars.iter().enumerate() {
@@ -1102,6 +1124,10 @@ mod tests {
                     }
                     shapes[3] |= matches!(ch, '\\' | ':')
                         && matches!(next, Some(n) if matches!(n, '\\' | ':'));
+                    // One char, more than one byte: the seam between the byte
+                    // bound `FindingKey::new` enforces and the char-wise walk
+                    // `push_escaped`/`split_escaped` do.
+                    shapes[4] |= ch.len_utf8() > 1;
                 }
             }
             for (slot, seen) in tally.iter_mut().zip(shapes) {
@@ -1141,19 +1167,28 @@ mod tests {
         const SEED: u64 = 0x5150_7787_0BAD_5EED;
 
         let mut rng = Xorshift(SEED);
-        let mut keys: Vec<FindingKey> = ESCAPE_EDGE_CASES
+        let fixed: Vec<FindingKey> = ESCAPE_EDGE_CASES
             .iter()
             .map(|parts| FindingKey::new("semgrep", parts).expect("edge-case components"))
             .collect();
+        let mut keys = fixed.clone();
         keys.extend((0..GENERATED_CASES).map(|_| generated_key(&mut rng)));
 
         // The corpus has to contain what it claims to, or the property below is
-        // true of nothing interesting.
+        // true of nothing interesting. Checked twice, because the two halves can
+        // fail independently: every shape must be reachable without the random
+        // generator at all (so a seed change cannot drop one), and the corpus as
+        // a whole must clear `MIN_PER_SHAPE` (so an alphabet edit that stops the
+        // random half producing a shape fails loudly instead of thinning it).
+        for (shape, count) in SHAPE_NAMES.into_iter().zip(escape_shape_tally(&fixed)) {
+            assert!(
+                count > 0,
+                "no ESCAPE_EDGE_CASES entry contains a {shape}; that shape would rest \
+                 entirely on the random generator"
+            );
+        }
         let tally = escape_shape_tally(&keys);
-        for (shape, count) in ["separator", "backslash", "escaped-ordinary", "adjacent-run"]
-            .into_iter()
-            .zip(tally)
-        {
+        for (shape, count) in SHAPE_NAMES.into_iter().zip(tally) {
             assert!(
                 count >= MIN_PER_SHAPE,
                 "seed {SEED:#x}: only {count} of {} generated keys contain a {shape}; \
@@ -1190,30 +1225,64 @@ mod tests {
     ///
     /// `split_escaped` strips a backslash before *any* character, so a string
     /// `render` would never emit parses to the same identity as the canonical
-    /// one. `parse` is therefore not injective on rendered strings, even though
-    /// `parse ∘ render` is the identity on keys — which is the property
-    /// [`key_rendering_round_trips_and_is_injective_over_generated_keys`] holds.
+    /// one. `parse` is therefore not injective over *arbitrary input strings*.
+    /// It **is** injective over the image of `render` — that is precisely what
+    /// [`key_rendering_round_trips_and_is_injective_over_generated_keys`] holds,
+    /// and `parse ∘ render` is the identity on keys. The gap is between those
+    /// two domains, and none of the inputs below is in the image of `render`.
     /// That gap is the known `permissive-constraint` debt of review-corpus row
     /// `4bed7d81`, and this test does not resolve it.
     ///
-    /// **The decision is deferred to a human, and this test passing is not it.**
-    /// Tightening the parser would reject keys already written to stored findings
-    /// layers and emitted in `--json` output, so it is a wire-format change, not
-    /// a test change. Do not read a green run here as a decision that the
-    /// permissiveness is intended: the assertions exist so that a change to it is
-    /// visible rather than silent. What they do establish meanwhile is that the
-    /// permissiveness *normalises* — whatever form came in, what goes back out is
-    /// the canonical rendering, so nothing non-canonical can be stored.
+    /// **The decision is deferred to a human — see #798 — and not settled here.**
+    /// It is tracked as its own open decision, #798, carved out of #787 so that
+    /// merging this test does not bury it: this PR settles the property, not the
+    /// semantics. #798 carries the evidence table summarised below.
+    ///
+    /// # The blast radius, measured rather than assumed
+    ///
+    /// Tightening `parse` is still a compatibility decision, but the surface it
+    /// touches was *traced*, not guessed, and it is narrow. It is **not** what
+    /// an earlier draft of this comment claimed: neither `--json` output nor any
+    /// row written by this code is exposed, because both go out through
+    /// [`FindingKey::render`] — the [`Serialize`] impl is
+    /// `serializer.serialize_str(&self.render())` (this file, `impl Serialize
+    /// for FindingKey`), and the findings insert stores `finding.key.render()`.
+    /// Both are canonical by construction. Every in-tree producer likewise
+    /// builds keys from *components* via [`FindingKey::new`] and never by
+    /// parsing a string — including the untrusted path, since a normalized
+    /// report carries `identity: Vec<String>` that `rto_exec::ingest` converts
+    /// with `new`.
+    ///
+    /// The re-verification is cheap and deliberately left to the next reader:
+    /// [`FindingKey::parse`] has exactly **two** callers — `finding_from_row`
+    /// and the [`Deserialize`] impl. Grep for them; there is no third. A
+    /// stricter parser could therefore reject exactly two things:
+    ///
+    /// 1. **JSON authored outside this codebase**, and
+    /// 2. **a stored row written by something other than this code.**
+    ///
+    /// That is the whole of the blast radius. What is left is a compatibility
+    /// policy question about foreign input — a human's call, not a test's, and
+    /// #798 is where it gets made rather than here.
+    ///
+    /// Do not read a green run here as a decision that the permissiveness is
+    /// intended: the assertions exist so that a change to it is visible rather
+    /// than silent. What they do establish meanwhile is that the permissiveness
+    /// *normalises* — whatever form came in, what goes back out is the canonical
+    /// rendering, so nothing non-canonical can be stored.
     #[test]
     fn parse_is_permissive_about_escapes_pending_a_wire_format_decision() {
         let canonical = FindingKey::new("semgrep", &["ab"]).expect("key");
         assert_eq!(canonical.render(), "finding:semgrep:ab");
+        // The baseline: the canonical form parses to the canonical key. Split out
+        // of the loop below so that loop holds only genuinely non-canonical input
+        // and its name describes all of it.
+        assert_eq!(
+            FindingKey::parse("finding:semgrep:ab").expect("parse"),
+            canonical
+        );
 
-        for non_canonical in [
-            "finding:semgrep:a\\b",
-            "finding:semgrep:\\ab",
-            "finding:semgrep:ab",
-        ] {
+        for non_canonical in ["finding:semgrep:a\\b", "finding:semgrep:\\ab"] {
             let parsed = FindingKey::parse(non_canonical).expect("parse");
             assert_eq!(
                 parsed, canonical,
