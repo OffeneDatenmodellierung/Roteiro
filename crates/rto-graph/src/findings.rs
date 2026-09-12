@@ -1089,10 +1089,13 @@ mod tests {
         &["日本\\\\:é", "ß"],
     ];
 
-    /// How many generated keys must exhibit each shape of the grammar before the
-    /// property is worth believing. Guards against a future edit to the alphabet
-    /// quietly making the run vacuous — the random half has to reach every shape,
-    /// not merely the deterministic half that [`ESCAPE_EDGE_CASES`] guarantees.
+    /// How many *generated* keys must exhibit each shape of the grammar before
+    /// the property is worth believing. Guards against a future edit to the
+    /// alphabet quietly making the run vacuous.
+    ///
+    /// Applied to the generated half alone, never to the union with
+    /// [`ESCAPE_EDGE_CASES`] — the fixed cases would otherwise carry a shape over
+    /// this floor by themselves and hide the very edit the floor is for.
     const MIN_PER_SHAPE: usize = 10;
 
     /// The shapes [`escape_shape_tally`] counts, in the order it returns them.
@@ -1171,15 +1174,23 @@ mod tests {
             .iter()
             .map(|parts| FindingKey::new("semgrep", parts).expect("edge-case components"))
             .collect();
-        let mut keys = fixed.clone();
-        keys.extend((0..GENERATED_CASES).map(|_| generated_key(&mut rng)));
+        let generated: Vec<FindingKey> = (0..GENERATED_CASES)
+            .map(|_| generated_key(&mut rng))
+            .collect();
 
         // The corpus has to contain what it claims to, or the property below is
-        // true of nothing interesting. Checked twice, because the two halves can
-        // fail independently: every shape must be reachable without the random
-        // generator at all (so a seed change cannot drop one), and the corpus as
-        // a whole must clear `MIN_PER_SHAPE` (so an alphabet edit that stops the
-        // random half producing a shape fails loudly instead of thinning it).
+        // true of nothing interesting. The two halves are tallied *separately*,
+        // because they go vacuous in different ways and a combined tally hides
+        // both: the fixed corpus must reach every shape on its own, so a seed
+        // change cannot drop one, and the generated half must reach every shape
+        // on its own, so an alphabet edit cannot.
+        //
+        // Tallying the union instead would be the bug this guard exists to
+        // prevent, committed by the guard: eleven of the twenty fixed cases
+        // contain a separator, so with `MIN_PER_SHAPE` at 10 the union clears the
+        // floor on the fixed half alone. Deleting `:` from `GENERATED_ALPHABET`
+        // then leaves the random half exercising no separator at all and this
+        // assertion still green — measured, not supposed.
         for (shape, count) in SHAPE_NAMES.into_iter().zip(escape_shape_tally(&fixed)) {
             assert!(
                 count > 0,
@@ -1187,15 +1198,16 @@ mod tests {
                  entirely on the random generator"
             );
         }
-        let tally = escape_shape_tally(&keys);
-        for (shape, count) in SHAPE_NAMES.into_iter().zip(tally) {
+        for (shape, count) in SHAPE_NAMES.into_iter().zip(escape_shape_tally(&generated)) {
             assert!(
                 count >= MIN_PER_SHAPE,
-                "seed {SEED:#x}: only {count} of {} generated keys contain a {shape}; \
-                 the property would be vacuous for that shape",
-                keys.len()
+                "seed {SEED:#x}: only {count} of {GENERATED_CASES} generated keys contain \
+                 a {shape}; the random half would be vacuous for that shape"
             );
         }
+
+        let mut keys = fixed;
+        keys.extend(generated);
 
         let mut rendered_to_key: HashMap<String, FindingKey> = HashMap::new();
         for key in &keys {
@@ -1254,16 +1266,35 @@ mod tests {
     /// with `new`.
     ///
     /// The re-verification is cheap and deliberately left to the next reader:
-    /// [`FindingKey::parse`] has exactly **two** callers — `finding_from_row`
-    /// and the [`Deserialize`] impl. Grep for them; there is no third. A
-    /// stricter parser could therefore reject exactly two things:
+    /// [`FindingKey::parse`] has exactly **two non-test production call sites** —
+    /// `finding_from_row` and the [`Deserialize`] impl. Grep for them; the only
+    /// other hits are this module's own tests. A stricter parser could therefore
+    /// reject exactly two things in-tree:
     ///
     /// 1. **JSON authored outside this codebase**, and
     /// 2. **a stored row written by something other than this code.**
     ///
-    /// That is the whole of the blast radius. What is left is a compatibility
-    /// policy question about foreign input — a human's call, not a test's, and
-    /// #798 is where it gets made rather than here.
+    /// That is the whole of the *in-tree* blast radius. A third category exists
+    /// beyond it and is real: `parse` is `pub` and [`FindingKey`] is re-exported
+    /// from the crate root (`lib.rs`), so an out-of-tree caller could depend on
+    /// the permissive behaviour. Unlike the two above, that set cannot be
+    /// enumerated from this repository.
+    ///
+    /// What it is **not** is a hard constraint, and it should not be argued as
+    /// one. `AGENTS.md` carves the `rto-*` crates out on purpose: they publish
+    /// only because `crates/roteiro/Cargo.toml` depends on them by version and
+    /// crates.io rejects path-only dependencies, `roteiro` is their sole reverse
+    /// dependency, and a technically-breaking change to their surface — a
+    /// field's type, an enum variant, a signature — ships as a **minor** bump
+    /// and does **not** take a `!`. This crate's own package description agrees:
+    /// *"Implementation detail of the roteiro CLI; no API stability guarantee"*.
+    /// So semver would not block tightening `parse`; the question is whether to
+    /// break a promise that was never made, which is a judgement rather than a
+    /// rule.
+    ///
+    /// What is left is a compatibility policy question about foreign input and
+    /// out-of-tree callers — a human's call, not a test's, and #798 is where it
+    /// gets made rather than here.
     ///
     /// Do not read a green run here as a decision that the permissiveness is
     /// intended: the assertions exist so that a change to it is visible rather
