@@ -154,6 +154,23 @@ pub enum EntrySpan {
     /// A link. `text` is what is printed, `href` where it points; for a DOI
     /// both are the `https://doi.org/…` form, because APA prints the resolver
     /// URL itself rather than a label.
+    ///
+    /// # Escaping is the consumer's duty
+    ///
+    /// Stated plainly because an unstated answer is how the next consumer gets
+    /// it wrong. `href` is **not** guaranteed safe to interpolate into markup
+    /// unescaped. A UI writing HTML must escape it for HTML, one writing a
+    /// terminal escape sequence must escape it for that, and so on: this module
+    /// renders APA, and it does not know the destination format.
+    ///
+    /// What it *does* guarantee is narrower and worth having. Every character
+    /// of `href` is one RFC 3986 permits in a URI, and none is whitespace or
+    /// invisible — so `"`, `<`, `>`, `\`, `^`, `` ` ``, `{`, `|` and `}` cannot
+    /// occur, and a locator therefore cannot close a double-quoted attribute or
+    /// open a tag. `&` and `'` are legal in a URI and *are* allowed, which is
+    /// precisely why the duty above is not discharged here. The guarantee
+    /// removes the characters that make forgetting it catastrophic; it does not
+    /// remove the need to remember.
     Link {
         /// The printed text.
         text: String,
@@ -229,6 +246,13 @@ pub enum Missing {
     PublicationDate,
     /// The work has no title recorded.
     Title,
+    /// The retrieval date names a day that does not exist — `February 31`.
+    ///
+    /// Its own variant rather than borrowed from [`Missing::PublicationDate`],
+    /// because a refusal that names the wrong field sends an editor to the
+    /// wrong line. The two dates are separate types with separate roles, and a
+    /// worklist is only useful if each entry is true.
+    RetrievalDate,
     /// Nobody has recorded whether the work carries a version.
     Version,
     /// Nobody has recorded whether this work carries a bracketed descriptor —
@@ -265,6 +289,7 @@ impl Missing {
             Self::AuthorInitials { .. } => "author-initials",
             Self::PublicationDate => "publication-date",
             Self::Title => "title",
+            Self::RetrievalDate => "retrieval-date",
             Self::Version => "version",
             Self::Descriptor => "descriptor",
             Self::Publisher => "publisher",
@@ -424,7 +449,14 @@ fn validate(reference: &Reference) -> Vec<Missing> {
         }
     }
 
-    if reference.published.is_unknown() {
+    // Unknown, or known and impossible. `Day` validates 1..=31 because it
+    // carries no calendar; `February 31` is only impossible once the month is
+    // in hand, so it is caught here where the whole date is.
+    let impossible_date = reference
+        .published
+        .known()
+        .is_some_and(|published| !published.names_a_day_that_exists());
+    if reference.published.is_unknown() || impossible_date {
         missing.push(Missing::PublicationDate);
     }
     if reference.title.trim().is_empty() {
@@ -461,6 +493,12 @@ fn validate(reference: &Reference) -> Vec<Missing> {
     };
     if locator_missing {
         missing.push(Missing::Locator);
+    }
+
+    if let Stability::UnarchivedAndChanging { retrieved } = reference.stability
+        && !retrieved.names_a_day_that_exists()
+    {
+        missing.push(Missing::RetrievalDate);
     }
 
     if reference.publisher.is_absent_from_work() && reference.locator.is_absent_from_work() {
@@ -681,12 +719,29 @@ fn is_web_url(url: &str) -> bool {
     let Some(authority) = authority else {
         return false;
     };
-    // There has to be a host. `https://` and `https://?` carry a scheme and
-    // nothing to resolve, so they satisfied a prefix test while naming no work
-    // at all — a link that cannot locate anything, which is the fabrication this
-    // module refuses rather than a cosmetic defect. The authority ends at the
-    // first delimiter; what matters is only that something precedes it.
-    let host = authority.split(['/', '?', '#']).next().unwrap_or_default();
+    // There has to be a host, and *non-empty is not the same as valid*: the
+    // first attempt at this checked only that something preceded the first
+    // delimiter, which let `https://:443` (a port and no host), `https://@/path`
+    // (userinfo and no host) and `https://[]` (an empty address literal)
+    // through. Each carries a scheme and nothing to resolve — a link that cannot
+    // locate anything, which is the fabrication this module refuses rather than
+    // a cosmetic defect.
+    //
+    // So the authority is taken apart the way RFC 3986 §3.2 builds it —
+    // userinfo, host, port — and the host is what must survive.
+    let authority = authority.split(['/', '?', '#']).next().unwrap_or_default();
+    let after_userinfo = authority.rsplit('@').next().unwrap_or_default();
+    let host = match after_userinfo.strip_prefix('[') {
+        // An IP-literal: the brackets must close, and hold something.
+        Some(literal) => match literal.split_once(']') {
+            Some((address, _port)) => address,
+            None => "",
+        },
+        // A registered name or IPv4 address, up to the port.
+        None => after_userinfo.split(':').next().unwrap_or_default(),
+    };
+    // What a host *is* beyond being present is a question needing a network, so
+    // this asks no more than that one.
     !host.is_empty() && is_printable_identifier(url)
 }
 
@@ -2019,6 +2074,87 @@ mod tests {
             "https://localhost/x",
             "http://example.invalid",
             "https://example.invalid/a?b#c",
+        ] {
+            let mut reference = complete("r", WorkKind::Document, "A title");
+            reference.locator = Attested::Known(Locator::Url(locatable.to_owned()));
+            assert!(entry(&reference).is_ok(), "{locatable:?}");
+        }
+    }
+
+    #[test]
+    fn a_date_that_did_not_happen_refuses_by_its_own_name() {
+        // `February 31` rendered as an APA date, and a retrieval date of the
+        // same shape said somebody read a work on a day that did not happen.
+        let mut published = complete("p", WorkKind::Document, "A title");
+        published.published = Attested::Known(PublicationDate::Full {
+            year: year(2021),
+            month: Month::February,
+            day: day(31),
+        });
+        assert_eq!(
+            entry(&published).expect_err("refuses").missing,
+            vec![Missing::PublicationDate]
+        );
+
+        // Its own variant, because a refusal naming the wrong field sends an
+        // editor to the wrong line.
+        let mut retrieved = complete("r", WorkKind::WebPage, "A title");
+        retrieved.stability = Stability::UnarchivedAndChanging {
+            retrieved: AccessDate {
+                year: year(2021),
+                month: Month::February,
+                day: day(31),
+            },
+        };
+        let refusal = entry(&retrieved).expect_err("refuses");
+        assert_eq!(refusal.missing, vec![Missing::RetrievalDate]);
+        assert!(refusal.to_string().contains("retrieval-date"), "{refusal}");
+
+        // A real date still renders, including a leap day in a leap year.
+        let mut leap = complete("l", WorkKind::Document, "A title");
+        leap.published = Attested::Known(PublicationDate::Full {
+            year: year(2020),
+            month: Month::February,
+            day: day(29),
+        });
+        assert!(
+            entry(&leap)
+                .expect("renders")
+                .plain_text()
+                .contains("(2020, February 29)")
+        );
+    }
+
+    #[test]
+    fn a_locator_with_no_real_host_cannot_locate_a_work() {
+        // Non-empty is not the same as valid: each of these has something
+        // between the scheme and the first delimiter, and none of them names a
+        // host. A port with no host, userinfo with no host, an empty address
+        // literal.
+        for hostless in [
+            "https://:443",
+            "https://@/path",
+            "https://[]",
+            "https://[]:80/x",
+            "https://user@:8080/x",
+            "https://[unclosed/x",
+        ] {
+            let mut reference = complete("r", WorkKind::Document, "A title");
+            reference.locator = Attested::Known(Locator::Url(hostless.to_owned()));
+            assert_eq!(
+                entry(&reference).expect_err("refuses").missing,
+                vec![Missing::Locator],
+                "{hostless:?} names no host"
+            );
+        }
+        // The shapes RFC 3986 actually builds still resolve.
+        for locatable in [
+            "https://[::1]/x",
+            "https://[::1]:8080/x",
+            "https://user@host/x",
+            "https://user:pw@host:8080/x",
+            "https://host:8080/x",
+            "https://localhost",
         ] {
             let mut reference = complete("r", WorkKind::Document, "A title");
             reference.locator = Attested::Known(Locator::Url(locatable.to_owned()));

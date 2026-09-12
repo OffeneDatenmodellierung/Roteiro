@@ -376,7 +376,57 @@ pub enum PublicationDate {
     },
 }
 
+/// Whether `day` exists in that month of that year.
+///
+/// The proleptic Gregorian calendar, which is the one APA's dates are read in.
+/// It lives here rather than on [`Day`] because it is not a property of a day:
+/// `31` is a perfectly good day number, and only `31` *together with* February
+/// is impossible. That is the shape of this defect and of the several before it
+/// — an invariant enforced on a part while the composite goes unchecked — so it
+/// is checked where the composite is, and by both types that build one.
+fn day_exists(year: Year, month: Month, day: Day) -> bool {
+    let leap = |y: i32| y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let length = match month {
+        Month::January
+        | Month::March
+        | Month::May
+        | Month::July
+        | Month::August
+        | Month::October
+        | Month::December => 31,
+        Month::April | Month::June | Month::September | Month::November => 30,
+        Month::February => {
+            if leap(year.get()) {
+                29
+            } else {
+                28
+            }
+        }
+    };
+    day.get() <= length
+}
+
 impl PublicationDate {
+    /// Whether this names a day that exists.
+    ///
+    /// Always true for the `Year` and `YearMonth` precisions, which cannot name
+    /// a day at all. For `Full` it is the question [`Day`] cannot answer on its
+    /// own: `Day::new(31)` is valid, and `February 31` is not.
+    ///
+    /// A method rather than a constructor because making the state
+    /// unrepresentable means giving this enum an opaque shape — a smart
+    /// constructor and private fields on a public enum — which is a wider change
+    /// than the defect warrants. So the formatter refuses instead, which is the
+    /// module's other setting and the one it uses wherever a record can be
+    /// *written* but not *cited*.
+    #[must_use]
+    pub fn names_a_day_that_exists(self) -> bool {
+        match self {
+            Self::Year(_) | Self::YearMonth { .. } => true,
+            Self::Full { year, month, day } => day_exists(year, month, day),
+        }
+    }
+
     /// The year, whatever the precision. An in-text citation uses only this.
     #[must_use]
     pub fn year(self) -> Year {
@@ -400,6 +450,21 @@ pub struct AccessDate {
     pub month: Month,
     /// The day of the month.
     pub day: Day,
+}
+
+impl AccessDate {
+    /// Whether this names a day that exists — see
+    /// [`PublicationDate::names_a_day_that_exists`], which this shares its
+    /// calendar with.
+    ///
+    /// A retrieval date is always full precision, so unlike a publication date
+    /// there is no case where the question does not arise. Without it the
+    /// formatter emitted `Retrieved February 31, 2021, from …` — a statement
+    /// that somebody read a work on a day that did not happen.
+    #[must_use]
+    pub fn names_a_day_that_exists(self) -> bool {
+        day_exists(self.year, self.month, self.day)
+    }
 }
 
 /// Whether a work holds still.
@@ -734,17 +799,65 @@ fn strip_prefix_ignoring_ascii_case<'a>(text: &'a str, prefix: &str) -> Option<&
 /// The difference is not an inconsistency but the reason the two exist
 /// separately: a DOI is encoded at the boundary by [`Doi::url`], so it can be
 /// recorded as the identifier itself, while a URL is not, so it cannot.
+/// # What this does and does not promise a consumer
+///
+/// It promises the value contains **only characters RFC 3986 permits in a
+/// URI**, and nothing invisible. In particular `"`, `<`, `>`, `\`, `^`,
+/// `` ` ``, `{`, `|` and `}` are excluded — so a locator cannot close a
+/// double-quoted HTML attribute or open a tag, which is how
+/// `https://example.invalid/a"onmouseover="…` became an `href` before this rule
+/// was narrowed. ASCII-graphic was the wrong bar: it admits all nine.
+///
+/// It does **not** promise the value is safe to interpolate into HTML
+/// unescaped, and nothing here should be read as saying so. `&` and `'` are
+/// legal URI characters and are allowed, so a consumer building markup must
+/// still escape for its own context — `&` always, and `'` if it quotes
+/// attributes with it. **Escaping is the consumer's duty.** What this rule buys
+/// is that the characters which make forgetting that duty catastrophic are not
+/// representable in the first place.
 #[must_use]
 pub fn is_printable_identifier(text: &str) -> bool {
-    !text.is_empty() && text.chars().all(|c| c.is_ascii_graphic())
+    !text.is_empty() && text.chars().all(is_uri_char)
+}
+
+/// Whether `c` is a character RFC 3986 permits to appear in a URI.
+///
+/// Unreserved, sub-delims, gen-delims, and `%` for an escape — which is the
+/// whole of §2, stated positively. The nine ASCII graphics it leaves out
+/// (`"`, `<`, `>`, `\`, `^`, `` ` ``, `{`, `|`, `}`) are the ones RFC 3986
+/// excludes from a URI outright, and are exactly the ones that let a locator
+/// escape an HTML attribute.
+fn is_uri_char(c: char) -> bool {
+    c.is_ascii_alphanumeric()
+        || matches!(
+            c,
+            // Unreserved.
+            '-' | '.' | '_' | '~'
+            // Sub-delims.
+            | '!' | '$' | '&' | '\'' | '(' | ')' | '*' | '+' | ',' | ';' | '='
+            // Gen-delims.
+            | ':' | '/' | '?' | '#' | '[' | ']' | '@'
+            // The escape introducer.
+            | '%'
+        )
 }
 
 /// Whether `c` may appear in a DOI name.
 ///
-/// ASCII graphic characters, **or** any letter or digit of any script. The DOI
-/// Handbook is explicit that a DOI name may incorporate any printable character
-/// from the Unicode Standard, so `10.1234/中文` is a legal identifier and
-/// refusing it would be this type inventing a rule the standard does not have.
+/// ASCII graphic characters, **or** any letter or digit of any script. So
+/// `10.1234/中文` is recordable, because it is a legal DOI name and refusing it
+/// would be this type inventing a rule the standard does not have.
+///
+/// This is **narrower than the standard**, and the doc used to overstate it by
+/// saying "any printable character from the Unicode Standard" — which admits
+/// non-ASCII punctuation this refuses, an em dash among them. The narrowing is
+/// deliberate and the reason is the shape of the rule, not the characters:
+/// "printable" has no allowlist spelling, only a denylist of the invisible, and
+/// this module has already spent a round learning that such a list cannot be
+/// finished. Letters and digits exclude the entire format category by
+/// construction. A DOI carrying an em dash is therefore refused — visibly, and
+/// arguably — rather than admitted by a rule that would also admit the next
+/// zero-width character nobody listed.
 ///
 /// Wider than [`is_printable_identifier`] on purpose, and safe to be wider for a
 /// reason that is structural rather than a judgement call: a DOI is never
@@ -854,7 +967,24 @@ impl Doi {
         .iter()
         .find_map(|prefix| strip_prefix_ignoring_ascii_case(trimmed, prefix))
         {
-            Some(encoded) => percent_decode(encoded).ok_or_else(refused)?,
+            Some(encoded) => {
+                // In a URL, `?` opens a query and `#` opens a fragment, and a
+                // fragment is never sent to the server at all. So they are
+                // *delimiters* here, not characters of the name:
+                // `https://doi.org/10.1234/a#b` asks the resolver for
+                // `10.1234/a`, and storing `10.1234/a#b` would record a DOI
+                // nobody requested and re-emit it as `…/a%23b` — a different
+                // record again. Truncating at the first of either is what the
+                // resolver itself does.
+                //
+                // Note this makes the two input forms deliberately *disagree*:
+                // the bare `10.1234/a#b` is a DOI name whose suffix contains a
+                // literal `#`, while the URL form names `10.1234/a`. That is
+                // correct — they are different statements — and it is the reason
+                // the decode happens only on the URL path.
+                let addressed = encoded.split(['?', '#']).next().unwrap_or_default();
+                percent_decode(addressed).ok_or_else(refused)?
+            }
             None => strip_prefix_ignoring_ascii_case(trimmed, "doi:")
                 .unwrap_or(trimmed)
                 .to_owned(),
@@ -872,6 +1002,18 @@ impl Doi {
             let Some((registrant, suffix)) = rest.split_once('/') else {
                 return Err(refused());
             };
+            // Digits and dots, and deliberately **no minimum length**. Registrant
+            // codes are in practice four digits or more (`10.1000` is the
+            // lowest assigned), but that is how they have been handed out, not
+            // a rule of the syntax: neither ISO 26324 nor ANSI/NISO Z39.84
+            // states a digit count, Crossref's own documentation says members
+            // create only the suffix and describes no prefix structure, and the
+            // usual secondary sources say the prefix "*usually*" takes the form
+            // `10.NNNN`. Enforcing a convention as though it were the standard
+            // is how a type comes to refuse a registered identifier, which is a
+            // worse failure than accepting an unassigned one — and whether a
+            // well-formed DOI is *registered* is a question only the network
+            // answers, which this crate does not have.
             let registrant_is_numeric = registrant
                 .split('.')
                 .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()));
@@ -1142,10 +1284,12 @@ impl Reference {
     /// The keys, in order:
     ///
     /// 1. every author, in the order the work lists them — surname then
-    ///    *initials as rendered*, case-insensitively, since APA alphabetises
-    ///    letter by letter and does not care about capitals. Rendered initials
-    ///    rather than recorded given names, so that nothing invisible on the
-    ///    page can decide the order of the page;
+    ///    *initials as rendered*, folded **letter by letter**: capitals ignored,
+    ///    and spaces and punctuation dropped, which is what APA's "letter by
+    ///    letter" means literally. `Olsen` therefore precedes `O'Malley`
+    ///    precedes `O'Neil`. Rendered initials rather than recorded given names,
+    ///    so that nothing invisible on the page can decide the order of the
+    ///    page;
     /// 2. the same list case-sensitively, so the fold in step 1 never decides a
     ///    tie by accident of iteration order;
     /// 3. the full publication date — year, then month, then day, so two works
@@ -1156,9 +1300,11 @@ impl Reference {
     ///    to be defined for it. A year-only date precedes a more precise one in
     ///    the same year, because that is the only placement that does not
     ///    invent a month for it;
-    /// 4. title, case-insensitively then not — trimmed, like the author keys,
-    ///    because the renderer trims both and whitespace nobody can see must
-    ///    not decide an order somebody reads;
+    /// 4. title, folded the same way then compared as written — trimmed, like
+    ///    the author keys, because the renderer trims both and whitespace nobody
+    ///    can see must not decide an order somebody reads. Folded the same way
+    ///    because APA alphabetises a title letter by letter too, and one
+    ///    function applied to both is what keeps them from disagreeing;
     /// 5. [`Reference::id`];
     /// 6. the record itself, structurally.
     ///
@@ -1212,14 +1358,24 @@ impl Reference {
                 })
                 .collect()
         };
+        // Letter by letter, which APA means literally: spaces and punctuation are
+        // ignored, so `Olsen` precedes `O'Malley` precedes `O'Neil` — Ol, OM,
+        // ON. Keeping the apostrophe in the key sorted all three wrongly, since
+        // `'` sorts below every letter and put both O'-names above `Olsen`.
+        // Dropping the punctuation from the *fold* only: key 2 below still
+        // compares the names as written, so two people who differ only in
+        // punctuation are still ordered, and deterministically.
+        let fold = |name: &str| -> String {
+            name.chars()
+                .filter(|c| c.is_alphanumeric())
+                .flat_map(char::to_lowercase)
+                .collect()
+        };
         let folded = |names: &[(String, Vec<String>)]| -> Vec<(String, Vec<String>)> {
             names
                 .iter()
                 .map(|(surname, given)| {
-                    (
-                        surname.to_lowercase(),
-                        given.iter().map(|name| name.to_lowercase()).collect(),
-                    )
+                    (fold(surname), given.iter().map(|name| fold(name)).collect())
                 })
                 .collect()
         };
@@ -1244,7 +1400,7 @@ impl Reference {
             .cmp(&folded(&right))
             .then_with(|| left.cmp(&right))
             .then_with(|| date(a).cmp(&date(b)))
-            .then_with(|| title(a).to_lowercase().cmp(&title(b).to_lowercase()))
+            .then_with(|| fold(title(a)).cmp(&fold(title(b))))
             .then_with(|| title(a).cmp(title(b)))
             .then_with(|| a.id.cmp(&b.id))
             .then_with(|| a.cmp(b))
@@ -1975,6 +2131,193 @@ mod tests {
         };
         assert_eq!(published.year().get(), 2020);
         assert_eq!(author.sort_key(), "Luna");
+    }
+
+    #[test]
+    fn a_locator_cannot_carry_a_character_that_escapes_an_attribute() {
+        // This crate's output is structured spans destined for a web UI, so an
+        // `href` is a value somebody interpolates into markup. ASCII-graphic was
+        // the wrong bar: it admits the nine characters RFC 3986 excludes from a
+        // URI outright, and `"` among them turns a locator into an attribute.
+        for escaping in [
+            "https://example.invalid/a\"onmouseover=\"alert(1)",
+            "https://example.invalid/a\"",
+            "https://example.invalid/a<script>",
+            "https://example.invalid/a>b",
+            "https://example.invalid/a\\b",
+            "https://example.invalid/a{b}",
+            "https://example.invalid/a^b",
+            "https://example.invalid/a|b",
+            "https://example.invalid/a`b",
+        ] {
+            assert!(
+                !is_printable_identifier(escaping),
+                "{escaping:?} can escape a quoted attribute and must not be a link target"
+            );
+        }
+        // The characters a URL actually needs are all still there, including the
+        // two the contract explicitly does *not* discharge the consumer of.
+        for ordinary in [
+            "https://example.invalid/a?b=c&d=e#f",
+            "https://example.invalid/~user/a_b-c.d",
+            "https://example.invalid/a'b",
+            "https://example.invalid/(a)+b,c;d=e!f$g*h",
+            "https://example.invalid/a%20b",
+            "https://[::1]:8080/x",
+        ] {
+            assert!(is_printable_identifier(ordinary), "{ordinary:?}");
+        }
+    }
+
+    #[test]
+    fn a_resolver_url_ends_at_a_query_or_a_fragment() {
+        // In a URL `?` opens a query and `#` opens a fragment, and a fragment is
+        // never sent to the server — so `https://doi.org/10.1234/a#b` asks the
+        // resolver for `10.1234/a`. Storing `10.1234/a#b` recorded a DOI nobody
+        // requested and re-emitted it as `…/a%23b`, a third record again.
+        for (url, named) in [
+            ("https://doi.org/10.1234/a#b", "10.1234/a"),
+            ("https://doi.org/10.1234/a?b", "10.1234/a"),
+            ("https://doi.org/10.1234/a#b?c", "10.1234/a"),
+            ("https://doi.org/10.1234/a%23b", "10.1234/a#b"),
+            ("https://doi.org/10.1234/plain", "10.1234/plain"),
+        ] {
+            assert_eq!(
+                Doi::new(url).expect("a resolver URL").as_str(),
+                named,
+                "{url:?}"
+            );
+        }
+        // The two input forms disagree on purpose: bare, `#` is a character of
+        // the name; in a URL it is a delimiter. They are different statements.
+        assert_ne!(
+            Doi::new("10.1234/a#b").expect("a bare name"),
+            Doi::new("https://doi.org/10.1234/a#b").expect("a URL")
+        );
+        // And the round trip holds for URL-shaped input too, which is the form
+        // the property was not previously stated over.
+        for recorded in ["10.1234/a#b", "10.1234/a?b", "10.1234/a%b"] {
+            let doi = Doi::new(recorded).expect("a DOI");
+            assert_eq!(
+                Doi::new(&doi.url()).expect("its own URL"),
+                doi,
+                "{recorded:?} did not survive render-and-reparse as a URL"
+            );
+        }
+    }
+
+    #[test]
+    fn a_registrant_code_is_not_held_to_a_length_convention() {
+        // Registrant codes are four digits or more in practice, but that is how
+        // they have been assigned rather than a rule of the syntax — no digit
+        // count is stated by the standards, and secondary sources say the prefix
+        // "usually" takes the form `10.NNNN`. Enforcing the convention would
+        // refuse a registered identifier on no authority, which is a worse
+        // failure than accepting an unassigned one.
+        for short in ["10.1/x", "10.12/x", "10.123/x"] {
+            assert!(Doi::new(short).is_ok(), "{short:?}");
+        }
+        assert!(Doi::new("10.1000/182").is_ok(), "the DOI Foundation's own");
+        // The shape rules that *are* stated still hold.
+        for malformed in ["10./x", "10.a/x", "10.1./x", "11.1234/x", "10.1234"] {
+            assert!(Doi::new(malformed).is_err(), "{malformed:?}");
+        }
+    }
+
+    #[test]
+    fn a_date_that_did_not_happen_is_not_a_date() {
+        // `Day` validates 1..=31 because it carries no calendar. `February 31`
+        // is only impossible once the month is in hand, so the composite has to
+        // ask — the same shape as every other invariant enforced on a part while
+        // the whole went unchecked.
+        let day = |d: u8| Day::new(d).expect("a day");
+        for (y, m, d) in [
+            (2021, Month::February, 31),
+            (2021, Month::February, 30),
+            (2021, Month::February, 29),
+            (2021, Month::April, 31),
+            (2021, Month::June, 31),
+            (2021, Month::September, 31),
+            (2021, Month::November, 31),
+        ] {
+            let date = PublicationDate::Full {
+                year: year(y),
+                month: m,
+                day: day(d),
+            };
+            assert!(!date.names_a_day_that_exists(), "{m:?} {d}, {y}");
+            assert!(
+                !AccessDate {
+                    year: year(y),
+                    month: m,
+                    day: day(d)
+                }
+                .names_a_day_that_exists(),
+                "a retrieval date shares the calendar: {m:?} {d}, {y}"
+            );
+        }
+        // Leap years, both rules of them.
+        for (y, exists) in [(2020, true), (2021, false), (2000, true), (1900, false)] {
+            let date = PublicationDate::Full {
+                year: year(y),
+                month: Month::February,
+                day: day(29),
+            };
+            assert_eq!(date.names_a_day_that_exists(), exists, "29 February {y}");
+        }
+        // Ordinary dates, and the precisions that name no day at all.
+        assert!(
+            PublicationDate::Full {
+                year: year(2021),
+                month: Month::January,
+                day: day(31)
+            }
+            .names_a_day_that_exists()
+        );
+        assert!(PublicationDate::Year(year(2021)).names_a_day_that_exists());
+        assert!(
+            PublicationDate::YearMonth {
+                year: year(2021),
+                month: Month::February
+            }
+            .names_a_day_that_exists()
+        );
+    }
+
+    #[test]
+    fn apa_alphabetises_letter_by_letter_ignoring_punctuation() {
+        // APA means this literally: spaces and punctuation are skipped, so the
+        // order is Ol, OM, ON. Keeping the apostrophe in the key put both
+        // O'-names above `Olsen`, because `'` sorts below every letter.
+        let named = |id: &str, surname: &str| {
+            let mut reference = dated(id, surname, 2020);
+            reference.authors = vec![Author::Person {
+                surname: surname.to_owned(),
+                given: vec![given_name("A")],
+            }];
+            reference
+        };
+        let mut refs = [
+            named("oneil", "O'Neil"),
+            named("olsen", "Olsen"),
+            named("omalley", "O'Malley"),
+        ];
+        refs.sort_by(Reference::list_order);
+        assert_eq!(
+            refs.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["olsen", "omalley", "oneil"]
+        );
+        // Two names differing only in punctuation are still ordered, and
+        // deterministically, because the unfolded key breaks the tie.
+        let mut ties = [named("with", "O'Neil"), named("without", "ONeil")];
+        ties.sort_by(Reference::list_order);
+        let order: Vec<&str> = ties.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(order.len(), 2);
+        assert_ne!(
+            Reference::list_order(&ties[0], &ties[1]),
+            Ordering::Equal,
+            "the fold must not collapse two distinct names into one position"
+        );
     }
 
     #[test]
