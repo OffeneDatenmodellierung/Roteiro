@@ -1186,19 +1186,26 @@ mod tests {
         }
     }
 
+    /// Records what the parser does today. **Not** a guarantee that it is right.
+    ///
+    /// `split_escaped` strips a backslash before *any* character, so a string
+    /// `render` would never emit parses to the same identity as the canonical
+    /// one. `parse` is therefore not injective on rendered strings, even though
+    /// `parse ∘ render` is the identity on keys — which is the property
+    /// [`key_rendering_round_trips_and_is_injective_over_generated_keys`] holds.
+    /// That gap is the known `permissive-constraint` debt of review-corpus row
+    /// `4bed7d81`, and this test does not resolve it.
+    ///
+    /// **The decision is deferred to a human, and this test passing is not it.**
+    /// Tightening the parser would reject keys already written to stored findings
+    /// layers and emitted in `--json` output, so it is a wire-format change, not
+    /// a test change. Do not read a green run here as a decision that the
+    /// permissiveness is intended: the assertions exist so that a change to it is
+    /// visible rather than silent. What they do establish meanwhile is that the
+    /// permissiveness *normalises* — whatever form came in, what goes back out is
+    /// the canonical rendering, so nothing non-canonical can be stored.
     #[test]
-    fn parse_accepts_non_canonical_escapes_and_normalises_them() {
-        // The permissive half of #787, pinned as behaviour rather than fixed:
-        // `split_escaped` drops a backslash before *any* character, so a string
-        // `render` would never emit parses to the same identity as the canonical
-        // one. `parse` is therefore not injective on rendered strings, even
-        // though `parse ∘ render` is the identity on keys (above).
-        //
-        // This is deliberately not a bug fix. Tightening the parser would reject
-        // keys already written to stored findings layers and to `--json` output,
-        // so it is a wire-format decision, not a test change. What this test
-        // guarantees meanwhile is that the permissiveness *normalises*: whatever
-        // form came in, what goes back out is the canonical rendering.
+    fn parse_is_permissive_about_escapes_pending_a_wire_format_decision() {
         let canonical = FindingKey::new("semgrep", &["ab"]).expect("key");
         assert_eq!(canonical.render(), "finding:semgrep:ab");
 
