@@ -715,6 +715,22 @@ pub struct MarkdownLink {
 /// Escapes are **not** processed inside `[[…]]`, which is a Roteiro token rather
 /// than `CommonMark` syntax and has never had them.
 ///
+/// # Ranges may overlap, and a splicing caller must expect it
+///
+/// `[See [[x]]](target)` is one inline link *and* one wiki-link, and the inline
+/// one's range encloses the other's. That is the honest report: both are there,
+/// and which one matters depends on who is asking — the renderer rewrites
+/// wiki-links, the rustdoc-anchor guard reduces inline ones to their text.
+/// Neither wants the other's answer, and a scanner that picked one would be
+/// wrong for the other.
+///
+/// Overlap only ever pairs a wiki-link with an inline or image one — a nested
+/// `[…](…)` is consumed by the link enclosing it, and `[[…]]` never nests — so
+/// **taking a single [`LinkKind`] gives a non-overlapping set**, which is what
+/// both rewriting callers in this workspace do. A caller that splices *across*
+/// kinds must skip a link starting before where the last one ended, or it slices
+/// a backwards range and panics. Raised in review on #806.
+///
 /// **A `[[…]]` inside an image's alt text is still reported**, so
 /// `![alt [[docs/x.md]]](i.png)` yields an [`LinkKind::Image`] *and* a
 /// [`LinkKind::Wiki`]. That is not an oversight and cannot be tidied here: a
@@ -737,7 +753,7 @@ pub fn markdown_links(line: &str) -> Vec<MarkdownLink> {
             span: map.start(range.start)..map.end(range.end),
         })
         .collect();
-    out.extend(inline_spans(&stripped, &wiki).into_iter().map(
+    out.extend(inline_spans(&stripped, &wiki, &map).into_iter().map(
         |(kind, range, text, destination)| MarkdownLink {
             scope: link_scope(&destination),
             kind,
@@ -1022,6 +1038,7 @@ fn wiki_spans(stripped: &str) -> Vec<(Range<usize>, String)> {
 fn inline_spans(
     stripped: &str,
     wiki: &[(Range<usize>, String)],
+    map: &SpanMap,
 ) -> Vec<(LinkKind, Range<usize>, Range<usize>, String)> {
     let bytes = stripped.as_bytes();
     let mut out = Vec::new();
@@ -1043,6 +1060,19 @@ fn inline_spans(
             i += 1;
             continue;
         };
+        // Removing a code span **joins** what was either side of it, which is
+        // right for a `[[…]]` (that is what the scan this replaced did) and
+        // wrong for a `[…](…)`: `CommonMark` gives code spans precedence over
+        // links, so ``[a]`x`(b)`` is not a link and neither is ``[x](a`b`c)``.
+        // Requiring `](…)` to be the same length in the line as in the stripped
+        // string is that rule — nothing was removed inside it. The **label** is
+        // deliberately not covered: a code span there is part of the label.
+        // Raised in review on #806.
+        let tail = text.end..end;
+        if map.end(tail.end) - map.start(tail.start) != tail.len() {
+            i += 1;
+            continue;
+        }
         let image = i > 0 && bytes[i - 1] == b'!' && !is_escaped(bytes, i - 1);
         let (kind, start) = if image {
             (LinkKind::Image, i - 1)
@@ -1639,6 +1669,63 @@ mod link_tests {
         let links = markdown_links("![alt [[docs/x.md]]](i.png)");
         assert!(links[0].span.start < links[1].span.start);
         assert!(links[0].span.end > links[1].span.end);
+    }
+
+    /// The same overlap through an ordinary inline link — the general case, and
+    /// the one that says what a splicing caller may assume.
+    ///
+    /// `[See [[x]]](target)` is one inline link enclosing one wiki-link. A caller
+    /// walking **both** would pass the outer link's end and then meet the inner
+    /// one's start, slicing a backwards range. No caller does today: overlap only
+    /// ever pairs a wiki-link with an inline or image one, so taking a single
+    /// kind — which both rewriting callers do — is non-overlapping, and that is
+    /// asserted below rather than asserted in prose. Raised in review on #806 as
+    /// a live panic in `doc_anchor_fragments.rs`; it was not one, because that
+    /// caller drops wiki-links. The contract still permits it, so it is written
+    /// down and guarded.
+    #[test]
+    fn an_inline_link_may_enclose_a_wiki_link() {
+        let line = "[See [[docs/x.md]]](target.md)";
+        let links = markdown_links(line);
+        assert_eq!(
+            links
+                .iter()
+                .map(|l| (l.kind, l.target.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (LinkKind::Inline, "target.md"),
+                (LinkKind::Wiki, "docs/x.md")
+            ]
+        );
+        assert_eq!(&line[links[0].span.clone()], line);
+        assert_eq!(&line[links[1].span.clone()], "[[docs/x.md]]");
+        // Either kind on its own is non-overlapping, which is what the two
+        // rewriting callers rely on.
+        for kind in [LinkKind::Wiki, LinkKind::Inline] {
+            let mut at = 0;
+            for l in markdown_links(line).iter().filter(|l| l.kind == kind) {
+                assert!(l.span.start >= at, "{kind:?} spans overlap");
+                at = l.span.end;
+            }
+        }
+    }
+
+    /// A code span between the `]` and the `(`, or inside the destination, means
+    /// this is **not** a link.
+    ///
+    /// Removing a code span joins what was either side of it — which is right
+    /// for a `[[…]]`, because that is what the scan this replaced did, and wrong
+    /// here: `CommonMark` gives code spans precedence over links, so none of
+    /// these is a link to anybody reading the rendered page. Joining them
+    /// invented a destination that is not in the source. Raised in review on
+    /// #806.
+    #[test]
+    fn a_code_span_inside_the_destination_means_there_is_no_link() {
+        assert!(scanned("[a]`x`(docs/b.md)").is_empty());
+        assert!(scanned("[x](a`b`c.md)").is_empty());
+        assert!(scanned("[x](`docs/x.md`)").is_empty());
+        // The label is deliberately not covered: a code span there is content.
+        assert_eq!(scanned("[the `Foo` type](docs/x.md)")[0].1, "docs/x.md");
     }
 
     /// An angle-bracket destination is opaque: it may hold the parentheses and

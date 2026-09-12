@@ -125,6 +125,17 @@ fn heading_text(raw: &str) -> String {
         if link.kind == rto_graph::LinkKind::Wiki {
             continue;
         }
+        // `markdown_links` may report **overlapping** ranges — an inline link
+        // encloses a `[[…]]` written inside its label — so a link already inside
+        // one that has been spliced is skipped, rather than slicing a backwards
+        // range. Not reachable today: overlap only ever pairs a wiki-link with
+        // an inline one, and the `continue` above drops every wiki-link. It is
+        // here because that is a fact about the filter one line up, not about
+        // the contract, and the contract is what the next reader will trust.
+        // Raised in review on #806; kept after checking the claim.
+        if link.span.start < at {
+            continue;
+        }
         out.push_str(&raw[at..link.span.start]);
         out.push_str(&link.text);
         at = link.span.end;
@@ -588,6 +599,19 @@ fn slugify_matches_rustdocs_rule() {
     );
     // Non-ASCII is kept verbatim — rustdoc lowercases only ASCII.
     assert_eq!(slugify(&heading_text("Ünicode kept")), "Ünicode-kept");
+    // An image reduces to its alt text, not to alt text plus the source path.
+    assert_eq!(
+        slugify(&heading_text("A ![diagram](img.png) here")),
+        "a-diagram-here"
+    );
+    // A wiki-link inside an inline link: `markdown_links` reports both, and the
+    // inline one's range **encloses** the wiki one's. The label is what survives,
+    // wiki brackets and all, because this reduces markdown to what a reader sees
+    // and the renderer is what turns a `[[…]]` into something else.
+    assert_eq!(
+        slugify(&heading_text("See [x [[docs/y.md]]](self#paging)")),
+        "see-x-docsymd"
+    );
 }
 
 #[test]
