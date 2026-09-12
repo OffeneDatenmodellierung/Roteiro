@@ -655,7 +655,20 @@ impl LinkScope {
 }
 
 /// One Markdown link found on one line by [`markdown_links`].
+///
+/// # Its invariants are enforced, not merely documented
+///
+/// Every claim the fields below make is made true by `MarkdownLink::new`,
+/// which is the only constructor this crate has, and the struct is
+/// `#[non_exhaustive]` so no code outside this crate can build one another way.
+/// That is deliberate and was earned: three rounds of review on #806 and #807
+/// each turned up a field whose doc comment stated a guarantee its constructor
+/// did not keep — `target` promised "trimmed, and never empty" while the
+/// angle-destination branch could return whitespace. A contract a reader trusts
+/// and a caller can violate is worse than no contract, because it is relied on.
+/// New fields belong in `new` as much as they belong here.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MarkdownLink {
     /// Which syntax it was written in.
     pub kind: LinkKind,
@@ -677,7 +690,79 @@ pub struct MarkdownLink {
     /// The byte range the whole link occupies **in the line as given**, so a
     /// caller can rewrite it in place. Code spans are excluded from the scan but
     /// not from this range: a link whose brackets straddle one covers it.
+    ///
+    /// Always non-empty, inside the line, and on character boundaries, so
+    /// `&line[link.span]` cannot panic.
     pub span: Range<usize>,
+}
+
+impl MarkdownLink {
+    /// The one constructor, and the one place this type's documented invariants
+    /// are made true.
+    ///
+    /// Returns [`None`] when `target` names nothing once trimmed. That is the
+    /// `target` field's contract — "trimmed, and never empty" — held by
+    /// construction rather than by hope, and it is the same reading the rest of
+    /// the scanner already had: `[t]()`, `[t](   )` and `[[  ]]` were all
+    /// already no link at all, and only the angle-destination branch let
+    /// `[t](< >)` through with a target of one space.
+    ///
+    /// `kind` decides the other two. A wiki-link's visible text **is** its
+    /// target, and a wiki-link addresses a graph node by key and so cannot name
+    /// a URL — both are stated on the fields, and taking them as parameters
+    /// would be inviting the next caller to disagree with the documentation.
+    ///
+    /// # Where this differs from `pulldown-cmark`, deliberately
+    ///
+    /// `pulldown-cmark` renders `[t](< >)` as a link whose destination is one
+    /// space, and `[t](< docs/x.md >)` with the spaces kept. This reports no
+    /// link for the first and `docs/x.md` for the second. That is the one place
+    /// this scanner knowingly diverges from the renderer, it is the divergence
+    /// three of the four destination forms already had, and the reason is what
+    /// this type is *for*: a `target` is a key a graph node is looked up by and
+    /// a label a citation is written from, and `" "` is neither. Nothing in this
+    /// repository writes such a link — `markdown_links_parity.rs` checks that
+    /// over every `.md` and `.rs` in the tree. Raised in review on #806.
+    ///
+    /// # Panics
+    ///
+    /// Debug builds only, and only on a bug in this module: `span` must be
+    /// non-empty and must slice `line` on character boundaries. Those cannot be
+    /// enforced by returning [`None`] — a scanner that produced a bad range has
+    /// miscounted and should say so where it happened, not hand back a silently
+    /// shorter list. The corpus test asserts the same three properties over the
+    /// whole repository, in a build where these are live.
+    fn new(
+        kind: LinkKind,
+        target: &str,
+        text: &str,
+        span: Range<usize>,
+        line: &str,
+    ) -> Option<Self> {
+        let target = target.trim();
+        if target.is_empty() {
+            return None;
+        }
+        debug_assert!(
+            span.start < span.end
+                && span.end <= line.len()
+                && line.is_char_boundary(span.start)
+                && line.is_char_boundary(span.end),
+            "{kind:?} link span {span:?} does not address {line:?}"
+        );
+        let wiki = kind == LinkKind::Wiki;
+        Some(Self {
+            kind,
+            text: if wiki { target } else { text }.to_owned(),
+            scope: if wiki {
+                LinkScope::Internal
+            } else {
+                link_scope(target)
+            },
+            target: target.to_owned(),
+            span,
+        })
+    }
 }
 
 /// Every Markdown link on `line`, of both kinds, in the order they are written.
@@ -756,28 +841,35 @@ pub fn markdown_links(line: &str) -> Vec<MarkdownLink> {
     let wiki = wiki_spans(&stripped);
     let mut out: Vec<MarkdownLink> = wiki
         .iter()
-        .map(|(range, target)| MarkdownLink {
-            kind: LinkKind::Wiki,
-            target: target.clone(),
-            text: target.clone(),
-            scope: LinkScope::Internal,
-            span: map.start(range.start)..map.end(range.end),
+        .filter_map(|(range, target)| {
+            MarkdownLink::new(
+                LinkKind::Wiki,
+                target,
+                target,
+                map.start(range.start)..map.end(range.end),
+                line,
+            )
         })
         .collect();
-    out.extend(inline_spans(line, &stripped, &wiki, &map).into_iter().map(
-        |(kind, span, text, destination)| MarkdownLink {
-            scope: link_scope(&destination),
-            kind,
-            target: destination,
-            // Read back out of the **line**, not the stripped string: a
-            // label like ``[the `Foo` type](x.md)`` is scanned with its code
-            // span removed, so taking the text from there would cite "the
-            // type". The span is excluded from the *scan* because a link
-            // inside one is an example; its content is still the label.
-            text: line[text].to_owned(),
-            span,
-        },
-    ));
+    out.extend(
+        inline_spans(line, &stripped, &wiki, &map)
+            .into_iter()
+            .filter_map(|(kind, span, text, destination)| {
+                MarkdownLink::new(
+                    kind,
+                    &destination,
+                    // Read back out of the **line**, not the stripped string: a
+                    // label like ``[the `Foo` type](x.md)`` is scanned with its
+                    // code span removed, so taking the text from there would
+                    // cite "the type". The span is excluded from the *scan*
+                    // because a link inside one is an example; its content is
+                    // still the label.
+                    &line[text],
+                    span,
+                    line,
+                )
+            }),
+    );
     out.sort_by_key(|l| l.span.start);
     out
 }
@@ -1323,15 +1415,45 @@ fn destination_of(raw: &str) -> Option<String> {
         let end = raw.find(char::is_whitespace).unwrap_or(raw.len());
         (&raw[..end], raw[end..].trim_start())
     };
-    let titled = rest.is_empty()
-        || (rest.len() >= 2
-            && (rest.starts_with('"') && rest.ends_with('"')
-                || rest.starts_with('\'') && rest.ends_with('\'')
-                || rest.starts_with('(') && rest.ends_with(')')));
-    if destination.is_empty() || !titled {
+    if destination.is_empty() || !(rest.is_empty() || is_title(rest)) {
         return None;
     }
     Some(destination.to_owned())
+}
+
+/// Whether `rest` is exactly **one** `CommonMark` link title and nothing else.
+///
+/// The three forms are `"…"`, `'…'` and `(…)`. What makes this more than a
+/// first-and-last-character test is the interior rule: a title may not hold its
+/// own closing delimiter unescaped, and the parenthesised form may not hold an
+/// unescaped `(` either. Testing only the ends accepted five malformed shapes as
+/// links, every one of which `pulldown-cmark` renders as literal text — one
+/// title running into another (`[t](x.md "one" "two")`), one closed and
+/// reopened (`[t](x.md "a"x"b")`), the same through an angle destination
+/// (`[t](<x.md> "a" "b")`), and both paren shapes (`[t](x.md (a)b(c))`,
+/// `[t](x.md (a(b)c))`). Each produced a confident target for a line that names
+/// nothing, which is precisely the invention [`destination_of`] exists to
+/// refuse. Raised in review on #806 as one instance; the other four came out of
+/// sweeping the rule against the renderer.
+///
+/// `rest` is already trimmed, so a title with anything after it fails on the
+/// closing delimiter rather than needing a separate trailing-junk test.
+fn is_title(rest: &str) -> bool {
+    let Some(shut) = rest.as_bytes().first().and_then(|b| match b {
+        b'"' => Some(b'"'),
+        b'\'' => Some(b'\''),
+        b'(' => Some(b')'),
+        _ => None,
+    }) else {
+        return false;
+    };
+    if rest.len() < 2 || rest.as_bytes()[rest.len() - 1] != shut {
+        return false;
+    }
+    let inner = &rest[1..rest.len() - 1];
+    // The paren form is the only one whose delimiters differ, so it is the only
+    // one that has to refuse its *opener* as well.
+    unescaped(inner, shut).is_none() && (shut != b')' || unescaped(inner, b'(').is_none())
 }
 
 #[cfg(test)]
@@ -1910,6 +2032,88 @@ mod link_tests {
         assert_eq!(scanned(r"[t](<a\<b>)")[0].1, r"a\<b");
         // The `>` rule is unchanged and still the one that closes it.
         assert_eq!(scanned("[t](<a b.md>)")[0].1, "a b.md");
+    }
+
+    /// A destination that names nothing is not a link, whichever form it is
+    /// written in — and a target is trimmed.
+    ///
+    /// This is [`MarkdownLink::target`]'s documented contract, and until #806's
+    /// third round it was prose: `[t]()`, `[t](   )` and `[[  ]]` all honoured
+    /// it, and the angle-destination branch returned its interior unchanged, so
+    /// `[t](< >)` was a link whose target was one space and
+    /// `[t](< docs/x.md >)` kept its padding. It is now held by
+    /// `MarkdownLink::new`, which is the only constructor and cannot be
+    /// bypassed.
+    ///
+    /// The five rejections below are the one place this scanner knowingly
+    /// disagrees with `pulldown-cmark`, which renders each of them as a link to
+    /// nothing. `renderer_agreement.rs` lists them as expected divergences and
+    /// fails if a *sixth* appears — or if one of these quietly stops diverging.
+    #[test]
+    fn a_destination_that_names_nothing_is_not_a_link() {
+        for line in [
+            "[t](< >)",
+            "[t](<  >)",
+            "[t](<>)",
+            "[t](   )",
+            "[t]()",
+            "[[  ]]",
+        ] {
+            assert!(scanned(line).is_empty(), "{line:?} should not be a link");
+        }
+        // Trimmed, not rejected, when there is something between the spaces.
+        assert_eq!(scanned("[t](< docs/x.md >)")[0].1, "docs/x.md");
+        // Trimming happens *before* the scheme test, so a padded URL is still
+        // external. Reading the scheme off the untrimmed destination found no
+        // scheme at offset 0 and called this internal.
+        assert_eq!(
+            scanned("[t](< https://e.org/a >)"),
+            vec![(
+                LinkKind::Inline,
+                "https://e.org/a".to_owned(),
+                "t".to_owned(),
+                true,
+            )]
+        );
+    }
+
+    /// Exactly **one** optional title, and a title may not hold its own closing
+    /// delimiter unescaped.
+    ///
+    /// The test this replaced checked the first and last characters of whatever
+    /// followed the destination, which accepted five malformed shapes as links —
+    /// every one of them rendered as literal text by `pulldown-cmark`. Each gave
+    /// a confident target for a line that names nothing, which is the invention
+    /// [`destination_of`] exists to refuse. One was raised in review on #806;
+    /// the other four came out of sweeping the rule against the renderer, which
+    /// is why `renderer_agreement.rs` now exists.
+    #[test]
+    fn a_destination_takes_one_title_and_no_more() {
+        for line in [
+            r#"[t](x.md "one" "two")"#,
+            r#"[t](x.md "a"x"b")"#,
+            r#"[t](<x.md> "a" "b")"#,
+            "[t](x.md (a)b(c))",
+            "[t](x.md (a(b)c))",
+            r#"[t](x.md 'a' "b")"#,
+        ] {
+            assert!(scanned(line).is_empty(), "{line:?} should not be a link");
+        }
+        // All three forms, empty and not, are still titles.
+        for line in [
+            r#"[t](x.md "title")"#,
+            r"[t](x.md 'title')",
+            "[t](x.md (title))",
+            r#"[t](x.md "")"#,
+            r"[t](x.md '')",
+            "[t](x.md ())",
+        ] {
+            assert_eq!(scanned(line)[0].1, "x.md", "{line:?} should be a link");
+        }
+        // An escaped closing delimiter is content, and the other forms' quotes
+        // are content too — only the closer of the form in use is special.
+        assert_eq!(scanned(r#"[t](x.md "a\"b")"#)[0].1, "x.md");
+        assert_eq!(scanned(r#"[t](x.md 'a"b')"#)[0].1, "x.md");
     }
 
     /// A title needs no whitespace after an angle destination, because the

@@ -127,6 +127,39 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
+/// Whether this is a checkout of the Roteiro repository, rather than a packaged
+/// crate unpacked from the registry.
+///
+/// This file ships in the published `roteiro` package — `cargo package --list`
+/// names it, along with 46 other integration tests. There
+/// `CARGO_MANIFEST_DIR` is `…/registry/src/<index>/roteiro-<version>`, so
+/// [`repo_root`]'s two ancestors are the registry's *source directory*: a tree
+/// full of unrelated crates, with plenty of `.md` and `.rs` in it. The floors
+/// below would happily clear on somebody else's files, and the parity claim
+/// would be made about a repository this test never saw. Raised in review on
+/// #806.
+///
+/// The marker is the **workspace** manifest, and the rule for reading it is
+/// `ci_coverage_claims.rs`'s, which met this same problem first and wrote down
+/// why the marker has to be as loud as the thing it guards: reading `false` on
+/// an I/O error would turn "cannot read the repository" into "this is not a
+/// repository" and skip in silence, which is the defect these two tests spent a
+/// review round removing one level down. Only `NotFound` means absent.
+fn is_repository_checkout() -> bool {
+    let manifest = repo_root().join("Cargo.toml");
+    match std::fs::read_to_string(&manifest) {
+        Ok(text) => text.lines().any(|line| line.trim() == "[workspace]"),
+        Err(e) if e.kind() == ErrorKind::NotFound => false,
+        Err(e) => panic!(
+            "cannot read {} ({:?}: {e}). Without it this test cannot tell a \
+             packaged crate from a repository checkout, and guessing would make \
+             the corpus either vacuous or somebody else's.",
+            manifest.display(),
+            e.kind(),
+        ),
+    }
+}
+
 /// Every file under `dir` whose extension is in `exts`, recursively.
 ///
 /// **Regular files only**, symlinks not followed — the same three-way
@@ -223,8 +256,37 @@ fn read_text(path: &Path) -> Option<String> {
 // The test
 // ---------------------------------------------------------------------------
 
+/// The skip above is real, and here it must not happen.
+///
+/// Both corpus tests return early outside a repository checkout, which is right
+/// in the published package and would be a silent hole in CI: a marker that read
+/// `false` here would turn two guards over ~1,400 files into two instant passes
+/// and nothing would say so. That is the same vacuity `read_text` was fixed for
+/// one round earlier, moved up a level, so it gets the same treatment — the skip
+/// is asserted *not* to fire where the files exist.
+#[test]
+fn the_corpus_guards_actually_run_in_a_checkout() {
+    assert!(
+        is_repository_checkout(),
+        "no `[workspace]` manifest at {} — so both corpus tests below skipped. \
+         In a checkout that is not a skip, it is two guards silently switched \
+         off; fix the marker rather than this assertion.",
+        repo_root().join("Cargo.toml").display()
+    );
+    // And the walker really reaches the tree it claims to, so "ran" is not
+    // "ran over nothing" — the floors inside each test cover the rest.
+    assert!(
+        corpus().len() >= 200,
+        "the corpus holds only {} file(s) in what claims to be a checkout",
+        corpus().len()
+    );
+}
+
 #[test]
 fn the_shared_scanner_finds_exactly_what_the_old_one_did() {
+    if !is_repository_checkout() {
+        return;
+    }
     let files = corpus();
     let root = repo_root();
     let mut lines = 0usize;
@@ -294,6 +356,9 @@ fn the_shared_scanner_finds_exactly_what_the_old_one_did() {
 #[test]
 fn every_reported_link_addresses_the_text_it_was_read_from() {
     let root = repo_root();
+    if !is_repository_checkout() {
+        return;
+    }
     let mut checked = 0usize;
     let mut inline = 0usize;
     for file in corpus() {
