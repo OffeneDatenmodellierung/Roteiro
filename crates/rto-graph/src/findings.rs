@@ -1271,16 +1271,33 @@ mod tests {
     /// [`FindingKey::parse`] has exactly **two non-test production call sites** —
     /// `finding_from_row` and the [`Deserialize`] impl.
     ///
-    /// That is a negative claim about the rest of the workspace, so it was
-    /// established from the graph rather than from `grep`, per `AGENTS.md`'s
-    /// rule that a *"there is no other X"* must be confirmed with
-    /// `roteiro search` across several vocabularies and cite its node keys. The
-    /// inbound `calls` edges of
-    /// `sym:rust:crates/rto-graph/src/findings.rs#FindingKey::parse` are exactly
-    /// `#FindingKey::deserialize`, `#finding_from_row`, and two `#tests::…`
-    /// functions in this module — nothing else in the workspace. Queries run:
-    /// `roteiro search "FindingKey parse"`, `"parse rendered finding key"`,
-    /// `"finding_from_row"`.
+    /// Every other call to it is in this module's own tests:
+    /// `key_round_trips_including_components_containing_colons`,
+    /// `key_rendering_round_trips_and_is_injective_over_generated_keys`,
+    /// `parse_is_permissive_about_escapes_pending_a_wire_format_decision` and
+    /// `key_parse_rejects_malformed_strings`.
+    ///
+    /// How that was checked, and what the check is worth. `AGENTS.md` requires a
+    /// *"nothing else does X"* to go through `roteiro search` rather than `grep`;
+    /// `roteiro search "FindingKey parse"`, `"parse rendered finding key"` and
+    /// `"finding_from_row"` each return only nodes in this file, and the inbound
+    /// `calls` edges of
+    /// `sym:rust:crates/rto-graph/src/findings.rs#FindingKey::parse` are
+    /// `#FindingKey::deserialize`, `#finding_from_row` and two `#tests::…`.
+    ///
+    /// That is **two short** of the four tests listed above, and the reason is
+    /// worth carrying: the extractor records a `calls` edge for a
+    /// `call_expression`, so an invocation written inside a macro — `assert_eq!`
+    /// in the first test, `matches!` in the last — produces none. The graph
+    /// therefore cannot, on its own, close the workspace-wide negative either: a
+    /// macro-wrapped caller in another crate would be just as invisible to it.
+    /// What actually closes it is a text search over `crates/` for
+    /// `FindingKey::parse`, which finds no hit outside this file. Neither
+    /// instrument is sufficient alone, and this comment has twice claimed more
+    /// than one of them could support.
+    ///
+    /// Only the production count carries the argument below. It is two, and the
+    /// graph, the searches and the text search agree on it.
     ///
     /// A stricter parser could therefore reject exactly two things in-tree:
     ///
