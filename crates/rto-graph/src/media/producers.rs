@@ -102,11 +102,22 @@ pub fn available() -> Vec<Producer> {
 ///
 /// # Errors
 /// Returns [`MediaError::NoProducer`] when the modality was not compiled in
-/// (naming the cargo feature that provides it), [`MediaError::ModelMissing`]
+/// (naming the cargo feature that provides it), or [`MediaError::ModelMissing`]
 /// when it was but the model is not on disk (naming the `roteiro model pull`
-/// command that installs it), or [`MediaError::ModelConfig`] when the modality's
-/// `[models]` key names a model that cannot be used at all. All three are
-/// actionable; none degrades to silence.
+/// command that installs it).
+#[cfg_attr(
+    feature = "models",
+    doc = "With `models` there is a third, [`MediaError::ModelConfig`], for when"
+)]
+#[cfg_attr(
+    feature = "models",
+    doc = "the modality's `[models]` key names a model that cannot be used at all."
+)]
+/// Every one of them is actionable; none degrades to silence.
+///
+/// The `models` half is gated with the variant rather than delinked, because a
+/// build without the registry cannot return it: an `# Errors` section that
+/// listed it there would be describing a failure that cannot happen.
 pub fn installed(opts: MediaBuildOptions) -> Result<Vec<Box<dyn MediaProducer>>, MediaError> {
     let mut out: Vec<Box<dyn MediaProducer>> = Vec::new();
     if opts.audio {

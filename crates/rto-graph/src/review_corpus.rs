@@ -26,7 +26,8 @@
 //! because a comment was later edited or a thread resolved. So there is no
 //! "refresh from the GitHub API" here, and there must not be one — this crate's
 //! `gix` dependency is pinned without transports precisely so that such a call
-//! cannot be written (the same reasoning as [`crate::model_choice`]).
+//! cannot be written (the same reasoning as `model_choice`, named rather than
+//! linked because that module is behind `models` and this one is not).
 //!
 //! # Not `crate::findings`
 //!

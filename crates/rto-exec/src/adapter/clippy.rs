@@ -69,10 +69,13 @@ pub const ANALYZER: &str = "clippy";
 /// The command that adds the linter to an already-installed toolchain.
 ///
 /// Named once because two refusals print it: this adapter's install hint, and
-/// [`crate::lint::LintError::AnalyzerNotInstalled`], which is raised by the
+/// `crate::lint::LintError::AnalyzerNotInstalled`, which is raised by the
 /// probe that finds `cargo clippy --version` failing on a toolchain that has
 /// `cargo`. They are the same instruction reached two ways, and a literal in
 /// each is how they would come to disagree.
+///
+/// That second one is named rather than linked: it is behind `exec-subprocess`
+/// and this constant is not, which is the whole reason it is written here.
 ///
 /// Documented at <https://doc.rust-lang.org/clippy/installation.html>, whose
 /// full form is `rustup component add clippy [--toolchain=<name>]`; the optional
@@ -244,8 +247,10 @@ impl Clippy {
     /// It is worth the flag for the error message alone. Without it a missing
     /// crate surfaces as a network failure from inside a machine the user cannot
     /// see; with it, cargo says *"attempting to make an HTTP request, but
-    /// --offline was specified"*, which [`crate::lint_sandbox`] turns into the
-    /// one thing that would actually help — fetch it on the host first.
+    /// --offline was specified"*, which `crate::lint_sandbox` turns into the
+    /// one thing that would actually help — fetch it on the host first. Named
+    /// rather than linked: that module needs both backend features and this
+    /// adapter needs neither.
     #[must_use]
     pub fn offline_invocation(features: &FeatureSet) -> Invocation {
         let mut invocation = Self::invocation(features);

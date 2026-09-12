@@ -383,14 +383,16 @@ pub static ADAPTERS: &[&dyn Adapter] = &[
 /// A separate list from [`known_analyzers`], which answers a different question
 /// — *what can be stored* — and would name `semgrep` and `cargo-audit` here,
 /// sending a caller off to ask for a lint from an analyzer that files layers.
-/// It sits beside [`ADAPTERS`] rather than in [`crate::lint`] so that the two
+/// It sits beside [`ADAPTERS`] rather than in `crate::lint` so that the two
 /// lists are read together: they are the same shape and deliberately disjoint,
 /// and a name that drifted into both would make a lint storable by accident.
 ///
 /// Ungated, unlike the linter itself, for [`crate::lint_grant`]'s reason: what
 /// `roteiro lint` *could* run is a question a build that cannot run it still has
 /// to answer, and `roteiro security prefetch --analyzer clippy` is one of the
-/// callers that asks.
+/// callers that asks. Which is also why `crate::lint` above is named and not
+/// linked — a link would be unresolved in precisely the builds this sentence is
+/// about.
 pub const LINT_ANALYZERS: &[&str] = &[clippy::ANALYZER];
 
 /// The adapters behind [`LINT_ANALYZERS`].

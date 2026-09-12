@@ -380,9 +380,10 @@ impl DebtConfig {
     /// which is almost never what its author meant.
     ///
     /// Reported rather than refused at load, which is
-    /// [`ModelsConfig::resolve`]'s rule in this file: a bad value fails where it
+    /// `ModelsConfig::resolve`'s rule in this file: a bad value fails where it
     /// is *consumed*, so `roteiro config` can report it rather than being the one
-    /// command a bad entry stops.
+    /// command a bad entry stops. (Named rather than linked: that method is
+    /// behind `models` and this key is not.)
     ///
     /// **The two failure directions are not symmetric, and the second is why this
     /// is worth a check rather than a documentation note.** Under-ignoring
@@ -766,7 +767,8 @@ pub struct SecurityConfig {
     /// is*.
     ///
     /// Nothing is validated in this module, which is deliberate and is
-    /// [`ModelsConfig::resolve`]'s rule: a value that is wrong is refused where
+    /// `ModelsConfig::resolve`'s rule (named, not linked — it is behind
+    /// `models` and this key is not): a value that is wrong is refused where
     /// it is *consumed*, so `roteiro config` can **report** a bad entry rather
     /// than being the one command a bad entry stops. Every path that resolves an
     /// image goes through `rto_exec::boxlite::resolve_image`, so there is one
@@ -1011,8 +1013,11 @@ pub struct LinkDecl {
 /// One key per model **kind**, not per command: `generative` governs both `spec
 /// draft` and the Ask panel, because they want the same kind of model and a
 /// project that pins one and not the other has almost certainly made a mistake.
-/// Which key governs which surface is [`rto_graph::ModelTask::config_key`], and
-/// `roteiro config` prints the whole mapping resolved.
+/// Which key governs which surface is `rto_graph::ModelTask::config_key`, and
+/// `roteiro config` prints the whole mapping resolved. (Named rather than
+/// linked: the resolver is behind `models`, while these keys parse in every
+/// build so a config shared with a fuller one is never rejected by a leaner
+/// one.)
 ///
 /// `vision`, `audio` and `ocr` arrived in Stage 33. Until then those three models
 /// were compiled-in string constants, so **a project could not pin its ASR model
@@ -1042,8 +1047,9 @@ pub struct ModelsConfig {
 ///
 /// **The resolver's semantics, adopted here rather than the other way round**,
 /// because the resolver's are the ones that decide what actually runs
-/// ([`rto_graph::ModelPins::by_key`]). A reporting surface that disagreed with
-/// them would be describing a run that did not happen.
+/// (`rto_graph::ModelPins::by_key`, named rather than linked because it is
+/// behind `models` and this reading is not). A reporting surface that disagreed
+/// with them would be describing a run that did not happen.
 fn model_pin(raw: Option<&str>) -> Option<&str> {
     raw.map(str::trim).filter(|value| !value.is_empty())
 }

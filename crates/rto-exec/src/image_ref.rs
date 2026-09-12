@@ -7,8 +7,10 @@
 //! at all — it is the command an operator runs precisely because a key is not
 //! doing what they expected — and a second copy of the check living in the
 //! `roteiro` crate for that purpose is how one of the two ends up laxer than the
-//! other. There is one function; [`crate::boxlite::pinned_digest`] wraps it into
-//! the backend's error type and adds nothing.
+//! other. There is one function; `crate::boxlite::pinned_digest` wraps it into
+//! the backend's error type and adds nothing — named rather than linked,
+//! because it is behind `exec-boxlite` and the first sentence of this page is
+//! that this module is not.
 //!
 //! # Why a tag is refused at all
 //!
@@ -263,10 +265,10 @@ pub struct NotPinned {
 
 /// The digest `reference` is pinned to, or a refusal naming what to fix.
 ///
-/// Holds a [`SANDBOX_IMAGES`](crate::boxlite::SANDBOX_IMAGES) entry, a
-/// user-supplied builder image and a `[security.images]` entry to the same
-/// standard — the difference between them is *who chose*, never *how strong the
-/// pin is*.
+/// Holds a `SANDBOX_IMAGES` entry (`crate::boxlite`, behind `exec-boxlite`, so
+/// it is named rather than linked from this ungated module), a user-supplied
+/// builder image and a `[security.images]` entry to the same standard — the
+/// difference between them is *who chose*, never *how strong the pin is*.
 ///
 /// Checked structurally rather than by looking for an `@`: a reference may carry
 /// a registry port (`host:5000/repo`) and a tag, so "contains a colon" and

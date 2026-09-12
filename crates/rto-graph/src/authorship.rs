@@ -33,10 +33,11 @@
 //! only.** That is a decision about what can be *compared*, not a claim about
 //! what harnesses write.
 //!
-//! The registry side is unambiguous: [`crate::ModelTask::Review`] resolves to a
-//! model, never to a harness. So a model-to-harness comparison is a category
-//! error whichever way the trailer happens to be written, and there is no rule
-//! that could rescue it. The trailer side, by contrast, is free text with no
+//! The registry side is unambiguous: `ModelTask::Review` — named rather than
+//! linked, because the registry is behind `models` and this module is not —
+//! resolves to a model, never to a harness. So a model-to-harness comparison is
+//! a category error whichever way the trailer happens to be written, and there
+//! is no rule that could rescue it. The trailer side, by contrast, is free text with no
 //! schema — a harness may write its product name (`Claude Code`, `Cursor`,
 //! `Aider`) instead of the weights it ran, and nothing in the string says which
 //! it did. Any rule that *decided* "this one is a harness" would be guessing at

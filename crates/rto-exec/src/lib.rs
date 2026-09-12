@@ -15,15 +15,15 @@
 //!
 //! # What this crate does not do
 //!
-//! It does not *always* produce something to store, either. [`lint`] runs a
-//! linter and returns a report the caller prints: no [`AnalysisRun`], no layer,
-//! no store. A lint name is a symbol in a compiler rather than an assigned
+//! It does not *always* produce something to store, either. `lint` — named
+//! rather than linked, because that module is behind `exec-subprocess` and this
+//! page is read from builds without it — runs a linter and returns a report the
+//! caller prints: no [`AnalysisRun`], no layer, no store. A lint name is a symbol in a compiler rather than an assigned
 //! identifier, so it is an opinion about the code as it stands today rather than
 //! a durable fact about the repository (ADR-0020 v1.1) — and everything below
 //! about persistence simply does not apply to it.
 //!
 //! [`AnalysisRun`]: rto_graph::AnalysisRun
-//! [`lint`]: crate::lint
 //!
 //! It does not decide how results are *stored*. Persistence lives in `rto-graph`,
 //! which files findings in their own tables — never `nodes`/`edges`, never a

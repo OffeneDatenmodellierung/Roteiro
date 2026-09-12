@@ -10,7 +10,7 @@
 //! to read code pays roughly half its tool budget to advertise `sandbox_clear`,
 //! which is also the only tool on the surface that changes anything.
 //!
-//! [`crate::mcp::restrict`] already resolves an operator's list of tool *names*
+//! `crate::mcp::restrict` already resolves an operator's list of tool *names*
 //! (issue #584). A class is that same mechanism with a name a person can actually
 //! type: `--tools query,quality` rather than ten names that go stale the moment a
 //! tool is added. Narrowing stays opt-in — the default advertises every class, so
@@ -29,9 +29,15 @@
 //! # The taxonomy is total
 //!
 //! Every tool belongs to exactly one class, and `every_tool_has_exactly_one_class`
-//! in [`crate::mcp`] fails if a tool is added to the surface and not to a class —
+//! in `crate::mcp` fails if a tool is added to the surface and not to a class —
 //! which would otherwise make it unreachable through the class aliases while
 //! remaining reachable by name, a surface with two disagreeing halves.
+//!
+//! Both mentions of `crate::mcp` above are named rather than linked. That module
+//! is behind the `mcp` feature and this one is deliberately not — the taxonomy
+//! is compiled, and tested, by the default build that has no server at all — so
+//! a link would be unresolved in exactly the configuration this module exists
+//! to keep honest.
 
 /// The tool that names the classes, and the one tool belonging to none of them.
 ///

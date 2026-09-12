@@ -1,8 +1,9 @@
 //! The one place `roteiro` turns a change into diff text (issue #649).
 //!
 //! Both review arms need the same thing — the hunks for a path over a range —
-//! and before this module only [`review_llm`](crate::review_llm) had it, behind
-//! a generation-backend feature gate. The graph arm is unconditional, so reusing
+//! and before this module only `review_llm` had it, behind a generation-backend
+//! feature gate — named rather than linked here for that reason, since this
+//! module is the unconditional one. The graph arm is unconditional, so reusing
 //! that copy was not possible and adding a second one was the obvious move;
 //! this module exists so that it was not made. There is one definition of "the
 //! diff for this path", and both arms call it.
@@ -92,8 +93,9 @@ pub fn git(repo: &Path, args: &[&str]) -> Option<String> {
 /// Returns `None` when git fails and `Some("")` when git ran and emitted
 /// nothing. Callers must not collapse those two: one is "we could not look" and
 /// the other is "we looked and there is no text", which is the same distinction
-/// [`review_llm`](crate::review_llm) draws when it refuses to send a hunkless
-/// file to a model.
+/// `review_llm` draws when it refuses to send a hunkless file to a model (named
+/// rather than linked: that module needs a generation backend and this one does
+/// not).
 ///
 /// The empty case is **not** a mode change, a rename, or a binary file, though
 /// each reads like it should be: `git diff -U3` emits headers for all three, so
