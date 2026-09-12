@@ -39,28 +39,37 @@ enum Verdict {
 
 use Verdict::{Agrees, Diverges};
 
-/// The destination of the first inline link or image on `line`, per the renderer,
-/// and whether it is an image.
+/// **Every** inline link and image on `line`, per the renderer, in order, as
+/// `(is_image, destination)`.
+///
+/// The whole line, not the first link on it. These helpers returned only the
+/// first until #806's sixth round, which meant a line whose *second* link
+/// diverged compared equal and passed — a guard against silent disagreement that
+/// was itself silent. ``[a](x`y) and [b](z`w)`` is the witness: both readers
+/// agree on the first destination and only the renderer finds the second.
 ///
 /// `Options::empty()` deliberately: `Options::all()` turns on `ENABLE_WIKILINKS`,
 /// which reinterprets `[[a]]` and would make this compare the wrong two rules.
-fn rendered(line: &str) -> Option<(bool, String)> {
-    Parser::new_ext(line, Options::empty()).find_map(|ev| match ev {
-        Event::Start(Tag::Link { dest_url, .. }) => Some((false, dest_url.to_string())),
-        Event::Start(Tag::Image { dest_url, .. }) => Some((true, dest_url.to_string())),
-        _ => None,
-    })
+fn rendered(line: &str) -> Vec<(bool, String)> {
+    Parser::new_ext(line, Options::empty())
+        .filter_map(|ev| match ev {
+            Event::Start(Tag::Link { dest_url, .. }) => Some((false, dest_url.to_string())),
+            Event::Start(Tag::Image { dest_url, .. }) => Some((true, dest_url.to_string())),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The same, per the shared scanner.
 ///
 /// Wiki-links are filtered out because they are a Roteiro token the renderer
 /// rewrites before it parses; comparing them would compare nothing.
-fn scanned(line: &str) -> Option<(bool, String)> {
+fn scanned(line: &str) -> Vec<(bool, String)> {
     markdown_links(line)
         .into_iter()
-        .find(|l| l.kind() != LinkKind::Wiki)
+        .filter(|l| l.kind() != LinkKind::Wiki)
         .map(|l| (l.kind() == LinkKind::Image, l.target().to_owned()))
+        .collect()
 }
 
 /// The reason every [`Diverges`] case below gives, because they are all one rule.
@@ -69,7 +78,34 @@ const NAMES_NOTHING: &str = "a destination that names nothing is not a link — 
      renderer's `href=\"\"`/`href=\" \"` is neither. The same reading `[t]()` and \
      `[[  ]]` always had";
 
-/// The second reason, and the only other one.
+/// The third reason: a code span that swallows a later link.
+///
+/// Code spans are removed from the whole line before the scan, and
+/// [`rto_graph::markdown_links`] reads a destination back out of the line but
+/// still *scans* the stripped string. A backtick inside one link's destination
+/// or title is not a code-span delimiter to `CommonMark` — the link parser
+/// consumes it raw — but the standalone span lexer has no way to know that, so
+/// it pairs with a later backtick and everything between them, including any
+/// link, is erased before the scan sees it.
+///
+/// **Recorded rather than fixed, and measured before deciding.** Scanning every
+/// `.md` and `.rs` in this repository — 326 files, 210,005 lines — for a line
+/// where the scanner reports fewer inline links than the renderer finds **zero**
+/// instances of this shape. The wiki half is not a regression either: the
+/// scanner this replaced stripped code spans exactly the same way, which
+/// `markdown_links_parity.rs` holds byte-for-byte over the same tree. And no
+/// production caller reads an inline `target` yet — `docs.rs` takes wiki-links
+/// only. Closing it means abandoning strip-then-scan for a single left-to-right
+/// pass, which is a rewrite of the scanner rather than a fix to it. Raised in
+/// review on #806; it belongs with #801's citation phase, which is the first
+/// code that will read these destinations.
+const SWALLOWED: &str = "a backtick inside a link's destination or title is not \
+     a code-span delimiter to `CommonMark`, but the span lexer that runs before \
+     the scan cannot know that, so it pairs with a later backtick and erases the \
+     link between them. Zero instances in this repository across 210,005 lines, \
+     and the wiki half matches the scanner this replaced exactly";
+
+/// The second reason.
 ///
 /// Pre-existing, and deliberately left: it belongs to #801's citation phase.
 const UNESCAPED: &str = "a backslash is left in the target. The renderer \
@@ -96,6 +132,17 @@ fn cases() -> Vec<(&'static str, Verdict)> {
         // An unescaped `<` or a missing `>` is not an angle destination.
         ("[t](<a<b>)", Agrees),
         ("[t](<a\\<b>)", Diverges(UNESCAPED)),
+        // -- more than one link on a line ---------------------------------
+        ("[a](x.md) and [b](y.md)", Agrees),
+        ("[a](x`y.md) then [b](z.md)", Agrees),
+        ("see [a](`q`) and [b](z.md)", Agrees),
+        ("![i](i.png) then [b](z.md)", Agrees),
+        // …and the shape where a code span reaches across two of them.
+        ("[a](x`y) and [b](z`w)", Diverges(SWALLOWED)),
+        (
+            r#"[a](x.md "t`1") and [b](y.md "t`2")"#,
+            Diverges(SWALLOWED),
+        ),
         ("[t](<https://e.org/a", Agrees),
         ("[t](<a>junk)", Agrees),
         ("[t](<a> junk)", Agrees),
