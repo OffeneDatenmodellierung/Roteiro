@@ -117,8 +117,18 @@
 //! - **First-author initials in an in-text citation**, which APA adds when two
 //!   first authors share a surname — `(J. Smith, 2020)` against `(T. Smith,
 //!   2020)`. [`in_text`] is given one record and cannot see the other, and the
-//!   rule is a property of the pair. Reported through the same
-//!   [`ReferenceList::ambiguous`] channel, for the same reason.
+//!   rule is a property of the pair.
+//!
+//!   **Only partly reported, and the limit is worth stating exactly.**
+//!   [`ReferenceList::ambiguous`] groups entries whose in-text citations are
+//!   *identical*, so it catches two Smiths who published in the same year. APA's
+//!   rule is wider: it applies "even if the year of publication differs", so
+//!   `(Smith, 2020)` and `(Smith, 1990)` by two different Smiths are equally
+//!   unresolvable to a reader and are **not** reported here. Reporting them
+//!   would mean [`Ambiguity`] carrying something other than one citation string,
+//!   which is a shape for the phase that implements the rule rather than a field
+//!   added ahead of it. Until then this is a gap a caller should know about, not
+//!   one this module quietly covers.
 //! - **Generational suffixes** — APA writes `Smith, J., Jr.`, in a position
 //!   [`Author::Person`] has no field for. Rather than let one be smuggled into
 //!   the given names, where it renders as an invented middle initial (`Smith,
@@ -253,10 +263,23 @@ pub enum Missing {
     /// wrong line. The two dates are separate types with separate roles, and a
     /// worklist is only useful if each entry is true.
     RetrievalDate,
-    /// Nobody has recorded whether the work carries a version.
+    /// Nobody has recorded whether the work carries a version — or the recorded
+    /// value carries its own label.
+    ///
+    /// Both, because the field is a free-form `String` and the renderer supplies
+    /// the word APA puts in front of it. A version recorded as `Version 3`
+    /// renders `(Version Version 3)`, so the record is not citable as written
+    /// and says which field to fix. A version named `V1` is fine and is APA's
+    /// own data-set example — only the whole word `Version` is refused.
     Version,
     /// Nobody has recorded whether this work carries a bracketed descriptor —
     /// or, for a kind that requires one, the record does not carry it.
+    ///
+    /// It is also raised when the recorded descriptor brings its own brackets.
+    /// The field is documented as stored *without* them, because the renderer
+    /// supplies them — so `Known("[Data set]")` renders `[[Data set]]`, and a
+    /// record that cannot be printed as written should say which field to fix
+    /// rather than print it anyway.
     ///
     /// Both cases, because every kind consults the field. For a `Document` or a
     /// `WebPage` a descriptor is optional, so [`Attested::AbsentFromWork`]
@@ -423,6 +446,21 @@ fn title_is_italic(kind: WorkKind) -> bool {
     }
 }
 
+/// Whether `text` begins with `word` as a whole word, compared without case.
+///
+/// A whole word, so `Version 3` is caught and a version genuinely named `V1` is
+/// not. That distinction is not pedantry: APA's own data-set example renders
+/// `(Version V1)`, so `V1` is a legitimate bare version and a rule that refused
+/// a leading `v` would refuse the style's own worked case.
+fn starts_with_word(text: &str, word: &str) -> bool {
+    text.get(..word.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(word))
+        && text[word.len()..]
+            .chars()
+            .next()
+            .is_none_or(|next| !next.is_alphanumeric())
+}
+
 /// Every field that stops this record from being cited, in a fixed order.
 fn validate(reference: &Reference) -> Vec<Missing> {
     let mut missing = Vec::new();
@@ -462,16 +500,31 @@ fn validate(reference: &Reference) -> Vec<Missing> {
     if reference.title.trim().is_empty() {
         missing.push(Missing::Title);
     }
-    if !attested_text(&reference.version).is_recorded() {
+    let version = attested_text(&reference.version);
+    // Recorded, or recorded in a shape the renderer would print twice. The
+    // record documents a version as stored bare — `3.3.070`, never
+    // `Version 3.3.070` — and nothing checked, so `Known("Version 3")` rendered
+    // `(Version Version 3)` and reported success. A documented storage contract
+    // that no guard enforces is an assumption, and the renderer was making it.
+    let version_repeats_its_label = version
+        .value()
+        .is_some_and(|text| text.len() > "version".len() && starts_with_word(text, "version"));
+    if !version.is_recorded() || version_repeats_its_label {
         missing.push(Missing::Version);
     }
 
     let descriptor = attested_text(&reference.descriptor);
+    // Same shape as the version above: a descriptor is documented as stored
+    // *without* its brackets, because the renderer supplies them — so
+    // `Known("[Data set]")` rendered `[[Data set]]` and called it a success.
+    let descriptor_brings_its_own_brackets = descriptor
+        .value()
+        .is_some_and(|text| text.contains('[') || text.contains(']'));
     if requires_descriptor(reference.kind) {
-        if descriptor.value().is_none() {
+        if descriptor.value().is_none() || descriptor_brings_its_own_brackets {
             missing.push(Missing::Descriptor);
         }
-    } else if !descriptor.is_recorded() {
+    } else if !descriptor.is_recorded() || descriptor_brings_its_own_brackets {
         missing.push(Missing::Descriptor);
     }
 
@@ -699,17 +752,21 @@ fn retrieval_clause(retrieved: AccessDate) -> String {
 /// `str::get` rather than a slice, so a multi-byte character straddling the
 /// scheme length is a `false` rather than a panic.
 ///
-/// The [printable-character][is_printable_identifier] allowlist is the same one
-/// [`Doi::new`](rto_graph::reference::Doi::new) applies to a DOI name, and it is
-/// here for the same reason: a
-/// URL becomes an [`EntrySpan::Link`] whose visible text *is* its `href`, so
+/// [`is_printable_identifier`] is the rule, and it is here because a URL becomes
+/// an [`EntrySpan::Link`] whose visible text *is* its `href`: so
 /// `https://example.org/a\nb` is a citation printed across two lines and
 /// resolving to neither of them, and a bidi override is a link that reads as one
-/// host and resolves to another. The two paths share one predicate rather than
-/// each carrying its own: the DOI path was hardened first, and a second copy of
-/// the rule is how the two would drift apart. A recorded URL that fails this is
-/// not printable, so the record refuses on `Missing::Locator` rather than
-/// quietly losing its source element — the same terms as a blank URL.
+/// host and resolves to another. A recorded URL that fails it is not printable,
+/// so the record refuses on `Missing::Locator` rather than quietly losing its
+/// source element — the same terms as a blank URL.
+///
+/// This is **not** the rule [`Doi::new`](rto_graph::reference::Doi::new) applies.
+/// The two used to share one predicate and deliberately stopped: a DOI is
+/// encoded at the boundary by `Doi::url`, so it can be recorded as the
+/// identifier itself and its rule is the wider `is_doi_name_char`, while a URL
+/// is emitted verbatim into an `href` with no encoding step and so has to be
+/// URL-safe already. The difference between them is the reason they exist
+/// separately, and it is the thing to keep straight when changing either.
 fn is_web_url(url: &str) -> bool {
     let authority = ["https://", "http://"].iter().find_map(|scheme| {
         url.get(..scheme.len())
@@ -1999,12 +2056,12 @@ mod tests {
 
     #[test]
     fn a_url_a_reader_cannot_see_whole_is_not_a_link() {
-        // The same defect as a DOI suffix carrying a newline, one type along: a
-        // URL becomes an `EntrySpan::Link` whose visible text *is* its `href`,
-        // so these produce a citation printed across two lines and resolving to
-        // neither — or, for the bidi override, one that reads as one host and
-        // resolves to another. Both paths ask the question through one
-        // predicate; a second copy of the rule is how they would drift apart.
+        // The same *defect* as a DOI suffix carrying a newline, one type along —
+        // though no longer the same predicate, since a URL is emitted verbatim
+        // into an `href` and a DOI is encoded on the way out. A URL becomes an
+        // `EntrySpan::Link` whose visible text *is* its `href`, so these produce
+        // a citation printed across two lines and resolving to neither — or, for
+        // the bidi override, one that reads as one host and resolves to another.
         for hidden in [
             "https://example.invalid/a\nb",
             "https://example.invalid/a b",
@@ -2098,6 +2155,54 @@ mod tests {
             reference.locator = Attested::Known(Locator::Url(locatable.to_owned()));
             assert!(entry(&reference).is_ok(), "{locatable:?}");
         }
+    }
+
+    #[test]
+    fn a_field_that_brings_its_own_label_is_not_citable_as_written() {
+        // The record documents how these two fields are stored and the renderer
+        // supplies the rest — `(Version {v})` and `[{d}]`. Nothing enforced the
+        // storage contract, so the renderer's assumption went unchecked and a
+        // record could render `(Version Version 3)` or `[[Data set]]` and report
+        // success. A documented contract that no guard enforces is an assumption.
+        for doubled in ["Version 3", "version 3.3.070", "VERSION 1"] {
+            let mut reference = complete("r", WorkKind::Document, "A title");
+            reference.version = Attested::Known(doubled.to_owned());
+            assert_eq!(
+                entry(&reference).expect_err("refuses").missing,
+                vec![Missing::Version],
+                "{doubled:?} would render its label twice"
+            );
+        }
+        // `V1` is a legitimate bare version — it is APA's own data-set example,
+        // `(Version V1)` — so only the whole word is refused, never a leading
+        // `v`. Refusing the style's own worked case would be the wrong fix.
+        for fine in ["V1", "3.3.070", "b10200", "2.0-rc1", "Versionless"] {
+            let mut reference = complete("r", WorkKind::Document, "A title");
+            reference.version = Attested::Known(fine.to_owned());
+            let rendered = entry(&reference).expect("renders").plain_text();
+            assert!(
+                rendered.contains(&format!("(Version {fine})")),
+                "{rendered}"
+            );
+        }
+
+        for bracketed in ["[Data set]", "Data set]", "[Computer software"] {
+            let mut reference = complete("r", WorkKind::DataSet, "A title");
+            reference.descriptor = Attested::Known(bracketed.to_owned());
+            assert_eq!(
+                entry(&reference).expect_err("refuses").missing,
+                vec![Missing::Descriptor],
+                "{bracketed:?} would render its brackets twice"
+            );
+        }
+        let mut bare = complete("r", WorkKind::DataSet, "A title");
+        bare.descriptor = Attested::Known("Data set".to_owned());
+        assert!(
+            entry(&bare)
+                .expect("renders")
+                .plain_text()
+                .contains("[Data set]")
+        );
     }
 
     #[test]

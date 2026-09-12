@@ -2147,7 +2147,10 @@ mod tests {
         assert_reachable::<crate::Locator>();
         assert_reachable::<crate::WorkKind>();
         assert_reachable::<crate::Reference>();
-        assert!(crate::is_printable_identifier("10.1234/ok"));
+        // A URL, not a DOI: this predicate is the rule for a value emitted
+        // verbatim, and reaching for it with a DOI-shaped string is the
+        // confusion the split exists to prevent.
+        assert!(crate::is_printable_identifier("https://example.invalid/ok"));
 
         // And the round trip that omission actually blocked: building the two
         // public shapes entirely through the crate root.
