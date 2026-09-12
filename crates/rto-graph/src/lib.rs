@@ -186,8 +186,9 @@ pub use query::{
     explain, list_kind, path, search, search_channels, window,
 };
 pub use reference::{
-    AccessDate, Attested, Author, Day, Doi, Locator, Month, NotADay, NotADoi, PublicationDate,
-    Reference, Stability, WorkKind,
+    AccessDate, Attested, Author, Day, Doi, GivenName, Locator, Month, NotADay, NotADoi,
+    NotAGivenName, NotAYear, PublicationDate, Reference, Stability, WorkKind, Year,
+    is_printable_identifier,
 };
 pub use store::{ImportApplied, SchemaAhead, Store, StoreError};
 pub use sync::{

@@ -134,7 +134,7 @@ use std::fmt;
 
 use rto_graph::reference::{
     AccessDate, Attested, Author, GivenName, Locator, PublicationDate, Reference, Stability,
-    WorkKind, has_invisible_characters,
+    WorkKind, is_printable_identifier,
 };
 use serde::Serialize;
 
@@ -655,7 +655,7 @@ fn retrieval_clause(retrieved: AccessDate) -> String {
 /// `str::get` rather than a slice, so a multi-byte character straddling the
 /// scheme length is a `false` rather than a panic.
 ///
-/// The [invisible-character][has_invisible_characters] test is the same one
+/// The [printable-character][is_printable_identifier] allowlist is the same one
 /// [`Doi::new`] applies to a DOI suffix, and it is here for the same reason: a
 /// URL becomes an [`EntrySpan::Link`] whose visible text *is* its `href`, so
 /// `https://example.org/a\nb` is a citation printed across two lines and
@@ -670,7 +670,7 @@ fn is_web_url(url: &str) -> bool {
         url.get(..scheme.len())
             .is_some_and(|head| head.eq_ignore_ascii_case(scheme))
     });
-    web_scheme && !has_invisible_characters(url)
+    web_scheme && is_printable_identifier(url)
 }
 
 /// Whether the source element would repeat the author, in which case APA drops
@@ -1856,7 +1856,21 @@ mod tests {
         // The fix is not a guard at this call site; it is that the value no
         // longer has a spelling. These are the exact fragments Copilot named,
         // and none of them can be put into a `Reference` at all:
-        for undroppable in ["", "   ", "Jean--Paul", "-Paul", "Jean-"] {
+        for undroppable in [
+            "",
+            "   ",
+            "Jean--Paul",
+            "-Paul",
+            "Jean-",
+            // The separator the first version of the guard did not name. One
+            // value holding two names rendered `Smith, M.` and dropped `Ann`,
+            // by the same mechanism and through a different character — which
+            // is why the guard is an allowlist now rather than a longer list of
+            // separators.
+            "Mary Ann",
+            "Mary  Ann",
+            "José María",
+        ] {
             assert!(
                 GivenName::new(undroppable).is_err(),
                 "{undroppable:?} must not be constructible, so no renderer can drop it"
@@ -1866,6 +1880,7 @@ mod tests {
         // out, every time.
         for (given, rendered) in [
             (vec!["Mary"], "Smith, M."),
+            // Two names, two entries — the spelling the refusal above points at.
             (vec!["Mary", "Ann"], "Smith, M. A."),
             (vec!["Jean-Paul"], "Smith, J.-P."),
             (vec!["M.", "A."], "Smith, M. A."),
@@ -1905,6 +1920,11 @@ mod tests {
             "https://example.invalid/a\tb",
             "https://example.invalid/a\u{202e}b",
             "https://example.invalid/a\u{200b}b",
+            // The three the first denylist missed, and would have kept missing.
+            "https://example.invalid/a\u{061c}b",
+            "https://example.invalid/a\u{206a}b",
+            "https://example.invalid/a\u{00ad}b",
+            "https://example.invalid/a\u{e0041}b",
         ] {
             let mut reference = complete("r", WorkKind::Document, "A title");
             reference.locator = Attested::Known(Locator::Url(hidden.to_owned()));

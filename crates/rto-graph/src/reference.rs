@@ -442,10 +442,16 @@ pub enum Stability {
 /// no later renderer can reintroduce it, and `serde` refuses one on the way in
 /// from a file as well.
 ///
-/// Accepted: any text whose hyphen-separated parts are each non-blank —
-/// `Mary`, `M.`, `Jean-Paul`. Rejected: the empty string, whitespace alone, and
-/// `Jean--Paul`, `-Paul` or `Jean-`, whose empty parts are precisely what used
-/// to vanish.
+/// What is accepted is stated as an **allowlist** — see
+/// `is_given_name_char` — rather than as a list of the malformed shapes to
+/// reject. The first attempt at this was the latter, and a space walked through
+/// it: `"Mary Ann"` was one legal value that rendered `Smith, M.`, dropping
+/// `Ann` by exactly the mechanism the newtype was introduced to close. A rule
+/// that enumerates the bad separators is a rule waiting for the next separator.
+///
+/// Accepted: `Mary`, `M.`, `Jean-Paul`, `Ibáñez`, `N'Golo`. Rejected: the empty
+/// string, whitespace alone, `Jean--Paul`, `-Paul`, `Jean-`, `"Mary Ann"`, and
+/// anything carrying a digit, a separator or an invisible character.
 ///
 /// Also rejected: a **generational suffix** (`Jr.`, `Sr.`, `II`, `III`, `IV`).
 /// Those are not given names, and APA prints them in a position this record has
@@ -461,9 +467,36 @@ pub struct GivenName(String);
 /// A string that is not a usable given name.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "not a given name: {0:?} (expected a name, or hyphen-joined names, each non-blank; a generational suffix such as `Jr.` has no field on this record)"
+    "not a given name: {0:?} (expected letters, optionally hyphen-joined, each part starting with a letter; no whitespace — two names go in two entries; a generational suffix such as `Jr.` has no field on this record)"
 )]
 pub struct NotAGivenName(pub String);
+
+/// Whether `c` may appear inside one hyphen-separated part of a given name.
+///
+/// An **allowlist**, for the reason spelled out on [`is_printable_identifier`],
+/// and this one earned it the same way. The rule this replaced split a name on
+/// hyphens and required each part to be non-blank — an enumeration of the
+/// separators somebody had thought of, which is a list with a space missing from
+/// it. `"Mary Ann"` passed, and rendered `Smith, M.`, dropping `Ann`: the exact
+/// silent drop the newtype had just been introduced to make unspellable, through
+/// the one separator the rule did not name. Unicode has many more.
+///
+/// So: letters of **any** script, because this is not a rule about English.
+/// Combining diacritics U+0300–U+036F, so a name recorded in decomposed form
+/// (`e` followed by U+0301, which is what macOS hands you) is the same name as
+/// its composed spelling rather than a refusal. A full stop, because `M.` is a
+/// value this record is explicitly allowed to hold. An apostrophe in both its
+/// spellings, because `N'Golo` and `N’Golo` are one name typed two ways.
+///
+/// Everything else is refused: digits, every kind of whitespace, every
+/// separator, every format and control character. A name this turns away is a
+/// name somebody can come and argue for; a name the old rule let through was a
+/// citation with a piece missing and nothing to show for it.
+fn is_given_name_char(c: char) -> bool {
+    c.is_alphabetic()
+        || ('\u{0300}'..='\u{036F}').contains(&c)
+        || matches!(c, '.' | '\'' | '\u{2019}')
+}
 
 /// Whether `name` is a generational suffix rather than a given name.
 ///
@@ -488,17 +521,41 @@ impl GivenName {
     /// Outer whitespace is trimmed and the trimmed form is what is stored: the
     /// renderer trims, and a leading space no reader can see must not be able to
     /// decide where an entry lands in a list somebody reads. Nothing *inside*
-    /// the name is rewritten — `Jean - Paul` is stored exactly as written,
-    /// because recognising a shape is not licence to restyle it.
+    /// the name is rewritten.
+    ///
+    /// Each hyphen-separated part must **begin with a letter** and otherwise
+    /// contain only given-name characters (`is_given_name_char`). Beginning with
+    /// a letter is what makes [`GivenName::initial`] total: every part has a
+    /// letter to reduce to, so there is no part it can fail on and therefore
+    /// none it could be tempted to skip.
+    ///
+    /// # One value is one name
+    ///
+    /// A given name holding internal whitespace is **refused**, and this is a
+    /// decision rather than a side effect. `"Mary Ann"` has two readings — two
+    /// given names that belong in two elements of `given`, rendering `M. A.`, or
+    /// one compound name rendering `M.` — and a formatter picking between them
+    /// is guessing at what somebody meant. The caller knows; this type does not.
+    /// So the ambiguous spelling is not recordable, and the unambiguous one is:
+    /// `given = [GivenName::new("Mary")?, GivenName::new("Ann")?]`.
+    ///
+    /// The alternative — accept it and render `M. A.` by splitting on whitespace
+    /// — was rejected because it makes the compound reading unspellable instead,
+    /// and a compound given name is a real thing. Refusing leaves *both* readings
+    /// expressible, one of them per element; accepting would silently pick one.
     ///
     /// # Errors
     ///
-    /// Returns [`NotAGivenName`] for a blank name, a name with a blank
-    /// hyphen-separated part, or a generational suffix.
+    /// Returns [`NotAGivenName`] for a blank name, a part not starting with a
+    /// letter, any character outside the allowlist (including whitespace), or a
+    /// generational suffix.
     pub fn new(text: &str) -> Result<Self, NotAGivenName> {
         let trimmed = text.trim();
+        let is_a_name = |part: &str| {
+            part.starts_with(char::is_alphabetic) && part.chars().all(is_given_name_char)
+        };
         let usable = !trimmed.is_empty()
-            && trimmed.split('-').all(|part| !part.trim().is_empty())
+            && trimmed.split('-').all(is_a_name)
             && !is_generational_suffix(trimmed);
         if usable {
             Ok(Self(trimmed.to_owned()))
@@ -513,10 +570,11 @@ impl GivenName {
         &self.0
     }
 
-    /// The hyphen-separated parts, each trimmed, and each non-blank by
-    /// construction.
+    /// The hyphen-separated parts. Each begins with a letter, by construction,
+    /// and a part carries no whitespace — so a part is exactly one name and
+    /// there is exactly one initial to take from it.
     pub fn parts(&self) -> impl Iterator<Item = &str> {
-        self.0.split('-').map(str::trim)
+        self.0.split('-')
     }
 
     /// The initial APA prints for this name: `M.` for `Mary` and for `M.`, and
@@ -625,41 +683,54 @@ fn strip_prefix_ignoring_ascii_case<'a>(text: &'a str, prefix: &str) -> Option<&
         .map(|_| &text[prefix.len()..])
 }
 
-/// Whether `text` carries a character that would make printed text not the text
-/// a reader sees.
+/// Whether every character of `text` is one a reader can see and a URL can
+/// carry: an ASCII graphic character, `!` through `~`.
 ///
 /// Every identifier this model hands to a renderer — a DOI, a URL — is printed
 /// as its own visible text *and* used as a link target, so the two have to be
-/// the same string in the reader's eye as well as in the byte stream. Three
-/// kinds of character break that:
+/// the same string in the reader's eye as well as in the byte stream.
 ///
-/// - **whitespace**, which splits a single-line identifier across two lines, or
-///   silently truncates it at the space in anything that parses a URL;
-/// - **control characters**, same, and worse in a terminal;
-/// - **zero-width and bidirectional-override characters**, which are invisible
-///   *by design*: they can reorder what a reader sees without changing a byte of
-///   what the link resolves to, which is a link that is not what it looks like.
+/// This is an **allowlist**, and the inversion is the whole point of it. It
+/// replaced a denylist of whitespace, control and bidirectional characters,
+/// which is a rule that cannot be finished: Unicode holds far more invisible
+/// characters than a hand-written list will ever name — U+061C, the
+/// U+206A–U+206F block, U+00AD, U+2060, the U+E0020 tag characters — and every
+/// one missing from such a list is a link whose printed text is not where it
+/// goes. Two were found by review, one after the other, which is the shape of a
+/// rule that will keep producing a next one.
 ///
-/// The last set is listed explicitly rather than tested by general category,
-/// because [`char::is_control`] covers only `Cc` and these are format characters
-/// (`Cf`), for which the standard library has no predicate.
+/// Inverting it puts the failure in the safe direction, which is the argument
+/// rather than tidiness. An incomplete **denylist** emits a citation that is not
+/// what it looks like, and does it silently. An incomplete **allowlist** refuses
+/// a citation somebody can then come and argue for, visibly. Preferring the
+/// second is this module's entire subject, so its guards should be shaped that
+/// way too.
 ///
-/// This is not a URL or DOI grammar and does not try to be — it is the one
-/// question both types have to ask and neither should answer twice.
+/// The cost is real and worth stating plainly: a genuinely non-ASCII identifier
+/// — an IRI, or a DOI suffix with a non-Latin character — is refused, and has to
+/// be recorded in its percent-encoded form. That narrows what is *recordable*,
+/// not what is correct, and it announces itself the moment somebody tries.
 #[must_use]
-pub fn has_invisible_characters(text: &str) -> bool {
-    text.chars().any(|c| {
-        c.is_whitespace()
-            || c.is_control()
-            || matches!(
-                c,
-                // Zero-width space, non-joiner and joiner; and the byte-order
-                // mark in its zero-width-no-break-space role.
-                '\u{200B}'..='\u{200D}' | '\u{FEFF}'
-                // Bidi marks, embeddings, overrides and isolates.
-                | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
-            )
-    })
+pub fn is_printable_identifier(text: &str) -> bool {
+    !text.is_empty() && text.chars().all(|c| c.is_ascii_graphic())
+}
+
+/// Whether `byte` may stand for itself inside the path of a resolver URL.
+///
+/// RFC 3986's `pchar` — unreserved, sub-delims, `:` and `@` — plus `/`, which
+/// separates the segments of a DOI suffix. An allowlist again, so a character
+/// nobody considered is percent-encoded rather than emitted raw.
+const fn is_url_path_safe(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            // Unreserved.
+            b'-' | b'.' | b'_' | b'~'
+            // Sub-delims.
+            | b'!' | b'$' | b'&' | b'\'' | b'(' | b')' | b'*' | b'+' | b',' | b';' | b'='
+            // The two pchar additions, and the segment separator.
+            | b':' | b'@' | b'/'
+        )
 }
 
 /// A string that is not a DOI.
@@ -676,7 +747,7 @@ impl Doi {
     /// The shape checked is the one the DOI Handbook defines: a `10.` prefix, a
     /// registrant code of digits (possibly dot-separated, as in
     /// `10.1000.10/123`), a `/`, and a non-empty suffix carrying no
-    /// [invisible characters][has_invisible_characters]. That is deliberately
+    /// [printable characters][is_printable_identifier]. That is deliberately
     /// stricter than "starts with `10.` and contains a slash", because
     /// everything this type accepts is rendered as a resolver link — and a link
     /// that resolves to nothing is exactly the plausible-looking citation this
@@ -710,14 +781,15 @@ impl Doi {
             .split('.')
             .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()));
         // The DOI Handbook lets a suffix be almost any string, and this does not
-        // second-guess that — except for the characters that cannot survive
-        // being printed. Everything accepted here becomes a resolver link whose
-        // visible text is the URL itself, so a suffix carrying a newline, a
-        // space or a bidi override produces a link that is not the identifier it
-        // appears to be. A dead link dressed as a citation is the failure this
-        // newtype exists to prevent; an invisible one is the same failure with
-        // the evidence removed.
-        if registrant_is_numeric && !suffix.is_empty() && !has_invisible_characters(suffix) {
+        // second-guess that beyond one question: can every character of it be
+        // printed? Everything accepted here becomes a resolver link whose visible
+        // text is the URL itself, so a suffix carrying a newline, a space or a
+        // bidi override produces a link that is not the identifier it appears to
+        // be. A dead link dressed as a citation is the failure this newtype
+        // exists to prevent; an invisible one is the same failure with the
+        // evidence removed. `is_printable_identifier` is an allowlist, so the
+        // next exotic code point is refused rather than discovered later.
+        if registrant_is_numeric && is_printable_identifier(suffix) {
             Ok(Self(bare.to_owned()))
         } else {
             Err(refused())
@@ -731,9 +803,44 @@ impl Doi {
     }
 
     /// The DOI as APA renders it: `https://doi.org/10.…`.
+    ///
+    /// The identifier is percent-encoded on the way in, because a DOI may
+    /// legitimately contain characters that mean something else inside a URL.
+    /// The sharpest is `#`: concatenated raw, `10.1234/a#b` becomes
+    /// `https://doi.org/10.1234/a#b`, whose `#b` is an HTTP fragment and is
+    /// never sent to the resolver — so the link retrieves `10.1234/a`, *a
+    /// different record*, silently and with every appearance of working. `?`
+    /// opens a query string and does the same; a bare `%` invalidates the escape
+    /// sequence it looks like.
+    ///
+    /// Encoded rather than refused, and the reason is evidence rather than
+    /// taste: `10.1002/(SICI)1097-0258(19970815)16:15<1707::AID-SIM605>3.0.CO;2-Y`
+    /// is a real registered DOI, and `<`, `>`, `(`, `;` and `:` are ordinary in
+    /// the wild. A suffix rule narrow enough to be URL-safe by construction would
+    /// refuse identifiers that exist, which is a worse failure than encoding
+    /// them. [`Doi::as_str`] still returns the DOI exactly as recorded — this is
+    /// a transport encoding applied where the transport is, the same kind of
+    /// operation as applying the resolver prefix, and for the same reason it is
+    /// applied exactly once.
+    ///
+    /// What passes through unescaped is RFC 3986's `pchar` (`is_url_path_safe`),
+    /// plus `/`; everything else
+    /// becomes `%XX`. Byte by byte, so a multi-byte character is encoded as the
+    /// bytes a URL actually carries.
     #[must_use]
     pub fn url(&self) -> String {
-        format!("https://doi.org/{}", self.0)
+        let mut url = String::from("https://doi.org/");
+        for byte in self.0.bytes() {
+            if is_url_path_safe(byte) {
+                url.push(char::from(byte));
+            } else {
+                const HEX: &[u8; 16] = b"0123456789ABCDEF";
+                url.push('%');
+                url.push(char::from(HEX[usize::from(byte >> 4)]));
+                url.push(char::from(HEX[usize::from(byte & 0x0F)]));
+            }
+        }
+        url
     }
 }
 
@@ -1060,7 +1167,7 @@ impl Reference {
 mod tests {
     use super::{
         AccessDate, Attested, Author, Day, Doi, GivenName, Month, Ordering, PublicationDate,
-        Reference, Stability, WorkKind, Year, has_invisible_characters,
+        Reference, Stability, WorkKind, Year, is_printable_identifier,
     };
 
     fn year(year: i32) -> Year {
@@ -1304,14 +1411,22 @@ mod tests {
                 "{suffix:?} is a generational suffix, and this record has no field for one"
             );
         }
-        for accepted in ["Mary", "M.", "Jean-Paul", "Ibáñez", "Jean - Paul", "Iva"] {
+        for accepted in [
+            "Mary",
+            "M.",
+            "Jean-Paul",
+            "Ibáñez",
+            "N'Golo",
+            "Iva",
+            "Владимир",
+        ] {
             assert!(GivenName::new(accepted).is_ok(), "{accepted:?}");
         }
         // Outer whitespace is trimmed, because the renderer trims and a leading
         // space nobody can see must not decide an order somebody reads. Nothing
         // inside the name is touched.
         assert_eq!(given_name("  Mary  ").as_str(), "Mary");
-        assert_eq!(given_name("Jean - Paul").as_str(), "Jean - Paul");
+        assert!(GivenName::new("Jean - Paul").is_err());
         // And a file cannot smuggle one past construction either.
         assert!(serde_json::from_str::<GivenName>("\"Jean--Paul\"").is_err());
         assert!(serde_json::from_str::<GivenName>("\"\"").is_err());
@@ -1331,7 +1446,6 @@ mod tests {
             ("M.", "M."),
             ("Jean-Paul", "J.-P."),
             ("ibáñez", "I."),
-            ("Jean - Paul", "J.-P."),
         ] {
             assert_eq!(given_name(recorded).initial(), initial, "{recorded:?}");
         }
@@ -1442,8 +1556,239 @@ mod tests {
         ] {
             assert!(Doi::new(fine).is_ok(), "{fine:?}");
         }
-        assert!(!has_invisible_characters("https://example.org/a-b"));
-        assert!(has_invisible_characters("https://example.org/a b"));
+        assert!(is_printable_identifier("https://example.org/a-b"));
+        assert!(!is_printable_identifier("https://example.org/a b"));
+    }
+
+    /// Code points worth sweeping a guard against: the ASCII block, Latin-1
+    /// (U+00AD SOFT HYPHEN), combining diacritics, the Arabic format controls
+    /// (U+061C), general punctuation in full (U+2000–U+206F — every Unicode
+    /// space, the zero-width set, the bidi embeddings, overrides and isolates,
+    /// the word joiner, and the deprecated U+206A–U+206F block), the ideographic
+    /// space, the byte-order mark, interlinear annotation, and the plane-14 tag
+    /// characters. Two of these blocks held the characters that walked through a
+    /// hand-written denylist; sweeping them is how a guard stops being a list of
+    /// what somebody happened to think of.
+    fn interesting_code_points() -> impl Iterator<Item = char> {
+        [
+            0x0000..=0x00FF_u32,
+            0x0300..=0x036F,
+            0x0590..=0x0620,
+            0x2000..=0x2070,
+            0x3000..=0x3002,
+            0xFEFF..=0xFEFF,
+            0xFFF9..=0xFFFC,
+            0xE0000..=0xE0080,
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(char::from_u32)
+    }
+
+    #[test]
+    fn a_given_name_is_accepted_whole_or_not_at_all() {
+        // The invariant, rather than the four inputs review happened to name:
+        // for *any* code point, putting it inside a name either refuses the name
+        // or renders it losslessly. What must never happen is the third outcome
+        // — accepted, and rendered with part of it gone — which is how both
+        // `["Mary", ""]` and `"Mary Ann"` got through.
+        let mut accepted = 0_u32;
+        for c in interesting_code_points() {
+            let candidate = format!("Ma{c}ry");
+            let Ok(name) = GivenName::new(&candidate) else {
+                continue;
+            };
+            accepted += 1;
+            assert_eq!(
+                name.as_str(),
+                candidate,
+                "U+{:04X} was accepted, so it must be stored exactly",
+                c as u32
+            );
+            // One initial per part, always. A separator that slipped through
+            // the allowlist would show up here as a name with more words than
+            // the rendering has initials — which is the drop, stated as a count.
+            // The hyphen itself is in the sweep and legitimately makes two
+            // parts, so the rule is a ratio rather than a constant.
+            assert_eq!(
+                name.initial().matches('.').count(),
+                candidate.split('-').count(),
+                "U+{:04X}: {candidate:?} rendered {:?}, losing a part",
+                c as u32,
+                name.initial()
+            );
+            assert!(
+                !candidate.chars().any(char::is_whitespace),
+                "U+{:04X} is whitespace and must not be inside one name",
+                c as u32
+            );
+            // Two parts in, two initials out — the hyphen case, swept the same
+            // way, since that is where the empty-part drop lived.
+            let joined = format!("Ma{c}ry-Jo");
+            let hyphenated = GivenName::new(&joined).expect("a valid given name");
+            assert_eq!(
+                hyphenated.initial().matches('.').count(),
+                joined.split('-').count(),
+                "U+{:04X}: {joined:?} rendered {:?}, losing a part",
+                c as u32,
+                hyphenated.initial()
+            );
+        }
+        // Not vacuous: the sweep really does accept letters and marks, so this
+        // is a test of an allowlist rather than of a `return false`.
+        assert!(
+            accepted > 100,
+            "the sweep accepted only {accepted} code points — the allowlist cannot be that narrow"
+        );
+    }
+
+    #[test]
+    fn a_doi_is_accepted_whole_or_not_at_all() {
+        // The same invariant for the identifier that becomes a link: any code
+        // point either refuses the DOI, or survives into a URL that still names
+        // the same record. Nothing may be accepted and then quietly mean
+        // something else — which is what `#` did, by becoming a fragment the
+        // resolver never sees.
+        let mut accepted = 0_u32;
+        for c in interesting_code_points() {
+            let candidate = format!("10.1234/a{c}b");
+            let Ok(doi) = Doi::new(&candidate) else {
+                continue;
+            };
+            accepted += 1;
+            assert_eq!(doi.as_str(), "10.1234/a{c}b".replace("{c}", &c.to_string()));
+            // The recorded identifier is itself printable. Encoding makes the
+            // *link* safe, but a bare DOI gets printed too, and a citation
+            // carrying a character nobody can see is not one anybody can check.
+            // Spelled out rather than asked of `is_printable_identifier`: a
+            // property checked through the same function that enforces it
+            // cancels on both sides, and would pass however that function broke.
+            assert!(
+                doi.as_str().chars().all(|c| c.is_ascii_graphic()),
+                "U+{:04X} was accepted into a DOI but cannot be printed",
+                c as u32
+            );
+            let url = doi.url();
+            let rest = url
+                .strip_prefix("https://doi.org/")
+                .expect("the resolver prefix");
+            // Every character of the rendered link is one a reader can see and a
+            // URL carries unambiguously — no fragment, no query, no bare escape.
+            assert!(
+                rest.chars().all(|c| c.is_ascii_graphic()),
+                "U+{:04X} left something unprintable in {url:?}",
+                c as u32
+            );
+            for reserved in ['#', '?'] {
+                assert!(
+                    !rest.contains(reserved),
+                    "U+{:04X} left a bare {reserved:?} in {url:?}, which the resolver never receives",
+                    c as u32
+                );
+            }
+            // And the encoding is reversible, so the link names the DOI that was
+            // recorded rather than one that merely looks like it.
+            assert_eq!(
+                percent_decode(rest),
+                doi.as_str(),
+                "U+{:04X}: the URL must decode back to the recorded DOI",
+                c as u32
+            );
+        }
+        assert!(
+            accepted > 50,
+            "the sweep accepted only {accepted} code points — too narrow to be testing an allowlist"
+        );
+    }
+
+    /// Reverse [`Doi::url`]'s escaping, so a test can prove the encoding is
+    /// lossless rather than merely well-formed.
+    fn percent_decode(text: &str) -> String {
+        let mut bytes = Vec::new();
+        let mut rest = text.as_bytes();
+        while let Some((first, tail)) = rest.split_first() {
+            if *first == b'%' && tail.len() >= 2 {
+                let hex = std::str::from_utf8(&tail[..2]).expect("ascii hex");
+                bytes.push(u8::from_str_radix(hex, 16).expect("valid escape"));
+                rest = &tail[2..];
+            } else {
+                bytes.push(*first);
+                rest = tail;
+            }
+        }
+        String::from_utf8(bytes).expect("valid utf-8")
+    }
+
+    #[test]
+    fn a_doi_url_names_the_record_that_was_recorded() {
+        // The four URI delimiters, by name. `#` is the one that matters: raw, it
+        // is an HTTP fragment, so `https://doi.org/10.1234/a#b` asks the resolver
+        // for `10.1234/a` — a different record, retrieved silently and with every
+        // appearance of working.
+        for (recorded, expected) in [
+            ("10.1234/a#b", "https://doi.org/10.1234/a%23b"),
+            ("10.1234/a?b", "https://doi.org/10.1234/a%3Fb"),
+            ("10.1234/a%b", "https://doi.org/10.1234/a%25b"),
+            ("10.1234/a\"b", "https://doi.org/10.1234/a%22b"),
+        ] {
+            let doi = Doi::new(recorded).expect("a printable DOI");
+            assert_eq!(doi.as_str(), recorded, "the record keeps what was written");
+            assert_eq!(doi.url(), expected);
+        }
+        // A real, registered Wiley DOI: `<`, `>`, `(`, `;` and `:` are ordinary
+        // in the wild, which is why this encodes rather than refuses. The
+        // sub-delims pass through; the two angle brackets are escaped.
+        let wiley = Doi::new("10.1002/(SICI)1097-0258(19970815)16:15<1707::AID-SIM605>3.0.CO;2-Y")
+            .expect("a real DOI");
+        assert_eq!(
+            wiley.url(),
+            "https://doi.org/10.1002/(SICI)1097-0258(19970815)16:15%3C1707::AID-SIM605%3E3.0.CO;2-Y"
+        );
+        // The ordinary shapes are untouched, so this costs nothing in the common
+        // case.
+        assert_eq!(
+            Doi::new("10.3886/ICPSR36966.v1").expect("valid").url(),
+            "https://doi.org/10.3886/ICPSR36966.v1"
+        );
+    }
+
+    #[test]
+    fn every_public_type_here_is_reachable_from_the_crate_root() {
+        // `Year`, `GivenName` and their error types were public, constructible
+        // and *not* re-exported, so a downstream caller could name the field
+        // types of `PublicationDate` and `Author::Person` but could not build
+        // one through the crate's own API. The assertion is the type check: this
+        // names every public item of this module by its root path, so adding one
+        // without re-exporting it stops compiling here.
+        fn assert_reachable<T>() {}
+        assert_reachable::<crate::Attested<String>>();
+        assert_reachable::<crate::Month>();
+        assert_reachable::<crate::Day>();
+        assert_reachable::<crate::NotADay>();
+        assert_reachable::<crate::Year>();
+        assert_reachable::<crate::NotAYear>();
+        assert_reachable::<crate::PublicationDate>();
+        assert_reachable::<crate::AccessDate>();
+        assert_reachable::<crate::Stability>();
+        assert_reachable::<crate::GivenName>();
+        assert_reachable::<crate::NotAGivenName>();
+        assert_reachable::<crate::Author>();
+        assert_reachable::<crate::Doi>();
+        assert_reachable::<crate::NotADoi>();
+        assert_reachable::<crate::Locator>();
+        assert_reachable::<crate::WorkKind>();
+        assert_reachable::<crate::Reference>();
+        assert!(crate::is_printable_identifier("10.1234/ok"));
+
+        // And the round trip that omission actually blocked: building the two
+        // public shapes entirely through the crate root.
+        let published = crate::PublicationDate::Year(crate::Year::new(2020).expect("a year"));
+        let author = crate::Author::Person {
+            surname: "Luna".to_owned(),
+            given: vec![crate::GivenName::new("R").expect("a given name")],
+        };
+        assert_eq!(published.year().get(), 2020);
+        assert_eq!(author.sort_key(), "Luna");
     }
 
     #[test]
