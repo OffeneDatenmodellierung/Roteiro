@@ -290,11 +290,16 @@ fn every_reported_link_addresses_the_text_it_was_read_from() {
                             "{where_}: wiki span {source:?} is not a `[[…]]`"
                         );
                     }
-                    rto_graph::LinkKind::Inline => {
+                    rto_graph::LinkKind::Inline | rto_graph::LinkKind::Image => {
                         inline += 1;
+                        let opens = if link.kind == rto_graph::LinkKind::Image {
+                            "!["
+                        } else {
+                            "["
+                        };
                         assert!(
-                            source.starts_with('[') && source.ends_with(')'),
-                            "{where_}: inline span {source:?} is not a `[…](…)`"
+                            source.starts_with(opens) && source.ends_with(')'),
+                            "{where_}: inline span {source:?} does not open `{opens}` and close `)`"
                         );
                         assert!(
                             !link.target.is_empty(),

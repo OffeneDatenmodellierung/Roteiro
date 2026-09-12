@@ -76,11 +76,14 @@ pub(crate) use rto_graph::{first_h1, heading_text};
 /// reads. The inline `[text](destination)` half is not used here yet.
 pub(crate) use rto_graph::wiki_link_targets;
 
-/// Return a line with inline code spans removed, and the byte ranges of the
-/// spans themselves — so tokens documented as examples (e.g.
-/// `` `[[path#Symbol]]` `` or ``` ``@rto:0001`` ```) are not scanned as real
-/// links or annotations, and so [`crate::fmt`] can tell a table row's column
-/// separator from a `|` inside a code span.
+/// The two halves of the inline-code-span rule: `strip_code_spans` returns a
+/// line with its spans **removed**, and `code_spans` returns the **byte ranges**
+/// of the spans themselves.
+///
+/// The first is why a token documented as an example (`` `[[path#Symbol]]` ``,
+/// ``` ``@rto:0001`` ```) is not scanned as a real link or annotation; the
+/// second is how [`crate::fmt`] tells a table row's column separator from a `|`
+/// inside a code span.
 ///
 /// Re-exported from [`rto_graph`] because the link scanner above is: stripping
 /// code spans is the *first step* of finding a link, so leaving a copy of it

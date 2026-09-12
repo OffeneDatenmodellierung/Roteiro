@@ -118,7 +118,11 @@ fn heading_text(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut at = 0;
     for link in rto_graph::markdown_links(raw) {
-        if link.kind != rto_graph::LinkKind::Inline {
+        // An image reduces the same way — to its alt text — and for the same
+        // reason: `![diagram](img.png)` reads as "diagram", so folding the
+        // source in would anchor the heading at `diagram-img-png`. Wiki-links
+        // are left alone, as the helper this replaced left them.
+        if link.kind == rto_graph::LinkKind::Wiki {
             continue;
         }
         out.push_str(&raw[at..link.span.start]);

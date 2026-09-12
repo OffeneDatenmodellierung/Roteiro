@@ -586,13 +586,13 @@ pub fn headings(md: &str) -> Vec<Heading> {
 ///
 /// Both are links in this project's dialect and both are read by one scanner,
 /// which is the point: "find a Markdown link" had five implementations sharing
-/// no code, and the two kinds were never found by the same one.
+/// no code, and the kinds were never all found by the same one.
 ///
 /// # Deliberately closed, and not `#[non_exhaustive]`
 ///
-/// `CommonMark` has link forms this does not read — reference links (`[a][b]`),
-/// autolinks (`<https://…>`), images — so a third variant is imaginable, which
-/// is exactly why the set is shut rather than left open. A caller decides what
+/// `CommonMark` has link forms this does not read — reference links (`[a][b]`)
+/// and autolinks (`<https://…>`) — so a fourth variant is imaginable, which is
+/// exactly why the set is shut rather than left open. A caller decides what
 /// to *do* per kind: [`crate::markdown_links`]' own callers rewrite an inline
 /// link's text over the whole link and resolve a wiki-link's target against a
 /// node key, and there is no behaviour that is right for a kind nobody has seen.
@@ -608,6 +608,14 @@ pub enum LinkKind {
     Wiki,
     /// A `CommonMark` `[text](destination)` inline link.
     Inline,
+    /// A `CommonMark` `![alt](source)` image.
+    ///
+    /// Reported rather than skipped, and **distinct from [`Self::Inline`]** so
+    /// that it can be: a citation list filters to `Inline` and a `.png` never
+    /// reaches it, while a caller reducing markdown to its visible text — the
+    /// rustdoc-anchor guard does — keeps the alt text and drops the source. Read
+    /// as one kind and either of those is wrong.
+    Image,
 }
 
 /// Whether a link destination addresses something this repository holds, or
@@ -706,6 +714,15 @@ pub struct MarkdownLink {
 /// A backslash escapes the delimiter after it, so `\[not a link](x)` is prose.
 /// Escapes are **not** processed inside `[[…]]`, which is a Roteiro token rather
 /// than `CommonMark` syntax and has never had them.
+///
+/// **A `[[…]]` inside an image's alt text is still reported**, so
+/// `![alt [[docs/x.md]]](i.png)` yields an [`LinkKind::Image`] *and* a
+/// [`LinkKind::Wiki`]. That is not an oversight and cannot be tidied here: a
+/// `[[…]]` is a Roteiro token found anywhere on the line, the scanner this
+/// replaced had no concept of images, and `roteiro check` counts what that
+/// scanner found. Suppressing it would move the gate's number — see
+/// `markdown_links_parity.rs`, which holds this function to that scanner over
+/// the whole tree. The image rule applies to the `[…](…)` syntax it is part of.
 #[must_use]
 pub fn markdown_links(line: &str) -> Vec<MarkdownLink> {
     let (stripped, map) = strip_and_map(line);
@@ -720,22 +737,20 @@ pub fn markdown_links(line: &str) -> Vec<MarkdownLink> {
             span: map.start(range.start)..map.end(range.end),
         })
         .collect();
-    out.extend(
-        inline_spans(&stripped, &wiki)
-            .into_iter()
-            .map(|(range, text, destination)| MarkdownLink {
-                scope: link_scope(&destination),
-                kind: LinkKind::Inline,
-                target: destination,
-                // Read back out of the **line**, not the stripped string: a
-                // label like ``[the `Foo` type](x.md)`` is scanned with its code
-                // span removed, so taking the text from there would cite "the
-                // type". The span is excluded from the *scan* because a link
-                // inside one is an example; its content is still the label.
-                text: line[map.widest(&text)].to_owned(),
-                span: map.start(range.start)..map.end(range.end),
-            }),
-    );
+    out.extend(inline_spans(&stripped, &wiki).into_iter().map(
+        |(kind, range, text, destination)| MarkdownLink {
+            scope: link_scope(&destination),
+            kind,
+            target: destination,
+            // Read back out of the **line**, not the stripped string: a
+            // label like ``[the `Foo` type](x.md)`` is scanned with its code
+            // span removed, so taking the text from there would cite "the
+            // type". The span is excluded from the *scan* because a link
+            // inside one is an example; its content is still the label.
+            text: line[map.widest(&text)].to_owned(),
+            span: map.start(range.start)..map.end(range.end),
+        },
+    ));
     out.sort_by_key(|l| l.span.start);
     out
 }
@@ -1001,15 +1016,13 @@ fn wiki_spans(stripped: &str) -> Vec<(Range<usize>, String)> {
 /// text range, destination)`.
 ///
 /// Skips the ranges `wiki` already claimed, so `[[a]]` is one wiki-link rather
-/// than also an inline one with a bracket for text — and skips **images**,
-/// whose `![alt](src)` would otherwise be read as a link starting one byte late.
-/// An image is passed over whole, so a link written inside its alt text is not
-/// read either; that is the same refusal as everywhere else here, since an
-/// image's alt text is not a place a citation can be written.
+/// than also an inline one with a bracket for text. An `![alt](src)` is reported
+/// as [`LinkKind::Image`] and its range **starts at the `!`**, which is the half
+/// that matters to a caller splicing over it.
 fn inline_spans(
     stripped: &str,
     wiki: &[(Range<usize>, String)],
-) -> Vec<(Range<usize>, Range<usize>, String)> {
+) -> Vec<(LinkKind, Range<usize>, Range<usize>, String)> {
     let bytes = stripped.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;
@@ -1031,9 +1044,12 @@ fn inline_spans(
             continue;
         };
         let image = i > 0 && bytes[i - 1] == b'!' && !is_escaped(bytes, i - 1);
-        if !image {
-            out.push((i..end, text, destination));
-        }
+        let (kind, start) = if image {
+            (LinkKind::Image, i - 1)
+        } else {
+            (LinkKind::Inline, i)
+        };
+        out.push((kind, start..end, text, destination));
         i = end;
     }
     out
@@ -1058,6 +1074,23 @@ fn inline_at(line: &str, open: usize) -> Option<(Range<usize>, String, usize)> {
     Some((open + 1..close, destination, dest_end + 1))
 }
 
+/// The offset of the first **unescaped** `byte` in `s`.
+fn unescaped(s: &str, byte: u8) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i += 2;
+            continue;
+        }
+        if bytes[i] == byte {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Whether the byte at `at` is escaped by an unbalanced run of backslashes.
 fn is_escaped(bytes: &[u8], at: usize) -> bool {
     bytes[..at]
@@ -1080,10 +1113,29 @@ fn is_escaped(bytes: &[u8], at: usize) -> bool {
 /// apostrophe in `(https://e.org/a'b)` is part of the destination rather than an
 /// unterminated title swallowing the rest of the line.
 fn destination_end(bytes: &[u8], from: usize) -> Option<usize> {
-    let mut depth = 0usize;
+    let mut i = from + 1;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    // An angle-bracket destination is **opaque**: `CommonMark` lets it hold the
+    // parentheses and quotes that close the link everywhere else, which is the
+    // point of writing one. `[t](<https://e.org/a_(b)>)` is a valid link, and
+    // counting its `)` against the outer depth rejected it.
+    if bytes.get(i) == Some(&b'<') {
+        i += 1;
+        loop {
+            let byte = *bytes.get(i)?;
+            i += 1;
+            if byte == b'\\' {
+                i += 1;
+            } else if byte == b'>' {
+                break;
+            }
+        }
+    }
+    let mut depth = 1usize;
     let mut quote: Option<u8> = None;
     let mut after_space = false;
-    let mut i = from;
     while i < bytes.len() {
         if bytes[i] == b'\\' {
             i += 2;
@@ -1152,8 +1204,10 @@ fn matching(bytes: &[u8], from: usize, open: u8, shut: u8) -> Option<usize> {
 fn destination_of(raw: &str) -> Option<String> {
     let raw = raw.trim();
     let (destination, rest) = if let Some(rest) = raw.strip_prefix('<') {
-        // The angle form must close; an unclosed one is not a destination.
-        let end = rest.find('>')?;
+        // The angle form must close, on an **unescaped** `>`; `[t](<a\>b>)` is
+        // one destination, not one truncated at the escape. An unclosed one is
+        // not a destination at all.
+        let end = unescaped(rest, b'>')?;
         (&rest[..end], rest[end + 1..].trim_start())
     } else {
         let end = raw.find(char::is_whitespace).unwrap_or(raw.len());
@@ -1522,12 +1576,27 @@ mod link_tests {
         assert!(scanned("[t](docs/x.md not-a-title)").is_empty());
     }
 
-    /// An image is not a link, which the `LinkKind` docs say and the scan has to
-    /// mean: `![alt](src)` would otherwise be read as a link starting one byte
-    /// late, putting a `.png` into a reference list. Raised in review on #806.
+    /// An image is its own kind, not an `Inline` link — so a `.png` cannot
+    /// reach a reference list, and a caller reducing markdown to visible text
+    /// still gets the alt text rather than the source folded in.
+    ///
+    /// It was read as an `Inline` link *starting one byte late*, which is both
+    /// at once wrong. Raised in review on #806.
     #[test]
-    fn an_image_is_not_a_link() {
-        assert!(scanned("![a diagram](docs/x.png)").is_empty());
+    fn an_image_is_its_own_kind_and_starts_at_the_bang() {
+        let line = "![a diagram](docs/x.png)";
+        assert_eq!(
+            scanned(line),
+            vec![(
+                LinkKind::Image,
+                "docs/x.png".to_owned(),
+                "a diagram".to_owned(),
+                false,
+            )]
+        );
+        // The range covers the `!`, so a caller splicing over it drops the whole
+        // image rather than leaving a stray bang behind.
+        assert_eq!(&line[markdown_links(line)[0].span.clone()], line);
         // An escaped `!` is literal text, so what follows it *is* a link.
         assert_eq!(
             scanned(r"\![t](docs/x.md)")
@@ -1536,14 +1605,59 @@ mod link_tests {
                 .collect::<Vec<_>>(),
             vec!["docs/x.md"]
         );
-        // A real link on the same line as an image is still found.
+        // A real link on the same line as an image is still an `Inline` one.
         assert_eq!(
             scanned("![img](a.png) and [t](docs/x.md)")
                 .iter()
-                .map(|(_, t, _, _)| t.as_str())
+                .map(|(k, t, _, _)| (*k, t.as_str()))
                 .collect::<Vec<_>>(),
-            vec!["docs/x.md"]
+            vec![(LinkKind::Image, "a.png"), (LinkKind::Inline, "docs/x.md")]
         );
+    }
+
+    /// A `[[…]]` inside an image's alt text **is** still reported, and that is
+    /// required rather than tolerated.
+    ///
+    /// A `[[…]]` is a Roteiro token found anywhere on the line; the scanner this
+    /// replaced had no concept of images, and `roteiro check` counts what that
+    /// scanner found. Suppressing it here would move the gate's number. Raised
+    /// in review on #806, and answered by the parity contract rather than by a
+    /// change. The image rule applies to the `[…](…)` syntax it is part of.
+    #[test]
+    fn a_wiki_link_in_alt_text_is_reported_because_the_gate_counts_it() {
+        assert_eq!(
+            scanned("![alt [[docs/x.md]]](i.png)")
+                .iter()
+                .map(|(k, t, _, _)| (*k, t.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(LinkKind::Image, "i.png"), (LinkKind::Wiki, "docs/x.md")]
+        );
+        // The image is reported first because its range opens first, and that
+        // range **encloses** the wiki-link's. Overlap is the honest report of an
+        // overlap; a caller splicing ranges takes one kind, as both of this
+        // function's rewriting callers do.
+        let links = markdown_links("![alt [[docs/x.md]]](i.png)");
+        assert!(links[0].span.start < links[1].span.start);
+        assert!(links[0].span.end > links[1].span.end);
+    }
+
+    /// An angle-bracket destination is opaque: it may hold the parentheses and
+    /// quotes that close the link everywhere else, which is the point of writing
+    /// one. Counting them rejected `[t](<https://e.org/a_(b)>)`, a valid link.
+    /// Raised in review on #806.
+    #[test]
+    fn an_angle_destination_may_hold_what_would_otherwise_close_the_link() {
+        let line = "[t](<https://e.org/a_(b)>) after";
+        let links = markdown_links(line);
+        assert_eq!(links[0].target, "https://e.org/a_(b)");
+        assert_eq!(&line[links[0].span.clone()], "[t](<https://e.org/a_(b)>)");
+        assert!(links[0].scope.is_external());
+        // A quote inside one is content, not a title nobody closed.
+        assert_eq!(scanned(r#"[t](<a "b".md>)"#)[0].1, r#"a "b".md"#);
+        // The closing `>` must be unescaped, so an escaped one is content.
+        assert_eq!(scanned(r"[t](<a\>b.md>)")[0].1, r"a\>b.md");
+        // And one that never closes is still not a link.
+        assert!(scanned("[t](<https://e.org/a").is_empty());
     }
 
     /// A label is what a **reader** sees, so it keeps the code spans the scan

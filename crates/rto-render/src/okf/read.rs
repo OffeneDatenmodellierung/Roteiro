@@ -724,14 +724,22 @@ fn parse_relationships(body: &str) -> (Vec<RelLink>, usize) {
 ///
 /// # Why this is not [`rto_graph::markdown_links`] either (#801)
 ///
-/// That function is the workspace's one Markdown link reader, and four of the
-/// five scanners this one was counted among now are it. It is **not**
-/// `pulldown-cmark`, so the paragraph above is not an argument against it — it
-/// is a line scanner with the same refusal to recover, and on every well-formed
-/// bundle line the two agree.
+/// That function is the workspace's one Markdown link reader, and every other
+/// scanner this one was counted among now is it. It is **not** `pulldown-cmark`,
+/// so the paragraph above is not an argument against it — it is a line scanner
+/// with the same refusal to recover.
 ///
-/// They differ on input this reader does not get to choose, and that is the
-/// reason to keep this one:
+/// # The shared reader is better on well-formed lines, and that is not the question
+///
+/// It is, and by more than was first written here (raised in review on #806).
+/// This one reads `[t](path.md "title")` as a target of `path.md "title"`,
+/// which resolves to no concept, so a titled link in a peer bundle is an edge
+/// silently dropped today. It also mis-splits a destination holding balanced
+/// parentheses, and reads an image as a link. Those are three reasons to
+/// migrate, not none, and they are recorded here so the deferral is priced.
+///
+/// What defers it is that the two differ on input **this reader does not get to
+/// choose**, in ways no test in this repository would fail on:
 ///
 /// - **It skips inline code spans.** That is right for a document *we* author,
 ///   where `` `[a](b)` `` is an example of the form. It is wrong for a bundle
@@ -743,11 +751,14 @@ fn parse_relationships(body: &str) -> (Vec<RelLink>, usize) {
 ///   where this reads one to `x`. Neither is obviously right for a malformed
 ///   file; changing it silently re-points an imported edge.
 ///
-/// Both are behaviour changes to third-party input with no test that would fail,
-/// which is the shape of drift this consolidation exists to remove rather than
-/// introduce. So this stays, and says why — the alternative to sharing is a
-/// written reason, not silence. Anything that reads a document *this repository*
-/// authors must use the shared reader.
+/// Both change what an *import* produces from somebody else's file, which is the
+/// one thing #801 phase 2 must not do quietly: it is the shape of drift this
+/// consolidation exists to remove, not to introduce. Deciding it needs a
+/// bundle-level fixture that pins what a peer's links become — OKF interop work,
+/// not link-scanner work — so this stays until that exists, and says why.
+///
+/// Anything that reads a document *this repository* authors must use the shared
+/// reader.
 fn markdown_link_targets(line: &str) -> Vec<String> {
     let mut out = Vec::new();
     let bytes = line.as_bytes();
