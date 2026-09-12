@@ -448,10 +448,27 @@ fn title_is_italic(kind: WorkKind) -> bool {
 
 /// Whether `text` begins with `word` as a whole word, compared without case.
 ///
-/// A whole word, so `Version 3` is caught and a version genuinely named `V1` is
-/// not. That distinction is not pedantry: APA's own data-set example renders
-/// `(Version V1)`, so `V1` is a legitimate bare version and a rule that refused
-/// a leading `v` would refuse the style's own worked case.
+/// # Why a whole word, and not a leading `v`
+///
+/// Left here in full because it is the kind of reasoning a well-meaning future
+/// tightening undoes. [`Reference::version`] documents a version as stored bare
+/// — `3.3.070`, never `Version 3.3.070` — so the obvious rule is "refuse a value
+/// that starts with a `v`". That rule is wrong, and APA itself is the
+/// counter-example: the data-set entry in the style's own worked examples renders
+/// **`(Version V1)`**. `V1` *is* the bare version. A leading-`v` rule would
+/// refuse the style this module claims to implement, on its own published case.
+///
+/// So only the whole word `Version` is refused — the spelling that actually
+/// makes the renderer print its label twice — and `V1`, `v2`, `b10200` and
+/// `Versionless` all pass. Refusing a value that is genuinely valid is the worse
+/// failure of the two, and this is the third rule in this module to be narrowed
+/// for that reason rather than widened: the DOI registrant length (a convention,
+/// not a rule of the syntax) and the URL port grammar (`https://host:/x` is a
+/// valid URI with an empty port) were both declined on the same ground.
+///
+/// The boundary test is the whole rule. Do not add a length condition in front
+/// of it: one was added and it let the exact value `Version` through, which is
+/// precisely what this exists to catch.
 fn starts_with_word(text: &str, word: &str) -> bool {
     text.get(..word.len())
         .is_some_and(|head| head.eq_ignore_ascii_case(word))
@@ -506,9 +523,13 @@ fn validate(reference: &Reference) -> Vec<Missing> {
     // `Version 3.3.070` — and nothing checked, so `Known("Version 3")` rendered
     // `(Version Version 3)` and reported success. A documented storage contract
     // that no guard enforces is an assumption, and the renderer was making it.
+    // No length guard: `starts_with_word` already decides the boundary, and
+    // requiring something *after* the word let the exact value `Version` slip
+    // through to render `(Version Version)` — the very defect this check was
+    // added for, reintroduced by the guard meant to narrow it.
     let version_repeats_its_label = version
         .value()
-        .is_some_and(|text| text.len() > "version".len() && starts_with_word(text, "version"));
+        .is_some_and(|text| starts_with_word(text, "version"));
     if !version.is_recorded() || version_repeats_its_label {
         missing.push(Missing::Version);
     }
@@ -2164,7 +2185,7 @@ mod tests {
         // storage contract, so the renderer's assumption went unchecked and a
         // record could render `(Version Version 3)` or `[[Data set]]` and report
         // success. A documented contract that no guard enforces is an assumption.
-        for doubled in ["Version 3", "version 3.3.070", "VERSION 1"] {
+        for doubled in ["Version 3", "version 3.3.070", "VERSION 1", "Version"] {
             let mut reference = complete("r", WorkKind::Document, "A title");
             reference.version = Attested::Known(doubled.to_owned());
             assert_eq!(
