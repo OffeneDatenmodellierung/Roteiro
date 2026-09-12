@@ -954,6 +954,8 @@ fn finding_from_row(row: &rusqlite::Row<'_>) -> Result<Finding, StoreError> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::{
         AdvisoryDb, CommandPolicy, EnvironmentPolicy, FindingKey, FindingsError, Isolation,
         MAX_ANALYZER_ID, MAX_IDENTITY_PART, NetworkPolicy, RunnerKind, Severity, WorktreeAccess,
@@ -999,6 +1001,219 @@ mod tests {
         let a = FindingKey::new("semgrep", &["x:y", "z"]).expect("a");
         let b = FindingKey::new("semgrep", &["x", "y:z"]).expect("b");
         assert_ne!(a.render(), b.render());
+    }
+
+    /// A deterministic 64-bit xorshift, so a generated counterexample is
+    /// reproducible from the seed the assertion prints rather than from whatever
+    /// the machine's entropy happened to be that run.
+    ///
+    /// Hand-rolled on purpose: the workspace carries no property-testing crate
+    /// (no `proptest`, `quickcheck` or `arbitrary`, in any manifest or in
+    /// `Cargo.lock`), and a key grammar with two escapable characters does not
+    /// earn a new workspace dependency — see #787.
+    struct Xorshift(u64);
+
+    impl Xorshift {
+        /// The next value in the sequence. Never returns zero for a non-zero
+        /// seed, which is the only state xorshift64 cannot leave.
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+
+        /// A value in `0..bound`. `bound` is a small literal here, so the modulo
+        /// bias is irrelevant and the conversions cannot fail.
+        fn below(&mut self, bound: usize) -> usize {
+            let bound = u64::try_from(bound).expect("bound fits in u64");
+            usize::try_from(self.next_u64() % bound).expect("remainder fits in usize")
+        }
+    }
+
+    /// Analyzer ids the generator draws from. `is_valid_analyzer_id` already
+    /// forbids `\` and `:` in this position, so the analyzer cannot carry an
+    /// escape and only the identity components exercise the grammar.
+    const GENERATED_ANALYZERS: [&str; 4] = ["semgrep", "cargo-audit", "trivy.fs", "a"];
+
+    /// The alphabet identity components are drawn from: the separator, a literal
+    /// backslash, ordinary ASCII, and one multi-byte character (`MAX_IDENTITY_PART`
+    /// is a *byte* bound while `push_escaped` iterates *chars*, so the two need a
+    /// case where they disagree).
+    const GENERATED_ALPHABET: [&str; 7] = ["a", "b", "1", "-", ":", "\\", "é"];
+
+    /// Longest generated component, in symbols drawn from [`GENERATED_ALPHABET`].
+    const GENERATED_PART_LEN: usize = 6;
+
+    /// Most components in a generated key.
+    const GENERATED_PART_COUNT: usize = 4;
+
+    /// How many random keys the property runs over, on top of [`ESCAPE_EDGE_CASES`].
+    const GENERATED_CASES: usize = 400;
+
+    /// Hand-written components covering every shape of the escape grammar, so the
+    /// corpus cannot lose a case to a later edit of the random generator: the
+    /// separator alone, a literal backslash alone, a backslash before an ordinary
+    /// character (the non-canonical form `split_escaped` is permissive about),
+    /// and adjacent runs and combinations of all three.
+    const ESCAPE_EDGE_CASES: [&[&str]; 16] = [
+        &[":"],
+        &["\\"],
+        &["\\a"],
+        &["a\\"],
+        &["\\\\"],
+        &["\\\\\\"],
+        &["::"],
+        &[":::"],
+        &["\\:"],
+        &[":\\"],
+        &["a\\b"],
+        &["a\\\\b"],
+        &["C:\\src\\x.rs"],
+        &["\\:\\:", "a"],
+        &["a:b", "\\", "c\\d"],
+        &[":", "\\", "\\a", "a\\\\:b"],
+    ];
+
+    /// How many generated keys must exhibit each shape of the grammar before the
+    /// property is worth believing. Guards against a future edit to the alphabet
+    /// quietly making the run vacuous.
+    const MIN_PER_SHAPE: usize = 10;
+
+    /// How many of `keys` carry a separator, a literal backslash, a backslash
+    /// before an ordinary character, and an adjacent run of escapable characters,
+    /// in that order.
+    fn escape_shape_tally(keys: &[FindingKey]) -> [usize; 4] {
+        let mut tally = [0_usize; 4];
+        for key in keys {
+            let mut shapes = [false; 4];
+            for part in key.parts() {
+                let chars: Vec<char> = part.chars().collect();
+                for (i, &ch) in chars.iter().enumerate() {
+                    shapes[0] |= ch == ':';
+                    shapes[1] |= ch == '\\';
+                    let next = chars.get(i + 1).copied();
+                    if ch == '\\' {
+                        // A backslash before anything other than `\` or `:` is
+                        // the non-canonical escape #787 is about.
+                        shapes[2] |= matches!(next, Some(n) if n != '\\' && n != ':');
+                    }
+                    shapes[3] |= matches!(ch, '\\' | ':')
+                        && matches!(next, Some(n) if matches!(n, '\\' | ':'));
+                }
+            }
+            for (slot, seen) in tally.iter_mut().zip(shapes) {
+                *slot += usize::from(seen);
+            }
+        }
+        tally
+    }
+
+    /// One generated key: a valid analyzer id and 1..=[`GENERATED_PART_COUNT`]
+    /// non-empty components drawn from [`GENERATED_ALPHABET`].
+    fn generated_key(rng: &mut Xorshift) -> FindingKey {
+        let analyzer = GENERATED_ANALYZERS[rng.below(GENERATED_ANALYZERS.len())];
+        let count = 1 + rng.below(GENERATED_PART_COUNT);
+        let mut parts = Vec::with_capacity(count);
+        for _ in 0..count {
+            let len = 1 + rng.below(GENERATED_PART_LEN);
+            let mut part = String::new();
+            for _ in 0..len {
+                part.push_str(GENERATED_ALPHABET[rng.below(GENERATED_ALPHABET.len())]);
+            }
+            parts.push(part);
+        }
+        FindingKey::new(analyzer, &parts).expect("generated components are well formed")
+    }
+
+    #[test]
+    fn key_rendering_round_trips_and_is_injective_over_generated_keys() {
+        // #787: `parse(render(x)) == x` over generated keys, including every
+        // shape of the escape grammar. The round trip is what makes a rendered
+        // key a *stable identity*: if it ever stopped holding, two findings
+        // could share one key, or one finding could change key across runs,
+        // with no test failing anywhere else.
+        //
+        // Deterministic seed, printed by every assertion below, so a failure is
+        // reproducible from the message alone.
+        const SEED: u64 = 0x5150_7787_0BAD_5EED;
+
+        let mut rng = Xorshift(SEED);
+        let mut keys: Vec<FindingKey> = ESCAPE_EDGE_CASES
+            .iter()
+            .map(|parts| FindingKey::new("semgrep", parts).expect("edge-case components"))
+            .collect();
+        keys.extend((0..GENERATED_CASES).map(|_| generated_key(&mut rng)));
+
+        // The corpus has to contain what it claims to, or the property below is
+        // true of nothing interesting.
+        let tally = escape_shape_tally(&keys);
+        for (shape, count) in ["separator", "backslash", "escaped-ordinary", "adjacent-run"]
+            .into_iter()
+            .zip(tally)
+        {
+            assert!(
+                count >= MIN_PER_SHAPE,
+                "seed {SEED:#x}: only {count} of {} generated keys contain a {shape}; \
+                 the property would be vacuous for that shape",
+                keys.len()
+            );
+        }
+
+        let mut rendered_to_key: HashMap<String, FindingKey> = HashMap::new();
+        for key in &keys {
+            let rendered = key.render();
+            let parsed = FindingKey::parse(&rendered).unwrap_or_else(|err| {
+                panic!(
+                    "seed {SEED:#x}: counterexample {key:?} rendered as {rendered:?}, \
+                     which does not parse: {err}"
+                )
+            });
+            assert_eq!(
+                parsed, *key,
+                "seed {SEED:#x}: counterexample {key:?} rendered as {rendered:?} \
+                 and parsed back as {parsed:?}"
+            );
+            if let Some(earlier) = rendered_to_key.insert(rendered.clone(), key.clone()) {
+                assert_eq!(
+                    earlier, *key,
+                    "seed {SEED:#x}: counterexample — {earlier:?} and {key:?} \
+                     both render to {rendered:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn parse_accepts_non_canonical_escapes_and_normalises_them() {
+        // The permissive half of #787, pinned as behaviour rather than fixed:
+        // `split_escaped` drops a backslash before *any* character, so a string
+        // `render` would never emit parses to the same identity as the canonical
+        // one. `parse` is therefore not injective on rendered strings, even
+        // though `parse ∘ render` is the identity on keys (above).
+        //
+        // This is deliberately not a bug fix. Tightening the parser would reject
+        // keys already written to stored findings layers and to `--json` output,
+        // so it is a wire-format decision, not a test change. What this test
+        // guarantees meanwhile is that the permissiveness *normalises*: whatever
+        // form came in, what goes back out is the canonical rendering.
+        let canonical = FindingKey::new("semgrep", &["ab"]).expect("key");
+        assert_eq!(canonical.render(), "finding:semgrep:ab");
+
+        for non_canonical in [
+            "finding:semgrep:a\\b",
+            "finding:semgrep:\\ab",
+            "finding:semgrep:ab",
+        ] {
+            let parsed = FindingKey::parse(non_canonical).expect("parse");
+            assert_eq!(
+                parsed, canonical,
+                "{non_canonical:?} parses to the same identity as the canonical key"
+            );
+            assert_eq!(parsed.render(), canonical.render());
+        }
     }
 
     #[test]
