@@ -414,6 +414,16 @@ impl Author {
 #[serde(try_from = "String", into = "String")]
 pub struct Doi(String);
 
+/// `text` without `prefix`, comparing the prefix case-insensitively.
+///
+/// `str::get` rather than a slice, so a multi-byte character straddling the
+/// prefix length is a `None` rather than a panic.
+fn strip_prefix_ignoring_ascii_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    text.get(..prefix.len())
+        .filter(|head| head.eq_ignore_ascii_case(prefix))
+        .map(|_| &text[prefix.len()..])
+}
+
 /// A string that is not a DOI.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
@@ -448,7 +458,11 @@ impl Doi {
             "doi:",
         ]
         .iter()
-        .find_map(|prefix| trimmed.strip_prefix(prefix))
+        // Case-insensitively: a URI scheme is case-insensitive by RFC 3986, and
+        // `DOI:10.1234/x` is how plenty of publishers print one. Matching
+        // exactly would send those down the "not a DOI at all" path, where they
+        // are rejected for a reason that is not true of them.
+        .find_map(|prefix| strip_prefix_ignoring_ascii_case(trimmed, prefix))
         .unwrap_or(trimmed);
         let refused = || NotADoi(text.to_owned());
         let rest = bare.strip_prefix("10.").ok_or_else(refused)?;
@@ -695,7 +709,9 @@ impl Reference {
     ///    to be defined for it. A year-only date precedes a more precise one in
     ///    the same year, because that is the only placement that does not
     ///    invent a month for it;
-    /// 4. title, case-insensitively then not;
+    /// 4. title, case-insensitively then not — trimmed, like the author keys,
+    ///    because the renderer trims both and whitespace nobody can see must
+    ///    not decide an order somebody reads;
     /// 5. [`Reference::id`];
     /// 6. the record itself, structurally.
     ///
@@ -714,10 +730,15 @@ impl Reference {
     /// a reference-list order, and sorting with it directly gives id order.
     #[must_use]
     pub fn list_order(a: &Self, b: &Self) -> Ordering {
+        fn title(reference: &Reference) -> &str {
+            reference.title.trim()
+        }
+        // Trimmed, because the renderer trims: a leading space that no reader
+        // can see must not decide where an entry lands in the list.
         let authors = |r: &Self| -> Vec<String> {
             r.authors
                 .iter()
-                .map(|author| author.sort_key().to_owned())
+                .map(|author| author.sort_key().trim().to_owned())
                 .collect()
         };
         let folded = |names: &[String]| -> Vec<String> {
@@ -744,8 +765,8 @@ impl Reference {
             .cmp(&folded(&right))
             .then_with(|| left.cmp(&right))
             .then_with(|| date(a).cmp(&date(b)))
-            .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
-            .then_with(|| a.title.cmp(&b.title))
+            .then_with(|| title(a).to_lowercase().cmp(&title(b).to_lowercase()))
+            .then_with(|| title(a).cmp(title(b)))
             .then_with(|| a.id.cmp(&b.id))
             .then_with(|| a.cmp(b))
     }
@@ -826,6 +847,12 @@ mod tests {
             "https://dx.doi.org/10.3886/ICPSR36966.v1",
             "doi:10.3886/ICPSR36966.v1",
             "  10.3886/ICPSR36966.v1  ",
+            // A URI scheme is case-insensitive, and publishers print `DOI:`
+            // both ways. Rejecting these would refuse a real DOI for a reason
+            // that is not true of it.
+            "HTTPS://doi.org/10.3886/ICPSR36966.v1",
+            "DOI:10.3886/ICPSR36966.v1",
+            "Doi:10.3886/ICPSR36966.v1",
         ] {
             let parsed = Doi::new(spelling).expect("parses");
             assert_eq!(
@@ -1024,6 +1051,33 @@ mod tests {
         refs.sort_by(Reference::list_order);
         let order: Vec<&str> = refs.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(order, ["january", "december"]);
+    }
+
+    #[test]
+    fn whitespace_nobody_can_see_does_not_decide_the_order() {
+        // The renderer trims the author names and the title, so a leading space
+        // changes where an entry sorts without changing a character of what is
+        // printed — two lists that render identically in a different order.
+        let padded = {
+            let mut r = dated("padded", "  Salas  ", 2020);
+            r.title = "  A title  ".to_owned();
+            r
+        };
+        let tidy = dated("padded", "Salas", 2020);
+        assert_eq!(
+            Reference::list_order(&padded, &tidy),
+            Reference::list_order(&tidy, &padded).reverse(),
+            "the comparison is symmetric"
+        );
+        let mut zhang = dated("zhang", "Zhang", 2020);
+        zhang.title = "A title".to_owned();
+        let mut refs = [zhang, padded];
+        refs.sort_by(Reference::list_order);
+        assert_eq!(
+            refs.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["padded", "zhang"],
+            "a padded `Salas` still sorts before `Zhang`"
+        );
     }
 
     #[test]

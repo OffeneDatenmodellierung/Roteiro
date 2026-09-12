@@ -451,7 +451,7 @@ fn printable_locator(reference: &Reference) -> Option<String> {
         Locator::Doi(doi) | Locator::Both { doi, .. } => Some(doi.url()),
         Locator::Url(url) => {
             let url = url.trim();
-            (url.starts_with("https://") || url.starts_with("http://")).then(|| url.to_owned())
+            is_web_url(url).then(|| url.to_owned())
         }
     }
 }
@@ -551,6 +551,23 @@ fn retrieval_clause(retrieved: AccessDate) -> String {
     )
 }
 
+/// Whether `url` names a scheme this will turn into a link.
+///
+/// Case-insensitively, because a URI scheme is case-insensitive by RFC 3986 and
+/// `HTTPS://example.org` is a perfectly ordinary way to have written one down.
+/// Matching exactly would refuse it as though it were a `javascript:` locator,
+/// which is a true rule applied to a false case. The URL itself is printed as
+/// recorded — recognising a scheme is not licence to rewrite it.
+///
+/// `str::get` rather than a slice, so a multi-byte character straddling the
+/// scheme length is a `false` rather than a panic.
+fn is_web_url(url: &str) -> bool {
+    ["https://", "http://"].iter().any(|scheme| {
+        url.get(..scheme.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(scheme))
+    })
+}
+
 /// Whether the source element would repeat the author, in which case APA drops
 /// it.
 ///
@@ -561,24 +578,25 @@ fn retrieval_clause(retrieved: AccessDate) -> String {
 ///
 /// Only for a **single group author**: a person is not their own publisher, and
 /// with several authors the name is not "the author" in the sense the rule
-/// means. And only when a locator will be printed, because otherwise dropping
-/// the publisher would leave the source element empty — the reference would
-/// lose its fourth element to a formatting rule meant to tidy it.
+/// means.
+///
+/// It applies whether or not a locator follows. That looked wrong at first — it
+/// can leave the source element empty — but APA's reasoning is that the element
+/// is not lost, it is *already there*: a reader who wants the publisher reads
+/// the author position, which is why the rule exists rather than tolerating the
+/// name twice. Refusing such a record, or keeping the repetition to avoid an
+/// empty-looking line, would both be this module preferring its own tidiness to
+/// the style it claims to implement.
 ///
 /// Encoding the rule here is what lets the record stay honest. Without it, the
 /// only way to get APA's output is `publisher = AbsentFromWork`, which claims
 /// the work *has* no publisher — a false statement about the world, made to
 /// satisfy a layout rule, in a module whose entire subject is not doing that.
-fn publisher_repeats_the_author(
-    reference: &Reference,
-    publisher: &str,
-    locator_printed: bool,
-) -> bool {
-    locator_printed
-        && match reference.authors.as_slice() {
-            [Author::Group(name)] => name.trim() == publisher.trim(),
-            _ => false,
-        }
+fn publisher_repeats_the_author(reference: &Reference, publisher: &str) -> bool {
+    match reference.authors.as_slice() {
+        [Author::Group(name)] => name.trim() == publisher.trim(),
+        _ => false,
+    }
 }
 
 /// `text` with its first character upper-cased.
@@ -660,7 +678,7 @@ pub fn entry(reference: &Reference) -> Result<Entry, Refusal> {
     let locator = printable_locator(reference);
     let publisher = attested_text(&reference.publisher)
         .value()
-        .filter(|publisher| !publisher_repeats_the_author(reference, publisher, locator.is_some()));
+        .filter(|publisher| !publisher_repeats_the_author(reference, publisher));
     if let Some(publisher) = publisher {
         tail.push(' ');
         tail.push_str(publisher);
@@ -1454,8 +1472,15 @@ mod tests {
                 "{hostile:?} must never become a link target"
             );
         }
-        // …and the schemes a reference actually uses still work.
-        for good in ["https://example.invalid/a", "http://example.invalid/b"] {
+        // …and the schemes a reference actually uses still work, in any case:
+        // a URI scheme is case-insensitive, so refusing `HTTPS://` would be a
+        // true rule applied to a false case.
+        for good in [
+            "https://example.invalid/a",
+            "http://example.invalid/b",
+            "HTTPS://example.invalid/c",
+            "HtTp://example.invalid/d",
+        ] {
             let mut reference = complete("r", WorkKind::Document, "A title");
             reference.locator = Attested::Known(Locator::Url(good.to_owned()));
             let rendered = entry(&reference).expect("renders");
@@ -1509,20 +1534,19 @@ mod tests {
             "only a group author triggers the rule"
         );
 
-        // With nothing else in the source element, the publisher stays: a
-        // tidying rule must not delete the only source a reader has.
+        // The rule is unconditional: with no locator either, the entry simply
+        // ends after the title. The publisher is not lost — a reader takes it
+        // from the author position, which is the whole reason APA drops the
+        // repetition rather than tolerating it.
         let mut no_locator = page.clone();
         no_locator.kind = WorkKind::Document;
         no_locator.locator = Attested::AbsentFromWork;
+        let rendered = entry(&no_locator).expect("renders").plain_text();
         assert_eq!(
-            entry(&no_locator)
-                .expect("renders")
-                .plain_text()
-                .matches("World Health Organization")
-                .count(),
-            2,
-            "with no locator the publisher is all the source element has"
+            rendered,
+            "World Health Organization. (2020). The top 10 causes of death."
         );
+        assert_eq!(rendered.matches("World Health Organization").count(), 1);
     }
 
     #[test]
