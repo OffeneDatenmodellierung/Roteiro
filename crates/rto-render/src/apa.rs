@@ -1,0 +1,2382 @@
+//! APA 7 rendering of a [`Reference`] — reference-list entries and in-text
+//! citations (issue #801, phase 3).
+//!
+//! A pure function from a record to either a formatted entry or a **refusal
+//! naming the fields that stopped it**. No I/O, no clock, no graph, no network;
+//! the same record renders to the same bytes on every machine and every run.
+//!
+//! # Refuse rather than fabricate
+//!
+//! The return type is a `Result` rather than a `String` because there is no
+//! string that honestly represents an unresearched work. A citation with a
+//! guessed year does not look guessed — it looks like every other line in the
+//! list — so the failure is silent by construction, and in an academic context
+//! a plausible fabricated citation is materially worse than a missing one.
+//!
+//! Concretely: **every field this module consults must be
+//! [`Attested::Known`] or explicitly [`Attested::AbsentFromWork`]**. An
+//! [`Attested::Unknown`] anywhere is a refusal, never an omission. That is the
+//! whole rule, and it is why `n.d.` can only ever be reached from
+//! `AbsentFromWork` — a claim somebody made about the work — and never from
+//! "nobody looked". The editorial work of maintaining a reference register is
+//! exactly the work of moving fields out of `Unknown`, and a refusal is the
+//! worklist.
+//!
+//! One consequence is deliberate and worth stating: [`in_text`] validates the
+//! **whole** record, not just the author and year it prints. An in-text
+//! citation whose work has no reference-list entry is a dangling citation, and
+//! `rto-faithful` already holds the line that a claim citing nothing is a
+//! fabrication. It would be odd to build the other half of that machine with
+//! the hole left in.
+//!
+//! # Why the output is not a `String`
+//!
+//! A reference list needs italics and a hanging indent, and the styling is
+//! structural: *which* element is italicised is an APA rule, decided here,
+//! where the rule lives. Returning `*asterisks*` or `<i>` would push that
+//! decision into a renderer that would have to re-parse this output to find it
+//! — and re-parsing emphasis out of prose containing titles, brackets and URLs
+//! is the class of bug that produces italics running to the end of the entry.
+//!
+//! So an [`Entry`] is a sequence of typed [`EntrySpan`]s — plain, italic, or a
+//! link with its target — and [`Entry::plain_text`] derives the flat string
+//! from them. HTML, a terminal, and a plain-text bibliography each map the
+//! spans their own way, and none of them parses. The hanging indent is a
+//! property of the list rather than of any span, so it is not modelled here.
+//!
+//! # Which APA rules are implemented, and against what
+//!
+//! Verified against the APA Style site (7th edition), September 2026:
+//!
+//! - *Elements of reference list entries* — element order; surname-then-initials;
+//!   "when there are 21 or more authors, include the first 19 authors' names,
+//!   insert an ellipsis (but no ampersand), and then add the final author's
+//!   name"; a group author spelled out in full; sentence case with italics for
+//!   standalone works; a bracketed description after the title.
+//! - *How many names to include in an APA Style reference* — up to 20 authors,
+//!   all are listed; the worked 21-author example shows the ellipsis as three
+//!   spaced dots.
+//! - *Basic principles of citation* / *Author–date citation system* — `(Luna,
+//!   2020)`, `(Salas & D'Agostino, 2020)`, `(Martin et al., 2020)`; narrative
+//!   forms spell out "and"; and for three or more authors "include the name of
+//!   only the first author plus 'et al.' in every citation (even the first
+//!   citation)". That last is the APA 7 change from APA 6, which listed all
+//!   authors on first use.
+//! - *Missing information* — "for a work with no date, use 'n.d.' in both the
+//!   reference list entry and the in-text citation".
+//! - *DOIs and URLs* — a DOI is rendered `https://doi.org/xxxxx`, and "if an
+//!   online work has both a DOI and a URL, include only the DOI".
+//! - *When do you include a retrieval date in a citation?* and the webpage
+//!   reference examples — a retrieval date only where the work is unarchived
+//!   **and** designed to change, written `Retrieved January 9, 2020, from …`.
+//!
+//! # APA rules that are implemented, and easy to assume are not
+//!
+//! Listed because each is a real APA 7 rule that a formatter can plausibly be
+//! missing, and a reader should be able to tell which side of the line it is on
+//! without reading the code:
+//!
+//! - **Same-surname authors are ordered by their initials, before date.**
+//!   `Smith, A. (2020)` precedes `Smith, T. (1990)`. See
+//!   [`Reference::list_order`], whose first key is surname *and rendered
+//!   initials* — rendered, so that `Mary` and `M.`, which print alike, cannot
+//!   order by a difference the page does not show.
+//! - **A single-author work precedes a multi-author work with the same first
+//!   author**, and works sharing a first author are ordered by the second
+//!   author. Both fall out of comparing the whole author list element by
+//!   element: a shorter list is a prefix of a longer one.
+//! - **The first letter of a bracketed description is capitalised** —
+//!   `[Computer software]` from a record spelling it `computer software`. The
+//!   line between this and recasing a *title* is drawn at `capitalise_first`.
+//! - **The publisher is omitted when it is the same as a single group author**,
+//!   which is why APA's WHO example does not print the name twice. See
+//!   `publisher_repeats_the_author`.
+//!
+//! # What is not implemented, and is therefore unspellable
+//!
+//! Each of these is a rule whose inputs the record does not carry, so the
+//! alternative to leaving it out is emitting a reference with part of it
+//! invented:
+//!
+//! - **Works inside a greater whole** — journal articles, book chapters. See
+//!   [`WorkKind`]: the container is a second model, and half of it is worse
+//!   than none.
+//! - **Works with no author and works with no title.** APA moves the title up
+//!   into the author position for the first, and substitutes a bracketed
+//!   description for the second. Both are real rules; both need a judgement the
+//!   register does not record yet, so both refuse.
+//! - **Single-name (mononym) authors.** [`Author::Person`] renders initials, so
+//!   an author with no given name refuses rather than being silently printed as
+//!   a bare surname.
+//! - **`2020a` / `2020b` disambiguation** for one author's works in one year.
+//!   The suffix depends on the whole list and on the in-text citations that
+//!   accompany it, so it belongs to the phase that renders both together. It is
+//!   not silent: [`reference_list`] reports the collision in
+//!   [`ReferenceList::ambiguous`], so a caller learns that two entries produce
+//!   one citation rather than discovering it in print.
+//! - **First-author initials in an in-text citation**, which APA adds when two
+//!   first authors share a surname — `(J. Smith, 2020)` against `(T. Smith,
+//!   2020)`. [`in_text`] is given one record and cannot see the other, and the
+//!   rule is a property of the pair.
+//!
+//!   **Only partly reported, and the limit is worth stating exactly.**
+//!   [`ReferenceList::ambiguous`] groups entries whose in-text citations are
+//!   *identical*, so it catches two Smiths who published in the same year. APA's
+//!   rule is wider: it applies "even if the year of publication differs", so
+//!   `(Smith, 2020)` and `(Smith, 1990)` by two different Smiths are equally
+//!   unresolvable to a reader and are **not** reported here. Reporting them
+//!   would mean [`Ambiguity`] carrying something other than one citation string,
+//!   which is a shape for the phase that implements the rule rather than a field
+//!   added ahead of it. Until then this is a gap a caller should know about, not
+//!   one this module quietly covers.
+//! - **Generational suffixes** — APA writes `Smith, J., Jr.`, in a position
+//!   [`Author::Person`] has no field for. Rather than let one be smuggled into
+//!   the given names, where it renders as an invented middle initial (`Smith,
+//!   J. J.`), [`GivenName`] refuses one at construction. The field arrives with
+//!   the phase that needs it; until then the gap is visible rather than wrong.
+//! - **BCE dates and era notation.** [`Year`](rto_graph::reference::Year) starts
+//!   at 1, because APA writes
+//!   `400 B.C.E.` and a bare `-400` is not that date — see the note there on
+//!   why half an era model is worse than none.
+
+use std::collections::BTreeMap;
+use std::fmt;
+
+use rto_graph::reference::{
+    AccessDate, Attested, Author, GivenName, Locator, PublicationDate, Reference, Stability,
+    WorkKind, is_printable_identifier,
+};
+use serde::Serialize;
+
+/// One run of an entry, carrying how it should be presented.
+///
+/// Deliberately not `#[non_exhaustive]`: these are the three things an APA
+/// reference can contain, and closing the set is what tells a UI at compile
+/// time when that stops being true. A wildcard arm in a renderer would drop a
+/// new span kind's text out of the page entirely.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EntrySpan {
+    /// Text set as-is.
+    Plain(String),
+    /// Text set in italics — in APA, the title of a standalone work.
+    Italic(String),
+    /// A link. `text` is what is printed, `href` where it points; for a DOI
+    /// both are the `https://doi.org/…` form, because APA prints the resolver
+    /// URL itself rather than a label.
+    ///
+    /// # Escaping is the consumer's duty
+    ///
+    /// Stated plainly because an unstated answer is how the next consumer gets
+    /// it wrong. `href` is **not** guaranteed safe to interpolate into markup
+    /// unescaped. A UI writing HTML must escape it for HTML, one writing a
+    /// terminal escape sequence must escape it for that, and so on: this module
+    /// renders APA, and it does not know the destination format.
+    ///
+    /// What it *does* guarantee is narrower and worth having. Every character
+    /// of `href` is one RFC 3986 permits in a URI, and none is whitespace or
+    /// invisible — so `"`, `<`, `>`, `\`, `^`, `` ` ``, `{`, `|` and `}` cannot
+    /// occur, and a locator therefore cannot close a double-quoted attribute or
+    /// open a tag. `&` and `'` are legal in a URI and *are* allowed, which is
+    /// precisely why the duty above is not discharged here. The guarantee
+    /// removes the characters that make forgetting it catastrophic; it does not
+    /// remove the need to remember.
+    Link {
+        /// The printed text.
+        text: String,
+        /// The link target.
+        href: String,
+    },
+}
+
+impl EntrySpan {
+    /// The text of this span, without its styling.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        match self {
+            Self::Plain(text) | Self::Italic(text) | Self::Link { text, .. } => text,
+        }
+    }
+}
+
+/// A formatted reference-list entry or in-text citation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Entry {
+    /// The [`Reference::id`] this was rendered from, so a caller can pair an
+    /// in-text citation with its list entry without matching on text.
+    pub reference_id: String,
+    /// The entry, in reading order.
+    pub spans: Vec<EntrySpan>,
+}
+
+impl Entry {
+    /// The entry as flat text, derived from the spans.
+    ///
+    /// A convenience for plain-text consumers, and the thing tests assert on.
+    /// It is *derived*, never the source of truth: a renderer that wants
+    /// italics reads [`Entry::spans`] rather than looking for markup in here,
+    /// because there is none to find.
+    #[must_use]
+    pub fn plain_text(&self) -> String {
+        self.spans.iter().map(EntrySpan::text).collect()
+    }
+}
+
+/// A field APA requires that the record cannot supply.
+///
+/// "Cannot supply" means [`Attested::Unknown`] — nobody has looked — except
+/// where noted. A field somebody established the work does not have is not
+/// missing; it is absent, and absence is renderable.
+///
+/// Deliberately not `#[non_exhaustive]`: a refusal is a worklist, and a tool
+/// that turns one into a task for a human has to know about every reason a
+/// record can be refused. A new reason arriving as an unmatched wildcard is a
+/// piece of editorial work that silently never gets scheduled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Missing {
+    /// The record has no [`Reference::id`].
+    ///
+    /// Not an APA element — APA never prints it. It is required because an
+    /// entry nobody can point at cannot be paired with the in-text citation
+    /// that cites it, and an in-text citation whose entry cannot be found is
+    /// the dangling citation this module exists to prevent.
+    Identifier,
+    /// There are no authors, or one of them has an empty name.
+    Author,
+    /// A person author with no given names, so no initials can be formed.
+    /// Position is 1-based, counting in the order the work lists them.
+    AuthorInitials {
+        /// Which author, counting from 1.
+        position: usize,
+    },
+    /// Nobody has looked up when the work was published. Note that this is
+    /// *not* the undated case: a work established to have no date renders
+    /// `n.d.` and is perfectly citable.
+    PublicationDate,
+    /// The work has no title recorded.
+    Title,
+    /// The retrieval date names a day that does not exist — `February 31`.
+    ///
+    /// Its own variant rather than borrowed from [`Missing::PublicationDate`],
+    /// because a refusal that names the wrong field sends an editor to the
+    /// wrong line. The two dates are separate types with separate roles, and a
+    /// worklist is only useful if each entry is true.
+    RetrievalDate,
+    /// Nobody has recorded whether the work carries a version — or the recorded
+    /// value carries its own label.
+    ///
+    /// Both, because the field is a free-form `String` and the renderer supplies
+    /// the word APA puts in front of it. A version recorded as `Version 3`
+    /// renders `(Version Version 3)`, so the record is not citable as written
+    /// and says which field to fix. A version named `V1` is fine and is APA's
+    /// own data-set example — only the whole word `Version` is refused.
+    Version,
+    /// Nobody has recorded whether this work carries a bracketed descriptor —
+    /// or, for a kind that requires one, the record does not carry it.
+    ///
+    /// It is also raised when the recorded descriptor brings its own brackets.
+    /// The field is documented as stored *without* them, because the renderer
+    /// supplies them — so `Known("[Data set]")` renders `[[Data set]]`, and a
+    /// record that cannot be printed as written should say which field to fix
+    /// rather than print it anyway.
+    ///
+    /// Both cases, because every kind consults the field. For a `Document` or a
+    /// `WebPage` a descriptor is optional, so [`Attested::AbsentFromWork`]
+    /// satisfies it and only [`Attested::Unknown`] refuses. For software, a
+    /// data set or a fact sheet it is required, and *neither* satisfies it: a
+    /// descriptor is a requirement of the **format** — it exists so a reader is
+    /// not left thinking a data set is a book — rather than a property of the
+    /// work, so "this work has no descriptor" is not a state it can be in.
+    Descriptor,
+    /// Nobody has recorded a publisher.
+    Publisher,
+    /// Nobody has recorded where the work can be found; or the kind of work
+    /// requires a locator (a web page is nothing without its URL) and none was
+    /// recorded; or the work is unarchived and changing, in which case there
+    /// must be something for the retrieval clause to point at.
+    Locator,
+    /// The source element would be empty: the work is recorded as having
+    /// neither a publisher nor a locator, which leaves a reader nothing to go
+    /// on.
+    Source,
+}
+
+impl Missing {
+    /// A stable kebab-case token naming the field.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Identifier => "identifier",
+            Self::Author => "author",
+            Self::AuthorInitials { .. } => "author-initials",
+            Self::PublicationDate => "publication-date",
+            Self::Title => "title",
+            Self::RetrievalDate => "retrieval-date",
+            Self::Version => "version",
+            Self::Descriptor => "descriptor",
+            Self::Publisher => "publisher",
+            Self::Locator => "locator",
+            Self::Source => "source",
+        }
+    }
+}
+
+impl fmt::Display for Missing {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AuthorInitials { position } => write!(f, "author-initials (author {position})"),
+            other => f.write_str(other.as_str()),
+        }
+    }
+}
+
+/// Why a reference could not be rendered.
+///
+/// Carries *every* field that stopped it rather than only the first, because
+/// the point of a refusal is to be a worklist for whoever maintains the
+/// register, and one round trip per missing field is not that.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Refusal {
+    /// The [`Reference::id`] that was refused.
+    pub reference_id: String,
+    /// The fields that stopped it, in a fixed order — never empty.
+    pub missing: Vec<Missing>,
+}
+
+impl fmt::Display for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "cannot cite {}: missing ", self.reference_id)?;
+        for (index, missing) in self.missing.iter().enumerate() {
+            if index > 0 {
+                f.write_str(", ")?;
+            }
+            write!(f, "{missing}")?;
+        }
+        Ok(())
+    }
+}
+
+/// Which in-text form to render.
+///
+/// Deliberately not `#[non_exhaustive]`: APA's author–date system has exactly
+/// these two shapes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CitationForm {
+    /// `(Salas & D'Agostino, 2020)` — the citation sits inside parentheses, and
+    /// two authors are joined by an ampersand.
+    Parenthetical,
+    /// `Salas and D'Agostino (2020)` — the authors are part of the sentence,
+    /// and "and" is spelled out.
+    Narrative,
+}
+
+/// Two or more entries whose in-text citation is the same text.
+///
+/// APA resolves these with a year suffix (`2020a`, `2020b`) or by adding the
+/// first author's initials when two first authors share a surname. Both rules
+/// need the whole list at once *and* the citations that accompany it, so
+/// neither belongs to a function that renders one record — see the module
+/// documentation. What belongs here is saying so: a list that silently emits
+/// two indistinguishable citations is a list whose references cannot be
+/// resolved, and the caller is the only one placed to fix it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Ambiguity {
+    /// The parenthetical citation they share.
+    pub citation: String,
+    /// The records that produce it, in list order.
+    pub reference_ids: Vec<String>,
+}
+
+/// A rendered reference list: what could be cited, what could not, and what a
+/// reader would not be able to tell apart.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReferenceList {
+    /// The entries, in APA order — see [`Reference::list_order`].
+    pub entries: Vec<Entry>,
+    /// The records that refused, in the same order they would have appeared in.
+    pub refused: Vec<Refusal>,
+    /// Ids carried by more than one rendered record, sorted and deduplicated.
+    ///
+    /// [`Entry::reference_id`] is the key a caller pairs an in-text citation
+    /// with its entry by, and nothing in [`Reference`] enforces that ids are
+    /// unique. Where they are not, that pairing is ambiguous — so it is
+    /// reported rather than assumed away. The entries are still rendered:
+    /// dropping them would turn a naming problem into a missing citation.
+    pub duplicate_ids: Vec<String>,
+    /// Sets of entries whose in-text citations are identical, in list order.
+    pub ambiguous: Vec<Ambiguity>,
+}
+
+/// Whether APA requires a bracketed descriptor for this kind of work.
+///
+/// An APA judgement, so it lives here rather than on [`WorkKind`]: another
+/// style would draw this line somewhere else, and the record should not carry
+/// one style's opinion.
+fn requires_descriptor(kind: WorkKind) -> bool {
+    match kind {
+        WorkKind::Software | WorkKind::DataSet | WorkKind::FactSheet => true,
+        WorkKind::Document | WorkKind::WebPage => false,
+    }
+}
+
+/// Whether the kind of work is nothing without a locator.
+fn requires_locator(kind: WorkKind) -> bool {
+    match kind {
+        WorkKind::WebPage => true,
+        WorkKind::Document | WorkKind::Software | WorkKind::DataSet | WorkKind::FactSheet => false,
+    }
+}
+
+/// Whether the title of this kind of work is italicised.
+///
+/// True for every kind currently modelled, because every kind currently
+/// modelled is a standalone work. The rule is written down as a function rather
+/// than assumed, because the branch that returns `false` — an article or a
+/// chapter, whose *container* is italicised instead — is the one that arrives
+/// with the next kind, and a reader should be able to see where it goes.
+fn title_is_italic(kind: WorkKind) -> bool {
+    match kind {
+        WorkKind::Document
+        | WorkKind::Software
+        | WorkKind::DataSet
+        | WorkKind::FactSheet
+        | WorkKind::WebPage => true,
+    }
+}
+
+/// Whether `text` begins with `word` as a whole word, compared without case.
+///
+/// # Why a whole word, and not a leading `v`
+///
+/// Left here in full because it is the kind of reasoning a well-meaning future
+/// tightening undoes. [`Reference::version`] documents a version as stored bare
+/// — `3.3.070`, never `Version 3.3.070` — so the obvious rule is "refuse a value
+/// that starts with a `v`". That rule is wrong, and APA itself is the
+/// counter-example: the data-set entry in the style's own worked examples renders
+/// **`(Version V1)`**. `V1` *is* the bare version. A leading-`v` rule would
+/// refuse the style this module claims to implement, on its own published case.
+///
+/// So only the whole word `Version` is refused — the spelling that actually
+/// makes the renderer print its label twice — and `V1`, `v2`, `b10200` and
+/// `Versionless` all pass. Refusing a value that is genuinely valid is the worse
+/// failure of the two, and this is the third rule in this module to be narrowed
+/// for that reason rather than widened: the DOI registrant length (a convention,
+/// not a rule of the syntax) and the URL port grammar (`https://host:/x` is a
+/// valid URI with an empty port) were both declined on the same ground.
+///
+/// The boundary test is the whole rule. Do not add a length condition in front
+/// of it: one was added and it let the exact value `Version` through, which is
+/// precisely what this exists to catch.
+fn starts_with_word(text: &str, word: &str) -> bool {
+    text.get(..word.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(word))
+        && text[word.len()..]
+            .chars()
+            .next()
+            .is_none_or(|next| !next.is_alphanumeric())
+}
+
+/// Every field that stops this record from being cited, in a fixed order.
+fn validate(reference: &Reference) -> Vec<Missing> {
+    let mut missing = Vec::new();
+
+    if reference.id.trim().is_empty() {
+        missing.push(Missing::Identifier);
+    }
+
+    let nameless = reference
+        .authors
+        .iter()
+        .any(|author| author.sort_key().trim().is_empty());
+    if reference.authors.is_empty() || nameless {
+        missing.push(Missing::Author);
+    }
+    for (index, author) in reference.authors.iter().enumerate() {
+        if let Author::Person { surname, given } = author
+            && !surname.trim().is_empty()
+            && initials(given).is_none()
+        {
+            missing.push(Missing::AuthorInitials {
+                position: index + 1,
+            });
+        }
+    }
+
+    // Unknown, or known and impossible. `Day` validates 1..=31 because it
+    // carries no calendar; `February 31` is only impossible once the month is
+    // in hand, so it is caught here where the whole date is.
+    let impossible_date = reference
+        .published
+        .known()
+        .is_some_and(|published| !published.names_a_day_that_exists());
+    if reference.published.is_unknown() || impossible_date {
+        missing.push(Missing::PublicationDate);
+    }
+    if reference.title.trim().is_empty() {
+        missing.push(Missing::Title);
+    }
+    let version = attested_text(&reference.version);
+    // Recorded, or recorded in a shape the renderer would print twice. The
+    // record documents a version as stored bare — `3.3.070`, never
+    // `Version 3.3.070` — and nothing checked, so `Known("Version 3")` rendered
+    // `(Version Version 3)` and reported success. A documented storage contract
+    // that no guard enforces is an assumption, and the renderer was making it.
+    // No length guard: `starts_with_word` already decides the boundary, and
+    // requiring something *after* the word let the exact value `Version` slip
+    // through to render `(Version Version)` — the very defect this check was
+    // added for, reintroduced by the guard meant to narrow it.
+    let version_repeats_its_label = version
+        .value()
+        .is_some_and(|text| starts_with_word(text, "version"));
+    if !version.is_recorded() || version_repeats_its_label {
+        missing.push(Missing::Version);
+    }
+
+    let descriptor = attested_text(&reference.descriptor);
+    // Same shape as the version above: a descriptor is documented as stored
+    // *without* its brackets, because the renderer supplies them — so
+    // `Known("[Data set]")` rendered `[[Data set]]` and called it a success.
+    let descriptor_brings_its_own_brackets = descriptor
+        .value()
+        .is_some_and(|text| text.contains('[') || text.contains(']'));
+    if requires_descriptor(reference.kind) {
+        if descriptor.value().is_none() || descriptor_brings_its_own_brackets {
+            missing.push(Missing::Descriptor);
+        }
+    } else if !descriptor.is_recorded() || descriptor_brings_its_own_brackets {
+        missing.push(Missing::Descriptor);
+    }
+
+    let publisher = attested_text(&reference.publisher);
+    if !publisher.is_recorded() {
+        missing.push(Missing::Publisher);
+    }
+
+    let locator = printable_locator(reference);
+    let locator_required = requires_locator(reference.kind)
+        || matches!(reference.stability, Stability::UnarchivedAndChanging { .. });
+    let locator_missing = match &reference.locator {
+        Attested::Unknown => true,
+        // Recorded, but there is nothing printable in it: a blank URL is a
+        // field somebody typed nothing into, not a judgement that the work has
+        // none, so it refuses on the same terms as a blank publisher.
+        Attested::Known(_) => locator.is_none(),
+        Attested::AbsentFromWork => locator_required,
+    };
+    if locator_missing {
+        missing.push(Missing::Locator);
+    }
+
+    if let Stability::UnarchivedAndChanging { retrieved } = reference.stability
+        && !retrieved.names_a_day_that_exists()
+    {
+        missing.push(Missing::RetrievalDate);
+    }
+
+    if reference.publisher.is_absent_from_work() && reference.locator.is_absent_from_work() {
+        missing.push(Missing::Source);
+    }
+
+    missing
+}
+
+/// A string field reduced to the two questions the formatter asks of it: has
+/// anybody recorded an answer, and if so is there text to print?
+///
+/// The same three states as [`Attested`], restated after trimming — a recorded
+/// value that is blank is nobody's answer — so that the formatter asks those
+/// two questions once rather than re-deriving them at every use.
+enum Recorded<'a> {
+    /// Somebody recorded text.
+    Value(&'a str),
+    /// Somebody recorded that the work has no such value.
+    AbsentFromWork,
+    /// Nobody recorded anything, or recorded only whitespace.
+    Unrecorded,
+}
+
+impl<'a> Recorded<'a> {
+    /// Whether somebody has recorded an answer, either a value or "the work has
+    /// none". A blank recorded value counts as no answer: it is a field
+    /// somebody typed nothing into, not a judgement that the work lacks one.
+    fn is_recorded(&self) -> bool {
+        !matches!(self, Self::Unrecorded)
+    }
+
+    /// The text to print, if any.
+    fn value(&self) -> Option<&'a str> {
+        match self {
+            Self::Value(text) => Some(text),
+            Self::AbsentFromWork | Self::Unrecorded => None,
+        }
+    }
+}
+
+/// Classify a string field.
+fn attested_text(field: &Attested<String>) -> Recorded<'_> {
+    match field {
+        Attested::AbsentFromWork => Recorded::AbsentFromWork,
+        Attested::Unknown => Recorded::Unrecorded,
+        Attested::Known(text) => match text.trim() {
+            "" => Recorded::Unrecorded,
+            text => Recorded::Value(text),
+        },
+    }
+}
+
+/// The one URL APA prints for this record, if it prints one.
+///
+/// Where both a DOI and a URL are recorded the DOI wins: "if an online work has
+/// both a DOI and a URL, include only the DOI".
+///
+/// A recorded URL is only printable if it is a **web address**. `Locator::Url`
+/// holds an arbitrary `String`, and an [`EntrySpan::Link`] is a target some UI
+/// will put in an `href` — so a `javascript:`, `data:` or `file:` locator that
+/// travelled through here would be this module handing a renderer a hostile
+/// destination and calling it a citation. Anything else is not printable, which
+/// means the record refuses rather than silently losing its source element.
+/// The accepted set is deliberately narrow: a reference needing another scheme
+/// is a case to argue, not one to admit by default.
+fn printable_locator(reference: &Reference) -> Option<String> {
+    match reference.locator.known()? {
+        // A DOI is rendered through the resolver, so it is an `https://` URL by
+        // construction whatever the record spelled.
+        Locator::Doi(doi) | Locator::Both { doi, .. } => Some(doi.url()),
+        // Validated exactly as recorded, and **not** trimmed first. Trimming
+        // here normalised the value before the allowlist saw it, which is the
+        // bypass the allowlist was built to close: ` https://example.invalid/a `
+        // and a trailing newline both passed, and what reached the `href` was a
+        // value the record does not hold. Whitespace is not printable, so a
+        // locator carrying any refuses on `Missing::Locator` — visible, and
+        // fixable in the record — rather than being quietly cleaned up on the
+        // way to the page. The comment on `is_web_url` says the URL is printed
+        // as recorded; this is what makes that true.
+        Locator::Url(url) => is_web_url(url).then(|| url.clone()),
+    }
+}
+
+/// `I. I.` from a list of given names, or `None` when there are none to work
+/// from — a mononym, which [`validate`] turns into a refusal.
+///
+/// Each given name contributes its initial, from [`GivenName::initial`]: the
+/// first character uppercased and a period, with a hyphenated name keeping its
+/// hyphen and contributing both (`Jean-Paul` → `J.-P.`). A name already recorded
+/// as an initial passes through unchanged, so a register that only ever learned
+/// `M.` loses nothing and one that learned `Mary` is not obliged to throw the
+/// rest away.
+///
+/// One name in, one initial out — `map`, and **never** `filter_map`. That is the
+/// whole point of this function's history. It used to `filter_map` over both the
+/// names and the hyphen parts, so a fragment it could not reduce was silently
+/// dropped: `given = ["Mary", ""]` rendered `Smith, M.`, and `"Jean--Paul"`
+/// rendered `J.-P.`. Each is a plausible author with part of the recorded name
+/// missing — a citation that reads as authoritative and is partly invented,
+/// which is precisely what this module is written to refuse. The drop is now
+/// unspellable twice over: [`GivenName`] cannot hold a fragment that has no
+/// initial, and there is no `filter_map` left here to drop one if it could.
+///
+/// The derivation itself lives on [`GivenName`] rather than here because
+/// [`Reference::list_order`] alphabetises on the same value, and two copies of
+/// one derivation is how the printed order and the sorted order came apart.
+fn initials(given: &[GivenName]) -> Option<String> {
+    (!given.is_empty()).then(|| {
+        given
+            .iter()
+            .map(GivenName::initial)
+            .collect::<Vec<_>>()
+            .join(" ")
+    })
+}
+
+/// One author as a reference list spells them.
+fn author_name(author: &Author) -> Option<String> {
+    match author {
+        Author::Person { surname, given } => {
+            Some(format!("{}, {}", surname.trim(), initials(given)?))
+        }
+        // A group is an author in its own right and is never reduced to
+        // initials: `World Health Organization`, not `W. H. O.`.
+        Author::Group(name) => Some(name.trim().to_owned()),
+    }
+}
+
+/// How many authors are listed in full before the ellipsis, when there are too
+/// many to list.
+const LISTED_BEFORE_ELLIPSIS: usize = 19;
+
+/// The most authors APA lists without eliding any.
+const MAX_LISTED_IN_FULL: usize = 20;
+
+/// The author element: every author when there are 20 or fewer, and the first
+/// 19 then an ellipsis then the last when there are 21 or more.
+fn author_element(authors: &[Author]) -> Option<String> {
+    let names: Vec<String> = authors.iter().map(author_name).collect::<Option<_>>()?;
+    let (last, rest) = names.split_last()?;
+    Some(match names.len() {
+        1 => last.clone(),
+        // Two through twenty: all of them, an ampersand before the last, and
+        // the serial comma APA keeps in front of it.
+        2..=MAX_LISTED_IN_FULL => format!("{}, & {last}", rest.join(", ")),
+        // Twenty-one or more: the first nineteen, three spaced dots, and the
+        // final author — with **no** ampersand, which is the part of this rule
+        // everybody gets wrong.
+        _ => format!(
+            "{}, . . . {last}",
+            rest[..LISTED_BEFORE_ELLIPSIS].join(", ")
+        ),
+    })
+}
+
+/// The date element, as it appears in a reference list: `2020`, `2020, August`,
+/// `2020, August 26`, or `n.d.`.
+///
+/// `None` only for [`Attested::Unknown`], which [`validate`] has already
+/// refused — this returns an `Option` rather than asserting so that no path
+/// through this module can panic.
+fn reference_date(published: &Attested<PublicationDate>) -> Option<String> {
+    Some(match published {
+        Attested::AbsentFromWork => "n.d.".to_owned(),
+        Attested::Unknown => return None,
+        Attested::Known(PublicationDate::Year(year)) => year.to_string(),
+        Attested::Known(PublicationDate::YearMonth { year, month }) => {
+            format!("{year}, {}", month.name())
+        }
+        Attested::Known(PublicationDate::Full { year, month, day }) => {
+            format!("{year}, {} {}", month.name(), day.get())
+        }
+    })
+}
+
+/// `Retrieved January 9, 2020, from ` — the clause, including its trailing
+/// space, ready to sit in front of a URL.
+fn retrieval_clause(retrieved: AccessDate) -> String {
+    format!(
+        "Retrieved {} {}, {}, from ",
+        retrieved.month.name(),
+        retrieved.day.get(),
+        retrieved.year
+    )
+}
+
+/// Whether `url` is something this will turn into a link: a web scheme, and
+/// nothing in it that cannot survive being printed.
+///
+/// The scheme is matched case-insensitively, because a URI scheme is
+/// case-insensitive by RFC 3986 and `HTTPS://example.org` is a perfectly
+/// ordinary way to have written one down. Matching exactly would refuse it as
+/// though it were a `javascript:` locator, which is a true rule applied to a
+/// false case. The URL itself is printed as recorded — recognising a scheme is
+/// not licence to rewrite it.
+///
+/// `str::get` rather than a slice, so a multi-byte character straddling the
+/// scheme length is a `false` rather than a panic.
+///
+/// [`is_printable_identifier`] is the rule, and it is here because a URL becomes
+/// an [`EntrySpan::Link`] whose visible text *is* its `href`: so
+/// `https://example.org/a\nb` is a citation printed across two lines and
+/// resolving to neither of them, and a bidi override is a link that reads as one
+/// host and resolves to another. A recorded URL that fails it is not printable,
+/// so the record refuses on `Missing::Locator` rather than quietly losing its
+/// source element — the same terms as a blank URL.
+///
+/// This is **not** the rule [`Doi::new`](rto_graph::reference::Doi::new) applies.
+/// The two used to share one predicate and deliberately stopped: a DOI is
+/// encoded at the boundary by `Doi::url`, so it can be recorded as the
+/// identifier itself and its rule is the wider `is_doi_name_char`, while a URL
+/// is emitted verbatim into an `href` with no encoding step and so has to be
+/// URL-safe already. The difference between them is the reason they exist
+/// separately, and it is the thing to keep straight when changing either.
+fn is_web_url(url: &str) -> bool {
+    let authority = ["https://", "http://"].iter().find_map(|scheme| {
+        url.get(..scheme.len())
+            .filter(|head| head.eq_ignore_ascii_case(scheme))
+            .map(|_| &url[scheme.len()..])
+    });
+    let Some(authority) = authority else {
+        return false;
+    };
+    // There has to be a host, and *non-empty is not the same as valid*: the
+    // first attempt at this checked only that something preceded the first
+    // delimiter, which let `https://:443` (a port and no host), `https://@/path`
+    // (userinfo and no host) and `https://[]` (an empty address literal)
+    // through. Each carries a scheme and nothing to resolve — a link that cannot
+    // locate anything, which is the fabrication this module refuses rather than
+    // a cosmetic defect.
+    //
+    // So the authority is taken apart the way RFC 3986 §3.2 builds it —
+    // userinfo, host, port — and the host is what must survive.
+    let authority = authority.split(['/', '?', '#']).next().unwrap_or_default();
+    let after_userinfo = authority.rsplit('@').next().unwrap_or_default();
+    let host = match after_userinfo.strip_prefix('[') {
+        // An IP-literal: the brackets must close, and hold something.
+        Some(literal) => match literal.split_once(']') {
+            Some((address, _port)) => address,
+            None => "",
+        },
+        // A registered name or IPv4 address, up to the port.
+        None => after_userinfo.split(':').next().unwrap_or_default(),
+    };
+    // What a host *is* beyond being present is a question needing a network, so
+    // this asks no more than that one.
+    //
+    // # A stated limitation, rather than a half-built URI parser
+    //
+    // What follows the host is **not** validated. `https://[::1]not-a-port`,
+    // `https://host:notaport/x` and a port above 65535 are all accepted, and
+    // produce a link that will not resolve. That is a known gap and it is left
+    // open deliberately: this is the second round in which extending this
+    // predicate has produced the next gap in the same grammar, which is the
+    // signature of hand-rolling a URI parser one counter-example at a time.
+    // Closing it properly means taking a URI parser as a dependency — a decision
+    // for its own change, not a line added here — and closing it by hand is not
+    // safe, because `https://host:/x` is a *valid* URI with an empty port and a
+    // digits-required rule would refuse it. Refusing a valid locator is the
+    // worse failure of the two.
+    //
+    // The consequence is bounded and worth naming: a locator of this shape is a
+    // broken link, not a link to the wrong work and not an unsafe one. Every
+    // character is still an RFC 3986 URI character with well-formed escapes, so
+    // the guarantee `EntrySpan::Link` documents continues to hold.
+    !host.is_empty() && is_printable_identifier(url)
+}
+
+/// Whether the source element would repeat the author, in which case APA drops
+/// it.
+///
+/// "Do not include the publisher when it is the same as the author" — a group
+/// author's own website is the common case, and `World Health Organization.
+/// (2018, May 24). The top 10 causes of death. World Health Organization.
+/// https://…` says the name twice for no reader's benefit.
+///
+/// Only for a **single group author**: a person is not their own publisher, and
+/// with several authors the name is not "the author" in the sense the rule
+/// means.
+///
+/// It applies whether or not a locator follows. That looked wrong at first — it
+/// can leave the source element empty — but APA's reasoning is that the element
+/// is not lost, it is *already there*: a reader who wants the publisher reads
+/// the author position, which is why the rule exists rather than tolerating the
+/// name twice. Refusing such a record, or keeping the repetition to avoid an
+/// empty-looking line, would both be this module preferring its own tidiness to
+/// the style it claims to implement.
+///
+/// Encoding the rule here is what lets the record stay honest. Without it, the
+/// only way to get APA's output is `publisher = AbsentFromWork`, which claims
+/// the work *has* no publisher — a false statement about the world, made to
+/// satisfy a layout rule, in a module whose entire subject is not doing that.
+fn publisher_repeats_the_author(reference: &Reference, publisher: &str) -> bool {
+    match reference.authors.as_slice() {
+        [Author::Group(name)] => name.trim() == publisher.trim(),
+        _ => false,
+    }
+}
+
+/// `text` with its first character upper-cased.
+///
+/// The one place this module changes recorded text, and the line is worth
+/// stating: a **title** is never recased, because which of its words are proper
+/// nouns is a judgement about the words, and a formatter guessing at that is a
+/// formatter rewriting what somebody wrote down. A **descriptor** is drawn from
+/// the small controlled vocabulary APA itself supplies — `Computer software`,
+/// `Data set`, `Fact sheet` — and "capitalize the first letter of the
+/// description" is a rule about punctuation, with no proper-noun hazard in it.
+/// Without this, a record carrying `computer software` renders `[computer
+/// software]`, which is simply not APA.
+fn capitalise_first(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
+}
+
+/// Whether a period should be added after `text`, which already ends the title
+/// element.
+fn needs_period(text: &str) -> bool {
+    !matches!(text.chars().last(), Some('.' | '?' | '!'))
+}
+
+/// Render one reference-list entry.
+///
+/// # Errors
+///
+/// Returns a [`Refusal`] naming every field APA requires that the record does
+/// not supply. See the module documentation: an unresearched field is always a
+/// refusal and never an omission, so no `Ok` from this function can contain a
+/// guessed year, an invented descriptor or a placeholder author.
+pub fn entry(reference: &Reference) -> Result<Entry, Refusal> {
+    let missing = validate(reference);
+    if !missing.is_empty() {
+        return Err(Refusal {
+            reference_id: reference.id.clone(),
+            missing,
+        });
+    }
+
+    let refuse = |missing: Missing| Refusal {
+        reference_id: reference.id.clone(),
+        missing: vec![missing],
+    };
+    let authors = author_element(&reference.authors).ok_or_else(|| refuse(Missing::Author))?;
+    let date =
+        reference_date(&reference.published).ok_or_else(|| refuse(Missing::PublicationDate))?;
+
+    let mut spans = Vec::new();
+    let separator = if needs_period(&authors) { "." } else { "" };
+    spans.push(EntrySpan::Plain(format!("{authors}{separator} ({date}). ")));
+
+    let title = reference.title.trim().to_owned();
+    let mut tail_of_title = title.clone();
+    spans.push(if title_is_italic(reference.kind) {
+        EntrySpan::Italic(title)
+    } else {
+        EntrySpan::Plain(title)
+    });
+
+    if let Some(version) = attested_text(&reference.version).value() {
+        let text = format!(" (Version {version})");
+        tail_of_title.clone_from(&text);
+        spans.push(EntrySpan::Plain(text));
+    }
+    if let Some(descriptor) = attested_text(&reference.descriptor).value() {
+        let text = format!(" [{}]", capitalise_first(descriptor));
+        tail_of_title.clone_from(&text);
+        spans.push(EntrySpan::Plain(text));
+    }
+
+    let mut tail = String::new();
+    if needs_period(&tail_of_title) {
+        tail.push('.');
+    }
+    let locator = printable_locator(reference);
+    let publisher = attested_text(&reference.publisher)
+        .value()
+        .filter(|publisher| !publisher_repeats_the_author(reference, publisher));
+    if let Some(publisher) = publisher {
+        tail.push(' ');
+        tail.push_str(publisher);
+        if needs_period(publisher) {
+            tail.push('.');
+        }
+    }
+    if locator.is_some() {
+        tail.push(' ');
+        if let Stability::UnarchivedAndChanging { retrieved } = reference.stability {
+            tail.push_str(&retrieval_clause(retrieved));
+        }
+    }
+    spans.push(EntrySpan::Plain(tail));
+    if let Some(url) = locator {
+        spans.push(EntrySpan::Link {
+            text: url.clone(),
+            href: url,
+        });
+    }
+
+    Ok(Entry {
+        reference_id: reference.id.clone(),
+        spans,
+    })
+}
+
+/// Render an in-text citation.
+///
+/// # Errors
+///
+/// Returns a [`Refusal`] on exactly the conditions [`entry`] refuses on — the
+/// whole record, not only the author and year printed here. An in-text citation
+/// with no reference-list entry behind it is a dangling citation, which is the
+/// defect this whole module exists to make unspellable.
+pub fn in_text(reference: &Reference, form: CitationForm) -> Result<Entry, Refusal> {
+    let missing = validate(reference);
+    if !missing.is_empty() {
+        return Err(Refusal {
+            reference_id: reference.id.clone(),
+            missing,
+        });
+    }
+
+    let refuse = |missing: Missing| Refusal {
+        reference_id: reference.id.clone(),
+        missing: vec![missing],
+    };
+    // In text, a date is only ever its year — or `n.d.`, which APA uses in the
+    // in-text citation exactly as it does in the reference list.
+    let year = match &reference.published {
+        Attested::AbsentFromWork => "n.d.".to_owned(),
+        Attested::Known(published) => published.year().to_string(),
+        Attested::Unknown => return Err(refuse(Missing::PublicationDate)),
+    };
+
+    let label = |author: &Author| match author {
+        Author::Person { surname, .. } => surname.trim().to_owned(),
+        Author::Group(name) => name.trim().to_owned(),
+    };
+    let first = reference
+        .authors
+        .first()
+        .map(&label)
+        .ok_or_else(|| refuse(Missing::Author))?;
+    let authors = match reference.authors.len() {
+        0 | 1 => first,
+        2 => {
+            let second = reference
+                .authors
+                .get(1)
+                .map(&label)
+                .ok_or_else(|| refuse(Missing::Author))?;
+            match form {
+                CitationForm::Parenthetical => format!("{first} & {second}"),
+                CitationForm::Narrative => format!("{first} and {second}"),
+            }
+        }
+        // Three or more: the first author and `et al.`, from the **first**
+        // citation. APA 6 listed every author on first use and shortened
+        // afterwards; APA 7 does not, and citing a first use the old way is the
+        // commonest way to be wrong about this.
+        _ => format!("{first} et al."),
+    };
+
+    let text = match form {
+        CitationForm::Parenthetical => format!("({authors}, {year})"),
+        CitationForm::Narrative => format!("{authors} ({year})"),
+    };
+    Ok(Entry {
+        reference_id: reference.id.clone(),
+        spans: vec![EntrySpan::Plain(text)],
+    })
+}
+
+/// Render a whole reference list, in APA order.
+///
+/// Records that refuse are returned separately rather than dropped: a
+/// bibliography that silently shrinks is how a citation goes missing without
+/// anybody noticing. For the same reason the two ways a rendered list can still
+/// fail its reader — [`ReferenceList::duplicate_ids`] and
+/// [`ReferenceList::ambiguous`] — are reported rather than left to be
+/// discovered downstream.
+///
+/// The output is a pure function of the input *set*: the records are put into
+/// [`Reference::list_order`], which is total, before any of them is rendered,
+/// so the same set in a different order produces byte-identical output.
+#[must_use]
+pub fn reference_list(references: &[Reference]) -> ReferenceList {
+    let mut ordered: Vec<&Reference> = references.iter().collect();
+    ordered.sort_by(|a, b| Reference::list_order(a, b));
+
+    let mut entries = Vec::new();
+    let mut refused = Vec::new();
+    let mut rendered_records = Vec::new();
+    for reference in ordered {
+        match entry(reference) {
+            Ok(rendered) => {
+                entries.push(rendered);
+                rendered_records.push(reference);
+            }
+            Err(refusal) => refused.push(refusal),
+        }
+    }
+
+    let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+    for reference in &rendered_records {
+        *seen.entry(reference.id.as_str()).or_default() += 1;
+    }
+    let duplicate_ids = seen
+        .into_iter()
+        .filter(|(_, count)| *count > 1)
+        .map(|(id, _)| id.to_owned())
+        .collect();
+
+    // Grouped by the citation text itself, in list order, so the report reads
+    // the way the page does.
+    let mut citations: Vec<(String, Vec<String>)> = Vec::new();
+    for reference in &rendered_records {
+        let Ok(citation) = in_text(reference, CitationForm::Parenthetical) else {
+            continue;
+        };
+        let text = citation.plain_text();
+        match citations.iter_mut().find(|(seen, _)| *seen == text) {
+            Some((_, ids)) => ids.push(reference.id.clone()),
+            None => citations.push((text, vec![reference.id.clone()])),
+        }
+    }
+    let ambiguous = citations
+        .into_iter()
+        .filter(|(_, ids)| ids.len() > 1)
+        .map(|(citation, reference_ids)| Ambiguity {
+            citation,
+            reference_ids,
+        })
+        .collect();
+
+    ReferenceList {
+        entries,
+        refused,
+        duplicate_ids,
+        ambiguous,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        Ambiguity, CitationForm, Entry, EntrySpan, Missing, entry, in_text, reference_list,
+        requires_descriptor, requires_locator, title_is_italic,
+    };
+    use rto_graph::reference::{
+        AccessDate, Attested, Author, Day, Doi, GivenName, Locator, Month, PublicationDate,
+        Reference, Stability, WorkKind, Year,
+    };
+
+    /// A person author. `given` is a space-separated list of given names, so a
+    /// fixture reads the way the work prints it.
+    fn person(surname: &str, given: &str) -> Author {
+        Author::Person {
+            surname: surname.to_owned(),
+            given: given
+                .split_whitespace()
+                .map(|name| GivenName::new(name).expect("a valid given name"))
+                .collect(),
+        }
+    }
+
+    fn day(day: u8) -> Day {
+        Day::new(day).expect("a valid day")
+    }
+
+    fn year(year: i32) -> Year {
+        Year::new(year).expect("a valid year")
+    }
+
+    fn given_name(name: &str) -> GivenName {
+        GivenName::new(name).expect("a valid given name")
+    }
+
+    fn doi(text: &str) -> Locator {
+        Locator::Doi(Doi::new(text).expect("a valid DOI"))
+    }
+
+    /// A record with every field answered — the baseline each case mutates.
+    /// Note what "answered" means: `AbsentFromWork` everywhere there is nothing
+    /// to print, never `Unknown`.
+    fn complete(id: &str, kind: WorkKind, title: &str) -> Reference {
+        let mut reference = Reference::new(id, kind, title, Stability::FixedOrArchived);
+        reference.authors = vec![person("Luna", "R")];
+        reference.published = Attested::Known(PublicationDate::Year(year(2020)));
+        reference.version = Attested::AbsentFromWork;
+        reference.descriptor = Attested::AbsentFromWork;
+        reference.publisher = Attested::Known("Publisher Name".to_owned());
+        reference.locator =
+            Attested::Known(Locator::Url("https://example.invalid/work".to_owned()));
+        reference
+    }
+
+    fn many_authors(count: usize) -> Vec<Author> {
+        (1..=count)
+            .map(|n| person(&format!("Author{n:02}"), "A"))
+            .collect()
+    }
+
+    /// APA's own worked software example, from the *Publication Manual* §10.10
+    /// entry the style site quotes: `Comprehensive meta-analysis (Version
+    /// 3.3.070) [Computer software]`.
+    fn software() -> Reference {
+        let mut software = complete(
+            "software",
+            WorkKind::Software,
+            "Comprehensive meta-analysis",
+        );
+        software.authors = vec![Author::Group("Biostat".to_owned())];
+        software.published = Attested::Known(PublicationDate::Year(year(2014)));
+        software.version = Attested::Known("3.3.070".to_owned());
+        software.descriptor = Attested::Known("Computer software".to_owned());
+        software.publisher = Attested::AbsentFromWork;
+        software
+    }
+
+    /// APA's own worked example of an undated, unarchived, changing page — the
+    /// one case that exercises `n.d.`, a group author and a retrieval date at
+    /// once.
+    fn population_clock() -> Reference {
+        let mut clock = Reference::new(
+            "undated",
+            WorkKind::WebPage,
+            "U.S. and world population clock",
+            Stability::UnarchivedAndChanging {
+                retrieved: AccessDate {
+                    year: year(2020),
+                    month: Month::January,
+                    day: day(9),
+                },
+            },
+        );
+        clock.authors = vec![Author::Group("U.S. Census Bureau".to_owned())];
+        // The *work* has no date. Somebody checked. This is citable.
+        clock.published = Attested::AbsentFromWork;
+        clock.version = Attested::AbsentFromWork;
+        clock.descriptor = Attested::AbsentFromWork;
+        clock.publisher = Attested::Known("U.S. Department of Commerce".to_owned());
+        clock.locator =
+            Attested::Known(Locator::Url("https://www.census.gov/popclock/".to_owned()));
+        clock
+    }
+
+    /// Cases that turn on how many authors there are and what kind they are.
+    ///
+    /// Split from [`cases_by_work_type`] only to keep each function inside the
+    /// line budget every function here is held to; the two are one table.
+    fn cases_by_author_shape() -> Vec<(&'static str, Reference, &'static str)> {
+        let one_author = complete("one", WorkKind::Document, "Title of the work");
+
+        let mut two_authors = complete("two", WorkKind::Document, "A shared title");
+        two_authors.authors = vec![person("Salas", "E"), person("D'Agostino", "R")];
+
+        let mut three_authors = complete("three", WorkKind::Document, "A title by three");
+        three_authors.authors = vec![
+            person("Martin", "T"),
+            person("Salas", "E"),
+            person("D'Agostino", "R"),
+        ];
+
+        let mut corporate = complete("corporate", WorkKind::WebPage, "The top 10 causes of death");
+        corporate.authors = vec![Author::Group("World Health Organization".to_owned())];
+        corporate.published = Attested::Known(PublicationDate::Full {
+            year: year(2018),
+            month: Month::May,
+            day: day(24),
+        });
+        // The publisher is recorded truthfully — the WHO *is* the publisher of
+        // its own fact sheet — and APA's "omit the publisher when it is the
+        // author" rule is what keeps it out of the output. Setting this to
+        // `AbsentFromWork` to get the same line would be a false statement
+        // about the work, made to satisfy a layout rule.
+        corporate.publisher = Attested::Known("World Health Organization".to_owned());
+        corporate.locator = Attested::Known(Locator::Url(
+            "https://www.who.int/news-room/fact-sheets/detail/the-top-10-causes-of-death"
+                .to_owned(),
+        ));
+
+        vec![
+            (
+                "one author",
+                one_author,
+                "Luna, R. (2020). Title of the work. Publisher Name. https://example.invalid/work",
+            ),
+            (
+                "two authors take an ampersand and the serial comma",
+                two_authors,
+                "Salas, E., & D'Agostino, R. (2020). A shared title. Publisher Name. \
+                 https://example.invalid/work",
+            ),
+            (
+                "three authors are all listed in the reference, however the in-text form shortens",
+                three_authors,
+                "Martin, T., Salas, E., & D'Agostino, R. (2020). A title by three. \
+                 Publisher Name. https://example.invalid/work",
+            ),
+            (
+                "a group author is not reduced to initials",
+                corporate,
+                "World Health Organization. (2018, May 24). The top 10 causes of death. \
+                 https://www.who.int/news-room/fact-sheets/detail/the-top-10-causes-of-death",
+            ),
+        ]
+    }
+
+    /// Cases that turn on what kind of work it is and where it can be found.
+    fn cases_by_work_type() -> Vec<(&'static str, Reference, &'static str)> {
+        let mut with_doi = complete("doi", WorkKind::Document, "A work with a DOI");
+        with_doi.locator = Attested::Known(doi("10.1037/abc123"));
+
+        let mut doi_and_url = complete("doi-and-url", WorkKind::Document, "A work with both");
+        doi_and_url.locator = Attested::Known(Locator::Both {
+            doi: Doi::new("10.1037/abc123").expect("a valid DOI"),
+            url: "https://example.invalid/also-here".to_owned(),
+        });
+
+        let url_only = complete("url", WorkKind::Document, "A work with a URL only");
+
+        let mut dataset = complete(
+            "dataset",
+            WorkKind::DataSet,
+            "Content analysis of undergraduate psychology textbooks",
+        );
+        dataset.authors = vec![person("O'Donohue", "W")];
+        dataset.published = Attested::Known(PublicationDate::Year(year(2017)));
+        dataset.version = Attested::Known("V1".to_owned());
+        dataset.descriptor = Attested::Known("Data set".to_owned());
+        dataset.publisher = Attested::Known("ICPSR".to_owned());
+        dataset.locator = Attested::Known(doi("10.3886/ICPSR36966.v1"));
+
+        vec![
+            (
+                "a DOI is rendered through the resolver",
+                with_doi,
+                "Luna, R. (2020). A work with a DOI. Publisher Name. https://doi.org/10.1037/abc123",
+            ),
+            (
+                "a DOI beats a URL when both are recorded",
+                doi_and_url,
+                "Luna, R. (2020). A work with both. Publisher Name. https://doi.org/10.1037/abc123",
+            ),
+            (
+                "a URL is used when there is no DOI",
+                url_only,
+                "Luna, R. (2020). A work with a URL only. Publisher Name. \
+                 https://example.invalid/work",
+            ),
+            (
+                "a data set carries its version and its descriptor",
+                dataset,
+                "O'Donohue, W. (2017). Content analysis of undergraduate psychology textbooks \
+                 (Version V1) [Data set]. ICPSR. https://doi.org/10.3886/ICPSR36966.v1",
+            ),
+            (
+                "software carries its version and its descriptor",
+                software(),
+                "Biostat. (2014). Comprehensive meta-analysis (Version 3.3.070) \
+                 [Computer software]. https://example.invalid/work",
+            ),
+            (
+                "a genuinely undated work is n.d., and is citable",
+                population_clock(),
+                "U.S. Census Bureau. (n.d.). U.S. and world population clock. \
+                 U.S. Department of Commerce. Retrieved January 9, 2020, from \
+                 https://www.census.gov/popclock/",
+            ),
+        ]
+    }
+
+    /// Cases that must refuse, and the fields the refusal must name.
+    fn cases_that_refuse() -> Vec<(&'static str, Reference, Vec<Missing>)> {
+        let mut hostile_locator = complete("hostile-locator", WorkKind::Document, "A work");
+        hostile_locator.locator = Attested::Known(Locator::Url("javascript:alert(1)".to_owned()));
+
+        // The undated case again, except that nobody has looked the date up.
+        let mut date_unknown = population_clock();
+        date_unknown.id = "date-unknown".to_owned();
+        date_unknown.published = Attested::Unknown;
+
+        // Software whose descriptor nobody recorded: the kind requires one, and
+        // `Computer software` must not be inferred from `WorkKind::Software`.
+        let mut no_descriptor = software();
+        no_descriptor.id = "no-descriptor".to_owned();
+        no_descriptor.descriptor = Attested::Unknown;
+
+        // …and one where somebody decided none applies, which for a kind that
+        // requires one is not an answer either.
+        let mut descriptor_absent = software();
+        descriptor_absent.id = "descriptor-absent".to_owned();
+        descriptor_absent.descriptor = Attested::AbsentFromWork;
+
+        let mut no_author = complete("no-author", WorkKind::Document, "An anonymous work");
+        no_author.authors = Vec::new();
+
+        let mut mononym = complete("mononym", WorkKind::Document, "A work by one name");
+        mononym.authors = vec![person("Plato", "")];
+
+        let mut nothing_known = Reference::new(
+            "nothing-known",
+            WorkKind::Software,
+            "",
+            Stability::FixedOrArchived,
+        );
+        nothing_known.authors = Vec::new();
+
+        let no_id = complete("", WorkKind::Document, "A work nobody can point at");
+
+        let mut no_source = complete("no-source", WorkKind::Document, "A work from nowhere");
+        no_source.publisher = Attested::AbsentFromWork;
+        no_source.locator = Attested::AbsentFromWork;
+
+        let mut blank_locator = complete("blank-locator", WorkKind::Document, "A work");
+        blank_locator.locator = Attested::Known(Locator::Url("   ".to_owned()));
+
+        vec![
+            (
+                "a date nobody has looked up refuses",
+                date_unknown,
+                vec![Missing::PublicationDate],
+            ),
+            (
+                "a descriptor nobody recorded refuses for a kind that needs one",
+                no_descriptor,
+                vec![Missing::Descriptor],
+            ),
+            (
+                "and so does a descriptor somebody decided does not apply",
+                descriptor_absent,
+                vec![Missing::Descriptor],
+            ),
+            ("no author refuses", no_author, vec![Missing::Author]),
+            (
+                "an author with no given names refuses rather than losing its initials",
+                mononym,
+                vec![Missing::AuthorInitials { position: 1 }],
+            ),
+            (
+                "a record nobody has touched names every field at once",
+                nothing_known,
+                vec![
+                    Missing::Author,
+                    Missing::PublicationDate,
+                    Missing::Title,
+                    Missing::Version,
+                    Missing::Descriptor,
+                    Missing::Publisher,
+                    Missing::Locator,
+                ],
+            ),
+            (
+                "neither a publisher nor a locator leaves no source element",
+                no_source,
+                vec![Missing::Source],
+            ),
+            (
+                "a recorded but blank locator is nobody's answer, not an absence",
+                blank_locator,
+                vec![Missing::Locator],
+            ),
+            (
+                "a locator that is not a web address is refused, never linked",
+                hostile_locator,
+                vec![Missing::Locator],
+            ),
+            (
+                "an entry nobody can point at cannot be cited",
+                no_id,
+                vec![Missing::Identifier],
+            ),
+        ]
+    }
+
+    #[test]
+    fn a_complete_record_formats_to_an_apa_entry() {
+        let cases = cases_by_author_shape()
+            .into_iter()
+            .chain(cases_by_work_type());
+        for (name, reference, expected) in cases {
+            let rendered = entry(&reference)
+                .unwrap_or_else(|refusal| panic!("{name}: expected an entry, got {refusal}"));
+            assert_eq!(rendered.plain_text(), expected, "{name}");
+            assert_eq!(rendered.reference_id, reference.id, "{name}");
+        }
+    }
+
+    #[test]
+    fn an_incomplete_record_refuses_and_names_the_field() {
+        for (name, reference, expected) in cases_that_refuse() {
+            let refusal =
+                entry(&reference).expect_err(&format!("{name}: expected a refusal, got an entry"));
+            assert_eq!(refusal.missing, expected, "{name}");
+            assert_eq!(refusal.reference_id, reference.id, "{name}");
+            assert!(
+                !refusal.missing.is_empty(),
+                "{name}: a refusal names a field"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_date_never_renders_as_n_d() {
+        // The whole point of the three-state model, asserted directly: the two
+        // records differ in nothing but whether somebody looked, and only one
+        // of them produces `n.d.`.
+        let mut undated = complete("undated", WorkKind::Document, "A title");
+        undated.published = Attested::AbsentFromWork;
+        let mut unknown = undated.clone();
+        unknown.id = "unknown".to_owned();
+        unknown.published = Attested::Unknown;
+
+        let rendered = entry(&undated)
+            .expect("an undated work is citable")
+            .plain_text();
+        assert!(rendered.contains("(n.d.)"), "got {rendered}");
+
+        let refusal = entry(&unknown).expect_err("an unresearched date must refuse");
+        assert_eq!(refusal.missing, vec![Missing::PublicationDate]);
+        let reported = format!("{refusal}");
+        assert!(
+            !reported.contains("n.d."),
+            "a refusal must not leak the undated spelling: {reported}"
+        );
+        assert_eq!(reported, "cannot cite unknown: missing publication-date");
+
+        // …and the same record refuses in text, rather than producing a
+        // citation with no entry behind it.
+        assert!(in_text(&unknown, CitationForm::Parenthetical).is_err());
+    }
+
+    #[test]
+    fn twenty_authors_are_all_listed() {
+        let mut twenty = complete("twenty", WorkKind::Document, "A title by twenty");
+        twenty.authors = many_authors(20);
+        let rendered = entry(&twenty).expect("renders").plain_text();
+        for n in 1..=20 {
+            assert!(
+                rendered.contains(&format!("Author{n:02}, A.")),
+                "author {n} must be listed in full: {rendered}"
+            );
+        }
+        assert!(
+            rendered.contains(", & Author20, A."),
+            "the twentieth author takes the ampersand: {rendered}"
+        );
+        assert!(
+            !rendered.contains(". . ."),
+            "twenty authors are not elided: {rendered}"
+        );
+    }
+
+    #[test]
+    fn twenty_one_authors_are_elided_after_nineteen() {
+        let mut twenty_one = complete("twenty-one", WorkKind::Document, "A title by twenty-one");
+        twenty_one.authors = many_authors(21);
+        let rendered = entry(&twenty_one).expect("renders").plain_text();
+
+        for n in 1..=19 {
+            assert!(
+                rendered.contains(&format!("Author{n:02}, A.")),
+                "the first nineteen are listed in full, and {n} is not: {rendered}"
+            );
+        }
+        assert!(
+            rendered.contains("Author19, A., . . . Author21, A."),
+            "nineteen, three spaced dots, then the final author: {rendered}"
+        );
+        assert!(
+            rendered.contains("Author21, A."),
+            "the final author is always named: {rendered}"
+        );
+        for dropped in ["Author20, A.", "Author18, A., Author20"] {
+            assert!(
+                !rendered.contains(dropped),
+                "the twentieth of twenty-one is elided, not printed: {rendered}"
+            );
+        }
+        assert!(
+            !rendered.contains('&'),
+            "there is no ampersand before an elided final author: {rendered}"
+        );
+    }
+
+    #[test]
+    fn in_text_citations_take_et_al_from_the_first_use() {
+        let mut reference = complete("three", WorkKind::Document, "A title by three");
+        reference.authors = vec![
+            person("Martin", "T"),
+            person("Salas", "E"),
+            person("D'Agostino", "R"),
+        ];
+        let parenthetical = in_text(&reference, CitationForm::Parenthetical)
+            .expect("renders")
+            .plain_text();
+        let narrative = in_text(&reference, CitationForm::Narrative)
+            .expect("renders")
+            .plain_text();
+        // APA 7 changed this: APA 6 listed all three on first use. There is no
+        // "first use" parameter to get wrong, because there is no rule that
+        // needs one.
+        assert_eq!(parenthetical, "(Martin et al., 2020)");
+        assert_eq!(narrative, "Martin et al. (2020)");
+        assert!(
+            !parenthetical.contains("Salas"),
+            "only the first author is named: {parenthetical}"
+        );
+    }
+
+    #[test]
+    fn in_text_citations_by_number_of_authors() {
+        let mut reference = complete("r", WorkKind::Document, "A title");
+        let cases: Vec<(Vec<Author>, &str, &str)> = vec![
+            (vec![person("Luna", "R")], "(Luna, 2020)", "Luna (2020)"),
+            (
+                vec![person("Salas", "E"), person("D'Agostino", "R")],
+                "(Salas & D'Agostino, 2020)",
+                "Salas and D'Agostino (2020)",
+            ),
+            (
+                vec![
+                    person("Martin", "T"),
+                    person("Salas", "E"),
+                    person("D'Agostino", "R"),
+                ],
+                "(Martin et al., 2020)",
+                "Martin et al. (2020)",
+            ),
+            (
+                vec![Author::Group("World Health Organization".to_owned())],
+                "(World Health Organization, 2020)",
+                "World Health Organization (2020)",
+            ),
+        ];
+        for (authors, parenthetical, narrative) in cases {
+            reference.authors = authors;
+            assert_eq!(
+                in_text(&reference, CitationForm::Parenthetical)
+                    .expect("renders")
+                    .plain_text(),
+                parenthetical
+            );
+            assert_eq!(
+                in_text(&reference, CitationForm::Narrative)
+                    .expect("renders")
+                    .plain_text(),
+                narrative
+            );
+        }
+    }
+
+    #[test]
+    fn an_undated_work_is_n_d_in_text_too() {
+        let mut reference = complete("undated", WorkKind::Document, "A title");
+        reference.published = Attested::AbsentFromWork;
+        assert_eq!(
+            in_text(&reference, CitationForm::Parenthetical)
+                .expect("renders")
+                .plain_text(),
+            "(Luna, n.d.)"
+        );
+    }
+
+    #[test]
+    fn the_title_is_italic_as_structure_not_as_punctuation() {
+        let reference = complete("one", WorkKind::Document, "Title of the work");
+        let rendered = entry(&reference).expect("renders");
+        let italics: Vec<&str> = rendered
+            .spans
+            .iter()
+            .filter_map(|span| match span {
+                EntrySpan::Italic(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(italics, ["Title of the work"]);
+        assert!(
+            !rendered.plain_text().contains('*'),
+            "styling is a span kind, never markup in the text"
+        );
+        // …and the locator is a link span, so a UI does not have to find URLs
+        // by scanning for `http`.
+        let links: Vec<(&str, &str)> = rendered
+            .spans
+            .iter()
+            .filter_map(|span| match span {
+                EntrySpan::Link { text, href } => Some((text.as_str(), href.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            links,
+            [(
+                "https://example.invalid/work",
+                "https://example.invalid/work"
+            )]
+        );
+    }
+
+    #[test]
+    fn plain_text_is_derived_from_the_spans() {
+        let rendered = Entry {
+            reference_id: "r".to_owned(),
+            spans: vec![
+                EntrySpan::Plain("Luna, R. (2020). ".to_owned()),
+                EntrySpan::Italic("A title".to_owned()),
+                EntrySpan::Plain(". ".to_owned()),
+                EntrySpan::Link {
+                    text: "https://example.invalid/x".to_owned(),
+                    href: "https://example.invalid/x".to_owned(),
+                },
+            ],
+        };
+        assert_eq!(
+            rendered.plain_text(),
+            "Luna, R. (2020). A title. https://example.invalid/x"
+        );
+    }
+
+    #[test]
+    fn a_retrieval_date_appears_only_where_apa_asks_for_one() {
+        let mut fixed = complete("fixed", WorkKind::Document, "A fixed work");
+        fixed.stability = Stability::FixedOrArchived;
+        let rendered = entry(&fixed).expect("renders").plain_text();
+        assert!(
+            !rendered.contains("Retrieved"),
+            "most references carry no retrieval date: {rendered}"
+        );
+
+        let mut changing = fixed.clone();
+        changing.id = "changing".to_owned();
+        changing.stability = Stability::UnarchivedAndChanging {
+            retrieved: AccessDate {
+                year: year(2020),
+                month: Month::January,
+                day: day(9),
+            },
+        };
+        let rendered = entry(&changing).expect("renders").plain_text();
+        assert!(
+            rendered.ends_with("Retrieved January 9, 2020, from https://example.invalid/work"),
+            "the clause sits immediately in front of the locator: {rendered}"
+        );
+
+        // A changing work with nothing to retrieve from is not citable.
+        let mut nowhere = changing;
+        nowhere.id = "nowhere".to_owned();
+        nowhere.locator = Attested::AbsentFromWork;
+        assert_eq!(
+            entry(&nowhere).expect_err("refuses").missing,
+            vec![Missing::Locator]
+        );
+    }
+
+    #[test]
+    fn a_web_page_without_a_url_refuses() {
+        let mut page = complete("page", WorkKind::WebPage, "A page");
+        page.locator = Attested::AbsentFromWork;
+        assert_eq!(
+            entry(&page).expect_err("refuses").missing,
+            vec![Missing::Locator]
+        );
+    }
+
+    #[test]
+    fn a_title_ending_in_its_own_punctuation_does_not_gain_a_period() {
+        let mut question = complete("q", WorkKind::Document, "Who owns the future?");
+        question.publisher = Attested::AbsentFromWork;
+        question.locator = Attested::Known(Locator::Url("https://example.invalid/q".to_owned()));
+        assert_eq!(
+            entry(&question).expect("renders").plain_text(),
+            "Luna, R. (2020). Who owns the future? https://example.invalid/q"
+        );
+    }
+
+    #[test]
+    fn initials_are_derived_without_rewriting_what_was_recorded() {
+        let mut reference = complete("r", WorkKind::Document, "A title");
+        reference.authors = vec![
+            person("Ibáñez", "Luis Miguel"),
+            Author::Person {
+                surname: "Sartre".to_owned(),
+                given: vec![GivenName::new("Jean-Paul").expect("a valid given name")],
+            },
+            Author::Person {
+                surname: "Already".to_owned(),
+                given: vec![GivenName::new("M.").expect("a valid given name")],
+            },
+        ];
+        let rendered = entry(&reference).expect("renders").plain_text();
+        assert!(
+            rendered.starts_with("Ibáñez, L. M., Sartre, J.-P., & Already, M. "),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn the_apa_rules_that_depend_on_the_kind_of_work() {
+        let cases = [
+            (WorkKind::Document, false, false, true),
+            (WorkKind::Software, true, false, true),
+            (WorkKind::DataSet, true, false, true),
+            (WorkKind::FactSheet, true, false, true),
+            (WorkKind::WebPage, false, true, true),
+        ];
+        for (kind, descriptor, locator, italic) in cases {
+            assert_eq!(requires_descriptor(kind), descriptor, "{kind:?}");
+            assert_eq!(requires_locator(kind), locator, "{kind:?}");
+            assert_eq!(title_is_italic(kind), italic, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn only_a_web_address_becomes_a_link() {
+        // An `EntrySpan::Link` is an `href` some UI will render. These are the
+        // schemes that must never reach one, and a record carrying one refuses
+        // rather than losing its source element quietly.
+        for hostile in [
+            "javascript:alert(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "file:///etc/passwd",
+            "vbscript:msgbox(1)",
+            "  javascript:alert(1)  ",
+        ] {
+            let mut reference = complete("r", WorkKind::Document, "A title");
+            reference.locator = Attested::Known(Locator::Url(hostile.to_owned()));
+            assert_eq!(
+                entry(&reference).expect_err("refuses").missing,
+                vec![Missing::Locator],
+                "{hostile:?} must never become a link target"
+            );
+        }
+        // …and the schemes a reference actually uses still work, in any case:
+        // a URI scheme is case-insensitive, so refusing `HTTPS://` would be a
+        // true rule applied to a false case.
+        for good in [
+            "https://example.invalid/a",
+            "http://example.invalid/b",
+            "HTTPS://example.invalid/c",
+            "HtTp://example.invalid/d",
+        ] {
+            let mut reference = complete("r", WorkKind::Document, "A title");
+            reference.locator = Attested::Known(Locator::Url(good.to_owned()));
+            let rendered = entry(&reference).expect("renders");
+            assert!(rendered.plain_text().ends_with(good), "{good}");
+            assert!(
+                rendered
+                    .spans
+                    .iter()
+                    .any(|span| matches!(span, EntrySpan::Link { href, .. } if href == good))
+            );
+        }
+    }
+
+    #[test]
+    fn a_descriptor_is_capitalised_but_a_title_is_never_recased() {
+        let mut lowercase = complete("lowercase", WorkKind::Software, "a Deliberately odd TITLE");
+        lowercase.version = Attested::AbsentFromWork;
+        lowercase.descriptor = Attested::Known("computer software".to_owned());
+        let rendered = entry(&lowercase).expect("renders").plain_text();
+        assert!(
+            rendered.contains("[Computer software]"),
+            "APA capitalises the first letter of the description: {rendered}"
+        );
+        assert!(
+            rendered.contains("a Deliberately odd TITLE"),
+            "the title is printed exactly as recorded: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_publisher_that_repeats_a_group_author_is_dropped_rather_than_denied() {
+        let mut page = complete("who", WorkKind::WebPage, "The top 10 causes of death");
+        page.authors = vec![Author::Group("World Health Organization".to_owned())];
+        page.publisher = Attested::Known("World Health Organization".to_owned());
+        let rendered = entry(&page).expect("renders").plain_text();
+        assert_eq!(
+            rendered.matches("World Health Organization").count(),
+            1,
+            "APA omits the publisher when it is the author: {rendered}"
+        );
+
+        // A person is not their own publisher, and a publisher that merely
+        // shares a word is a different name.
+        let mut person_author = complete("person", WorkKind::Document, "A title");
+        person_author.publisher = Attested::Known("Luna".to_owned());
+        assert!(
+            entry(&person_author)
+                .expect("renders")
+                .plain_text()
+                .contains(". Luna."),
+            "only a group author triggers the rule"
+        );
+
+        // The rule is unconditional: with no locator either, the entry simply
+        // ends after the title. The publisher is not lost — a reader takes it
+        // from the author position, which is the whole reason APA drops the
+        // repetition rather than tolerating it.
+        let mut no_locator = page.clone();
+        no_locator.kind = WorkKind::Document;
+        no_locator.locator = Attested::AbsentFromWork;
+        let rendered = entry(&no_locator).expect("renders").plain_text();
+        assert_eq!(
+            rendered,
+            "World Health Organization. (2020). The top 10 causes of death."
+        );
+        assert_eq!(rendered.matches("World Health Organization").count(), 1);
+    }
+
+    #[test]
+    fn a_list_is_ordered_and_byte_identical_whatever_order_it_arrives_in() {
+        let mut zhang = complete("zhang", WorkKind::Document, "Later work");
+        zhang.authors = vec![person("Zhang", "I")];
+        let mut abbott = complete("abbott", WorkKind::Document, "Earlier work");
+        abbott.authors = vec![person("Abbott", "K")];
+        let mut abbott_undated = abbott.clone();
+        abbott_undated.id = "abbott-undated".to_owned();
+        abbott_undated.published = Attested::AbsentFromWork;
+        let mut martin = complete("martin", WorkKind::Document, "Unresearched work");
+        martin.authors = vec![person("Martin", "T")];
+        martin.published = Attested::Unknown;
+
+        let forwards = vec![
+            zhang.clone(),
+            abbott.clone(),
+            martin.clone(),
+            abbott_undated.clone(),
+        ];
+        let backwards = vec![abbott_undated, martin, abbott, zhang];
+
+        let rendered = |set: &[Reference]| {
+            let list = reference_list(set);
+            (
+                list.entries
+                    .iter()
+                    .map(Entry::plain_text)
+                    .collect::<Vec<_>>(),
+                list.refused
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let (entries, refusals) = rendered(&forwards);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|text| text.split('.').next().unwrap_or_default())
+                .collect::<Vec<_>>(),
+            ["Abbott, K", "Abbott, K", "Zhang, I"],
+            "alphabetical by surname"
+        );
+        assert!(
+            entries[0].contains("(n.d.)"),
+            "an undated work sorts before the same author's dated ones: {}",
+            entries[0]
+        );
+        assert_eq!(refusals, ["cannot cite martin: missing publication-date"]);
+
+        assert_eq!(
+            rendered(&backwards),
+            (entries, refusals),
+            "the same set in a different order must render to the same bytes"
+        );
+    }
+
+    #[test]
+    fn two_people_with_one_surname_are_ordered_by_their_given_names() {
+        // A surname alone cannot separate two different people, and APA orders
+        // them by initials *before* it looks at the date — so the later work by
+        // A. Smith still precedes the earlier one by T. Smith.
+        let mut anne = complete("anne", WorkKind::Document, "A title");
+        anne.authors = vec![person("Smith", "Anne")];
+        anne.published = Attested::Known(PublicationDate::Year(year(2020)));
+        let mut tom = complete("tom", WorkKind::Document, "A title");
+        tom.authors = vec![person("Smith", "Tom")];
+        tom.published = Attested::Known(PublicationDate::Year(year(1990)));
+
+        let list = reference_list(&[tom, anne]);
+        assert_eq!(
+            list.entries
+                .iter()
+                .map(|e| e.reference_id.as_str())
+                .collect::<Vec<_>>(),
+            ["anne", "tom"]
+        );
+    }
+
+    #[test]
+    fn a_list_says_which_citations_a_reader_could_not_tell_apart() {
+        // Two works, one author, one year: APA disambiguates with `2020a` /
+        // `2020b`, which needs the whole list and the citations that accompany
+        // it. This module does not do that — so it says so, rather than
+        // emitting two identical citations and leaving a reader to discover
+        // that neither resolves.
+        let mut first = complete("first", WorkKind::Document, "A first title");
+        first.authors = vec![person("Luna", "R")];
+        let mut second = complete("second", WorkKind::Document, "A second title");
+        second.authors = vec![person("Luna", "R")];
+        let mut other = complete("other", WorkKind::Document, "Another title");
+        other.authors = vec![person("Abbott", "K")];
+
+        let list = reference_list(&[first, second, other]);
+        assert_eq!(list.entries.len(), 3, "every entry is still rendered");
+        assert_eq!(
+            list.ambiguous,
+            vec![Ambiguity {
+                citation: "(Luna, 2020)".to_owned(),
+                reference_ids: vec!["first".to_owned(), "second".to_owned()],
+            }],
+            "the unambiguous entry is not reported"
+        );
+        assert!(list.duplicate_ids.is_empty());
+    }
+
+    #[test]
+    fn a_list_says_when_two_records_share_an_identifier() {
+        // `reference_id` is what pairs a citation with its entry, and nothing
+        // in `Reference` enforces that ids are unique. Where they are not, the
+        // entries are still rendered — dropping one would turn a naming problem
+        // into a missing citation — and the collision is reported.
+        let mut one = complete("same", WorkKind::Document, "A first title");
+        one.authors = vec![person("Luna", "R")];
+        let mut two = complete("same", WorkKind::Document, "A second title");
+        two.authors = vec![person("Abbott", "K")];
+
+        let list = reference_list(&[one, two]);
+        assert_eq!(list.entries.len(), 2);
+        assert_eq!(list.duplicate_ids, ["same"]);
+        assert!(
+            list.ambiguous.is_empty(),
+            "different authors, so the citations themselves are distinct"
+        );
+    }
+
+    #[test]
+    fn no_part_of_a_recorded_name_is_dropped_from_a_rendered_author() {
+        // The module's own thesis, at the place it was leaking. `initials` used
+        // a `filter_map` over both the given names and their hyphenated parts,
+        // so a fragment it could not reduce to an initial was silently dropped
+        // and the author rendered anyway: `given = ["Mary", ""]` produced
+        // `Smith, M.`, and `"Jean--Paul"` produced `J.-P.`. Each is a plausible
+        // author with part of the recorded name missing — a citation that reads
+        // as authoritative and is partly invented.
+        //
+        // The fix is not a guard at this call site; it is that the value no
+        // longer has a spelling. These are the exact fragments Copilot named,
+        // and none of them can be put into a `Reference` at all:
+        for undroppable in [
+            "",
+            "   ",
+            "Jean--Paul",
+            "-Paul",
+            "Jean-",
+            // The separator the first version of the guard did not name. One
+            // value holding two names rendered `Smith, M.` and dropped `Ann`,
+            // by the same mechanism and through a different character — which
+            // is why the guard is an allowlist now rather than a longer list of
+            // separators.
+            "Mary Ann",
+            "Mary  Ann",
+            "José María",
+        ] {
+            assert!(
+                GivenName::new(undroppable).is_err(),
+                "{undroppable:?} must not be constructible, so no renderer can drop it"
+            );
+        }
+        // What remains constructible renders in full — one name in, one initial
+        // out, every time.
+        for (given, rendered) in [
+            (vec!["Mary"], "Smith, M."),
+            // Two names, two entries — the spelling the refusal above points at.
+            (vec!["Mary", "Ann"], "Smith, M. A."),
+            (vec!["Jean-Paul"], "Smith, J.-P."),
+            (vec!["M.", "A."], "Smith, M. A."),
+        ] {
+            let mut reference = complete("r", WorkKind::Document, "A title");
+            reference.authors = vec![Author::Person {
+                surname: "Smith".to_owned(),
+                given: given.iter().map(|n| given_name(n)).collect(),
+            }];
+            let text = entry(&reference).expect("renders").plain_text();
+            assert!(text.starts_with(rendered), "{given:?} rendered {text:?}");
+        }
+        // And the one case with genuinely nothing to render still refuses, by
+        // name, rather than printing a bare surname.
+        let mut mononym = complete("r", WorkKind::Document, "A title");
+        mononym.authors = vec![Author::Person {
+            surname: "Plato".to_owned(),
+            given: Vec::new(),
+        }];
+        assert_eq!(
+            entry(&mononym).expect_err("refuses").missing,
+            vec![Missing::AuthorInitials { position: 1 }]
+        );
+    }
+
+    #[test]
+    fn a_url_a_reader_cannot_see_whole_is_not_a_link() {
+        // The same *defect* as a DOI suffix carrying a newline, one type along —
+        // though no longer the same predicate, since a URL is emitted verbatim
+        // into an `href` and a DOI is encoded on the way out. A URL becomes an
+        // `EntrySpan::Link` whose visible text *is* its `href`, so these produce
+        // a citation printed across two lines and resolving to neither — or, for
+        // the bidi override, one that reads as one host and resolves to another.
+        for hidden in [
+            "https://example.invalid/a\nb",
+            "https://example.invalid/a b",
+            "https://example.invalid/a\tb",
+            "https://example.invalid/a\u{202e}b",
+            "https://example.invalid/a\u{200b}b",
+            // The three the first denylist missed, and would have kept missing.
+            "https://example.invalid/a\u{061c}b",
+            "https://example.invalid/a\u{206a}b",
+            "https://example.invalid/a\u{00ad}b",
+            "https://example.invalid/a\u{e0041}b",
+        ] {
+            let mut reference = complete("r", WorkKind::Document, "A title");
+            reference.locator = Attested::Known(Locator::Url(hidden.to_owned()));
+            assert_eq!(
+                entry(&reference).expect_err("refuses").missing,
+                vec![Missing::Locator],
+                "{hidden:?} must never become a link target"
+            );
+        }
+    }
+
+    #[test]
+    fn a_locator_is_validated_exactly_as_recorded() {
+        // The allowlist was bypassed at the call site by normalising before it
+        // ran: `printable_locator` trimmed, so a recorded locator with a leading
+        // space or a trailing newline passed validation and what reached the
+        // `href` was a value the record does not hold. Whitespace is not
+        // printable, so each of these refuses — visibly, and fixable in the
+        // record — rather than being quietly cleaned up on the way to the page.
+        for padded in [
+            " https://example.invalid/a ",
+            "https://example.invalid/a\n",
+            "\thttps://example.invalid/a",
+            "https://example.invalid/a\u{a0}",
+        ] {
+            let mut reference = complete("r", WorkKind::Document, "A title");
+            reference.locator = Attested::Known(Locator::Url(padded.to_owned()));
+            assert_eq!(
+                entry(&reference).expect_err("refuses").missing,
+                vec![Missing::Locator],
+                "{padded:?} must not be trimmed into validity"
+            );
+        }
+        // And what is accepted is emitted byte for byte, which is what the
+        // neighbouring comment promises.
+        let recorded = "https://example.invalid/a";
+        let mut reference = complete("r", WorkKind::Document, "A title");
+        reference.locator = Attested::Known(Locator::Url(recorded.to_owned()));
+        let spans = entry(&reference).expect("renders").spans;
+        let href = spans
+            .iter()
+            .find_map(|span| match span {
+                EntrySpan::Link { href, .. } => Some(href.clone()),
+                _ => None,
+            })
+            .expect("a link span");
+        assert_eq!(href, recorded, "printed as recorded");
+    }
+
+    #[test]
+    fn a_locator_with_no_host_cannot_locate_a_work() {
+        // A scheme and nothing after it satisfied a prefix test while naming no
+        // work at all. An `EntrySpan::Link` that cannot resolve is a citation
+        // that looks like a source and is not one, which is the fabrication this
+        // module exists to refuse rather than a cosmetic defect.
+        for hostless in [
+            "https://",
+            "http://",
+            "https://?",
+            "https://#frag",
+            "https:///path",
+            "HTTPS://",
+        ] {
+            let mut reference = complete("r", WorkKind::Document, "A title");
+            reference.locator = Attested::Known(Locator::Url(hostless.to_owned()));
+            assert_eq!(
+                entry(&reference).expect_err("refuses").missing,
+                vec![Missing::Locator],
+                "{hostless:?} has no authority and cannot locate anything"
+            );
+        }
+        // A host is all that is asked for — this does not start adjudicating
+        // which hosts are real, which it has no way to know without a network.
+        for locatable in [
+            "https://localhost/x",
+            "http://example.invalid",
+            "https://example.invalid/a?b#c",
+        ] {
+            let mut reference = complete("r", WorkKind::Document, "A title");
+            reference.locator = Attested::Known(Locator::Url(locatable.to_owned()));
+            assert!(entry(&reference).is_ok(), "{locatable:?}");
+        }
+    }
+
+    #[test]
+    fn a_field_that_brings_its_own_label_is_not_citable_as_written() {
+        // The record documents how these two fields are stored and the renderer
+        // supplies the rest — `(Version {v})` and `[{d}]`. Nothing enforced the
+        // storage contract, so the renderer's assumption went unchecked and a
+        // record could render `(Version Version 3)` or `[[Data set]]` and report
+        // success. A documented contract that no guard enforces is an assumption.
+        for doubled in ["Version 3", "version 3.3.070", "VERSION 1", "Version"] {
+            let mut reference = complete("r", WorkKind::Document, "A title");
+            reference.version = Attested::Known(doubled.to_owned());
+            assert_eq!(
+                entry(&reference).expect_err("refuses").missing,
+                vec![Missing::Version],
+                "{doubled:?} would render its label twice"
+            );
+        }
+        // `V1` is a legitimate bare version — it is APA's own data-set example,
+        // `(Version V1)` — so only the whole word is refused, never a leading
+        // `v`. Refusing the style's own worked case would be the wrong fix.
+        for fine in ["V1", "3.3.070", "b10200", "2.0-rc1", "Versionless"] {
+            let mut reference = complete("r", WorkKind::Document, "A title");
+            reference.version = Attested::Known(fine.to_owned());
+            let rendered = entry(&reference).expect("renders").plain_text();
+            assert!(
+                rendered.contains(&format!("(Version {fine})")),
+                "{rendered}"
+            );
+        }
+
+        for bracketed in ["[Data set]", "Data set]", "[Computer software"] {
+            let mut reference = complete("r", WorkKind::DataSet, "A title");
+            reference.descriptor = Attested::Known(bracketed.to_owned());
+            assert_eq!(
+                entry(&reference).expect_err("refuses").missing,
+                vec![Missing::Descriptor],
+                "{bracketed:?} would render its brackets twice"
+            );
+        }
+        let mut bare = complete("r", WorkKind::DataSet, "A title");
+        bare.descriptor = Attested::Known("Data set".to_owned());
+        assert!(
+            entry(&bare)
+                .expect("renders")
+                .plain_text()
+                .contains("[Data set]")
+        );
+    }
+
+    #[test]
+    fn a_date_that_did_not_happen_refuses_by_its_own_name() {
+        // `February 31` rendered as an APA date, and a retrieval date of the
+        // same shape said somebody read a work on a day that did not happen.
+        let mut published = complete("p", WorkKind::Document, "A title");
+        published.published = Attested::Known(PublicationDate::Full {
+            year: year(2021),
+            month: Month::February,
+            day: day(31),
+        });
+        assert_eq!(
+            entry(&published).expect_err("refuses").missing,
+            vec![Missing::PublicationDate]
+        );
+
+        // Its own variant, because a refusal naming the wrong field sends an
+        // editor to the wrong line.
+        let mut retrieved = complete("r", WorkKind::WebPage, "A title");
+        retrieved.stability = Stability::UnarchivedAndChanging {
+            retrieved: AccessDate {
+                year: year(2021),
+                month: Month::February,
+                day: day(31),
+            },
+        };
+        let refusal = entry(&retrieved).expect_err("refuses");
+        assert_eq!(refusal.missing, vec![Missing::RetrievalDate]);
+        assert!(refusal.to_string().contains("retrieval-date"), "{refusal}");
+
+        // A real date still renders, including a leap day in a leap year.
+        let mut leap = complete("l", WorkKind::Document, "A title");
+        leap.published = Attested::Known(PublicationDate::Full {
+            year: year(2020),
+            month: Month::February,
+            day: day(29),
+        });
+        assert!(
+            entry(&leap)
+                .expect("renders")
+                .plain_text()
+                .contains("(2020, February 29)")
+        );
+    }
+
+    #[test]
+    fn a_locator_with_no_real_host_cannot_locate_a_work() {
+        // Non-empty is not the same as valid: each of these has something
+        // between the scheme and the first delimiter, and none of them names a
+        // host. A port with no host, userinfo with no host, an empty address
+        // literal.
+        for hostless in [
+            "https://:443",
+            "https://@/path",
+            "https://[]",
+            "https://[]:80/x",
+            "https://user@:8080/x",
+            "https://[unclosed/x",
+        ] {
+            let mut reference = complete("r", WorkKind::Document, "A title");
+            reference.locator = Attested::Known(Locator::Url(hostless.to_owned()));
+            assert_eq!(
+                entry(&reference).expect_err("refuses").missing,
+                vec![Missing::Locator],
+                "{hostless:?} names no host"
+            );
+        }
+        // The shapes RFC 3986 actually builds still resolve.
+        for locatable in [
+            "https://[::1]/x",
+            "https://[::1]:8080/x",
+            "https://user@host/x",
+            "https://user:pw@host:8080/x",
+            "https://host:8080/x",
+            "https://localhost",
+        ] {
+            let mut reference = complete("r", WorkKind::Document, "A title");
+            reference.locator = Attested::Known(Locator::Url(locatable.to_owned()));
+            assert!(entry(&reference).is_ok(), "{locatable:?}");
+        }
+    }
+
+    #[test]
+    fn a_whole_rendered_list_is_byte_identical_whatever_order_it_arrives_in() {
+        // `a_list_is_ordered_and_byte_identical_whatever_order_it_arrives_in`
+        // reverses its input but compares only the entries and the refusals, and
+        // `rendering_the_same_list_twice_gives_the_same_bytes` serialises one
+        // `set` twice — which proves purity, not order-independence. So the two
+        // reports added since, `duplicate_ids` and `ambiguous`, were covered by
+        // neither: either could have become input-order-dependent with every
+        // test still green.
+        //
+        // This compares the **serialised whole** — entries, refusals, duplicate
+        // ids, ambiguities, and the order of each — across a reversed input.
+        let mut first = complete("first", WorkKind::Document, "A first title");
+        first.authors = vec![person("Luna", "R")];
+        let mut second = complete("second", WorkKind::Document, "A second title");
+        second.authors = vec![person("Luna", "R")];
+        let mut shared_id = complete("shared", WorkKind::Document, "A third title");
+        shared_id.authors = vec![person("Abbott", "K")];
+        let mut shared_id_too = complete("shared", WorkKind::Document, "A fourth title");
+        shared_id_too.authors = vec![person("Zhang", "I")];
+        let mut refuses = complete("refuses", WorkKind::Document, "A fifth title");
+        refuses.authors = vec![person("Martin", "P")];
+        refuses.published = Attested::Unknown;
+
+        let forwards = vec![
+            first.clone(),
+            second.clone(),
+            shared_id.clone(),
+            shared_id_too.clone(),
+            refuses.clone(),
+        ];
+        let backwards: Vec<Reference> = forwards.iter().rev().cloned().collect();
+
+        let list = reference_list(&forwards);
+        // Not vacuous: every report this is meant to pin down has something in
+        // it. A test that compared two empty lists would pass for ever.
+        assert_eq!(list.entries.len(), 4);
+        assert_eq!(list.refused.len(), 1);
+        assert_eq!(list.duplicate_ids, ["shared"]);
+        assert_eq!(
+            list.ambiguous,
+            vec![Ambiguity {
+                citation: "(Luna, 2020)".to_owned(),
+                reference_ids: vec!["first".to_owned(), "second".to_owned()],
+            }]
+        );
+
+        let serialised =
+            |set: &[Reference]| serde_json::to_string(&reference_list(set)).expect("serialize");
+        assert_eq!(
+            serialised(&forwards),
+            serialised(&backwards),
+            "the whole report, not just the entries, must be a function of the input set"
+        );
+    }
+
+    #[test]
+    fn rendering_the_same_list_twice_gives_the_same_bytes() {
+        let mut set = Vec::new();
+        for (index, surname) in ["Salas", "abbott", "Zhang", "Abbott"].iter().enumerate() {
+            let mut reference =
+                complete(&format!("r{index}"), WorkKind::Document, "A shared title");
+            reference.authors = vec![person(surname, "A")];
+            set.push(reference);
+        }
+        let once = serde_json::to_string(&reference_list(&set)).expect("serialize");
+        let twice = serde_json::to_string(&reference_list(&set)).expect("serialize");
+        assert_eq!(
+            once, twice,
+            "rendering must be a pure function of the input"
+        );
+    }
+}
