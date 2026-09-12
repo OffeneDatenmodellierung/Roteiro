@@ -1165,8 +1165,10 @@ mod tests {
         // could share one key, or one finding could change key across runs,
         // with no test failing anywhere else.
         //
-        // Deterministic seed, printed by every assertion below, so a failure is
-        // reproducible from the message alone.
+        // Deterministic seed, printed by every seed-dependent assertion below,
+        // so a failure is reproducible from the message alone. The fixed-corpus
+        // checks omit it deliberately: they do not depend on the seed, and a
+        // seed in their message would imply they did.
         const SEED: u64 = 0x5150_7787_0BAD_5EED;
 
         let mut rng = Xorshift(SEED);
@@ -1300,7 +1302,14 @@ mod tests {
     /// intended: the assertions exist so that a change to it is visible rather
     /// than silent. What they do establish meanwhile is that the permissiveness
     /// *normalises* — whatever form came in, what goes back out is the canonical
-    /// rendering, so nothing non-canonical can be stored.
+    /// rendering, so this code never *writes* a non-canonical key.
+    ///
+    /// That normalisation is in-memory only, and the distinction matters to the
+    /// decision: `finding_from_row` parses a row without rewriting it, so a row
+    /// some other writer put in the table stays non-canonical on disk until a
+    /// re-ingest replaces the whole layer. Reading it is what would start
+    /// failing under a stricter parser — which is case 2 above, not an exception
+    /// to it.
     #[test]
     fn parse_is_permissive_about_escapes_pending_a_wire_format_decision() {
         let canonical = FindingKey::new("semgrep", &["ab"]).expect("key");
