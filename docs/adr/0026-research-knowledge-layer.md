@@ -397,10 +397,13 @@ the asymmetry is what settles it: opting *in* is a decision a user can make abou
 their own corpus, while opting *out* afterwards is not, because git history keeps
 the bytes.
 
-The reason the choice is *free* is the exclusion. A document reached through the
-standard scan is graphed **twice** — once as the `knowledge/` summary, which
-already links to its source, and once as the `raw/` file itself, whose decoded
-text lands in `meta.content` and answers the same `search` query. One document,
+The reason the choice is *free* is the exclusion. Once `knowledge/` exists, a
+document reached through the standard scan **would be** graphed **twice** — once
+as the `knowledge/` summary, which already links to its source, and once as the
+`raw/` file itself, whose decoded text lands in `meta.content` and answers the
+same `search` query. (Not today: with no `knowledge/` layer there is no summary
+to duplicate, so a `raw/` document is graphed once, as the file. The duplication
+is what shipping step 2 *without* step 1's exclusion would create.) One document,
 two nodes, two hits. Excluding `raw/` from the scan removes the duplicate, and it
 also removes the constraint that made this question look forced.
 
@@ -700,10 +703,10 @@ PDFs"**: one concealment channel carries over and one does not, and a PDF
 concealing by the second class reaches at most `quarantine`.
 
 This ADR therefore adopts #813's acceptable outcomes as a condition on the ingest
-step, in **three parts**, because the gaps are not one gap: two of them are in
-what the walk screens today (foreign prose, and PDF concealment), and the third
-is created by this ADR's own layer split (a model's restatement re-entering as
-prose):
+step, in **three parts**, because the gaps are not one gap. Two are in what the
+existing extraction path does with foreign content — prose it admits without
+screening, and PDF concealment it screens only partly — and the third is created
+by this ADR's own layer split, a model's restatement re-entering as prose:
 
 1. **Foreign prose must be screened.** ADR-0025's carve-out exempts prose from
    the screen, and that exemption was measured on *first-party* files. A
