@@ -11,7 +11,7 @@ architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "0.10"
+version: "0.11"
 last-modified: 2026-09-13
 confluence-url:
 ---
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | For Review |
 | **Architectural Significance** | HIGH |
 | **Domain** | Developer Tooling |
-| **Document version** | 0.10 |
+| **Document version** | 0.11 |
 | **Related** | [[docs/adr/0021-open-knowledge-format-bundle.md]] · [[docs/adr/0022-dynamic-okf-viewer.md]] · [[docs/adr/0025-document-extraction-consent.md]] · [[docs/adr/0019-remote-model-tier.md]] · [[docs/adr/0013-agent-memory-artifact-store.md]] |
 
 ## Reference
@@ -389,8 +389,8 @@ both corrections make the case for the exclusion stronger rather than weaker**
 `sync_index` (the staged blobs, *"exactly what a commit would record"*) and
 `sync_tree` (an arbitrary revision). What is actually true, and is what the
 argument needed, is that **every input path comes from git's own enumeration of
-one working tree**: the `HEAD` tree, the index, or a **workdir-rooted,
-gitignore-aware dirwalk** ([[crates/rto-graph/src/git.rs#Repo]] `untracked_files`, which also
+one tree**: a commit's tree (`HEAD`, or any revision `sync_tree` is given), the
+index, or a **workdir-rooted, gitignore-aware dirwalk** ([[crates/rto-graph/src/git.rs#Repo]] `untracked_files`, which also
 skips nested repositories, symlinks and non-regular files). There *is* a
 filesystem walk — saying otherwise, as v0.4 did, was the same overreach in a new
 spelling — but it is rooted at the repository workdir and classified against
@@ -650,6 +650,23 @@ step, in **two parts**, because the two gaps above are not the same gap:
    was not checked** — specifically that the presentation-shaped and PDF-native
    concealment classes are undetected, while the invisible-codepoint class is
    covered.
+3. **The distilled output must be screened too, and this is the one the layer
+   split creates.** Screening `raw/` at ingest does not cover `knowledge/`.
+   `ModelTask::Distil` writes a `knowledge/*.md` page, which is **prose**, and
+   prose is exactly what `extract.rs` exempts from the screen — so a page
+   summarising a foreign document re-enters the graph through the unscreened
+   branch no matter how carefully its source was checked. Screening a source and
+   then admitting a model's unscreened restatement of it is a gate with a bypass
+   beside it. Whether the right answer is to screen `knowledge/` on the authored
+   path, or to screen the distiller's output before it is written, is an
+   implementation choice; that one of them must happen is not.
+
+**Why (3) is not covered by (1).** Ingest screening is about *bytes somebody
+else wrote*. This is about *bytes a model wrote from them*, which arrive in the
+one format ADR-0025 measured a carve-out for — and that measurement was over
+this repository's own prose, not over machine restatements of third-party
+documents. Two different populations, one exemption, and only one of them was
+ever in evidence.
 
 A screen that runs, passes, and implies a check it did not perform is not
 acceptable, and this repository has paid for that shape twice already.
@@ -785,3 +802,4 @@ ingest half of that belongs in a service of its own.
 | 0.8 | 2026-09-13 | **Records a live defect in `main` that this ADR was arguing from the absence of.** The symlink section said the standard scan refuses symlinks, citing three walks. It does — but the **derived extractor does not**, and that is the family the section used as its example. `sync_worktree` reads each tracked path with plain `std::fs::read` ([[crates/rto-graph/src/sync.rs#sync_worktree]]), which follows a link. Measured: replace a tracked `docs/note.md` with a symlink to a file outside the repository, run a worktree sync, and the out-of-repo bytes are stored as `file:docs/note.md` — precisely the false-key defect the other three walks exist to prevent. **Pre-existing in `main`, not introduced by this decision, and reported rather than fixed because this PR changes no code.** Two consequences for the ADR. The rule is restated as *a walk that makes a tree-relative claim **should** refuse symlinks* — should, not does, with the gap named — because an ADR resting on a guarantee the scan does not give is the same defect class as the present-tense sweep at v0.4. And the ingest path resolving links is **less anomalous than three-refusals-versus-one-resolution implied**: what distinguishes it is that it mints no tree-relative key, not that it is alone in following a link. Also sharpens *"every input path is one git can name"* to *"comes from git's own enumeration of one working tree"*, since the former could be read as "tracked" and untracked-but-not-ignored files are enumerated too. |
 | 0.9 | 2026-09-13 | **Final review pass; one real cost this ADR had understated, and two residues.** **(a) Splitting `generated` from `verified` needs a Rust change, which v0.2–v0.8 said it did not.** [[crates/rto-render/src/okf.rs#Origin]] holds a **single** `Actor`, and `Frontmatter::render` writes that one actor into both keys — which is the mechanical reason #799 measures them as identical rather than an oversight in the render path. Carrying two actors means changing `Origin` or `Frontmatter`, a breaking change to `rto-render`'s Rust surface. The claim is narrowed to what is true — **no OKF format change and no `Provenance` change** — and the Rust cost is stated and priced against existing precedent: under `AGENTS.md`'s `rto-*` carve-out, recorded at ADR-0001 v1.5, it ships as a **minor** with no `!`. Worth noting the shape of the error: *"no Rust break"* was inferred from *"no wire break"*, and they are separate questions this repository has already had to separate once. **(b)** One more present-tense residue: *"`raw/` produces no `file:` nodes by design"* described the target state as current. It produces them today — `IngestConfig` has no `raw` exclusion — and the text now says so. **(c)** The v0.3 row's superseded claim that all three symlink refusals guard a `file:` key now carries the v0.5 and v0.8 corrections inline, so a reader of the changelog alone is not left with the wrong family. |
 | 0.10 | 2026-09-13 | **Reconciles two sections of this ADR that contradicted each other, and closes a gap in its own requirement.** **(a)** v0.7–v0.9 argued that nothing can name a path outside the tree; v0.8 then recorded that the derived extractor follows tracked symlinks. Both cannot stand, and the resolution is an asymmetry worth having: on the **committed** path a tracked symlink resolves to the **git blob**, whose content is the target *path string*, so out-of-tree bytes are unreachable; on the **worktree** overlay `std::fs::read` follows the link and they are reachable. Measured both ways. **This is why the bundle argument survives**: `render okf` and `export` deliberately read the committed source — *"a shareable snapshot, whose whole value is being reproducible from a commit"* — so out-of-tree bytes cannot enter a **published bundle**, which is the property #812's blocker rests on. What they can enter is a local worktree preview and its `search` results. Smaller and different from what v0.4–v0.8 claimed, and now stated rather than glossed. **(b) The screening requirement only covered PDFs**, while the text two paragraphs above establishes that third-party markdown in `raw/` has *never* been screened and that ADR-0025's first-party prose carve-out does not transfer to it. Split into two parts: **foreign prose must be screened** (a widening of today's rule, not a re-wiring), and **PDF concealment must declare its coverage** — naming the presentation-shaped and PDF-native classes as undetected while the invisible-codepoint class is covered. **(c)** The v0.2 row still called `log.md` *"already implemented"*; corrected inline to the machinery, consistent with the Q3 heading fixed at v0.5. |
+| 0.11 | 2026-09-13 | **Closes a laundering path the layer split creates, which every previous screening pass missed.** Screening `raw/` at ingest does not cover `knowledge/`. `ModelTask::Distil` writes a `knowledge/*.md` page; that page is **prose**, and prose is precisely what [[crates/rto-graph/src/extract.rs]] exempts from the screen — so a summary of a foreign document re-enters the graph through the unscreened branch however carefully its source was checked. Screening a source and then admitting a model's unscreened restatement of it is a gate with a bypass beside it. Added as a **third part** of the ingest screening requirement, with the implementation choice left open (screen `knowledge/` on the authored path, or screen the distiller's output before it is written) and the obligation not. This is distinct from part (1): ingest screening covers *bytes somebody else wrote*, and this covers *bytes a model wrote from them* — arriving in the one format ADR-0025 measured a carve-out for, where that measurement was over this repository's own prose rather than over machine restatements of third-party documents. Two populations, one exemption, and only one of them ever in evidence. **Also:** *"one working tree"* omitted `sync_tree`'s arbitrary revision, which is listed as an entry point two sentences earlier; now *"one tree — a commit's tree (`HEAD`, or any revision `sync_tree` is given), the index, or a workdir-rooted dirwalk"*. |
