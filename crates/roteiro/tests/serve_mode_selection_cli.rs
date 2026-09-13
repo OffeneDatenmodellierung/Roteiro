@@ -827,12 +827,18 @@ fn observe_mode(what: &str, cwd: &Path, home: &IsolatedHome) -> Mode {
 /// Two named workspaces, one repo each, each carrying a rendered bundle — so
 /// `{ws}/` in the mount label is load-bearing and a dropped workspace is visible.
 ///
-/// `alpha`/`beta` are the repository paths the mount assertions compare origins
-/// against, so they are read only by the `okf-viewer` tests. Allowed rather than
-/// `cfg`-gated per field: the fixture is one thing in both builds, and splitting
-/// it would put a `#[cfg]` on two fields and both their initialisers to silence
-/// a lint about a build that simply asks less of it.
-#[cfg_attr(not(feature = "okf-viewer"), allow(dead_code))]
+#[cfg_attr(
+    not(feature = "okf-viewer"),
+    allow(
+        dead_code,
+        reason = "`alpha`/`beta` are the repository paths the mount assertions \
+                  compare origins against, so only the `okf-viewer` tests read \
+                  them. Allowed rather than `cfg`-gated per field: the fixture is \
+                  one thing in both builds, and splitting it would put a `#[cfg]` \
+                  on two fields and both their initialisers to silence a lint \
+                  about a build that simply asks less of it."
+    )
+)]
 struct TwoWorkspaces {
     base: PathBuf,
     alpha: PathBuf,
@@ -875,20 +881,34 @@ fn write_config(home: &IsolatedHome, workspaces: &[(&str, &Path)]) {
     use std::fmt::Write as _;
     let mut toml = String::new();
     for (name, root) in workspaces {
-        // **Single quotes.** A TOML *literal* string takes no escapes, and a
-        // path is the one value most likely to contain a backslash: on Windows
-        // `Path::display()` yields `C:\\Users\\…`, and `\\U` inside a basic
-        // (double-quoted) string is an invalid escape, so the config would fail
-        // to parse and every config-backed cell would silently fall back to the
-        // no-config path. The scratch paths here never contain an apostrophe,
-        // which is the only thing a literal string cannot hold.
+        // A basic string with its two special characters escaped, rather than
+        // either quoting style used raw. A *basic* string left unescaped breaks
+        // on Windows, where `Path::display()` yields `C:\\Users\\…` and `\\U`
+        // is not a valid escape; a *literal* string cannot represent an
+        // apostrophe, and `std::env::temp_dir()` is rooted wherever the
+        // environment says — `/tmp/o'brien/…` is a legal home for it. Escaping
+        // assumes nothing about either.
+        //
+        // The failure this avoids is quiet, which is why it is worth the two
+        // lines: an unparseable config makes `resolved_workspaces` yield nothing,
+        // so every config-backed cell takes the *no-config* path and the truth
+        // table goes green while testing the wrong half of itself.
         let _ = write!(
             toml,
-            "[[workspaces]]\nname = '{name}'\nroots = ['{}']\n\n",
-            root.display()
+            "[[workspaces]]\nname = \"{name}\"\nroots = [\"{}\"]\n\n",
+            toml_escape(&root.display().to_string())
         );
     }
     std::fs::write(home.path().join("config.toml"), toml).expect("write config.toml");
+}
+
+/// Escape a value for a TOML **basic** string: backslash first, then the quote.
+///
+/// Only those two, deliberately — every other character a path can hold is legal
+/// unescaped, and a broader escape would be guessing at a grammar this only needs
+/// two rules of.
+fn toml_escape(raw: &str) -> String {
+    raw.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 /// The smallest thing `okf_mounts` will admit: a directory holding an
@@ -1076,11 +1096,33 @@ fn run_refusing(
             stderr.push_str(&line);
             stderr.push('\n');
         }
+        // Fail *fast* the moment it starts serving, instead of spending the whole
+        // deadline discovering it. `serve_with_a_workspace_name_and_no_config…`
+        // pins a defect and is expected to go red when that defect is fixed —
+        // three cases each burning 90s would turn a legible "this now starts"
+        // into a four-and-a-half-minute timeout that reads like CI trouble.
+        assert!(
+            !stderr.contains(" listening on http://"),
+            "`roteiro {args:?}` was expected to refuse, and it STARTED A SERVER. \
+             If that is the fix, this test is the changelog entry for it.\n{stderr}"
+        );
         if let Some(status) = server.child.try_wait().expect("try_wait") {
-            // Drain whatever the reader thread still holds before reporting.
-            while let Ok(line) = server.lines.recv_timeout(Duration::from_millis(200)) {
-                stderr.push_str(&line);
-                stderr.push('\n');
+            // Drain until the reader thread is *gone*, not until it pauses. A
+            // `recv_timeout` window treats a slow scheduler as end-of-output, so
+            // under load the diagnostic this function exists to return can be the
+            // part that goes missing. Disconnected means the thread hit EOF and
+            // dropped the sender, which is the only honest end.
+            let drain_by = Instant::now() + Duration::from_secs(10);
+            loop {
+                match server.lines.recv_timeout(Duration::from_millis(100)) {
+                    Ok(line) => {
+                        stderr.push_str(&line);
+                        stderr.push('\n');
+                    }
+                    Err(RecvTimeoutError::Disconnected) => break,
+                    Err(RecvTimeoutError::Timeout) if Instant::now() >= drain_by => break,
+                    Err(RecvTimeoutError::Timeout) => {}
+                }
             }
             return (status, stderr);
         }
