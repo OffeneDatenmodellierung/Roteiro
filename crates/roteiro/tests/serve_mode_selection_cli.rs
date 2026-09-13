@@ -350,18 +350,31 @@ fn a_bundle_needs_an_index_md_file_to_be_mounted() {
 }
 
 /// One bundle reachable by two routes is mounted **once**, keyed on the
-/// canonical root — and the workspace-derived label is the one that survives,
-/// because the cwd block is admitted last.
+/// **canonical** root — and the workspace-derived label is the one that
+/// survives, because the cwd block is admitted last.
 ///
 /// The current directory is very often also a hosted project; mounting the same
 /// bundle twice under two names would leave a reader wondering which is
 /// authoritative.
+///
+/// # Why the fixture goes through a symlink
+///
+/// Standing inside a configured repo reaches the same bundle twice, but by the
+/// *same spelling* — and a dedup keyed on the raw path string passes that just
+/// as happily as one keyed on `canonicalize`. So workspace `one`'s root is a
+/// symlink here: the walk yields `<base>/wsA-link/alpha/okf` and the cwd yields
+/// `<base>/wsA/alpha/okf`. Same directory, two strings, and only
+/// `okf_root_key`'s canonicalisation collapses them.
+///
+/// Unix-only for the symlink. The property is not platform-specific; the
+/// cheapest way to produce two spellings of one directory is.
 #[test]
-#[cfg(feature = "okf-viewer")]
+#[cfg(all(unix, feature = "okf-viewer"))]
 fn a_bundle_reachable_twice_is_mounted_once() {
-    let fx = TwoWorkspaces::new("okf-dedup");
-    // Stand inside `alpha` itself: `okf_mounts` reaches `<alpha>/okf` once from
-    // the workspace walk and once from the cwd block.
+    let fx = TwoWorkspaces::via_symlink("okf-dedup");
+    // Stand inside `alpha` by its REAL path, while config reaches it through the
+    // link — so the two admissions disagree on the spelling and agree on the
+    // directory.
     let server = Server::spawn(&["explorer", "--addr", "{addr}"], &fx.alpha, &fx.home);
     let (addr, _line) = server.wait_for_listening();
 
@@ -422,15 +435,25 @@ fn the_cwd_is_read_both_as_a_bundle_and_as_its_parent() {
     std::fs::remove_dir_all(&base).ok();
 }
 
-/// A project served from a bare `graph.db` has no repository on disk, so it
-/// contributes no mount however many bundles sit beside the process — only the
-/// cwd block can speak for it.
+/// A project whose workspace knows **no repository root** contributes no mount,
+/// however plainly a repository is sitting there — only the cwd block can speak
+/// for it.
 ///
-/// This is the single-repo `serve` fallback (`Workspace::single`), and it is why
-/// that server's startup note says `okf` and not `default/<repo>`.
+/// The name matters, because the earlier one ("no repository on disk") described
+/// something this fixture does not do: `make_repo` creates a real git repository
+/// and `serve` is run inside it. What is missing is not the repository but the
+/// *workspace's knowledge* of it. `serve`'s single-repo fallback builds
+/// `Workspace::single` from an already-open store, so `project_root` returns
+/// `None` for that project and `okf_mounts` skips it — which is why the startup
+/// note reads `okf` (the cwd block, labelled by directory name) and never
+/// `default/solo`.
+///
+/// `okf_mounts` treats that skip as the ordinary shape of a `--db` project
+/// rather than a fault, and the same `None` arrives here by a different route.
+/// Pinned through the route a person can actually reach from the CLI.
 #[test]
 #[cfg(feature = "okf-viewer")]
-fn a_project_with_no_repository_on_disk_contributes_no_mount() {
+fn a_project_with_no_known_repository_root_contributes_no_mount() {
     let base = scratch_dir("okf-no-repo-root");
     let repo = base.join("solo");
     make_repo(&repo);
@@ -438,7 +461,8 @@ fn a_project_with_no_repository_on_disk_contributes_no_mount() {
     let home = IsolatedHome::new("okf-no-repo-root");
 
     // `serve` with no config and no `--workspace` hosts the cwd repo via
-    // `Workspace::single`, whose project has no `project_root`.
+    // `Workspace::single` — a project built from an open store, so it carries no
+    // `project_root` even though `repo` below is a real repository.
     let server = Server::spawn(&["serve", "--addr", "{addr}"], &repo, &home);
     let (_addr, line) = server.wait_for_listening();
 
@@ -848,6 +872,23 @@ struct TwoWorkspaces {
 
 impl TwoWorkspaces {
     fn new(label: &str) -> Self {
+        Self::build(label, false)
+    }
+
+    /// The same fixture, but with workspace `one`'s root reached through a
+    /// **symlink**, so the workspace walk spells `alpha`'s bundle
+    /// `<base>/wsA-link/alpha/okf` while the cwd block spells it
+    /// `<base>/wsA/alpha/okf`. Two spellings, one directory — which is the only
+    /// arrangement that can tell a canonical dedup key from a raw one.
+    // Gated exactly as its one caller is: the dedup test is `all(unix,
+    // okf-viewer)`, so a `--features explorer` build has no use for this and
+    // would otherwise report it as dead.
+    #[cfg(all(unix, feature = "okf-viewer"))]
+    fn via_symlink(label: &str) -> Self {
+        Self::build(label, true)
+    }
+
+    fn build(label: &str, symlink_root_a: bool) -> Self {
         let base = scratch_dir(label);
         let alpha = base.join("wsA").join("alpha");
         let beta = base.join("wsB").join("beta");
@@ -856,7 +897,14 @@ impl TwoWorkspaces {
         write_bundle(&alpha.join("okf"));
         write_bundle(&beta.join("okf"));
         let home = IsolatedHome::new(label);
-        let (root_a, root_b) = (base.join("wsA"), base.join("wsB"));
+        let mut root_a = base.join("wsA");
+        if symlink_root_a {
+            let link = base.join("wsA-link");
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&root_a, &link).expect("symlink wsA");
+            root_a = link;
+        }
+        let root_b = base.join("wsB");
         write_config(
             &home,
             &[("one", root_a.as_path()), ("two", root_b.as_path())],
@@ -881,6 +929,22 @@ fn write_config(home: &IsolatedHome, workspaces: &[(&str, &Path)]) {
     use std::fmt::Write as _;
     let mut toml = String::new();
     for (name, root) in workspaces {
+        // Refused rather than lossily converted. TOML is UTF-8 by definition and
+        // roteiro's `roots` is a `Vec<String>`, so a path that is not valid UTF-8
+        // cannot be expressed in this config at *all* — and `display()` would
+        // quietly substitute replacement characters, pointing the workspace at a
+        // directory that does not exist while the test read as a behaviour
+        // failure. There is nothing to fix in the escaping here; the fixture is
+        // simply unrepresentable, and it should say so.
+        let root = root.to_str().unwrap_or_else(|| {
+            panic!(
+                "fixture path is not valid UTF-8 and so cannot be written into \
+                 TOML at all: {}. `std::env::temp_dir()` is presumably rooted \
+                 somewhere unusual — this is a limit of the config format, not \
+                 of the escaping below.",
+                root.display()
+            )
+        });
         // An escaped basic string, rather than either quoting style used raw. A
         // *basic* string left unescaped breaks on Windows, where
         // `Path::display()` yields `C:\\Users\\…` and `\\U` is not a valid
@@ -899,7 +963,7 @@ fn write_config(home: &IsolatedHome, workspaces: &[(&str, &Path)]) {
         let _ = write!(
             toml,
             "[[workspaces]]\nname = \"{name}\"\nroots = [\"{}\"]\n\n",
-            toml_escape(&root.display().to_string())
+            toml_escape(root)
         );
     }
     std::fs::write(home.path().join("config.toml"), toml).expect("write config.toml");
