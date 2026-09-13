@@ -624,28 +624,39 @@ pub fn render_html(m: &OverrideMatrix) -> String {
     format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-         <title>Cross-repo config overrides — {hub}</title><style>{CSS}</style></head><body>\
+         <title>Cross-repo config overrides — {hub}</title><style>{tokens}{CSS}</style></head><body>\
          <main><h1>Cross-repo config overrides</h1>\
          <p class=\"muted\">Hub <strong>{hub}</strong> · {nspokes} spoke(s) · ADR-0009</p>\
          {body}</main></body></html>",
+        tokens = crate::theme::TOKENS,
         hub = esc(&m.hub),
         nspokes = m.spokes.len(),
     )
 }
 
-/// Minimal, theme-aware, self-contained stylesheet for the overview page.
+/// The overview page's own rules. **No palette**: `render_html` inlines
+/// [`crate::theme::TOKENS`] — the app's ONE token master — ahead of this, so the
+/// static export is the same identity, in the same two modes, as the served
+/// explorer and the OKF viewer.
+///
+/// It stays **inline**: this page is self-contained by requirement (no external
+/// asset, asserted by `render_html_is_self_contained_and_escapes` and by
+/// `links_cli`), which is why the master is a file the crate can `include_str!`
+/// rather than something served over a route.
+///
+/// This file used to carry its own nine-colour `:root` and dark block. They were
+/// a third palette — close enough to the explorer's to look intentional, far
+/// enough to be a different product — and the roles they named are now the
+/// master's: `--over`/`--over-fg` are the amber `--warn` family (a spoke
+/// overriding the hub) and `--same`/`--same-fg` are the green `--ok` family (a
+/// redundant restatement).
 const CSS: &str = "\
-:root{--bg:#fff;--fg:#1a1a2e;--muted:#6b7280;--line:#e5e7eb;--hub:#f3f4f6;\
---over:#fef3c7;--over-fg:#92400e;--same:#ecfdf5;--same-fg:#065f46;--accent:#4f46e5}\
-@media(prefers-color-scheme:dark){:root{--bg:#0f1117;--fg:#e5e7eb;--muted:#9ca3af;\
---line:#262b36;--hub:#1a1d27;--over:#3b2f10;--over-fg:#fcd34d;--same:#0f2a1f;\
---same-fg:#6ee7b7;--accent:#a5b4fc}}\
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);\
-font:15px/1.5 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif}\
+font:15px/1.5 var(--font)}\
 main{max-width:1100px;margin:0 auto;padding:2rem 1.25rem}\
 h1{font-size:1.5rem;margin:0 0 .25rem}h2{font-size:1.15rem;margin:2rem 0 .5rem}\
 .muted{color:var(--muted);margin:.25rem 0 1.5rem}\
-code{font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace}\
+code{font:13px/1.4 var(--font-mono)}\
 table{border-collapse:collapse;width:100%;overflow-x:auto;display:block}\
 @media(min-width:720px){table{display:table}}\
 th,td{border:1px solid var(--line);padding:.4rem .6rem;text-align:left;vertical-align:top}\
@@ -653,22 +664,21 @@ thead th{position:sticky;top:0;background:var(--bg);font-size:.8rem;\
 text-transform:uppercase;letter-spacing:.03em;color:var(--muted)}\
 tbody th[scope=row]{background:var(--hub);white-space:nowrap}\
 td.hub{background:var(--hub);color:var(--muted)}\
-td.cell{white-space:nowrap}td.over{background:var(--over);color:var(--over-fg)}\
-td.same{background:var(--same);color:var(--same-fg)}td.none{color:var(--muted);text-align:center}\
+td.cell{white-space:nowrap}td.over{background:var(--warn-soft);color:var(--warn)}\
+td.same{background:var(--ok-soft);color:var(--ok)}td.none{color:var(--muted);text-align:center}\
 .conf{display:inline-block;margin-left:.4rem;font-size:.7rem;opacity:.7;\
 font-variant-numeric:tabular-nums}\
 .pin{display:block;margin-top:.15rem;font-size:.7rem;text-transform:none;\
-letter-spacing:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;\
-font-weight:400}\
+letter-spacing:0;font-family:var(--font-mono);font-weight:400}\
 .pin.unpinned{opacity:.55;font-style:italic}\
 .vs{display:block;margin-top:.15rem;font-size:.7rem;opacity:.75}\
 .legend{color:var(--muted);font-size:.85rem;margin:1rem 0}\
 .swatch{display:inline-block;width:.8rem;height:.8rem;border-radius:3px;\
 vertical-align:-1px;border:1px solid var(--line)}\
-.swatch.over{background:var(--over)}.swatch.same{background:var(--same)}\
+.swatch.over{background:var(--warn-soft)}.swatch.same{background:var(--ok-soft)}\
 .swatch.none{background:var(--bg)}\
 table.drift td:first-child{white-space:nowrap;color:var(--muted)}\
-td.conflict{outline:2px solid var(--over-fg);outline-offset:-2px;font-weight:600}";
+td.conflict{outline:2px solid var(--drift);outline-offset:-2px;font-weight:600}";
 
 /// Escape text for HTML body or attribute content (both quote styles), so the
 /// helper stays safe if reused inside single-quoted attributes.
@@ -1212,6 +1222,47 @@ mod tests {
             false,
         );
         assert_eq!(consistent.rows[0].file, "Cargo.toml");
+    }
+
+    /// The static export is themed by the app's ONE token master, inline.
+    ///
+    /// Two claims. The page carries `assets/tokens.css` **verbatim** — it is
+    /// self-contained by requirement, so a `<link>` to a served route is not an
+    /// option and the master has to be inlinable at build time. And this
+    /// module's own rules declare no colour: every one names a token, so a
+    /// palette retune reaches the export rather than stopping at the served UI.
+    ///
+    /// The second half is what makes this falsifiable — rename a token in
+    /// `assets/tokens.css` and it goes red.
+    #[test]
+    fn the_matrix_export_inlines_the_token_master() {
+        let html = render_html(&matrix());
+        assert!(
+            html.contains(crate::theme::TOKENS),
+            "the export must inline `assets/tokens.css` verbatim"
+        );
+        let local: Vec<String> = crate::theme::declarations(CSS)
+            .into_iter()
+            .filter(|(prop, _)| prop.starts_with("--"))
+            .map(|(prop, _)| prop)
+            .collect();
+        assert!(
+            local.is_empty(),
+            "the overview stylesheet declares {local:?} of its own — custom \
+             properties belong in `assets/tokens.css`"
+        );
+        let literals = crate::theme::colour_literals(CSS);
+        assert!(
+            literals.is_empty(),
+            "the overview stylesheet hard-codes colours {literals:?} — name a \
+             token from `assets/tokens.css` instead"
+        );
+        let dangling = crate::theme::dangling_tokens(CSS);
+        assert!(
+            dangling.is_empty(),
+            "the overview stylesheet names {dangling:?}, which \
+             `assets/tokens.css` does not declare"
+        );
     }
 
     #[test]

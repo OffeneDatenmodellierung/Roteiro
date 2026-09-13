@@ -24,9 +24,14 @@ shape still right".
 
 WHAT THIS COVERS
   * Every declaration of every rule, with all var() chains expanded to literals.
+  * Every declaration resolved in the LIGHT mode. `build_scope` takes only
+    rules with no at-prelude, so `@media (prefers-color-scheme: dark)` never
+    enters a scope and the light baseline is what two revisions are compared
+    on. The project context is still dark, because it is dark by
+    `data-theme="dark"` rather than by OS preference.
   * Three contexts, which are exhaustive: no selector outside `:root`,
-    `#view-project` and `#ws-ask-panel` may declare custom properties, and that
-    is asserted at load rather than assumed. (Since #512 the sheet declares none
+    `#view-project`, `#ws-ask-panel` and `[data-theme="dark"]` may declare
+    custom properties, and that is asserted at load rather than assumed. (Since #512 the sheet declares none
     on `#ws-ask-panel`; it stays in the tolerated set so a pre-#512 revision can
     still be read as the BEFORE side.) The three views are mutually exclusive —
     `showSelectView` / `showWorkspaceView` / `showProjectView` in app.js each
@@ -44,6 +49,7 @@ WHAT THIS DOES NOT COVER
     against the markup before trusting a later run.
 """
 
+import pathlib
 import re
 import sys
 
@@ -51,7 +57,10 @@ CONTEXTS = {
     # name        -> variable scopes, in cascade order
     "workspace": [":root"],
     "ws-ask": [":root", "#ws-ask-panel"],
-    "project": [":root", "#view-project"],
+    # Since ADR-0022 v1.3 the project view declares nothing of its own: it
+    # carries `data-theme="dark"`, and `tokens.css` answers that. `#view-project`
+    # stays in the list so a pre-v1.3 revision still reads as the BEFORE side.
+    "project": [":root", "#view-project", '[data-theme="dark"]'],
 }
 
 # Class tokens of the project-view component family. A selector carrying one of
@@ -102,9 +111,31 @@ REACHABLE = {
 }
 
 
+# `index.html` no longer carries the palette: since ADR-0022 v1.3 it carries a
+# marker, and `explorer_app::SHELL_HTML` substitutes `assets/tokens.css` for it
+# at first use. This script has to do the same substitution or it reads a shell
+# with no variable definitions at all — which it did, silently, reporting
+# `defines vars on []` and `<UNRESOLVED --bg>` for every colour on the page.
+TOKENS_MARKER = "/* @tokens */"
+TOKENS_CSS = (
+    pathlib.Path(__file__).resolve().parent.parent
+    / "crates/roteiro/src/assets/tokens.css"
+)
+
+
 def style_block(path):
     text = open(path, encoding="utf-8").read()
-    return text[text.index("<style>") + len("<style>") : text.index("</style>")]
+    css = text[text.index("<style>") + len("<style>") : text.index("</style>")]
+    if TOKENS_MARKER in css:
+        css = css.replace(TOKENS_MARKER, TOKENS_CSS.read_text(encoding="utf-8"))
+    elif "--bg" not in css:
+        # A revision from before the splice landed still defines its own palette;
+        # one from after must resolve the marker. Neither shape is silent.
+        raise SystemExit(
+            f"{path}: no `{TOKENS_MARKER}` marker and no palette either — this "
+            f"script cannot resolve a shell whose variables it cannot see"
+        )
+    return css
 
 
 def parse(css):
@@ -218,7 +249,12 @@ def main():
     for path in sys.argv[1:]:
         rules = parse(style_block(path))
         defs = sorted({s for _, s, d in rules if any(p.startswith("--") for p, _ in d)})
-        if not set(defs) <= {":root", "#view-project", "#ws-ask-panel"}:
+        if not set(defs) <= {
+            ":root",
+            "#view-project",
+            "#ws-ask-panel",
+            '[data-theme="dark"]',
+        }:
             raise SystemExit(f"{path}: unexpected variable-defining selector(s): {defs}")
         outs[path] = {}
         for name, sels in CONTEXTS.items():

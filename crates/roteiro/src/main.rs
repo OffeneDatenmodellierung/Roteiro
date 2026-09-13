@@ -59,6 +59,9 @@ mod review_llm;
 // rotating, OTEL-shaped JSON file layer.
 mod telemetry;
 
+/// The one token master every in-app web surface is themed from (ADR-0022 v1.3).
+mod theme;
+
 #[derive(Parser)]
 #[command(
     name = "roteiro",

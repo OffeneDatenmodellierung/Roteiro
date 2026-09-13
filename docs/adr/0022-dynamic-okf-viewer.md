@@ -11,8 +11,8 @@ architectural-significance: MEDIUM  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.2"
-last-modified: 2026-09-10
+version: "1.3"
+last-modified: 2026-09-13
 confluence-url:
 ---
 
@@ -20,7 +20,7 @@ confluence-url:
 
 |  |  |
 |---|---|
-| **Document version** | 1.2 |
+| **Document version** | 1.3 |
 | **State** | Accepted |
 | **Decision makers** | The Roteiro Project Team |
 | **Related** | [[docs/adr/0021-open-knowledge-format-bundle.md]] · [[docs/adr/0010-explorer-web-app-vendored-js.md]] · [[docs/adr/0008-multi-repo-workspace-serve.md]] · [[docs/adr/0017-dependency-security-policy.md]] |
@@ -42,6 +42,17 @@ It reads a bundle path and has no knowledge of Roteiro's graph, so it works on
 any conformant bundle, and Roteiro's own `okf/` output is merely the default.
 It ships behind a feature and merges onto `serve` the way `explorer` already
 does.
+
+**Amended in v1.3**: the viewer's theme is **no longer the docs-site theme**.
+Roteiro is one application and must look like one, so the viewer, the workspace
+hub, the project graph view and the `links --matrix --html` export are now all
+themed from a single token master inside the crate —
+`crates/roteiro/src/assets/tokens.css` — in a light and a dark mode. Everything
+below that names `website/public/style.css` as this viewer's theme is superseded
+by that decision; the docs site itself is untouched and stays standalone. What
+the viewer *reads* is still unchanged, and so is the self-contained,
+no-network posture: the master is a file the crate can `include_str!`, not an
+asset fetched from anywhere.
 
 **Amended in v1.2**: the path stopped being a *command argument* and became the
 working directory. The viewer no longer has a server of its own; it is mounted
@@ -83,7 +94,7 @@ does not know whose bundle it has.
 | `rto_render::okf::read` | **import**: maps concepts to graph facts, applies provenance, screening and trust adoption | Wrong shape — viewing must not import |
 | `rto_render::okf::inspect` | reads a bundle **as a bundle** over `okf_core::Bundle` — `trust_summary`, `link_report`, `diff_report` | Right shape; this is the seam |
 | `roteiro explorer` | served read-only JSON API + HTML shell + vendored cytoscape, merged onto `/v1` under `serve` | The precedent for how a UI feature ships here |
-| `website/public/style.css` | the roteiro.dev theme | Reusable as-is |
+| `website/public/style.css` | the roteiro.dev theme | ~~Reusable as-is~~ — **superseded in v1.3**: the viewer is themed by the app's own token master, not by the docs site |
 
 The distinction in the first two rows is the load-bearing one. `read` exists to
 answer *"what would this add to our graph"* and necessarily makes decisions —
@@ -110,6 +121,16 @@ merged onto `serve`.**
   would only ever see bundles we generate, since nothing invokes it on a
   stranger's directory; and it would grow a second, divergent copy of the
   docs-site theme logic. Rejected.
+
+  **v1.3 note — the copy happened anyway, by the other route.** Option 3 was
+  taken and the viewer still ended up carrying a byte-copy of the docs site's
+  `:root`, pinned by a test, because `include_str!` cannot reach out of the
+  crate directory. So the con was real and the option choice was not what
+  decided it; the divergence risk followed the *theme source*, not the
+  renderer. Naming the risk and then pinning the bytes bought four months of
+  correctness and no direction: the copy could only ever track the site, never
+  the application it shipped inside. v1.3 removes the copy by moving the
+  palette inside the crate, where every in-app surface can read it.
 
 ### Option 2: Extend `roteiro explorer` to show OKF
 
@@ -167,8 +188,34 @@ that may be written to be *read as instructions*. Consequences:
 Per the request that started this: the concept **graph** and any UI imagery are
 embedded assets, not bundle content. The graph is rendered with the cytoscape
 build already vendored for `explorer`, over edges derived from
-`Bundle::links_from`/`backlinks`. The theme is `website/public/style.css`,
-embedded so the viewer is self-contained and works with no network.
+`Bundle::links_from`/`backlinks`.
+
+The theme, **since v1.3**, is `crates/roteiro/src/assets/tokens.css` — Roteiro's
+one token master, light and dark, shared with the explorer shell and the
+`links --matrix --html` export. It is embedded, so the viewer is still
+self-contained and works with no network; what changed is *which* file it
+embeds. Until v1.2 it was a byte-copy of `website/public/style.css`, asserted
+equal by `the_viewer_shares_the_sites_palette`, and the reason was mechanical:
+`roteiro` publishes to crates.io, `cargo package` takes only files under the
+crate directory, and an `include_str!` reaching up to `website/` would have
+shipped a crate that does not compile.
+
+That constraint has not gone away — the palette moved to satisfy it rather than
+to escape it. Two things made the copy wrong independently of it. It made the
+viewer look like the docs site and unlike the application it ships inside, which
+is the whole of the v1.3 decision. And it copied the site's **light** `:root`
+without the site's dark block, so the viewer was cream-only while the thing it
+claimed to share had two modes — a copy can drift, and this one shipped
+half-drifted from the day it was made.
+
+`the_viewer_shares_the_sites_palette` is **re-aimed, not deleted**, as
+`the_viewer_is_themed_by_the_app_token_master`. The relationship it pinned is
+deliberately severed, so its assertion is obsolete; the protection it gave — the
+viewer silently drifting from its palette source — is not, and is what the
+replacement keeps. It asserts the served stylesheet carries the master verbatim,
+that the viewer's own rules declare no palette and no colour literal, and that
+every `var(--x)` the viewer names is one the master declares. The third is what
+makes it falsifiable: rename a token upstream and it goes red.
 
 ### Surface
 
@@ -209,7 +256,12 @@ issue tracker, and two points in it changed the design:
 
 - that a viewer keeping the site theme but sourcing content from OKF is
   *generic for free*, which moved it from "a page for our docs" to "a viewer for
-  any bundle" and made `okf_core::Bundle` the obvious source;
+  any bundle" and made `okf_core::Bundle` the obvious source. **The conclusion
+  survives v1.3; the premise does not.** What made the viewer generic was
+  sourcing content from `okf_core::Bundle`, and that is untouched. The theme was
+  never load-bearing for genericity — it only ever made the viewer look like our
+  docs — and a viewer for anybody's bundle has no reason to wear the roteiro.dev
+  skin rather than Roteiro's;
 - that it belongs as an optional extension on `serve` alongside the standard UI
   content, which is what pointed at the `explorer` precedent rather than at a
   new server.
@@ -222,3 +274,4 @@ issue tracker, and two points in it changed the design:
 | 1.0 | 2026-09-02 | **Accepted and implemented.** The recommended option was built as written: `rto_render::okf::view` is the model and `roteiro`'s `okf_viewer` is the HTTP, behind an `okf-viewer` feature that is off by default and costs the default build nothing. `roteiro okf view [path]` serves it alone; under `serve` it nests at **`/okf`**, because the explorer already holds `/` and two UIs cannot both be the root — and only when the project has an `okf/` bundle, since `serve` hosts workspaces rather than a bundle path and a route that 404'd every request would be worse than an absent one. **One thing the draft did not anticipate**: nesting means every generated href must carry the mount prefix, because a concept id contains slashes and so relative hrefs sit at varying depths. A router that emitted absolute unprefixed paths would look right standalone and 404 on every link the moment it was mounted, so `base` is threaded through and `a_nested_mount_prefixes_every_href` pins it. **The split moved in the draft's favour**: only the *server* is behind the feature. Every rule about untrusted content — HTML escaped and never emitted, a link rewritten only when it resolves inside the bundle, no image fetched from off it, screener classes surfaced — lives in `okf::view`, which is unconditional and therefore compiled and tested by every job. That was chosen because this repository has found three defects in a year inside feature combinations nothing built. Two additions beyond the draft: raw HTML is **escaped and shown** rather than dropped, since silently discarding part of a document is its own kind of lie; and a `Content-Security-Policy` of `default-src 'self'` rides every response as a second, independently-failing line behind the escaping. The `no-default-features` job gains clippy **and test** cells for the feature, as the draft committed — tests too, because the route tests are themselves feature-gated and a clippy-only cell would compile them and never run them. No decision in this ADR changes. |
 | 1.1 | 2026-09-10 | Amended (no issue; found while sizing the knowledge layer). **The graph page drew every concept, and at this repository's own scale it never finished.** It handed 9,766 nodes and 41,980 edges — 8.16 MB — to a force-directed layout synchronously, having been tested only against the 9-concept fixture. The server was never the problem: that payload builds in 0.25 s. Three measurements decided the fix. (a) **No ranking rescues a whole-graph view.** This bundle is hub-and-spoke — max degree 1,670 against a median of 4 — and the 100 highest-degree concepts share just **157** of its 41,980 edges, so any "top N" tier renders as disconnected scatter whatever N is and whatever it ranks by. (b) Neighbourhoods, by contrast, are the right unit: a median concept reaches 3 nodes at one hop and 436 at two. (c) A force-directed layout is quadratic per tick in its repulsion step, so the node count is what decides whether the page renders at all. So `/graph` is now **focused**: without a `focus` it is a ranked **list** of well-connected concepts rather than a drawing, because there is no whole-graph picture worth drawing and pretending otherwise is what made the page unusable; with one it draws that concept's neighbourhood under a node budget, laid out `concentric` on the focus — linear, and it says what the picture means. **Bounded, not capped.** Every scoped response carries `shown_nodes`/`total_nodes`, `shown_edges`/`total_edges` and `beyond` — concepts linked to something drawn that are not drawn — and the page states them, because a view that quietly draws some of its nodes is the defect [[docs/adr/0024-screening-widened.md]] fixed for the binary inventory: the reader cannot tell a small bundle from a truncated picture of a large one. `beyond` is deliberately **one** number covering both ways a view falls short — budget and depth horizon — after reporting them separately cost a test that asserted one and measured the other. `depth` and `limit` are clamped at the edge (3 and 500), because a caller-supplied budget taken at its word would move the original defect into a URL. Payload for the default view: 8,159,353 B → 213,053 B. |
 | 1.2 | 2026-09-10 | Amended (no issue; task #22). **The premise changed: the viewer stopped being a server and became a mount.** v1.0 gave it two homes — `roteiro okf view <path>` standing alone, and a nest under `serve` — and the standalone one paid for itself twice over: a second command, a second port, a second tokio runtime, and a route shape (`base` empty, `/` real) that was the *only* one anybody exercised. That last part hid a defect for eight days. `nest("/okf")` serves `/okf` and **not** `/okf/`, so the "Concepts" link — written as `{base}/` — has 404'd under `serve` since v1.0 while working perfectly standalone; `index_href` now writes that rule once instead of at four call sites. **What the fold must not lose is the path.** ADR-0022's whole claim is that the viewer takes a path and knows nothing of Roteiro's graph, so it works on any conformant bundle; a viewer reachable only through a configured workspace would quietly become a viewer for *our* bundles. The resolution is that `explorer` serves the configured workspaces' bundles **and** the current directory when one is there — so `roteiro okf view <path>` is exactly `cd <path> && roteiro explorer`, and it works with no repository, no config and no graph, which is the case that proves the premise survived. **One port now holds many bundles**, so `/okf` gained a mount layer: a bundle per workspace project, deduplicated by canonical path, each at `/okf/{slug}`. Slugs are folded to one readable segment rather than percent-encoded, because this is a URL a person is meant to share — and folding collides, so `disambiguate` suffixes, since `nest` does not complain about a prefix it already holds and the second mount would otherwise take the first's URL and make one bundle silently unreachable. `/okf` itself lists the bundles, or redirects when there is one, because a chooser with one row is a click that tells the reader nothing. **Three failures here are route-table failures no type catches**: that shadowed nest; a chooser registered at `/` instead of at `base`, which makes axum panic at startup the moment the mount layer is merged into a host that owns the root; and the chooser being the one page *not* inside a bundle, so `{base}/okf-viewer.css` resolves to a bundle's route everywhere else and to nothing there — it rendered unstyled with a broken nav. All three are pinned by driving a whole merged router and asserting every `href` it writes resolves. Measured against this repository: six workspaces, one bundle, `/okf` → 307 → `/okf/Roteiro-Roteiro`, 3,878,122 B; and a copied bundle with no repository above it serving on `/okf/bare` with no Explorer link offered, because there is no explorer to link to. **The feature matrix moved, and the isolation cell earned itself back.** `okf-viewer` now **implies `explorer`**: a mount with no mount point is dead code, and `--no-default-features --features okf-viewer -D warnings` said so — 25 never-used items, the whole module. That in turn left `--features explorer` built by nothing but `--all-features`, which cannot fail on it because it turns the viewer on too — and it was already broken, because folding the viewer in made `serve_graph_ui` construct a multi-threaded runtime whose tokio feature only `okf-viewer` enables. The runtime is now chosen by `#[cfg]`, since the current-thread choice stays right for an explorer serving only compiled-in assets, and the `no-default-features` job gains a **fifth** cell for `explorer` alone. This is the fourth defect this project has found in a feature combination no job compiled, which is the reason v1.0 made the cell part of the decision rather than a follow-up; the same reasoning applied to the shape the fold created. |
+| 1.3 | 2026-09-13 | Amended (no issue; maintainer decision). **The viewer stopped wearing the docs-site theme.** Roteiro had three in-app web surfaces and three unrelated visual languages: a light workspace hub, a dark project graph view whose values lived under the same names but in a second block, and this cream/serif viewer carrying a byte-copy of `website/public/style.css`. A fourth surface, the `links --matrix --html` export, had a ninth-colour palette of its own that nothing compared to anything. They are now one token master — `crates/roteiro/src/assets/tokens.css`, light and dark — and all four read it: the shell splices it into its inline `<style>`, the viewer prepends it to its served stylesheet, and the export inlines it, which is why the master is a crate file rather than a route (the export is self-contained by requirement and has no server). **The docs site is explicitly out of scope** and unchanged: it is a separate artefact with its own lifecycle, and making a published site depend on an application binary's assets would be the same drift risk pointing the other way. **Dark is a mode, not a second identity.** The project graph view stays dark whatever the OS prefers — a graph canvas reads better that way — but it carries `data-theme="dark"` and gets the master's dark values, so `#view-project` declares nothing and the hand-kept `background: #0d1117` on `body` that had to track it by hand is gone. The other three surfaces gained `prefers-color-scheme`, which closes the asymmetry the copy created: the viewer had taken the site's light `:root` and not its dark block, so it was cream-only while the thing it claimed to share had two modes. **`app.js` stopped hard-coding colour.** Its 42 hex literals for graph nodes and edges did not read the custom properties, so the token layer was authoritative for chrome and fictional for the graph; cytoscape cannot read a custom property, so the values are now resolved with `getComputedStyle` **from the element the graph lives in** — which is what lets one code path serve a light canvas and a forced-dark one — and re-resolved when the OS preference flips under a live graph. Zero colours remain in `app.js`, `index.html`, `okf-viewer.css` or `overview.rs`, and "colour" means every syntax rather than every syntax somebody listed. The first version of that claim was measured with a `#rrggbb` scanner and was **wrong**: two `rgba()` shadows sat in the shell while the guard stayed green, and an undeclared `var(--mono, …)` went unseen because the check skipped any `var()` carrying a fallback. Both were the same defect — a scanner that recognises one form and reads every other form as absence — so the check was **inverted into two allowlists**: a declaration is colour-scanned unless its property is known not to accept a `<color>`, and a scanned value may contain only `var()` references, numbers, and a named set of keywords and functions. `rgba()`, a bare `crimson`, an `oklch()` and a colour hiding in a `var()` fallback are all reported now, none of them by having been thought of. An incomplete allowlist refuses visibly; an incomplete denylist passes silently. **The drift guard was re-aimed, not deleted.** `the_viewer_shares_the_sites_palette` pinned viewer==website byte-for-byte; that relationship is deliberately severed, so the assertion is obsolete and the protection is not. `the_viewer_is_themed_by_the_app_token_master` replaces it, with siblings for the shell and the export, and all of them fail on a renamed token rather than only on a reformatted copy — the failure mode that matters, since an undefined custom property is invalid at computed-value time and renders plausibly wrong rather than erroring (#512). `palette_scopes` became nesting-aware in the same change, because folding a dark-only token into `:root` would have made its second assertion vacuous the moment the palette gained a mode. **One behaviour the token layer has that the literals did not**: a cytoscape graph holds resolved colours, so it keeps whichever mode it was styled under. `#topology` sits outside `#view-project`, so with the project view forcing dark on `<html>` the hidden workspace graph resolved dark too, and walking back to a light workspace left a dark topology on a light panel — reproduced over CDP, and fixed by routing every mode change through the one place that writes the attribute and re-resolves the live graphs. |

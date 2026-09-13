@@ -5,43 +5,29 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Roteiro — workspace explorer</title>
     <style>
-      /* The palette. ONE set of semantic names; `#view-project` below re-declares
-         the same names with its own values, so a component reused across the two
-         views themes itself and needs no per-view remap (issue #512).
+      /* ===================================================================
+         THE APP TOKEN MASTER IS SPLICED IN AT THE MARKER BELOW.
 
-         Light theme, matching the maintainer-signed-off screenshots. */
-      :root {
-        --bg: #f6f7f9;
-        --panel: #ffffff;
-        --fg: #1a1f2e;
-        --muted: #6b7280;
-        --line: #e5e7eb;
-        --line-strong: #d1d5db;
-        --gold: #c99a2e;
-        --gold-soft: #fdf6e3;
-        --slate: #64748b;
-        --slate-soft: #f1f5f9;
-        --drift: #dc2626;
-        --drift-soft: #fef2f2;
-        --drift-line: #fca5a5;
-        --hub: #eef2ff;
-        --hub-line: #c7d2fe;
-        --accent: #4f46e5;
-        --shadow: 0 1px 2px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.1);
-        /* Roles that differ between the two views. Each light value is the one
-           the old `#ws-ask-panel` remap already resolved to, or the light-view
-           colour the workspace legend already uses for the same meaning — so
-           nothing here is a new colour, only a name for one we had. */
-        --field: var(--panel); /* input/chip fill, one step off the surrounding panel */
-        --code-bg: var(--slate-soft); /* inset code + captured-content backdrop */
-        --err: var(--drift); /* error TEXT (`#status.err` already used this) */
-        --derived: var(--accent);
-        --authored: var(--gold); /* the workspace legend's "gold = authored" */
-        --inferred: var(--slate); /* the workspace legend's "slate = inferred" */
-        --derived-line: var(--line-strong);
-        --authored-line: var(--line-strong);
-        --inferred-line: var(--line-strong);
-      }
+         `crates/roteiro/src/assets/tokens.css` — ONE definition of the palette,
+         light and dark — is substituted for the `@tokens` marker below by
+         `explorer_app::SHELL_HTML` at first use. The same file is prepended to
+         the OKF viewer's stylesheet and inlined into the `links --matrix --html`
+         export, so all four in-app surfaces are the same identity in the same
+         two modes.
+
+         Nothing below this point may declare a colour. Every rule names a
+         token; `shell_colour_vars_are_one_namespace_declared_by_both_views` and
+         `the_shell_declares_no_colour_of_its_own` in `explorer_app.rs` fail if
+         one sneaks back in, and #512 is the reason: an undefined custom property
+         is invalid at computed-value time, so it falls back to inherited or
+         initial and renders *plausibly wrong* rather than erroring.
+
+         The project graph view stays dark whatever the OS says — a graph canvas
+         reads better that way — but it is this palette's dark MODE, not a second
+         palette: it carries `data-theme="dark"`, which `tokens.css` answers.
+         =================================================================== */
+      /* @tokens */
+
       * {
         box-sizing: border-box;
       }
@@ -49,11 +35,19 @@
         margin: 0;
         background: var(--bg);
         color: var(--fg);
-        font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        font: 14px/1.5 var(--font);
+      }
+      /* Links. The shell had no rule for `a` at all: every link it draws sat on a
+         white panel where the UA's default blue passed for a choice, and the
+         one on the workspace-selector landing kept it. On a dark panel the same
+         blue is unreadable, which is how a missing rule finally announced
+         itself. */
+      a {
+        color: var(--accent);
       }
       code,
       .mono {
-        font: 12.5px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+        font: 12.5px/1.4 var(--font-mono);
       }
       main {
         max-width: 1240px;
@@ -98,14 +92,17 @@
         font-size: 0.72rem;
         padding: 0.1rem 0.45rem;
         border-radius: 999px;
-        background: var(--slate-soft);
-        color: var(--slate);
+        background: var(--tint);
+        color: var(--muted);
         border: 1px solid var(--line);
       }
+      /* A project with no workspace behind it. The amber `--warn` family, which
+         is mode-aware — so the `.pbar` override this rule used to need on the
+         dark project view is gone rather than hand-kept. */
       .ws-badge.standalone {
-        background: #fff7ed;
-        color: #b45309;
-        border-color: #fed7aa;
+        background: var(--warn-soft);
+        color: var(--warn);
+        border-color: var(--warn-line);
       }
       .ws-action {
         font: inherit;
@@ -119,8 +116,8 @@
         box-shadow: var(--shadow);
       }
       .ws-action:hover {
-        border-color: var(--slate);
-        color: var(--slate);
+        border-color: var(--accent);
+        color: var(--accent);
       }
       .ws-action:disabled {
         opacity: 0.55;
@@ -164,6 +161,11 @@
         text-align: left;
         font: inherit;
         cursor: pointer;
+        /* A `button`: `color` does NOT inherit into one — the UA sets
+           `buttontext` — so this card's title rendered near-black on whatever
+           `--panel` was. Invisible while the hub was light-only, and the first
+           thing dark mode showed. */
+        color: var(--fg);
         background: var(--panel);
         border: 1px solid var(--line);
         border-radius: 12px;
@@ -177,7 +179,7 @@
       .select-card:hover,
       .select-card:focus-visible {
         border-color: var(--hub-line);
-        box-shadow: 0 4px 12px rgba(16, 24, 40, 0.1);
+        box-shadow: var(--shadow-lifted);
         transform: translateY(-1px);
         outline: none;
       }
@@ -254,11 +256,11 @@
         border-radius: 2px;
         display: inline-block;
       }
-      .swatch.gold {
-        background: var(--gold);
+      .swatch.authored {
+        background: var(--authored);
       }
-      .swatch.slate {
-        background: var(--slate);
+      .swatch.inferred {
+        background: var(--inferred);
       }
       .dot {
         width: 0.6rem;
@@ -303,7 +305,7 @@
       #topology {
         width: 100%;
         height: 460px;
-        background: linear-gradient(0deg, #fbfbfd, #ffffff);
+        background: linear-gradient(0deg, var(--bg), var(--panel));
       }
 
       /* Matrix ------------------------------------------------------------ */
@@ -340,8 +342,8 @@
         text-decoration: underline;
       }
       tr.section-head th {
-        background: var(--slate-soft);
-        color: var(--slate);
+        background: var(--tint);
+        color: var(--muted);
         font-weight: 650;
         letter-spacing: 0.05em;
         text-transform: uppercase;
@@ -358,7 +360,7 @@
         text-align: center;
       }
       td.cell.set {
-        background: var(--gold-soft);
+        background: var(--authored-soft);
       }
       .tag {
         display: inline-block;
@@ -371,19 +373,19 @@
         vertical-align: 1px;
       }
       .tag.authored {
-        background: var(--gold);
-        color: #fff;
+        background: var(--authored);
+        color: var(--on-fill);
       }
       .tag.inferred {
-        background: var(--slate);
-        color: #fff;
+        background: var(--inferred);
+        color: var(--on-fill);
       }
       tr.drift-row td {
         background: var(--drift-soft);
       }
       tr.drift-band th {
         background: var(--drift);
-        color: #fff;
+        color: var(--on-fill);
         font-size: 0.72rem;
         letter-spacing: 0.04em;
       }
@@ -405,7 +407,7 @@
       .explain.drift-box {
         background: var(--drift-soft);
         border-top: 1px solid var(--drift-line);
-        color: #7f1d1d;
+        color: var(--drift);
       }
       .explain strong {
         color: var(--fg);
@@ -461,36 +463,20 @@
         background: var(--hub);
       }
 
-      /* Project graph view (dark, per the signed-off screenshots). Whether the
-         two views SHOULD differ is a product question and is left alone here;
-         all that changes is that the dark values now live under the same names
-         as the light ones instead of a parallel `--p*` set. --------------- */
+      /* Project graph view. It is dark whatever the reader's OS prefers — a
+         graph canvas reads better that way — and it is the SAME palette in its
+         dark mode, not a second one: the `data-theme="dark"` on the element
+         itself is what `tokens.css` answers, so there are no values here.
+
+         The overscroll area used to need a hand-kept `background: #0d1117` on
+         `body`, because `body` is OUTSIDE this element and `var(--bg)` there
+         resolved to the light value. `app.js` now puts the same `data-theme` on
+         `<html>` while this view is up, so the whole document is in dark mode
+         and the duplicate literal is gone. ------------------------------- */
       #view-project {
-        --bg: #0d1117;
-        --panel: #161b22;
-        --line: #30363d;
-        --line-strong: #3d444d;
-        --fg: #e6edf3;
-        --muted: #8b949e;
-        --accent: #7c8cff;
-        --field: #0d1117;
-        --code-bg: #0d1117;
-        --err: #ff7b72;
-        --derived: #6ea8fe;
-        --authored: #e0b64d;
-        --inferred: #3fb6a8;
-        --derived-line: #274b7a;
-        --authored-line: #5c4a13;
-        --inferred-line: #1f5750;
         background: var(--bg);
         color: var(--fg);
         min-height: 100vh;
-      }
-      body.on-project {
-        /* `body` is OUTSIDE `#view-project`, so `var(--bg)` here would resolve to
-           the LIGHT value. This literal backs the overscroll area and has to stay
-           in step with `#view-project`'s `--bg` by hand. */
-        background: #0d1117;
       }
       .pbar {
         display: flex;
@@ -515,7 +501,7 @@
       }
       .p-back:hover {
         border-color: var(--accent);
-        color: #fff;
+        color: var(--fg-strong);
       }
       .p-crumbs {
         display: flex;
@@ -546,16 +532,6 @@
       .p-sep {
         color: var(--muted);
       }
-      .pbar .ws-badge {
-        background: #21262d;
-        color: var(--muted);
-        border-color: var(--line);
-      }
-      .pbar .ws-badge.standalone {
-        background: #2a2010;
-        color: #e0b64d;
-        border-color: #5c4a13;
-      }
       .p-status {
         padding: 0.4rem 1rem;
         color: var(--muted);
@@ -582,7 +558,7 @@
       #p-graph {
         flex: 1 1 auto;
         min-height: 0;
-        background: radial-gradient(circle at 50% 40%, #12171f, #0d1117);
+        background: radial-gradient(circle at 50% 40%, var(--canvas), var(--bg));
       }
       .p-controls {
         display: flex;
@@ -603,7 +579,7 @@
         height: 1.9rem;
         line-height: 1;
         cursor: pointer;
-        background: #21262d;
+        background: var(--tint);
         color: var(--fg);
         border: 1px solid var(--line-strong);
         border-radius: 6px;
@@ -707,7 +683,7 @@
         border-top-color: var(--authored);
       }
       .p-dash.inferred {
-        border-top-color: #8b95a3;
+        border-top-color: var(--muted);
       }
       .p-qmark {
         display: inline-flex;
@@ -716,8 +692,8 @@
         width: 1rem;
         height: 1rem;
         border-radius: 999px;
-        border: 1.5px dashed #f85149;
-        color: #f85149;
+        border: 1.5px dashed var(--drift);
+        color: var(--drift);
         font-size: 0.7rem;
         font-weight: 700;
         font-style: normal;
@@ -736,7 +712,7 @@
         padding: 0.2rem 0.45rem;
         font-size: 0.72rem;
         white-space: nowrap;
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+        box-shadow: var(--shadow-lifted);
       }
       .p-chip.xrepo {
         border-style: dashed;
@@ -746,12 +722,12 @@
         color: var(--authored);
       }
       .p-chip.xrepo.inferred {
-        border-color: #8b95a3;
-        color: #c9d1d9;
+        border-color: var(--muted);
+        color: var(--fg);
       }
       .p-chip.xrepo.drift {
-        border-color: #f85149;
-        color: #f85149;
+        border-color: var(--drift);
+        color: var(--drift);
       }
       .p-follow-hint {
         color: var(--muted);
@@ -806,11 +782,11 @@
         font-weight: 600;
       }
       .p-tab[aria-disabled="true"] {
-        color: #484f58;
+        color: var(--sub);
         cursor: not-allowed;
       }
       .p-tab[aria-disabled="true"]:hover {
-        color: #484f58;
+        color: var(--sub);
       }
       .p-tabpanes {
         flex: 1 1 auto;
@@ -863,7 +839,7 @@
         border-bottom: 1px solid var(--line);
       }
       .p-hot li:hover .p-hot-name {
-        color: #fff;
+        color: var(--fg-strong);
         text-decoration: underline;
       }
       .p-hot-rank {
@@ -890,7 +866,7 @@
       .p-hot-bar {
         flex: 0 0 60px;
         height: 0.4rem;
-        background: #21262d;
+        background: var(--tint);
         border-radius: 3px;
         overflow: hidden;
       }
@@ -930,7 +906,7 @@
         letter-spacing: 0.04em;
         padding: 0.05rem 0.35rem;
         border-radius: 4px;
-        background: #3b2f10;
+        background: var(--authored-soft);
         color: var(--authored);
       }
       .p-debt-loc {
@@ -1016,7 +992,7 @@
         border: 1px solid var(--authored-line);
         border-left: 3px solid var(--authored);
         border-radius: 6px;
-        background: #14100a;
+        background: var(--authored-soft);
       }
       .p-generated + .p-generated {
         margin-top: 0.5rem;
@@ -1058,7 +1034,7 @@
         border: 1px solid var(--line);
         border-radius: 5px;
         background: var(--code-bg);
-        font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+        font-family: var(--font-mono);
         font-size: 0.7rem;
         color: var(--muted);
         word-break: break-all;
@@ -1086,7 +1062,7 @@
       }
       .p-chip:hover {
         border-color: var(--accent);
-        color: #fff;
+        color: var(--fg-strong);
       }
       .p-chip .p-chip-kind {
         color: var(--muted);
@@ -1150,7 +1126,7 @@
         justify-content: space-between;
       }
       .p-ask button.p-ask-send {
-        color: #fff;
+        color: var(--on-fill);
         background: var(--accent);
         border: 1px solid var(--accent);
         border-radius: 6px;
@@ -1299,9 +1275,9 @@
       </section>
 
       <div class="legend" aria-label="legend">
-        <span><i class="swatch gold"></i> gold = authored link</span>
-        <span><i class="swatch slate"></i> slate = inferred link</span>
-        <span><i class="dot"></i> red dot = drift</span>
+        <span><i class="swatch authored"></i> authored link</span>
+        <span><i class="swatch inferred"></i> inferred link</span>
+        <span><i class="dot"></i> drift</span>
       </div>
 
       <section class="panel">
@@ -1334,7 +1310,7 @@
     </main>
     </div>
 
-    <div id="view-project" hidden>
+    <div id="view-project" data-theme="dark" hidden>
       <div class="pbar">
         <button id="p-back" class="p-back" type="button">← Workspace</button>
         <nav class="p-crumbs" aria-label="Breadcrumb">
