@@ -76,7 +76,13 @@ pub fn builtin() -> Result<Corpus, CorpusError> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Verdict {
-    /// A genuine defect: accepted, and fixed by a commit.
+    /// A genuine defect: accepted by the maintainer.
+    ///
+    /// Usually fixed by a commit, which [`CorpusRow::fix_commit`] names — but
+    /// acceptance is what the verdict records, and the two can come apart: row
+    /// `3789014471` is accepted and **deferred** to its own tracked decision, with a
+    /// blank `fix_commit`. Reading `real` as "there is a fix commit" is what this
+    /// sentence used to invite, and it is not what the field means.
     Real,
     /// The claim was wrong: refuted in a maintainer reply.
     False,

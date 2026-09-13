@@ -99,9 +99,10 @@ fn loud_skip(test: &str, why: NoHistory, rows: usize) {
     let _ = writeln!(
         err,
         "SKIP: {test} — {}. Every assertion this test makes over all {rows} corpus \
-         rows went unchecked. {} CI checks out with `fetch-depth: 0` in every job \
-         that runs tests (`.github/workflows/ci.yml`) and fails these tests rather \
-         than skipping them, so this line can only appear off a runner.",
+         rows went unchecked. {} In a repository checkout on CI this is a failure \
+         rather than a skip (`.github/workflows/ci.yml` checks out with \
+         `fetch-depth: 0` in every job that runs tests), so on a runner this line \
+         means the crate is packaged.",
         why.reason(),
         why.remedy()
     );
@@ -197,8 +198,11 @@ fn history_or_loud_skip(test: &str, rows: usize) -> bool {
             .args(args)
             .output()
     };
-    let inside =
-        matches!(git(&["rev-parse", "--is-inside-work-tree"]), Ok(o) if o.status.success());
+    // The **output**, not the exit status: `--is-inside-work-tree` exits 0 in a bare
+    // repository and prints `false`, so a status-only check calls a bare repo a work
+    // tree and then fails on `git show <sha>:<path>` for a reason it cannot explain.
+    let inside = git(&["rev-parse", "--is-inside-work-tree"])
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "true");
     if !inside {
         loud_skip_unless_on_ci(test, NoHistory::NotAWorkTree, rows);
         return false;
@@ -225,12 +229,15 @@ fn history_or_loud_skip(test: &str, rows: usize) -> bool {
 /// hidden.
 #[test]
 fn the_package_exemption_cannot_claim_a_real_checkout() {
+    // Reads the output for the same reason the gate does: a bare repository exits 0
+    // and prints `false`, and calling that a work tree here would fail this test in
+    // the one place it is supposed to be quiet.
     let work_tree = std::process::Command::new("git")
         .arg("-C")
         .arg(repo_root())
         .args(["rev-parse", "--is-inside-work-tree"])
         .output()
-        .is_ok_and(|o| o.status.success());
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "true");
     if work_tree {
         assert!(
             is_repository_checkout(),

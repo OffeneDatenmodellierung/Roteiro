@@ -21,9 +21,11 @@
 //! yields a silent zero from either direction: the merged PR head contains the
 //! *fix* commits, and the obvious `merge-base main <sha>` yields an **empty
 //! diff** for every one of the 15 review commits, because each is an ancestor of
-//! `main` (it was 13 of 15 while three rows, on two commits, pinned objects a
-//! force-push had removed from the repository; #822 re-pinned them, so the count is
-//! now all of them).
+//! `main`. It used to be all but two, the exceptions being three rows on the two
+//! commits a force-push had removed from the repository; #822 re-pinned them, and
+//! the historical denominator is deliberately not quoted here, because the window
+//! has been 15, then 16, then 15 again and a number in prose beside a moving set is
+//! the drift this module documents elsewhere.
 //! [`fork_point`] implements the corrected recipe — find the merge that
 //! brought the branch in, and diff from its first parent's merge base — and
 //! `every_corpus_commit_reconstructs_a_diff_touching_its_anchor` holds it to every
@@ -1477,22 +1479,30 @@ mod tests {
     /// be changed with this; the last two are this module's own, because only these
     /// tests build a graph.
     #[derive(Debug, Clone, Copy)]
-    enum CannotRun {
+    enum CannotRun<'a> {
         NotAWorkTree,
         Shallow,
         NoMainRef,
-        NoObjectCache,
-        NoWorktreeGraph,
+        /// Carries the error, because the remedy below cites it.
+        NoObjectCache(&'a str),
+        /// Likewise.
+        NoWorktreeGraph(&'a str),
     }
 
-    impl CannotRun {
-        fn reason(self) -> &'static str {
+    impl CannotRun<'_> {
+        fn reason(self) -> String {
             match self {
-                Self::NotAWorkTree => "not a git work tree, or git could not be run here",
-                Self::Shallow => "shallow clone",
-                Self::NoMainRef => "neither origin/main nor main resolves here",
-                Self::NoObjectCache => "the repository's object cache could not be opened",
-                Self::NoWorktreeGraph => "the working-tree graph could not be assembled",
+                Self::NotAWorkTree => {
+                    "not a git work tree, or git could not be run here".to_owned()
+                }
+                Self::Shallow => "shallow clone".to_owned(),
+                Self::NoMainRef => "neither origin/main nor main resolves here".to_owned(),
+                Self::NoObjectCache(e) => {
+                    format!("the repository's object cache could not be opened ({e})")
+                }
+                Self::NoWorktreeGraph(e) => {
+                    format!("the working-tree graph could not be assembled ({e})")
+                }
             }
         }
 
@@ -1505,9 +1515,9 @@ mod tests {
                      main:refs/remotes/origin/main`) — unshallowing alone does not create \
                      that ref."
                 }
-                Self::NoObjectCache | Self::NoWorktreeGraph => {
-                    "This is a failure rather than a missing precondition: read the \
-                     error above it, because a checkout that cannot build its own graph \
+                Self::NoObjectCache(_) | Self::NoWorktreeGraph(_) => {
+                    "This is a failure rather than a missing precondition, and the \
+                     reason is quoted above: a checkout that cannot build its own graph \
                      cannot measure a reviewer either."
                 }
             }
@@ -1546,6 +1556,15 @@ mod tests {
         }
     }
 
+    /// What a skip withheld, for the tests that walk every corpus commit. Named
+    /// rather than written out at each call site, because the message is a claim
+    /// about what did not happen and two copies of a claim drift.
+    const GRAPH_AT_EVERY_CORPUS_COMMIT: &str = "The graph at every corpus commit";
+    /// The same, for the one test that compares the live surface with the replay and
+    /// reconstructs no corpus commit at all — the message used to tell it that
+    /// corpus commits went unreconstructed, which was simply not what it does.
+    const LIVE_VS_REPLAY_COMPARISON: &str = "The live-surface-versus-replay graph comparison";
+
     /// A skip that can be found in a log, written to **real** stderr — and **never
     /// taken on a runner**, where every one of these reasons is an environment
     /// defect rather than a property of the checkout.
@@ -1567,7 +1586,7 @@ mod tests {
     /// rule but the boundary of what the rule is about: a published tarball cannot
     /// contain this repository's history, so failing there would be our defect
     /// landing on somebody who did nothing wrong. See [`is_repository_checkout`].
-    fn loud_skip_unless_on_ci(test: &str, why: CannotRun) {
+    fn loud_skip_unless_on_ci(test: &str, why: CannotRun<'_>, unchecked: &str) {
         use std::io::Write;
 
         let on_ci =
@@ -1585,12 +1604,12 @@ mod tests {
         let mut err = std::io::stderr().lock();
         let _ = writeln!(
             err,
-            "SKIP: review_llm::tests::{test} — {}. None of the {} corpus commits were \
-             reconstructed. {} CI checks out with `fetch-depth: 0` in every job that \
-             runs tests (`.github/workflows/ci.yml`) and fails these tests rather \
-             than skipping them, so this line can only appear off a runner.",
+            "SKIP: review_llm::tests::{test} — {}. {unchecked} went unchecked. {} In a \
+             repository checkout on CI this is a failure rather than a skip \
+             (`.github/workflows/ci.yml` checks out with `fetch-depth: 0` in every \
+             job that runs tests), so on a runner this line means the crate is \
+             packaged.",
             why.reason(),
-            corpus_shas().len(),
             why.remedy()
         );
         let _ = err.flush();
@@ -1608,15 +1627,18 @@ mod tests {
     ///
     /// Returns `false` only off a runner; on one, a missing precondition panics —
     /// see [`loud_skip_unless_on_ci`].
-    fn history_available(repo: &Path, test: &str) -> bool {
+    fn history_available(repo: &Path, test: &str, unchecked: &str) -> bool {
+        // The **output**, not the exit status: `--is-inside-work-tree` exits 0 in a
+        // bare repository and prints `false`, so a status-only check calls a bare
+        // repo a work tree and then fails later for a reason it cannot explain.
         let ok = std::process::Command::new("git")
             .arg("-C")
             .arg(repo)
             .args(["rev-parse", "--is-inside-work-tree"])
             .output()
-            .is_ok_and(|o| o.status.success());
+            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "true");
         if !ok {
-            loud_skip_unless_on_ci(test, CannotRun::NotAWorkTree);
+            loud_skip_unless_on_ci(test, CannotRun::NotAWorkTree, unchecked);
             return false;
         }
         let shallow = std::process::Command::new("git")
@@ -1626,11 +1648,11 @@ mod tests {
             .output()
             .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "true");
         if shallow {
-            loud_skip_unless_on_ci(test, CannotRun::Shallow);
+            loud_skip_unless_on_ci(test, CannotRun::Shallow, unchecked);
             return false;
         }
         if main_ref(repo).is_err() {
-            loud_skip_unless_on_ci(test, CannotRun::NoMainRef);
+            loud_skip_unless_on_ci(test, CannotRun::NoMainRef, unchecked);
             return false;
         }
         true
@@ -1638,11 +1660,17 @@ mod tests {
 
     /// Open this repository and the shared, content-addressed object cache the
     /// per-commit graph builds hit.
-    fn graph_inputs() -> Option<(rto_graph::Repo, rto_graph::ObjectCache)> {
-        let repo = rto_graph::Repo::discover(&repo()).ok()?;
-        let cache =
-            rto_graph::ObjectCache::open(repo.common_dir().join("roteiro").join("objects")).ok()?;
-        Some((repo, cache))
+    /// **Carries its error rather than dropping it.** This used to end in `.ok()?`,
+    /// so a failure to open the repository or its cache arrived at the skip as a
+    /// bare `None` — and the skip then told the reader to "read the error above it",
+    /// which was not there. A diagnostic that promises evidence it discarded is the
+    /// same defect as a skip nobody can see.
+    fn graph_inputs() -> Result<(rto_graph::Repo, rto_graph::ObjectCache), String> {
+        let repo = rto_graph::Repo::discover(&repo())
+            .map_err(|e| format!("cannot discover the repository: {e}"))?;
+        let cache = rto_graph::ObjectCache::open(repo.common_dir().join("roteiro").join("objects"))
+            .map_err(|e| format!("cannot open the object cache: {e}"))?;
+        Ok((repo, cache))
     }
 
     /// **The graph arm must be built at the reviewed commit, not at `HEAD`.**
@@ -1662,15 +1690,20 @@ mod tests {
         if !history_available(
             &repo_path,
             "the_graph_arm_is_built_at_the_reviewed_commit_not_at_head",
+            GRAPH_AT_EVERY_CORPUS_COMMIT,
         ) {
             return;
         }
-        let Some((repo, cache)) = graph_inputs() else {
-            loud_skip_unless_on_ci(
-                "the_graph_arm_is_built_at_the_reviewed_commit_not_at_head",
-                CannotRun::NoObjectCache,
-            );
-            return;
+        let (repo, cache) = match graph_inputs() {
+            Ok(inputs) => inputs,
+            Err(why) => {
+                loud_skip_unless_on_ci(
+                    "the_graph_arm_is_built_at_the_reviewed_commit_not_at_head",
+                    CannotRun::NoObjectCache(&why),
+                    GRAPH_AT_EVERY_CORPUS_COMMIT,
+                );
+                return;
+            }
         };
         for sha in &corpus_shas() {
             let on_disk = std::process::Command::new("git")
@@ -1738,16 +1771,20 @@ mod tests {
         if !history_available(
             &repo_path,
             "the_live_surface_builds_the_same_graph_as_the_replay",
+            LIVE_VS_REPLAY_COMPARISON,
         ) {
             return;
         }
-        let Ok(store) = super::worktree_graph(&repo_path, rto_graph::IngestConfig::default())
-        else {
-            loud_skip_unless_on_ci(
-                "the_live_surface_builds_the_same_graph_as_the_replay",
-                CannotRun::NoWorktreeGraph,
-            );
-            return;
+        let store = match super::worktree_graph(&repo_path, rto_graph::IngestConfig::default()) {
+            Ok(store) => store,
+            Err(e) => {
+                loud_skip_unless_on_ci(
+                    "the_live_surface_builds_the_same_graph_as_the_replay",
+                    CannotRun::NoWorktreeGraph(&e.to_string()),
+                    LIVE_VS_REPLAY_COMPARISON,
+                );
+                return;
+            }
         };
         let on_disk = std::fs::read_dir(repo_path.join("docs/adr"))
             .expect("this repository has an ADR directory")
@@ -1805,15 +1842,20 @@ mod tests {
         if !history_available(
             &repo_path,
             "the_graph_arm_supplies_provenance_tagged_context_on_the_corpus",
+            GRAPH_AT_EVERY_CORPUS_COMMIT,
         ) {
             return;
         }
-        let Some((repo, cache)) = graph_inputs() else {
-            loud_skip_unless_on_ci(
-                "the_graph_arm_supplies_provenance_tagged_context_on_the_corpus",
-                CannotRun::NoObjectCache,
-            );
-            return;
+        let (repo, cache) = match graph_inputs() {
+            Ok(inputs) => inputs,
+            Err(why) => {
+                loud_skip_unless_on_ci(
+                    "the_graph_arm_supplies_provenance_tagged_context_on_the_corpus",
+                    CannotRun::NoObjectCache(&why),
+                    GRAPH_AT_EVERY_CORPUS_COMMIT,
+                );
+                return;
+            }
         };
         let main = main_ref(&repo_path).expect("checked above");
         let mut files_with_context = 0usize;
@@ -1903,6 +1945,7 @@ mod tests {
         if !history_available(
             &repo,
             "every_corpus_commit_reconstructs_a_diff_touching_its_anchor",
+            "The diff reconstruction at every corpus commit",
         ) {
             return;
         }
@@ -1960,6 +2003,7 @@ mod tests {
         if !history_available(
             &repo,
             "nothing_the_harness_skips_carries_an_adjudicated_row",
+            "The unreviewable-path check over every corpus commit",
         ) {
             return;
         }
@@ -2010,7 +2054,11 @@ mod tests {
     #[test]
     fn a_replay_covers_the_measured_number_of_files() {
         let repo = repo();
-        if !history_available(&repo, "a_replay_covers_the_measured_number_of_files") {
+        if !history_available(
+            &repo,
+            "a_replay_covers_the_measured_number_of_files",
+            "The measured replay window (commits, changed paths, reviewable paths)",
+        ) {
             return;
         }
         let main = main_ref(&repo).expect("checked above");

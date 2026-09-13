@@ -188,7 +188,10 @@ acceptance plus a tracked decision here, and follow #798 rather than this field.
 **Every false positive is a compile-failure claim, and every compile-failure
 claim is a false positive.** Read that off the table above: the
 `false-compile-claim` row is the only one with a non-zero `false` column, and its
-`real` column is zero. Every other row is real and was accepted and fixed.
+`real` column is zero. Every other row is real and was accepted — all but one of
+them fixed, the exception being `3789014471`, which is accepted and deferred to
+#798 rather than repaired (see the `fix_commit` note above). The suppression
+rule rests on the *false* column, so a deferred fix does not touch it.
 
 That is not a curiosity; it is a suppression rule with a measured cost of zero.
 CI already computes the refutation: the `msrv` job is
