@@ -933,15 +933,17 @@ fn stream_responses(
         if use_tools {
             match complete(&state, &req, &scope, &client_tools) {
                 Ok(outcome) if !outcome.client_tool_calls.is_empty() => {
+                    let finish = outcome.completion.finish_reason;
                     for call in tool_call_dtos(&outcome.client_tool_calls) {
                         for frame in writer.function_call(&call) {
                             let _ = tx.send(frame);
                         }
                     }
-                    let _ = tx.send(writer.completed(&usage_of(&outcome)));
+                    let _ = tx.send(writer.finish(&usage_of(&outcome), finish));
                 }
                 Ok(outcome) => {
                     let usage = usage_of(&outcome);
+                    let finish = outcome.completion.finish_reason;
                     let text = outcome.completion.content;
                     for frame in writer.message_start() {
                         let _ = tx.send(frame);
@@ -950,10 +952,10 @@ fn stream_responses(
                     // this path inherits from the tool loop, which has to run to
                     // completion before any of its output may be published.
                     let _ = tx.send(writer.text_delta(&text));
-                    for frame in writer.message_done(&text) {
+                    for frame in writer.message_done(&text, finish) {
                         let _ = tx.send(frame);
                     }
-                    let _ = tx.send(writer.completed(&usage));
+                    let _ = tx.send(writer.finish(&usage, finish));
                 }
                 Err(e) => {
                     let _ = tx.send(writer.failed(&e.to_string()));
@@ -987,14 +989,17 @@ fn stream_responses(
                             let _ = tx.send(frame);
                         }
                     }
-                    for frame in writer.message_done(&text) {
+                    for frame in writer.message_done(&text, usage.finish_reason) {
                         let _ = tx.send(frame);
                     }
-                    let _ = tx.send(writer.completed(&Usage {
-                        prompt_tokens: usage.prompt_tokens,
-                        completion_tokens: usage.completion_tokens,
-                        total_tokens: usage.prompt_tokens + usage.completion_tokens,
-                    }));
+                    let _ = tx.send(writer.finish(
+                        &Usage {
+                            prompt_tokens: usage.prompt_tokens,
+                            completion_tokens: usage.completion_tokens,
+                            total_tokens: usage.prompt_tokens + usage.completion_tokens,
+                        },
+                        usage.finish_reason,
+                    ));
                 }
                 Err(e) => {
                     let _ = tx.send(writer.failed(&e.to_string()));
@@ -3303,6 +3308,51 @@ mod tests {
                     && content == "<tool_response>20C</tool_response>"),
             "the client's result reaches the model as a `<tool_response>` user turn: {turns:?}"
         );
+    }
+
+    /// A generation the token budget cut short is **not** a completed one.
+    ///
+    /// The chat wire says so with `finish_reason: "length"`; this wire says so
+    /// with `response.incomplete` and an `incomplete_details.reason`. Reporting
+    /// `response.completed` would hand a client a truncated answer with nothing
+    /// on the wire to say it was truncated — the silent contradiction every
+    /// other refusal on this surface exists to prevent.
+    #[tokio::test]
+    async fn a_responses_turn_cut_at_the_token_cap_is_incomplete_not_completed() {
+        let engine = ReasoningEngine::in_pieces("a long answer that ran", 4, FinishReason::Length);
+        let resp = app(engine)
+            .oneshot(responses_body(&serde_json::json!({
+                "model": "echo", "stream": true, "input": "go on",
+                "max_output_tokens": 4,
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let sse = sse_text(resp).await;
+        let events = responses_events(&sse);
+        let kinds: Vec<&str> = events.iter().map(|(t, _)| t.as_str()).collect();
+        assert!(
+            kinds.contains(&"response.incomplete"),
+            "the terminal event names the truncation: {sse}"
+        );
+        assert!(
+            !kinds.contains(&"response.completed"),
+            "a truncated generation must not also claim to have completed: {sse}"
+        );
+        let terminal = &events
+            .iter()
+            .find(|(t, _)| t == "response.incomplete")
+            .expect("a terminal event")
+            .1["response"];
+        assert_eq!(terminal["status"], "incomplete");
+        assert_eq!(
+            terminal["incomplete_details"]["reason"],
+            "max_output_tokens"
+        );
+        // The item carries the same verdict, not a contradicting one.
+        assert_eq!(terminal["output"][0]["status"], "incomplete");
+        // And the text produced so far is still delivered — truncated, not lost.
+        assert_eq!(responses_content(&sse), "a long answer that ran");
     }
 
     #[tokio::test]

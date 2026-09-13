@@ -60,6 +60,7 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::engine::FinishReason;
 use crate::openai_params::{Forward, Mention, Param, Support};
 use crate::types::{
     ChatCompletionRequest, FunctionCallDto, FunctionSpec, Limits, MessageContent, NormalisedChat,
@@ -348,9 +349,15 @@ pub const RESPONSES_PARAMS: &[Param] = &[
     Param {
         name: "truncation",
         served_by: None,
-        note: "nothing is dropped from the middle of a conversation either way; an input larger than the context window is an error rather than a silent trim",
-        support: Support::Dropped,
-        inert: &[],
+        note: "",
+        support: Support::Rejected {
+            because: "`auto` asks the server to drop turns from the middle of the conversation so that an over-long input still answers, and nothing here does that — an input past the context window is refused, which is the exact failure `auto` was set to avoid",
+            forward: Forward::Do {
+                mentions: &[Mention::Parameter("input")],
+                prose: "Trim the conversation on your side and send the shortened `input`; only the caller knows which turns it can afford to lose.",
+            },
+        },
+        inert: &["\"disabled\""],
     },
     Param {
         name: "user",
@@ -443,7 +450,7 @@ fn message_text(content: Option<&Value>) -> Result<String, String> {
             let mut text = String::new();
             for part in parts {
                 let kind = part.get("type").and_then(Value::as_str).unwrap_or("");
-                if !matches!(kind, "input_text" | "output_text" | "text") {
+                if !matches!(kind, "input_text" | "output_text") {
                     return Err(format!(
                         "a message content part of type `{kind}` is not supported on this \
                          endpoint: only `input_text` and `output_text` parts are read, so \
@@ -451,7 +458,18 @@ fn message_text(content: Option<&Value>) -> Result<String, String> {
                          Send the part's information as text."
                     ));
                 }
-                let piece = part.get("text").and_then(Value::as_str).unwrap_or("");
+                // Refused rather than read as empty. A part whose `text` is
+                // missing or is not a string is part of the caller's prompt or
+                // tool result, and defaulting it to `""` would delete exactly
+                // that much of the conversation while still answering — the
+                // silent-drop failure this whole surface refuses by name.
+                let piece = part.get("text").and_then(Value::as_str).ok_or_else(|| {
+                    format!(
+                        "a `{kind}` content part must carry a string `text`, and this one \
+                         does not. Send the part's text as a string; reading it as empty \
+                         would drop part of the turn the model is answering from."
+                    )
+                })?;
                 if !text.is_empty() {
                     text.push('\n');
                 }
@@ -756,6 +774,27 @@ impl ResponseWriter {
         (name, data.to_string())
     }
 
+    /// The terminal event and response `status` one finish reason produces.
+    ///
+    /// **A generation cut at the token cap is not a completed one**, and saying
+    /// so is the whole of this function. OpenAI spells that `response.incomplete`
+    /// with an `incomplete_details.reason`, and the chat wire here already
+    /// spells it `finish_reason: "length"` — reporting `response.completed`
+    /// instead would hand a client a truncated answer with nothing on the wire
+    /// to say it was truncated, which is the silent-contradiction class the rest
+    /// of this module refuses by name.
+    ///
+    /// Measured rather than assumed, the same way the rest of the sequence was:
+    /// served from a mock to `codex-cli` 0.147.0, `response.incomplete` is
+    /// understood and surfaces as `Incomplete response returned, reason:
+    /// max_output_tokens` — a named error, not a wedged stream.
+    const fn terminal(finish: FinishReason) -> (&'static str, &'static str) {
+        match finish {
+            FinishReason::Stop => ("response.completed", "completed"),
+            FinishReason::Length => ("response.incomplete", "incomplete"),
+        }
+    }
+
     /// The `response` object every lifecycle event embeds.
     fn envelope(&self, status: &str, usage: Option<&crate::types::Usage>) -> Value {
         let mut response = json!({
@@ -832,15 +871,18 @@ impl ResponseWriter {
     }
 
     /// Close a `message` item with the text it accumulated, and record it in
-    /// the response's `output` so `response.completed` carries it.
-    pub fn message_done(&mut self, text: &str) -> Vec<Frame> {
+    /// the response's `output` so the terminal event carries it.
+    ///
+    /// The item's own `status` follows `finish`: a message cut at the token cap
+    /// is `incomplete`, matching the response status [`Self::terminal`] sets.
+    pub fn message_done(&mut self, text: &str, finish: FinishReason) -> Vec<Frame> {
         let item_id = format!("msg_{}_{}", self.id, self.output_index);
         let output_index = self.output_index;
         let part = json!({"type": "output_text", "text": text, "annotations": []});
         let item = json!({
             "id": item_id,
             "type": "message",
-            "status": "completed",
+            "status": Self::terminal(finish).1,
             "role": "assistant",
             "content": [part],
         });
@@ -927,10 +969,23 @@ impl ResponseWriter {
         vec![added, args_delta, args_done, item_done]
     }
 
-    /// `response.completed` — the event without which a client waits forever.
-    pub fn completed(&mut self, usage: &crate::types::Usage) -> Frame {
-        let response = self.envelope("completed", Some(usage));
-        self.frame("response.completed", json!({ "response": response }))
+    /// The terminal event — without one, a client waits forever.
+    ///
+    /// `response.completed` for a generation that stopped on its own, and
+    /// `response.incomplete` for one the token budget cut short. See
+    /// [`Self::terminal`].
+    pub fn finish(&mut self, usage: &crate::types::Usage, finish: FinishReason) -> Frame {
+        let (event, status) = Self::terminal(finish);
+        let mut response = self.envelope(status, Some(usage));
+        if finish == FinishReason::Length
+            && let Some(obj) = response.as_object_mut()
+        {
+            obj.insert(
+                "incomplete_details".to_owned(),
+                json!({"reason": "max_output_tokens"}),
+            );
+        }
+        self.frame(event, json!({ "response": response }))
     }
 
     /// `response.failed` — generation broke part-way.
@@ -1185,18 +1240,71 @@ mod tests {
         assert!(msg.contains("`input`"), "names the way forward: {msg}");
     }
 
-    /// The bookkeeping half of the rule: Codex sends all four of these on every
-    /// request, and none of them changes what comes back.
+    /// The bookkeeping half of the rule, against the real thing.
+    ///
+    /// This body is the top level of an actual `codex-cli` 0.147.0 request,
+    /// captured on the wire on 2026-09-13: five declared parameters
+    /// (`store`, `reasoning`, `include`, `prompt_cache_key`, `tool_choice`)
+    /// plus `parallel_tool_calls`, plus `client_metadata`, which is **not** an
+    /// OpenAI parameter at all and passes through on the unknown-key rule.
+    /// None of them changes what comes back, so none of them is refused —
+    /// otherwise every Codex turn would fail on a field nobody typed.
+    ///
+    /// Note what is *absent*: Codex does not send `truncation`, which is why
+    /// refusing it (it asks for a trimming this endpoint does not do) costs
+    /// this client nothing.
     #[test]
-    fn the_parameters_codex_always_sends_are_dropped_not_refused() {
+    fn the_parameters_codex_actually_sends_are_dropped_not_refused() {
         let body = json!({
             "model": "echo", "stream": true, "input": "hi",
             "store": false, "reasoning": {"effort": "none", "summary": "auto"},
             "include": ["reasoning.encrypted_content"],
-            "prompt_cache_key": "abc", "truncation": "auto",
+            "prompt_cache_key": "01a098c0-c98e-7f73-9a35-6e3d097437a1",
+            "tool_choice": "auto", "parallel_tool_calls": false,
             "client_metadata": {"turn_id": "t1"},
         });
         chat_of(body).expect("no refusal for bookkeeping parameters");
+    }
+
+    /// `truncation: "auto"` is a decision, not bookkeeping: it asks for turns to
+    /// be dropped so an over-long input still answers, and this endpoint refuses
+    /// such an input instead. `disabled` — the default, and what this endpoint
+    /// actually does — is inert.
+    #[test]
+    fn truncation_auto_is_refused_and_disabled_is_not() {
+        let msg = chat_of(json!({"model": "echo", "stream": true, "input": "hi",
+                                 "truncation": "auto"}))
+        .expect_err("a refusal");
+        assert!(msg.starts_with("`truncation` is not supported"), "{msg}");
+        chat_of(json!({"model": "echo", "stream": true, "input": "hi",
+                       "truncation": "disabled"}))
+        .expect("`disabled` is what this endpoint already does");
+    }
+
+    /// A supported part whose `text` is missing is refused, not read as `""`.
+    /// Reading it as empty would delete that much of the caller's prompt while
+    /// still answering.
+    #[test]
+    fn a_text_part_without_text_is_refused_rather_than_read_as_empty() {
+        let msg = chat_of(base(&json!([{
+            "type": "message", "role": "user",
+            "content": [{"type": "input_text"}],
+        }])))
+        .expect_err("a refusal");
+        assert!(msg.contains("string `text`"), "{msg}");
+    }
+
+    /// `text` is not a Responses content-part type; the refusal message and
+    /// `docs/SERVING.md` both name only `input_text` and `output_text`, so
+    /// accepting a third spelling would make all three disagree.
+    #[test]
+    fn a_part_type_of_text_is_refused_like_any_other_unknown_one() {
+        let msg = chat_of(base(&json!([{
+            "type": "message", "role": "user",
+            "content": [{"type": "text", "text": "hi"}],
+        }])))
+        .expect_err("a refusal");
+        assert!(msg.contains("`text`"), "{msg}");
     }
 
     /// `null` is never a decision — the same rule the chat table keys on.
@@ -1227,18 +1335,44 @@ mod tests {
 
     /// `docs/SERVING.md` publishes this table, so the document and the code are
     /// compared rather than trusted — the arrangement #488 put in place for the
-    /// chat table, for the same reason.
+    /// chat table, for the same reason and by the same method.
+    ///
+    /// **The generated block, not a substring.** `contains` would pass on a
+    /// document carrying an *extra* row, and an extra row is a published
+    /// capability that `check_declared` does not enforce — a client author
+    /// reading roteiro.dev/serving to find out what to send is the worst
+    /// possible audience for one. So the block is extracted whole and compared,
+    /// exactly as `openai_params::tests::the_published_table_is_this_table`
+    /// does.
     #[test]
     fn the_published_responses_table_is_this_table() {
-        let doc = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/SERVING.md"),
-        )
-        .expect("docs/SERVING.md");
-        assert!(
-            doc.contains(&published_table()),
-            "docs/SERVING.md's Responses parameter table is not the one in \
-             `responses::RESPONSES_PARAMS`; regenerate it with \
-             `cargo run -p rto-serve --example print_declared_table -- responses`"
+        let doc = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/SERVING.md");
+        let text = std::fs::read_to_string(&doc).expect("docs/SERVING.md");
+        let expected = published_table();
+        // The Responses table is the *second* table with this header; the chat
+        // one comes first. Anchored on the heading above it so the two cannot
+        // be confused as rows are added to either.
+        let section = text
+            .find("{#responses-api}")
+            .expect("docs/SERVING.md must publish the Responses section");
+        let header = expected.lines().next().expect("a header row");
+        let start = section
+            + text[section..]
+                .find(header)
+                .expect("the Responses section must publish the parameter table");
+        let published: String = text[start..]
+            .lines()
+            .take_while(|l| l.starts_with('|'))
+            .fold(String::new(), |mut acc, l| {
+                acc.push_str(l);
+                acc.push('\n');
+                acc
+            });
+        assert_eq!(
+            published, expected,
+            "the Responses parameter table in docs/SERVING.md has drifted from \
+             `responses::RESPONSES_PARAMS`; regenerate it with `cargo run -p \
+             rto-serve --example print_declared_table -- responses`"
         );
     }
 }

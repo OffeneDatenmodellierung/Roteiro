@@ -291,7 +291,8 @@ rather than ignored.
 
 | surface | status | why |
 |---|---|---|
-| `stream: true` | **supported** | the typed SSE event sequence, terminated by `response.completed` and then `data: [DONE]` |
+| `stream: true` | **supported** | the typed SSE event sequence, terminated by `response.completed` — or `response.incomplete` — and then `data: [DONE]` |
+| a generation cut short by `max_output_tokens` | **`response.incomplete`, not `response.completed`** | with `status: "incomplete"` and `incomplete_details.reason: "max_output_tokens"`, and the same verdict on the item. This is what the chat wire's `finish_reason: "length"` says on this wire; the text produced so far is still delivered, truncated rather than lost |
 | `stream: false`, or omitted | **400** | `stream` must be `true`: this endpoint serves the Responses API as a typed SSE event stream only, so a non-streaming request would have no body shape to return. Send `stream: true` and read `response.completed`, whose `response.output` carries exactly what a non-streaming body would have. |
 | `input` as a bare string, or as items of type `message`, `function_call`, `function_call_output` | **supported** | mapped onto the chat wire's turns — see below |
 | any other `input` item type — `reasoning`, `web_search_call`, `item_reference`, … | **400** | the item is named in the message. Dropping it silently would leave the model answering from a conversation it was never shown, and a replayed `reasoning` item is the likeliest case |
@@ -299,7 +300,7 @@ rather than ignored.
 | a message `role` other than `system` / `developer` / `user` / `assistant` | **400** | `developer` is mapped to `system`; an unrecognised role would be rendered *literally* into the prompt by the chat template, arriving as text rather than as a turn |
 | `instructions` | **supported** | mapped to a leading `system` turn |
 | a hosted tool — `web_search`, `code_interpreter`, … | **dropped** | Roteiro executes no hosted tool and never advertises one to the model, so the model cannot call it and no answer can be falsely attributed to it. **This diverges from the chat wire**, where a tool whose `type` is not `function` is a `400`: there, `tools` is function-only by construction and a `retrieval` entry is a mistake; here a hosted tool is a normal part of every request from a real client, and refusing it would fail every turn over a tool that was never going to be used |
-| `/v1/{project}/responses`, `/v1/workspaces/{ws}/responses` | **404** | scope parity is not built. A scoped Responses client should point at `/v1/{project}/chat/completions` for now; the seam these will reuse is the same `ChatScope` the chat routes already pass, not a second confinement mechanism (ADR-0008) |
+| `/v1/{project}/responses`, `/v1/workspaces/{ws}/responses` | **404** | scope parity is not built, and there is no substitute: `/v1/{project}/chat/completions` speaks the other wire — it takes `messages`, not `input` — so a Responses-native client cannot reach a scoped graph at all today. Until it lands, a scoped answer needs a server started in that project. The seam these routes will reuse is the same `ChatScope` the chat routes already pass, not a second confinement mechanism (ADR-0008) |
 
 ### A tool round trip, and why it is byte-identical to the chat one
 
@@ -328,7 +329,10 @@ than introducing it.
 
 `response.created` → `response.output_item.added` →
 (`response.output_text.delta` | `response.function_call_arguments.delta`) →
-`response.output_item.done` → `response.completed`, then `data: [DONE]`.
+`response.output_item.done` → `response.completed`, then `data: [DONE]`. A
+generation the token budget cut short ends on `response.incomplete` instead;
+`codex-cli` 0.147.0 was measured reading that event and reporting
+`Incomplete response returned, reason: max_output_tokens`.
 
 Which of those are load-bearing was **measured**, by serving each event set from
 a mock and running a real tool-using turn of `codex-cli` 0.147.0 against it,
@@ -381,7 +385,7 @@ chat key is.
 | `tools` | **supported** | `function` tools are advertised to the model and their calls returned, never run — bounded at 128 entries / 32 KiB. A hosted tool (`web_search`, `code_interpreter`, …) is dropped rather than refused; see the divergence table above |
 | `top_logprobs` | **400** | `top_logprobs` is not supported: no log probabilities are computed, so no alternatives come back at any position. This endpoint returns no log probabilities, and there is no flag that turns them on. |
 | `top_p` | **400** | `top_p` is not supported: nucleus sampling is not wired to the sampler, so the sampling you configured is not the sampling that ran. `temperature` is the one sampling control this endpoint honours. |
-| `truncation` | **dropped** | nothing is dropped from the middle of a conversation either way; an input larger than the context window is an error rather than a silent trim |
+| `truncation` | **400** | `truncation` is not supported: `auto` asks the server to drop turns from the middle of the conversation so that an over-long input still answers, and nothing here does that — an input past the context window is refused, which is the exact failure `auto` was set to avoid. Trim the conversation on your side and send the shortened `input`; only the caller knows which turns it can afford to lose. |
 | `user` | **dropped** | an end-user label for OpenAI's abuse tooling; a loopback server has no such tooling and the response is identical either way |
 
 ## Why the `tools` array is bounded
