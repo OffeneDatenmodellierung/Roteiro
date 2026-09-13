@@ -183,6 +183,7 @@ fn every_local_link_in_the_rendered_site_resolves() {
     );
 
     let mut broken = Vec::new();
+    let mut unknown = Vec::new();
     let mut checked = 0usize;
     for rel in &html {
         let text = std::fs::read_to_string(root.join(rel)).expect("read page");
@@ -190,12 +191,20 @@ fn every_local_link_in_the_rendered_site_resolves() {
             let rest = &text[i + 7..];
             let Some(end) = rest.find('"') else { continue };
             let href = rest[..end].replace("&amp;", "&");
-            // External and protocol-relative links are somebody else's uptime.
-            if href.starts_with("http://")
-                || href.starts_with("https://")
-                || href.starts_with("mailto:")
-                || href.starts_with("//")
-            {
+            // Offsite links are somebody else's uptime, and skipping them is
+            // an **allowlist** — see [`is_offsite`].
+            if is_offsite(&href) {
+                continue;
+            }
+            // A scheme this gate does not understand is reported, not resolved.
+            // Saying "no such file: javascript:alert(1)" would be true and
+            // useless; the point is that an executable href reached a page.
+            if let Some(scheme) = scheme_of(&href) {
+                unknown.push(format!(
+                    "{rel} -> {href}\n      (unrecognised URL scheme `{scheme}:` — \
+                     this gate only knows http, https, mailto and \
+                     protocol-relative)"
+                ));
                 continue;
             }
             checked += 1;
@@ -235,6 +244,17 @@ fn every_local_link_in_the_rendered_site_resolves() {
          in the rendered output:\n  {}",
         broken.join("\n  ")
     );
+    assert!(
+        unknown.is_empty(),
+        "the rendered site carries {} href(s) in a scheme this gate does not \
+         recognise. Two of those schemes are executable — `javascript:` and \
+         `data:` run in the reader's browser — so an unrecognised one is \
+         reported rather than waved through as \"external\". If a scheme here is \
+         legitimate, add it to `is_offsite`'s allowlist in the same change that \
+         introduces it, and say why:\n  {}",
+        unknown.len(),
+        unknown.join("\n  ")
+    );
     // The relation above is satisfiable by finding no links at all, so say how
     // much was actually resolved.
     assert!(
@@ -244,6 +264,51 @@ fn every_local_link_in_the_rendered_site_resolves() {
         html.len()
     );
     std::fs::remove_dir_all(&root).ok();
+}
+
+/// The scheme of `href`, lowercased, if it has one.
+///
+/// RFC 3986: a scheme is a letter followed by letters, digits, `+`, `-` or `.`,
+/// and it is **case-insensitive** — so `JavaScript:` is `javascript:` and must
+/// not slip past a comparison that forgot it.
+fn scheme_of(href: &str) -> Option<String> {
+    let (scheme, _) = href.split_once(':')?;
+    let mut chars = scheme.chars();
+    let valid = chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+    valid.then(|| scheme.to_ascii_lowercase())
+}
+
+/// Whether this gate may skip `href` because it points off this site.
+///
+/// # An allowlist, and deliberately **not** [`rto_graph::link_scope`]
+///
+/// The two answer different questions, and conflating them cost this gate a
+/// capability. `link_scope` asks "does this destination name something outside
+/// the repository?", and "anything shaped like an RFC 3986 scheme" is the right
+/// answer to *that* — it is why `rewrite_doc_link` stopped reading `tel:` and
+/// `ftp:` as repository-relative. This gate asks something narrower: "may I stop
+/// looking at this?" Answering it with `link_scope` meant every scheme was
+/// somebody else's problem, including the ones that execute.
+///
+/// Measured: with a `javascript:` and a `data:` href planted in a real site page,
+/// `main`'s four-prefix test fails naming both, and this gate — before this
+/// change — passed green. That is a capability this PR removed, so it is
+/// restored here rather than argued about. Raised in review on #806.
+///
+/// **Allowlist rather than a denylist of dangerous schemes**, because a denylist
+/// fails open on the next one: `vbscript:`, `blob:`, `filesystem:`, or whatever
+/// a browser ships in three years. This list is what the site actually emits
+/// (`https:`, 73 hrefs, and 777 local ones at the time of writing) plus the two
+/// more the previous gate allowed. Anything else fails the gate and a human
+/// decides, which is the direction that is safe to be wrong in.
+fn is_offsite(href: &str) -> bool {
+    let href = href.trim();
+    href.starts_with("//")
+        || matches!(
+            scheme_of(href).as_deref(),
+            Some("http" | "https" | "mailto")
+        )
 }
 
 /// `a/b/../c` → `a/c`, without touching the filesystem: the target need not
@@ -283,4 +348,64 @@ fn decoding_handles_non_ascii_and_malformed_escapes() {
     // A malformed escape is left alone rather than crashing the gate.
     assert_eq!(decode("100%"), "100%");
     assert_eq!(decode("%zz"), "%zz");
+}
+
+/// The gate skips only schemes it understands, and an executable one is never
+/// one of them.
+///
+/// This is the regression test for a capability #806 removed and restored.
+/// Classifying "anything shaped like an RFC 3986 scheme" as external — correct
+/// for [`rto_graph::link_scope`], whose question is whether a destination names
+/// something outside the repository — meant this gate stopped looking at eight
+/// scheme classes it used to check, `javascript:` and `data:` among them.
+/// Measured with both planted in a real site page: `main`'s gate failed naming
+/// them, and this one passed green.
+///
+/// Written as a table rather than left to the end-to-end path, because the
+/// end-to-end path cannot be committed: a page carrying `javascript:` in an
+/// href is the thing being guarded against, so it exists only as fault
+/// injection. Without this test the classification could be replaced by
+/// `link_scope` again and nothing would fail.
+#[test]
+fn the_gate_only_skips_schemes_it_understands() {
+    for href in [
+        "http://e.org/a",
+        "https://e.org/a",
+        "HTTPS://e.org/a",
+        "mailto:a@b.c",
+        "//e.org/a",
+    ] {
+        assert!(is_offsite(href), "{href} should be skipped as offsite");
+    }
+    // Executable, and the whole reason this is an allowlist.
+    for href in [
+        "javascript:alert(1)",
+        "JavaScript:alert(1)",
+        "data:text/html,<script>x</script>",
+        "vbscript:msgbox",
+        "blob:https://e.org/x",
+        "file:///etc/passwd",
+    ] {
+        assert!(
+            !is_offsite(href),
+            "{href} must reach the gate rather than be waved through as external"
+        );
+    }
+    // Schemes that are harmless but that this site does not emit are reported
+    // too: an allowlist is only safe if it stays one. If the site starts using
+    // one, it is added here in the same change.
+    for href in ["tel:+441234", "ftp://e.org/x"] {
+        assert!(!is_offsite(href), "{href} is not on the allowlist");
+    }
+    // A local path has no scheme at all and is resolved, not skipped.
+    for href in ["docs/x.html", "#anchor", "adr/0001.html", "a:b/c.html"] {
+        assert!(
+            !is_offsite(href),
+            "{href} should be resolved as a local target"
+        );
+    }
+    // The scheme reader itself, since the allowlist is only as good as it is.
+    assert_eq!(scheme_of("JavaScript:x").as_deref(), Some("javascript"));
+    assert_eq!(scheme_of("no-scheme/here.html"), None);
+    assert_eq!(scheme_of("9bad:x"), None);
 }

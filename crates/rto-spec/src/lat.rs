@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use rto_graph::{Edge, EdgeKind, FactSet, Node, NodeKind, Provenance};
 
 use crate::annotate::is_comment_line;
-use crate::text::{scan_wiki_links, slugify};
+use crate::text::{slugify, wiki_link_targets};
 
 /// `src_ref` stamped on every edge imported from lat.md, so it can be told apart
 /// from other `authored` edges (ADRs) and re-derived authoritatively on re-import.
@@ -126,7 +126,7 @@ pub fn scan_lat_annotations(rel_path: &str, text: &str) -> Vec<LatAnnotation> {
             continue;
         };
         let after = &stripped[pos + LAT_MARKER.len()..];
-        for reference in scan_wiki_links(after) {
+        for reference in wiki_link_targets(after) {
             out.push(LatAnnotation {
                 path: rel_path.to_owned(),
                 reference,
@@ -280,7 +280,7 @@ fn import_file(
         }
         // A link is attributed to the enclosing section, or the doc if none yet.
         let from = stack.last().map_or(doc.clone(), |(_, k)| k.clone());
-        for raw in scan_wiki_links(line) {
+        for raw in wiki_link_targets(line) {
             report.links_total += 1;
             if let Some((target, to_code)) = resolve_link(index, &raw) {
                 if to_code {

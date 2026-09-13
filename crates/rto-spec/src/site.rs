@@ -251,7 +251,7 @@ pub fn parse_site_page(rel_path: &str, text: &str) -> Result<SitePage, ParseErro
         if in_fence {
             continue;
         }
-        for raw in crate::text::scan_wiki_links(line) {
+        for raw in crate::text::wiki_link_targets(line) {
             let from = match current {
                 Some(slug) => format!("{key}#{slug}"),
                 None => key.clone(),
