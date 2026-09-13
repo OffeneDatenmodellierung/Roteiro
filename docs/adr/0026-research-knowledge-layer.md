@@ -11,7 +11,7 @@ architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "0.3"
+version: "0.4"
 last-modified: 2026-09-13
 confluence-url:
 ---
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | For Review |
 | **Architectural Significance** | HIGH |
 | **Domain** | Developer Tooling |
-| **Document version** | 0.3 |
+| **Document version** | 0.4 |
 | **Related** | [[docs/adr/0021-open-knowledge-format-bundle.md]] · [[docs/adr/0022-dynamic-okf-viewer.md]] · [[docs/adr/0025-document-extraction-consent.md]] · [[docs/adr/0019-remote-model-tier.md]] · [[docs/adr/0013-agent-memory-artifact-store.md]] |
 
 ## Reference
@@ -65,9 +65,15 @@ wiki/
 ```
 
 `okf-core` declares `RESERVED_FILENAMES: ["index.md", "log.md"]` — the same two
-files, with the same two meanings. That is not a coincidence worth ignoring: a
-knowledge base assembled from documents converges on a catalogue and a log, and
+**names**. That is not a coincidence worth ignoring: a knowledge base assembled
+from documents converges on a catalogue and a log, and
 [[docs/adr/0021-open-knowledge-format-bundle.md]] already standardises both.
+
+The **meanings** are not the same, and Resolved question 3 below settles the
+difference rather than inheriting it. The layout above is the reference pattern's,
+in which `log.md` is an append-only record of ingests; OKF §9 reserves the name
+for dated groups, and this ADR declines the append-only reading. Read the block
+above as *what the gist does*, not as what Roteiro adopts.
 
 **Most of the pipeline exists.** [[docs/adr/0025-document-extraction-consent.md]]
 decodes office documents and PDFs and screens the text it decodes; ADR-0005 and
@@ -250,10 +256,12 @@ The discriminator is **reviewed**, not **human**. ADR-0013 rejected `authored`
 for agent memory because memory is unreviewed and uncommitted, not because a
 model produced it; the same table rejects a `Provenance` variant for it outright
 on a second ground — *"memory has no source blob; it would break the
-pure-function-of-source promise"*. A `knowledge/` page under Option C is
-committed, diffed and reviewed before merge, and it **does** have a source blob.
-It passes both tests an ADR passes. So it is not merely tolerable as `authored`;
-it is the case `authored` describes.
+pure-function-of-source promise"*. A `knowledge/` page **as Option C defines it**
+is committed, diffed and reviewed before merge, and has a source blob. It would
+pass both tests an ADR passes. So it is not merely tolerable as `authored`; it is
+the case `authored` describes — and that is a statement about the layer this ADR
+proposes, which does not exist yet, rather than about anything in the tree
+today.
 
 **Why the human/model distinction is an actor question, not a class question.**
 The two axes are already separate in the format. `Provenance` decides a *trust
@@ -281,9 +289,13 @@ what **we can check** — *"They could re-derive it from their AST; we cannot,
 because we do not have their tree."* A peer's fact has no local source blob and
 no locally checkable tier, so the tier itself has to carry the qualifier or
 `origin_for` is forced onto one arm and launders by round-trip. A `knowledge/`
-page has a source blob in this repository, is drift-checked by `roteiro check`
-like any other authored file, and its tier is locally verifiable. Nothing about
-it is unavailable to us, so nothing about it needs to ride the tier.
+page would have a source blob in this repository and a locally verifiable tier,
+and — once step 2 of Implementation lands — **will be** drift-checked by
+`roteiro check` like any other authored file. (It is not today:
+[[crates/rto-spec/src/layer.rs]] classifies ADRs, blueprints, annotations and
+site pages, and has no `knowledge` arm. That is the work this resolution
+unblocks, not a property it can assume.) Nothing about such a page would be
+unavailable to us, so nothing about it needs to ride the tier.
 
 **The second candidate for the slot is separable, and already resolved the same
 way.** Issue #801 (bibliographic/citation records) is **closed**, and its own
@@ -336,15 +348,41 @@ also removes the constraint that made this question look forced.
 #### Why the mechanical argument no longer binds — and why it still matters
 
 v0.2 of this ADR resolved Q2 as *"`raw/` is committed, and ignored is not
-available"*, on a finding that is **correct and is retained**: extraction has
-exactly two sources of content, and an ignored file is in neither. Committed
-blobs come from the `HEAD` tree; new working-tree files come from a
-**gitignore-aware** dirwalk, and both call sites say so deliberately —
-[[crates/rto-graph/src/sync.rs]] `sync_worktree` and
-[[crates/rto-graph/src/git.rs#Repo]] `added_since_head`: *"an ignored file is
-absent from the dirwalk, so it enters only by being in the index — which takes a
-deliberate `git add -f` … the file will be committed regardless."* There is no
-third, non-git filesystem walk.
+available"*, and stated the mechanics as *"extraction has exactly two sources of
+content, and an ignored file is in neither"*. **That was wrong in two ways, and
+both corrections make the case for the exclusion stronger rather than weaker**
+(review of PR #816; measured 2026-09-13).
+
+**There are more than two sources, and the count was never the point.**
+[[crates/rto-graph/src/git.rs#GraphSource]] has three variants — `Committed`,
+`Worktree`, `Index` — and `rto-graph` exposes four entry points:
+[[crates/rto-graph/src/sync.rs#sync]] (the `HEAD` tree),
+[[crates/rto-graph/src/sync.rs#sync_worktree]] (`HEAD` plus a disk overlay),
+`sync_index` (the staged blobs, *"exactly what a commit would record"*) and
+`sync_tree` (an arbitrary revision). What is actually true, and is what the
+argument needed, is that **every one of them is git-mediated**: each reads a git
+tree or the index, plus a disk read for paths git already tracks. There is no
+non-git filesystem walk anywhere in extraction. Out-of-tree bytes are unreachable
+by every path, which is the finding that matters and is unaffected by the
+miscount.
+
+**`.gitignore` does not un-graph a file git already tracks — it is inert over
+tracked paths.** v0.2's *"an ignored file is in neither"* quoted a code comment
+scoped to the working-tree overlay and generalised it to the whole system. The
+comment is right about what it describes; the generalisation is not. Measured on
+a scratch repository:
+
+| case | `git check-ignore` | nodes? |
+|---|---|---|
+| `raw/` ignored from the start, never tracked | ignored | **no** |
+| `raw/paper.md` committed, `.gitignore` added afterwards | **reports it as *not* ignored** | **yes** |
+| `raw/paper.md` ignored, then `git add -f` (staged, uncommitted) | ignored | **yes** |
+
+The middle row is the one v0.2 missed, and it needs no `git add -f`: adding an
+ignore rule over a tracked path changes nothing at all, and git does not even
+consider the file ignored. So the retained half of the finding is narrower than
+v0.2 claimed — **an ignored file that git is not already tracking** yields no
+nodes — and the third row confirms the code comment exactly as written.
 
 That finding forced "committed" **only while `raw/` was expected to be scanned**.
 It said: if you want nodes from these files and the walk is your only way to get
@@ -358,10 +396,14 @@ choice rather than a forced one.
 rather than incidental.** A `raw/` that is merely *ignored* looks, from the
 outside, exactly like a `raw/` that is *excluded*: no nodes either way. The two
 are not the same, and the difference only shows up later. An ignored `raw/` is
-one `git add -f` — or one user who commits their corpus, as this decision
-explicitly permits — away from being scanned after all, at which point the
-duplicate nodes appear, the screen behaves differently, and nobody changed a
-setting. So the exclusion must be a **rule in the ingest configuration**, holding
+one `git add -f` away from being scanned after all — and, worse, a `raw/` that
+was **committed once and ignored afterwards** is being scanned *already*, because
+the ignore rule is inert over a tracked path. That is not a hypothetical
+sequence: it is precisely the journey this decision permits (a user commits their
+corpus) followed by the regret it anticipates (they think better of it and add an
+ignore rule). At that point the duplicate nodes are present, the screen is
+behaving differently from the ingest path, and nobody changed a setting — the
+user believes they opted out and the graph disagrees. So the exclusion must be a **rule in the ingest configuration**, holding
 for a committed `raw/` exactly as for an ignored one, and not a side effect of
 where the bytes happen to live.
 
@@ -370,9 +412,19 @@ ADR says so rather than implying it.** Under the default, a clone does not carry
 the sources its summaries were derived from. The property that *is* claimed
 remains true and is unaffected: `render okf` produces *"a shareable snapshot,
 whose whole value is being reproducible from a commit"*
-([[crates/roteiro/src/main.rs]]), and it stays reproducible from a commit because
-the bundle is a projection of `knowledge/` and the code graph, both of which are
-committed. What a clone cannot do is re-derive a summary from a source it does
+([[crates/roteiro/src/main.rs]]), and excluding `raw/` does not weaken it: the
+bundle projects `knowledge/` and the code graph, both committed.
+
+**One caveat, which predates this decision and is recorded rather than
+introduced.** "Reproducible from a commit" already holds only for the derived and
+authored layers. `build_graph` rebuilds those from the tree and then calls
+`store.reapply_imports()` for **persisted** import layers — Graphify, lat.md, a
+peer's OKF bundle — which live in the store rather than in the commit
+([[crates/roteiro/src/main.rs]]). Two clones at the same commit with different
+import histories therefore render different bundles today. That is a pre-existing
+property of the import layer, not a consequence of excluding `raw/`; it is noted
+here because this ADR leans on the reproducibility claim and should not overstate
+it. What a clone cannot do is re-derive a summary from a source it does
 not have — which is a different property, was never claimed, and must now
 **degrade honestly** rather than silently.
 
@@ -392,8 +444,9 @@ Two consequences follow, and they are requirements rather than observations:
   what the project already hashes — the `(path, blob id, bytes)` derivation basis
   — rather than inventing a second scheme.
 - **A `knowledge/` page whose source is absent must say so.** `roteiro check`
-  already treats a stale authored reference as drift, which is the mechanism;
-  what it needs is a manifest entry to resolve against. An absent source is a
+  already treats a stale reference as drift for the authored kinds it recognises,
+  which is the mechanism to extend; what it needs is a `knowledge` arm (it has
+  none today) and a manifest entry to resolve against. An absent source is a
   *known* absence, not an error — the distinction ADR-0021 draws between
   unverified and misattributed applies here too.
 
@@ -543,11 +596,15 @@ in the direction v0.1 named as the acceptable one:
 - `render_log` is a pure function of its arguments —
   *"Render `log.md` (§9): dated groups, newest first"*
   ([[crates/rto-render/src/okf.rs]]).
-- `assemble(concepts, title, log: &[LogDay])` writes `/log.md` on every render,
-  beside the indexes.
+- `assemble(concepts, title, log: &[LogDay])` takes the log as a parameter and
+  writes `/log.md` beside the indexes — but **conditionally**: the file is
+  appended only `if !log.is_empty()`.
 - **Both callers pass `&[]`** ([[crates/roteiro/src/main.rs]], the project and
-  workspace render paths), so every bundle Roteiro has ever published ships an
-  empty `# Update Log`.
+  workspace render paths), so **no bundle Roteiro has ever published contains a
+  `log.md` at all.** It is omitted, not emitted empty. (v0.3 of this ADR said it
+  ships an empty `# Update Log`; that was wrong, and the difference matters — an
+  absent reserved file is a bundle that never made the claim, where an empty one
+  would be a bundle asserting that nothing happened.)
 
 So there is no append-only file to reconcile and never was: the slot is wired,
 typed and derived-by-construction, and simply unfed. The open question was
@@ -559,12 +616,24 @@ bundle is.
 purpose.** ADR-0021 resolves a concept's `verified.at` to the commit that last
 changed that document's own path, *"rather than the render's"* — via
 [[crates/rto-graph/src/git.rs#Repo]] `last_authors` — precisely so the bundle
-carries no `SystemTime::now()`. The same per-concept `(date, author)` pair,
-grouped by date and rendered newest-first, is `log.md`. It costs no new state,
-no new command and no new file to maintain; it is byte-reproducible for the same
-reason the trust tiers are; and it makes the log say something true — *these
-concepts changed on this date* — rather than something a process promised to
-append to.
+carries no `SystemTime::now()`. That `(date, author)` pair, grouped by date and
+rendered newest-first, is `log.md`. It costs no new state, no new command and no
+new file to maintain; it is byte-reproducible for the same reason the trust tiers
+are; and it makes the log say something true — *these concepts changed on this
+date* — rather than something a process promised to append to.
+
+**The dates are per-concept only for the authored layer, and the log must say so
+rather than imply otherwise.** `authored_paths` filters to
+`Provenance::Authored` before the history walk ([[crates/roteiro/src/main.rs]]),
+deliberately — *"a derived symbol is confirmed by the tool, and looking up who
+last touched its file would answer a question nobody asked"*. Every other concept
+falls back to the render's `HEAD` commit time, so a log fed naively from all
+concepts would put nine thousand derived symbols in one undifferentiated group
+dated at `HEAD`, which says nothing. The determinism is unaffected — the fallback
+is a *commit* time, not `SystemTime::now()` — but the content would be noise. So
+`log.md` is a log of **authored-layer** change, `knowledge/` and ADRs included,
+which is both the only per-concept signal available and the only one a reader of
+a research bundle wants.
 
 **What is declined, explicitly.** An ingest log that records "this PDF was read
 at this time" is *not* derivable from a commit, because ingest time is not a
@@ -595,5 +664,6 @@ ingest half of that belongs in a service of its own.
 | Version | Date | Change |
 |---|---|---|
 | 0.1 | 2026-09-10 | Initial draft. Records a second knowledge source — documents rather than code — and the layer split that lets a model maintain a wiki without owning the bundle it renders into. Names the conflict that decides it: the OKF bundle is a projection, emptied on every render, while the pattern being followed requires the model to own the wiki outright. Resolves it by making the model maintain the **authored** layer instead, which is committed, diffed and drift-checked. Also settles the MCP question the same week's magpie work raised: the surface is read-only and narrow, because a skill driving the CLI beat fourteen advertised tools by 15,769 bytes at no loss of capability, and an ingest tool belongs in a separate upload service. Leaves three questions open rather than assuming them: a provenance class for model-authored content, whether `raw/` is committed, and what a reserved append-only `log.md` means inside a regenerated bundle. |
-| 0.2 | 2026-09-13 | **Answers all three open questions, two of them from evidence already in the tree.** (1) Model-authored content needs **no fourth provenance class**: v0.1's premise that `authored` means *human* is contradicted at the definition — `provenance.rs` says *"a human **or agent**"*, and ADR-0013, the precedent v0.1 pointed at, sets the test as *"deliberately wrote this in a **reviewed** file"*. ADR-0013 refused `authored` for agent memory because memory is unreviewed and has no source blob; a `knowledge/` page is reviewed and has one, so it passes both tests an ADR passes. The human/model distinction is an **actor** question, which OKF already separates from the tier via `generated.by` / `verified.by` — issue #799 is the render-path fix that makes it honest, and no schema, wire or Rust change is needed. The competing candidate for the same slot, issue #801's citation records, is **closed** having reached the same verdict independently: an extracted citation stays `derived`, *"no new provenance class"*. So ADR-0001 is unchanged in substance and amended only to record a **fourth** consecutive decline. The resolution binds its own precondition: `authored` carries +40 in `search`, so it is correct only while review is genuine. (2) `raw/` is **committed**, and "gitignored" was never available — extraction reads only `HEAD` blobs and a **gitignore-aware** overlay (`sync.rs` / `git.rs`: *"an ignored file is absent from the dirwalk, so it enters only by being in the index — which takes a deliberate `git add -f`"*), so an ignored `raw/` yields no nodes and the option disables the feature rather than storing it differently. Reproducibility-from-a-commit **is** claimed (`main.rs`: *"a shareable snapshot, whose whole value is being reproducible from a commit"*), which an out-of-tree corpus breaks. Out-of-line storage is **deferred, not rejected**, behind one narrower question named here: can `sync` resolve a blob from a committed manifest entry whose bytes are not in the object database, on the `prefetch`/`VENDORED_DEPENDENCIES.md` model? Copyright is a gate on ADR-0025's per-file consent, not a storage question, because ignoring a file answers nothing. (3) `log.md` is **derived and already implemented** — `render_log` is a pure function, `assemble` writes `/log.md` on every render, and both callers pass an empty slice, so every published bundle carries an empty log. The open question was what feeds it: the per-concept commit dates ADR-0021 already resolves for `verified.at` via `last_authors`, grouped by day. An ingest-time log is declined outright, being the `SystemTime::now()` non-determinism ADR-0021 refused. Also records that the live corpus this was framed against holds no `raw/` and no PDFs — the decision is being taken before several GB enter a history that cannot forget them. Status Draft → For Review. |
-| 0.3 | 2026-09-13 | **Q2 re-resolved on a maintainer decision** (issues #812, #813). `raw/` is **excluded from the standard scan** and reached by an explicit **ingest path**; without the exclusion a document is graphed twice — once as its `knowledge/` summary, which already links to the source, and once as the `raw/` file whose decoded text answers the same `search`. With no `file:` nodes coming from `raw/`, committed / untracked / ignored stops being forced and becomes a per-user choice with **local as the default** — the redistribution question stays with the person who kept the document, and the asymmetry that settles it is that opting in is reversible where opting out is not, because git history keeps the bytes. v0.2's mechanical finding is **retained and re-purposed rather than withdrawn**: extraction really does have only two sources and an ignored file is in neither, which forced "committed" *only while `raw/` was expected to be scanned*, and is now the reason the exclusion must be a **rule in the ingest configuration** rather than a side effect of where the bytes live — an ignored `raw/` and an excluded `raw/` are indistinguishable from outside, and one `git add -f` separates them. Reproducibility-from-the-repository-alone is explicitly **not** claimed; reproducibility-from-a-commit is unaffected, because the bundle projects `knowledge/` and the code graph, both committed. Adds three requirements the exclusion creates. **(a)** A committed manifest in every mode — identity, content hash, origin, access date, licence — so an absent source is *detectable rather than silent*, with hashes load-bearing and reusing the `(path, blob id, bytes)` basis. **(b)** Both symlink rules recorded together with the reason they oppose, because three refusals and one resolution otherwise read as drift: the scan's refusals (`collect_markdown`, `markdown_files` — *"a scope guarantee, not a security boundary"*, checking every path component — and the bundle walk) all guard a **repo-relative `file:` key** that a symlink falsifies silently, whereas the ingest path mints no such key, so there is nothing to falsify and following the link is the feature; a cycle bound and a recorded resolution are inherited regardless. **(c)** The ingest path **must screen explicitly**, because the screen is wired into the git-walk path at `extract.rs::decoded_content` (*"`admit` is the whole enforcement half"*) and excluding `raw/` removes it. The obligation is *larger* than what it replaces: a PDF in `raw/` loses a screen it gets today, and a markdown file never had one — ADR-0025's prose carve-out was measured over *"this repository's own 327 prose files"*, first-party content whose evidence does not transfer to a foreign corpus. #813's harder half is adopted as a condition: HTML-shaped concealment detection cannot see a PDF's vocabulary, so a `block` verdict — which needs concealment **and** direction — is unreachable in PDFs, and the outcome must be PDF-native detection or an explicit declaration of what was not checked. Out-of-line storage moves from plain deferral to **decided in principle, blocked in practice**, on the same narrower question #812 names independently, now paired with the manifest work. ADR-0025's per-file consent over an out-of-tree path is flagged as needing re-checking rather than assumed. Summary, Option C's layer table and Implementation step 1 corrected, all three having still described `raw/` as joining the roots extraction walks. |
+| 0.2 | 2026-09-13 | **Answers all three open questions, two of them from evidence already in the tree.** (1) Model-authored content needs **no fourth provenance class**: v0.1's premise that `authored` means *human* is contradicted at the definition — `provenance.rs` says *"a human **or agent**"*, and ADR-0013, the precedent v0.1 pointed at, sets the test as *"deliberately wrote this in a **reviewed** file"*. ADR-0013 refused `authored` for agent memory because memory is unreviewed and has no source blob; a `knowledge/` page is reviewed and has one, so it passes both tests an ADR passes. The human/model distinction is an **actor** question, which OKF already separates from the tier via `generated.by` / `verified.by` — issue #799 is the render-path fix that makes it honest, and no schema, wire or Rust change is needed. The competing candidate for the same slot, issue #801's citation records, is **closed** having reached the same verdict independently: an extracted citation stays `derived`, *"no new provenance class"*. So ADR-0001 is unchanged in substance and amended only to record a **fourth** consecutive decline. The resolution binds its own precondition: `authored` carries +40 in `search`, so it is correct only while review is genuine. (2) `raw/` is **committed**, and "gitignored" was never available, on the ground that an ignored `raw/` yields no nodes. *(v0.4 corrects the mechanics this rested on: there are more than two extraction sources, and `.gitignore` is inert over a path git already tracks. The narrower true claim is that an ignored file **git is not already tracking** yields no nodes. The resolution itself was superseded by v0.3.)* Reproducibility-from-a-commit **is** claimed (`main.rs`: *"a shareable snapshot, whose whole value is being reproducible from a commit"*), which an out-of-tree corpus breaks. Out-of-line storage is **deferred, not rejected**, behind one narrower question named here: can `sync` resolve a blob from a committed manifest entry whose bytes are not in the object database, on the `prefetch`/`VENDORED_DEPENDENCIES.md` model? Copyright was treated as a gate on ADR-0025's per-file consent. *(v0.4: that conflated two questions — ADR-0025's record governs whether a document is **extracted**, not whether it may be redistributed. The redistribution question is the user's, and v0.3 already dropped the claim from the body.)* (3) `log.md` is **derived and already implemented** — `render_log` is a pure function and both callers pass an empty slice. *(v0.4 corrects the consequence: `assemble` appends `/log.md` only `if !log.is_empty()`, so published bundles **omit** it rather than carrying an empty one.)* The open question was what feeds it: the per-concept commit dates ADR-0021 already resolves for `verified.at` via `last_authors`, grouped by day. An ingest-time log is declined outright, being the `SystemTime::now()` non-determinism ADR-0021 refused. Also records that the live corpus this was framed against holds no `raw/` and no PDFs — the decision is being taken before several GB enter a history that cannot forget them. Status Draft → For Review. |
+| 0.3 | 2026-09-13 | **Q2 re-resolved on a maintainer decision** (issues #812, #813). `raw/` is **excluded from the standard scan** and reached by an explicit **ingest path**; without the exclusion a document is graphed twice — once as its `knowledge/` summary, which already links to the source, and once as the `raw/` file whose decoded text answers the same `search`. With no `file:` nodes coming from `raw/`, committed / untracked / ignored stops being forced and becomes a per-user choice with **local as the default** — the redistribution question stays with the person who kept the document, and the asymmetry that settles it is that opting in is reversible where opting out is not, because git history keeps the bytes. v0.2's mechanical finding is **retained and re-purposed rather than withdrawn**: every extraction source is git-mediated and an ignored, untracked file reaches none of them, which forced "committed" *only while `raw/` was expected to be scanned*, and is now the reason the exclusion must be a **rule in the ingest configuration** rather than a side effect of where the bytes live — an ignored `raw/` and an excluded `raw/` are indistinguishable from outside, and one `git add -f` separates them. Reproducibility-from-the-repository-alone is explicitly **not** claimed; reproducibility-from-a-commit is unaffected, because the bundle projects `knowledge/` and the code graph, both committed. Adds three requirements the exclusion creates. **(a)** A committed manifest in every mode — identity, content hash, origin, access date, licence — so an absent source is *detectable rather than silent*, with hashes load-bearing and reusing the `(path, blob id, bytes)` basis. **(b)** Both symlink rules recorded together with the reason they oppose, because three refusals and one resolution otherwise read as drift: the scan's refusals (`collect_markdown`, `markdown_files` — *"a scope guarantee, not a security boundary"*, checking every path component — and the bundle walk) all guard a **repo-relative `file:` key** that a symlink falsifies silently, whereas the ingest path mints no such key, so there is nothing to falsify and following the link is the feature; a cycle bound and a recorded resolution are inherited regardless. **(c)** The ingest path **must screen explicitly**, because the screen is wired into the git-walk path at `extract.rs::decoded_content` (*"`admit` is the whole enforcement half"*) and excluding `raw/` removes it. The obligation is *larger* than what it replaces: a PDF in `raw/` loses a screen it gets today, and a markdown file never had one — ADR-0025's prose carve-out was measured over *"this repository's own 327 prose files"*, first-party content whose evidence does not transfer to a foreign corpus. #813's harder half is adopted as a condition: HTML-shaped concealment detection cannot see a PDF's vocabulary, so a `block` verdict — which needs concealment **and** direction — is unreachable in PDFs, and the outcome must be PDF-native detection or an explicit declaration of what was not checked. Out-of-line storage moves from plain deferral to **decided in principle, blocked in practice**, on the same narrower question #812 names independently, now paired with the manifest work. ADR-0025's per-file consent over an out-of-tree path is flagged as needing re-checking rather than assumed. Summary, Option C's layer table and Implementation step 1 corrected, all three having still described `raw/` as joining the roots extraction walks. |
+| 0.4 | 2026-09-13 | **Corrections from the PR #816 review round; no decision changes.** Four false statements about the code are fixed, two of them load-bearing. **(a) The Q2 mechanics were wrong twice, and both corrections strengthen the case for the exclusion.** v0.2 said *"extraction has exactly two sources of content, and an ignored file is in neither"*, retained in v0.3. There are more than two — [[crates/rto-graph/src/git.rs#GraphSource]] has `Committed`/`Worktree`/`Index` and `rto-graph` exposes `sync`, `sync_worktree`, `sync_index` and `sync_tree` — and the true property the argument needed is that **every source is git-mediated**, with no non-git filesystem walk anywhere, so out-of-tree bytes stay unreachable and the conclusion is untouched. Worse, **`.gitignore` is inert over a path git already tracks**: v0.2 quoted a code comment scoped to the working-tree overlay and generalised it. Measured on a scratch repository — ignored-and-never-tracked yields no nodes; **committed-then-ignored yields nodes and `git check-ignore` reports the file as *not* ignored**; force-added-and-staged yields nodes. The middle case needs no `git add -f`, and it is exactly the journey this ADR permits (a user commits their corpus) followed by the regret it anticipates (they add an ignore rule and believe they opted out while the graph disagrees) — so it is now the strongest argument that the exclusion must be a rule in the ingest configuration. **(b) `log.md` is omitted, not empty.** `assemble` appends it only `if !log.is_empty()` ([[crates/rto-render/src/okf.rs]]), so with both callers passing `&[]` no published bundle contains the file at all. An absent reserved file never made the claim; an empty one would assert that nothing happened. **(c) The per-concept date feed is authored-only.** `authored_paths` filters to `Provenance::Authored` before the history walk, deliberately, and every other concept falls back to the render's `HEAD` commit time — so a log fed from all concepts would put nine thousand derived symbols in one group dated at `HEAD`. Determinism is unaffected (a commit time, not `SystemTime::now()`); the content would be noise. `log.md` is therefore a log of authored-layer change. **(d) The reproducibility claim is narrowed.** "Reproducible from a commit" already holds only for the derived and authored layers: `build_graph` calls `store.reapply_imports()` for persisted Graphify/lat/OKF layers that live in the store rather than the commit, so two clones at one commit with different import histories already differ. Pre-existing, not caused by excluding `raw/`, recorded because this ADR leans on the claim. **Also:** a sweep for target state written in the present tense — issue #811's defect class (a document asserting what the code does not do), and worse in an ADR, which is the document people trust to describe what *is* — since `crates/rto-spec/src/layer.rs` has **no `knowledge` arm** and cannot drift-check a `knowledge/` page today; the internal contradiction where the context section called `log.md` *"the same two meanings"* as the gist's append-only ingest log, which Resolved question 3 declines; and corrections inside the (unmerged) 0.2 and 0.3 rows so no false code claim ships into `main`'s history. |
