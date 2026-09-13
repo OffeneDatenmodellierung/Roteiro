@@ -310,9 +310,19 @@ pub const RESPONSES_PARAMS: &[Param] = &[
     Param {
         name: "store",
         served_by: None,
-        note: "asks OpenAI to retain the response; Roteiro stores nothing and sends nothing anywhere, and the echoed value is always `false`",
-        support: Support::Dropped,
-        inert: &[],
+        note: "",
+        support: Support::Rejected {
+            because: "Roteiro retains nothing and sends nothing anywhere, so the response you asked to keep is gone the moment the stream ends and the id you were given addresses nothing",
+            forward: Forward::Do {
+                mentions: &[Mention::Parameter("input")],
+                prose: "Send `store: false` and keep the turns yourself, replaying them in `input`; that is the only conversation state this endpoint has.",
+            },
+        },
+        // `false` is both OpenAI's default and what this endpoint does, so a
+        // client library sending it has asked for exactly what it gets. Only
+        // `true` is a decision that would not be honoured — and the one real
+        // client measured here sends `false`.
+        inert: &["false"],
     },
     Param {
         name: "stream",
@@ -633,15 +643,40 @@ fn tool_spec(tool: &Value) -> Result<Option<ToolSpec>, String> {
         .get("name")
         .and_then(Value::as_str)
         .ok_or("a `function` tool must carry a string `name`. Responses spells a tool flat — `{\"type\":\"function\",\"name\":…,\"parameters\":…}` — rather than nesting it under a `function` key as Chat Completions does.")?;
+    // Read as raw JSON, so a malformed field has to be refused here rather than
+    // by serde. Dropping one would advertise a *different* tool to the model
+    // than the caller described — a tool with no description, or with no schema
+    // — and the call would come back looking like an answer to the tool that was
+    // sent. The chat wire gets this from its typed deserialisation; this wire
+    // has to say it.
+    let description = match tool.get("description") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(d)) => Some(d.clone()),
+        Some(other) => {
+            return Err(format!(
+                "tool `{name}` has a `description` that is not a string (`{other}`). \
+                 Send the description as a string, or omit it — dropping it would \
+                 advertise a tool the model knows less about than you described."
+            ));
+        }
+    };
+    let parameters = match tool.get("parameters") {
+        None | Some(Value::Null) => None,
+        Some(schema @ Value::Object(_)) => Some(schema.clone()),
+        Some(other) => {
+            return Err(format!(
+                "tool `{name}` has `parameters` that are not a JSON-Schema object \
+                 (`{other}`). Send an object with a `type` and `properties`, or omit \
+                 `parameters` for a tool that takes none."
+            ));
+        }
+    };
     Ok(Some(ToolSpec {
         kind: "function".to_owned(),
         function: FunctionSpec {
             name: name.to_owned(),
-            description: tool
-                .get("description")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            parameters: tool.get("parameters").cloned(),
+            description,
+            parameters,
         },
     }))
 }
@@ -1571,6 +1606,43 @@ mod tests {
             call_id.contains("correlates the call with its result"),
             "{call_id}"
         );
+    }
+
+    /// Retention is stateful, not bookkeeping: `store: true` asks for a response
+    /// to be kept and addressable, and nothing here keeps anything, so the id
+    /// the caller was handed would address nothing. `false` — the default, and
+    /// what this endpoint does — is inert, which is what the one measured client
+    /// sends.
+    #[test]
+    fn store_true_is_refused_and_store_false_is_not() {
+        let msg = chat_of(json!({"model": "echo", "stream": true, "input": "hi",
+                                 "store": true}))
+        .expect_err("a refusal");
+        assert!(msg.starts_with("`store` is not supported"), "{msg}");
+        chat_of(json!({"model": "echo", "stream": true, "input": "hi",
+                       "store": false}))
+        .expect("`false` is what this endpoint already does");
+    }
+
+    /// A malformed tool field is refused rather than dropped: dropping it would
+    /// advertise a tool the model knows less about than the caller described,
+    /// and the call would come back looking like an answer to the tool that was
+    /// sent. The chat wire gets this from its typed deserialisation.
+    #[test]
+    fn a_malformed_tool_description_or_schema_is_refused_not_dropped() {
+        for bad in [
+            json!({"type": "function", "name": "t", "description": 123}),
+            json!({"type": "function", "name": "t", "parameters": "an object, honest"}),
+        ] {
+            let msg = chat_of(json!({"model": "echo", "stream": true, "input": "hi",
+                                     "tools": [bad]}))
+            .expect_err("a refusal");
+            assert!(msg.contains("tool `t`"), "names the tool: {msg}");
+        }
+        // Omitting either is still fine — a tool may take no arguments.
+        chat_of(json!({"model": "echo", "stream": true, "input": "hi",
+                       "tools": [{"type": "function", "name": "t"}]}))
+        .expect("a tool may carry neither");
     }
 
     #[test]

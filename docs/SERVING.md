@@ -390,7 +390,7 @@ request schema on 2026-09-13 and cross-checked against a captured `codex-cli`
 | `reasoning` | **dropped** | a model's `<think>` block is stripped on every Roteiro surface and no `reasoning` item is ever emitted, so neither the effort nor the summary setting has anything to act on — see the divergence table above |
 | `safety_identifier` | **dropped** | an end-user label for OpenAI's abuse tooling; a loopback server has no such tooling and the response is identical either way |
 | `service_tier` | **dropped** | selects OpenAI's processing tier for latency and billing; there is one tier here and the output is unaffected |
-| `store` | **dropped** | asks OpenAI to retain the response; Roteiro stores nothing and sends nothing anywhere, and the echoed value is always `false` |
+| `store` | **400** | `store` is not supported: Roteiro retains nothing and sends nothing anywhere, so the response you asked to keep is gone the moment the stream ends and the id you were given addresses nothing. Send `store: false` and keep the turns yourself, replaying them in `input`; that is the only conversation state this endpoint has. |
 | `stream` | **supported** | the typed SSE event sequence; **`true` is the only value served** and `false` is a `400` — see the divergence table above |
 | `stream_options` | **dropped** | its one field, `include_obfuscation`, pads events against traffic analysis on a network this endpoint does not cross — it is bound to loopback, so the padding would defend nothing and its absence changes no field you can read |
 | `temperature` | **supported** | the one sampling control this endpoint honours; `0` (or omitted) is greedy |
