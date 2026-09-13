@@ -122,6 +122,19 @@ fn on_ci() -> bool {
     std::env::var_os("CI").is_some() || std::env::var_os("GITHUB_ACTIONS").is_some()
 }
 
+/// The manifest rule, as a pure function of the text — the half that can be tested
+/// against manifests this checkout does not contain.
+///
+/// **Both conditions are whole-line matches, and the second one is the interesting
+/// one.** A consumer that depends on Roteiro by git URL has our URL in its manifest,
+/// so a `contains` search would call their project ours and run our corpus gates on
+/// their CI. Matching the manifest's own `repository =` line tells "this is Roteiro"
+/// apart from "this uses Roteiro".
+fn manifest_is_ours(text: &str) -> bool {
+    text.lines().any(|line| line.trim() == "[workspace]")
+        && text.lines().any(|line| line.trim() == REPOSITORY_FIELD)
+}
+
 /// Whether this is **this repository's** checkout rather than a packaged crate.
 ///
 /// **The reason the CI rule below is not simply "never skip".** `rto-graph` is
@@ -143,10 +156,7 @@ fn on_ci() -> bool {
 fn is_repository_checkout() -> bool {
     let manifest = repo_root().join("Cargo.toml");
     match std::fs::read_to_string(&manifest) {
-        Ok(text) => {
-            text.lines().any(|line| line.trim() == "[workspace]")
-                && text.lines().any(|line| line.trim() == REPOSITORY_FIELD)
-        }
+        Ok(text) => manifest_is_ours(&text),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
         Err(e) => panic!(
             "cannot read {} ({:?}: {e}). Without it a guard cannot tell a packaged \\
@@ -226,6 +236,41 @@ fn history_or_loud_skip(test: &str, rows: usize) -> bool {
         return false;
     }
     true
+}
+
+/// **The manifest rule, held against manifests that are not ours.**
+///
+/// The real-checkout assertion below cannot catch a rule that is too *loose*: this
+/// repository satisfies a substring search just as well as a whole-line match, so
+/// reverting to `contains` would leave the suite green and put our corpus gates back
+/// on the CI of anyone who depends on Roteiro by git URL. These three inputs
+/// separate the two rules, and the second is the one that does it.
+#[test]
+fn the_manifest_rule_accepts_only_this_repository() {
+    let ours = std::fs::read_to_string(repo_root().join("Cargo.toml"))
+        .expect("this test runs from a checkout; the packaged case is covered below");
+    assert!(
+        manifest_is_ours(&ours),
+        "our own workspace manifest must qualify"
+    );
+
+    let consumer_depending_on_us = format!(
+        "[workspace]\nmembers = [\"app\"]\n\n[dependencies]\n\
+         rto-graph = {{ git = \"{}\" }}\n",
+        REPOSITORY_FIELD
+            .trim_start_matches("repository = ")
+            .trim_matches('"')
+    );
+    assert!(
+        !manifest_is_ours(&consumer_depending_on_us),
+        "a workspace that DEPENDS on Roteiro is not Roteiro; a substring search \
+         cannot tell those apart, which is why the rule matches whole lines"
+    );
+
+    assert!(
+        !manifest_is_ours("[workspace]\nmembers = [\"app\"]\n"),
+        "a plain consumer workspace is not this repository either"
+    );
 }
 
 /// **The exemption may not switch the rule off.** `is_repository_checkout()` is the
