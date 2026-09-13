@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.14.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v5.13.0...rto-serve-v5.14.0) - 2026-09-13
+
+### Added
+
+- *(serve)* add an OpenAI Responses surface at POST /v1/responses
+
+### Fixed
+
+- *(serve)* the streaming refusal named one terminal event, and a turn has two
+- *(serve)* a `namespace` groups function tools; stop dropping it
+- *(serve)* `store: true` is a decision, and a malformed tool field is refused
+- *(serve)* a `tools` array of only hosted tools is still a `tools` array
+- *(serve)* public docs must not link a private helper
+- *(serve)* refuse `conversation`, and bound `tools` before filtering
+- *(serve)* a truncated Responses turn is incomplete, not completed
+
+### Other
+
+- *(serve)* declare non-storage, and stop a refusal naming the wrong field
+
 ## [5.12.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v5.12.0...rto-serve-v5.12.1) - 2026-09-12
 
 ### Other
