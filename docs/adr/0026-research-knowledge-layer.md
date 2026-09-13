@@ -469,12 +469,17 @@ target is outside, so enumeration is not the whole story:
 |---|---|---|
 | `Committed` (`sync`) | the **git blob**, whose content is the target *path string* | **no** |
 | `sync_tree` (any revision) | the same, at that revision | **no** |
-| `Index` (`sync_index`) | the **staged blob object** | **no** |
+| `Index` (`sync_index`) | **nothing — the entry is skipped**, since `index_files` admits only `Mode::FILE \| FILE_EXECUTABLE` | **no** |
 | `Worktree` overlay | `std::fs::read` **follows** the link | **yes** |
 
 All four sources are listed deliberately: an exhaustive-looking matrix that quietly
 omitted one would be worse than an admittedly partial one, and `Index` is the
-source whose omission already forced one correction to this ADR.
+source whose omission already forced one correction to this ADR. Note the `Index`
+row reaches the same answer by a **different mechanism** from the tree rows — it
+never sees the entry at all, rather than seeing a blob that holds a path string
+([[crates/rto-graph/src/git.rs#Repo]] `index_files`). Same outcome, and worth
+distinguishing, because "resolves to the blob" would be a plausible-sounding
+guess that happens to be wrong.
 
 Measured both ways. Committing a symlink to a file outside the repository and
 running a committed sync stores no node for its content at all; doing the same
@@ -719,9 +724,16 @@ for any text input, PDF included.
 > directly, and no fixture drives a real PDF through `pdf_content` into it. It
 > plausibly depends on the document's font encoding — a `ToUnicode` CMap can
 > carry U+200B where a `WinAnsiEncoding` text stream cannot. **The test that
-> settles it is a PDF fixture containing a zero-width-obfuscated directive,
-> driven through `pdf_content` → `decoded_content`, asserting `Verdict::Block`**,
-> and it should be written before anyone relies on this paragraph. What is
+> settles it is a PDF fixture containing a zero-width-obfuscated directive**,
+> and it should be written before anyone relies on this paragraph. Note the
+> assertion has to be chosen with care: `decoded_content` returns the admitted
+> `String` and a list of finding *classes*, not a `Verdict`, so a test cannot
+> assert `Verdict::Block` through it without changing that signature. Two
+> writable forms, neither needing an API change — drive `pdf_content`'s output
+> into `screen_text` and assert the verdict there (which is precisely the
+> survival question), or drive the fixture through `decoded_content` and assert
+> it **admits nothing** while recording the directive class, which is the
+> enforcement the screen actually performs. What is
 > established is the negative: the presentation-shaped and PDF-native classes are
 > definitely not detected.
 
@@ -899,8 +911,11 @@ a research bundle wants.
 at this time" is *not* derivable from a commit, because ingest time is not a
 property of the tree. Two renders of one commit would disagree, which is the
 `SystemTime::now()` defect ADR-0021 already refused. If an ingest record is
-wanted, it is a committed artifact in `raw/` or `knowledge/`, and `log.md`
-reflects *its* commits like any other authored file. ADR-0025's per-file consent
+wanted, it is a committed artifact in **`knowledge/`** — not `raw/`, which this
+ADR excludes from the scan, so a file there becomes no concept at all and
+`authored_paths` would never see it, leaving `log.md` unable to reflect the very
+record that was meant to feed it. Placed in `knowledge/`, it is an authored file
+like any other and `log.md` reflects its commits. ADR-0025's per-file consent
 record is the natural **shape** for it — it already records a per-file decision —
 but not, today, the carrier: consent is persisted as a row in the local
 `graph.db` ([[crates/rto-graph/src/okf_consent.rs]]), which no clone shares and
