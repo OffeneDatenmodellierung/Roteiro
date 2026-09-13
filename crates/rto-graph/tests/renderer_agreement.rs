@@ -17,6 +17,35 @@
 //! check as a table instead: every shape runs through both readers, and the
 //! answers must match unless this file says why not.
 //!
+//! # What this compares, and the one thing it must not
+//!
+//! `rto_render::docs` does **not** hand a line straight to `pulldown-cmark`. It
+//! runs `rewrite_wiki_links` first, which replaces every `[[…]]` with either an
+//! ADR link or an inline code span. A line with no `[[…]]` reaches the parser
+//! byte-identical, so raw `pulldown-cmark` *is* the renderer for it — and that is
+//! the only kind of line this file may hold.
+//!
+//! It held two that were not, until #806's seventh round: `[[a]](target)` and
+//! `![[a]](target)` were both marked `Agrees`, and both were agreement about a
+//! pipeline that never runs. Measured against the real one, by rendering them in
+//! a site page:
+//!
+//! ```text
+//! [[a]](target)   ->  <code>a</code>(target)      no link at all
+//! ![[a]](target)  ->  !<code>a</code>(target)     no image, no link
+//! ```
+//!
+//! Raw `pulldown-cmark` reports a link and an image respectively, so the table
+//! was comparing two readers that both disagree with what the site emits, and
+//! calling it agreement. The scanner is not wrong there — reporting the inline
+//! link *and* the wiki-link is its documented contract, and `roteiro check`
+//! counts the wiki half — but this file is the wrong oracle for it.
+//! `markdown_links_parity.rs` is the right one: it holds the wiki half against
+//! a frozen copy of the scanner the gate used to use, over every `.md` and `.rs`
+//! in the tree. The cases are pinned as scanner behaviour in `text.rs`'s
+//! `an_image_whose_alt_text_is_a_wiki_token_is_still_an_image` and
+//! `an_inline_link_may_enclose_a_wiki_link`.
+//!
 //! # The list is two-sided on purpose
 //!
 //! A case marked [`Verdict::Diverges`] must **still** diverge. A test that only
@@ -105,6 +134,35 @@ const SWALLOWED: &str = "a backtick inside a link's destination or title is not 
      link between them. Zero instances in this repository across 210,005 lines, \
      and the wiki half matches the scanner this replaced exactly";
 
+/// The fourth reason: a link nested inside another link's label.
+///
+/// `CommonMark` parses a label's contents as inlines, so an image inside a link
+/// label is *both* — and where two links nest, the **inner** one wins and the
+/// outer `[…]` is literal text. This scanner matches brackets by depth and
+/// reports the outer one, which is the reading `heading_text` and the renderer's
+/// wiki splice both want: they reduce or rewrite a whole link, and an inner
+/// range nested inside an outer one is what makes a splice slice backwards.
+///
+/// Three shapes, one rule: `[a ![b](img.png)](page.md)` and
+/// `[![b](img.png)](page.md)` lose the image, and `[a [b](x.md)](page.md)` gets
+/// a *different* answer — the renderer reports `x.md`, this reports `page.md`.
+///
+/// **Recorded rather than fixed, and measured first**, the same way the
+/// swallowed-link shape was. Scanning every `.md` and `.rs` in the tree — 326
+/// files, 210,155 lines — for a line where the scanner reports fewer inline
+/// links than the renderer, with nested `](`, finds **four**, and all four are
+/// Rust string literals inside this repository's own tests: two entries in the
+/// table below, one assertion in `doc_anchor_fragments.rs`, and a scratch probe.
+/// **No document contains one.** No production caller reads an inline `target`
+/// yet either — `docs.rs` takes wiki-links only. Changing the nesting rule would
+/// change what `heading_text` reduces and what the wiki splice may assume, which
+/// is a decision for #801's citation phase rather than a review round. Raised in
+/// review on #806.
+const NESTED: &str = "a link nested in another link's label: `CommonMark` gives \
+     an inner image or link its own event and lets the inner one win, while this \
+     matches brackets by depth and reports the outer link — which is what a \
+     splicing caller needs. Zero instances in any document in this repository";
+
 /// The second reason.
 ///
 /// Pre-existing, and deliberately left: it belongs to #801's citation phase.
@@ -137,6 +195,12 @@ fn cases() -> Vec<(&'static str, Verdict)> {
         ("[a](x`y.md) then [b](z.md)", Agrees),
         ("see [a](`q`) and [b](z.md)", Agrees),
         ("![i](i.png) then [b](z.md)", Agrees),
+        // -- a link nested inside another link's label --------------------
+        ("[a ![b](img.png)](page.md)", Diverges(NESTED)),
+        ("[![b](img.png)](page.md)", Diverges(NESTED)),
+        ("[a [b](x.md)](page.md)", Diverges(NESTED)),
+        // A nested `[…]` that is *not* a link is just label text, and agrees.
+        ("[see [x]](y.md)", Agrees),
         // …and the shape where a code span reaches across two of them.
         ("[a](x`y) and [b](z`w)", Diverges(SWALLOWED)),
         (
@@ -200,9 +264,34 @@ fn cases() -> Vec<(&'static str, Verdict)> {
         ("\\![a](b)", Agrees),
         ("\\[not a link](x)", Agrees),
         ("[see [x]](y)", Agrees),
-        ("[[a]](target)", Agrees),
-        ("![[a]](target)", Agrees),
+        // No case here may contain `[[…]]` — see `every_case_is_a_line_the_renderer_parses_raw`.
     ]
+}
+
+/// No case may contain `[[…]]`, because raw `pulldown-cmark` is not the
+/// renderer for such a line.
+///
+/// The renderer rewrites wiki-links before parsing, so a `[[…]]` case here
+/// compares against a pipeline that never runs — which is how two of them sat in
+/// this table marked `Agrees` while the site emitted no link at all. This is a
+/// structural guard rather than a note, because a note is what failed. See the
+/// module docs for the measurement and for where those cases live now.
+#[test]
+fn every_case_is_a_line_the_renderer_parses_raw() {
+    let wiki: Vec<_> = cases()
+        .into_iter()
+        .map(|(line, _)| line)
+        .filter(|line| line.contains("[["))
+        .collect();
+    assert!(
+        wiki.is_empty(),
+        "these case(s) contain `[[…]]`, which `rto_render::docs` rewrites before \
+         `pulldown-cmark` ever sees it — so comparing against raw \
+         `pulldown-cmark` here proves nothing about what the site renders. Pin \
+         wiki behaviour in `markdown_links_parity.rs` (frozen oracle, whole \
+         tree) or as scanner behaviour in `text.rs` instead:\n  {}",
+        wiki.join("\n  ")
+    );
 }
 
 #[test]

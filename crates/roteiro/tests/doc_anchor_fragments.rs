@@ -362,10 +362,20 @@ fn anchor_links(doc: &DocLine<'_>) -> Vec<AnchorLink> {
 
     // A reference definition is the whole line, so its target runs to the end;
     // mid-sentence `]:` is prose and never a link.
+    //
+    // The `]:` has to be the **first** `]`, which is the label's own close: a
+    // definition's label cannot contain an unescaped `]`. Scanning the whole
+    // line for `]:` instead found one inside a link title, so
+    // `[x](self#real "a ]: self#fake")` reported the real anchor *and* a
+    // fabricated `fake")` — a fragment matching no heading, which is a false
+    // failure from a guard rather than a missed one. This file's own docs say
+    // why that is the worse direction: a gate that cries wolf is the one that
+    // gets switched off. Raised in review on #806.
     let stripped = without_code_spans(doc.text);
     let trimmed = stripped.trim_start();
-    if trimmed.starts_with('[')
-        && let Some((_, target)) = trimmed.split_once("]:")
+    if let Some(rest) = trimmed.strip_prefix('[')
+        && let Some(close) = rest.find(']')
+        && let Some(target) = rest[close + 1..].strip_prefix(':')
     {
         push(target.trim(), &mut found);
     }
@@ -848,6 +858,12 @@ fn an_anchor_is_read_by_the_one_scanner() {
     assert_eq!(anchors("[x]: self#paging"), paging);
     // A reference definition mid-sentence is prose, not a definition.
     assert_eq!(anchors("see [x]: self#paging"), vec![]);
+    // And a `]:` inside a link title is title text, not a definition. Scanning
+    // the whole line for `]:` invented a second anchor here.
+    assert_eq!(
+        anchors(r#"[x](self#real "a ]: self#fake")"#),
+        vec![("real".to_owned(), true)]
+    );
     assert_eq!(
         anchors("See [a](self#one) and [b](self#two)"),
         vec![("one".to_owned(), true), ("two".to_owned(), true)]
