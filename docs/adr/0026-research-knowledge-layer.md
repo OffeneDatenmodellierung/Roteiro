@@ -40,8 +40,12 @@ Roteiro reads code and produces a knowledge graph. This adds a second source of
 knowledge — **documents somebody chose to keep** — and a second kind of concept:
 research notes an LLM writes and maintains from them.
 
-Three decisions, none of them yet built — this is a `For Review` ADR and the
-whole of what follows describes a target state. A `raw/` source root **would be
+Three decisions. This is a `For Review` ADR: the `raw/` root and the
+`knowledge/` layer are unbuilt, and the MCP surface exists but its **narrowing**
+is not done, so what follows describes a target state throughout. It is written
+in the present tense of the mechanism it proposes, because that is the only tense
+in which a mechanism can be argued; read every such passage as *would*, and the
+passages that report what the code does today say so explicitly. A `raw/` source root **would be
 added and excluded** from the walk extraction already performs, reached instead
 by an explicit ingest path under the consent rule
 [[docs/adr/0025-document-extraction-consent.md]] set — so that a document **would
@@ -713,13 +717,31 @@ by this ADR's own layer split, a model's restatement re-entering as prose:
    third-party markdown document in `raw/` must not inherit it — the ingest path
    screens what it ingests regardless of format, which is a **widening** of
    today's rule rather than a re-wiring of it.
-2. **PDF concealment must be honest about its coverage.** Either PDF-native
-   detection, or the existing screen **plus an explicit declaration naming what
-   was not checked** — specifically that the presentation-shaped and PDF-native
-   concealment classes are undetected, and that the invisible-codepoint class is
-   covered *by the screen* but **unverified end-to-end through PDF extraction**
-   (see the qualification above). Declaring it simply "covered" would overstate
-   the evidence this ADR actually has.
+2. **PDF concealment must be honest about its coverage, in two named places.**
+   Either PDF-native detection, or the existing screen **plus an explicit
+   declaration naming what was not checked** — specifically that the
+   presentation-shaped and PDF-native concealment classes are undetected, and
+   that the invisible-codepoint class is covered *by the screen* but
+   **unverified end-to-end through PDF extraction** (see the qualification
+   above). Declaring it simply "covered" would overstate the evidence this ADR
+   actually has.
+
+   **Where it must appear, because a requirement a code comment can discharge is
+   not a requirement.** The declaration is owed in **both**:
+
+   - **the ingest command's own output, on the run that accepts the document** —
+     per accepted document, not once at start-up and not behind a verbosity
+     flag, so the person admitting a file cannot avoid reading what the screen
+     did not check; and
+   - **`docs/`**, so the statement is durable, reviewable and citable rather
+     than surviving only in a terminal scrollback.
+
+   A source comment discharges neither. The two surfaces are chosen to fail
+   differently: the first is unavoidable but ephemeral, the second durable but
+   easy never to open, and only a reader who meets both is reliably informed.
+   This is deliberately stronger than #813's *"visible to the user of the upload
+   path"*, which a sufficiently literal implementation could satisfy without any
+   user ever seeing it.
 3. **The distilled output must be screened too, and this is the one the layer
    split creates.** Screening `raw/` at ingest does not cover `knowledge/`.
    The distillation step this ADR proposes — the `ModelTask::Distil` variant
