@@ -881,18 +881,21 @@ fn write_config(home: &IsolatedHome, workspaces: &[(&str, &Path)]) {
     use std::fmt::Write as _;
     let mut toml = String::new();
     for (name, root) in workspaces {
-        // A basic string with its two special characters escaped, rather than
-        // either quoting style used raw. A *basic* string left unescaped breaks
-        // on Windows, where `Path::display()` yields `C:\\Users\\…` and `\\U`
-        // is not a valid escape; a *literal* string cannot represent an
-        // apostrophe, and `std::env::temp_dir()` is rooted wherever the
-        // environment says — `/tmp/o'brien/…` is a legal home for it. Escaping
-        // assumes nothing about either.
+        // An escaped basic string, rather than either quoting style used raw. A
+        // *basic* string left unescaped breaks on Windows, where
+        // `Path::display()` yields `C:\\Users\\…` and `\\U` is not a valid
+        // escape; a *literal* string cannot represent an apostrophe, and
+        // `std::env::temp_dir()` is rooted wherever the environment says, so
+        // `/tmp/o'brien/…` is a legal home for it. Escaping assumes nothing
+        // about either — see `toml_escape`, which also handles the control
+        // characters a basic string rejects.
         //
-        // The failure this avoids is quiet, which is why it is worth the two
-        // lines: an unparseable config makes `resolved_workspaces` yield nothing,
-        // so every config-backed cell takes the *no-config* path and the truth
-        // table goes green while testing the wrong half of itself.
+        // The failure is loud, not silent: `config::load` treats malformed TOML
+        // as a hard error and never a silent partial parse
+        // (`crates/roteiro/src/config.rs:2143-2144`), so the child exits with a
+        // parse error and the cells fail rather than quietly falling back to the
+        // no-config path. Measured: under `TMPDIR=/private/tmp/o'brien dir/` a
+        // literal-string version failed 7 of the 12 tests here.
         let _ = write!(
             toml,
             "[[workspaces]]\nname = \"{name}\"\nroots = [\"{}\"]\n\n",
@@ -902,13 +905,34 @@ fn write_config(home: &IsolatedHome, workspaces: &[(&str, &Path)]) {
     std::fs::write(home.path().join("config.toml"), toml).expect("write config.toml");
 }
 
-/// Escape a value for a TOML **basic** string: backslash first, then the quote.
+/// Escape a value for a TOML **basic** string.
 ///
-/// Only those two, deliberately — every other character a path can hold is legal
-/// unescaped, and a broader escape would be guessing at a grammar this only needs
-/// two rules of.
+/// Backslash and quote are the obvious two. The rest are not decoration: a basic
+/// string also rejects raw control characters other than tab, and Unix permits
+/// any byte but `/` and NUL in a directory name — so a `temp_dir()` containing a
+/// newline is unusual, not impossible, and "unusual" is the assumption this
+/// helper exists to stop making.
 fn toml_escape(raw: &str) -> String {
-    raw.replace('\\', "\\\\").replace('"', "\\\"")
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            // Everything else TOML calls a control character, in the `\uXXXX`
+            // form the grammar names for exactly this.
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                let _ = write!(out, "\\u{:04X}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// The smallest thing `okf_mounts` will admit: a directory holding an
@@ -1124,6 +1148,16 @@ fn run_refusing(
                     Err(RecvTimeoutError::Timeout) => {}
                 }
             }
+            // Re-checked after draining, not only before: the lines that arrive
+            // between the last poll and the exit are exactly the ones a
+            // start-then-exit would be hiding in, and accepting that as a refusal
+            // is the contract failing quietly.
+            assert!(
+                !stderr.contains(" listening on http://"),
+                "`roteiro {args:?}` was expected to refuse, and it STARTED A \
+                 SERVER before exiting {status:?}. If that is the fix, this test \
+                 is the changelog entry for it.\n{stderr}"
+            );
             return (status, stderr);
         }
         assert!(
@@ -1296,11 +1330,41 @@ fn between(haystack: &str, open: &str, close: &str) -> String {
 }
 
 /// Undo the viewer's HTML escaping, so a label or a path compares as written.
+///
+/// **One pass, not a chain of `replace`.** The viewer encodes `&` first, so a
+/// path that genuinely contains the text `&lt;` reaches the page as `&amp;lt;`;
+/// decoding `&amp;` and then `&lt;` turns it into `<` and reports a mismatch
+/// against a path that was never wrong. Scanning once and consuming each entity
+/// whole cannot re-read its own output.
 #[cfg(feature = "okf-viewer")]
 fn unescape(s: &str) -> String {
-    s.replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
+    const ENTITIES: &[(&str, char)] = &[
+        ("&amp;", '&'),
+        ("&lt;", '<'),
+        ("&gt;", '>'),
+        ("&quot;", '"'),
+        ("&#39;", '\''),
+    ];
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    'outer: while !rest.is_empty() {
+        let Some(i) = rest.find('&') else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..i]);
+        rest = &rest[i..];
+        for (entity, decoded) in ENTITIES {
+            if let Some(tail) = rest.strip_prefix(entity) {
+                out.push(*decoded);
+                rest = tail;
+                continue 'outer;
+            }
+        }
+        // A bare `&` the viewer did not write: pass it through and move past it,
+        // so the scan always advances.
+        out.push('&');
+        rest = &rest[1..];
+    }
+    out
 }
