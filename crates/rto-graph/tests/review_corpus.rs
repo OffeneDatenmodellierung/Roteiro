@@ -28,7 +28,7 @@
 //! `docs/REVIEW_CHECKLIST.md` for the adjudication rule that decides a verdict.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use rto_graph::review_corpus::{COMPLETE_THROUGH_PR, Corpus, DefectClass, Verdict};
 
@@ -153,8 +153,8 @@ fn manifest_is_ours(text: &str) -> bool {
 /// `NotFound` means "packaged"**: collapsing every IO error into that would turn
 /// "cannot read the repository" into "this is not a repository", which is the same
 /// vacuity one level up.
-fn is_repository_checkout() -> bool {
-    let manifest = repo_root().join("Cargo.toml");
+fn is_repository_checkout(root: &Path) -> bool {
+    let manifest = root.join("Cargo.toml");
     match std::fs::read_to_string(&manifest) {
         Ok(text) => manifest_is_ours(&text),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
@@ -196,7 +196,7 @@ fn is_repository_checkout() -> bool {
 /// must not read as one.
 fn loud_skip_unless_on_ci(test: &str, why: NoHistory, rows: usize) {
     assert!(
-        !on_ci() || !is_repository_checkout(),
+        !on_ci() || !is_repository_checkout(&repo_root()),
         "{test} cannot run on CI: {}. These tests are the corpus's only gate and \
          must not be skipped in a checkout — `.github/workflows/ci.yml` checks out \
          with `fetch-depth: 0` in every job that runs tests, so fix the environment \
@@ -247,12 +247,18 @@ fn history_or_loud_skip(test: &str, rows: usize) -> bool {
 /// separate the two rules, and the second is the one that does it.
 #[test]
 fn the_manifest_rule_accepts_only_this_repository() {
-    let ours = std::fs::read_to_string(repo_root().join("Cargo.toml"))
-        .expect("this test runs from a checkout; the packaged case is covered below");
-    assert!(
-        manifest_is_ours(&ours),
-        "our own workspace manifest must qualify"
-    );
+    // Read, never `expect`: this test ships inside the published crate, where the
+    // workspace manifest is absent by design. A packaged run checks the three
+    // synthetic cases below — which are the rule — and says nothing about a file it
+    // was never going to have.
+    match std::fs::read_to_string(repo_root().join("Cargo.toml")) {
+        Ok(ours) => assert!(
+            manifest_is_ours(&ours),
+            "our own workspace manifest must qualify"
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => panic!("cannot read our own workspace manifest: {e}"),
+    }
 
     let consumer_depending_on_us = format!(
         "[workspace]\nmembers = [\"app\"]\n\n[dependencies]\n\
@@ -271,9 +277,20 @@ fn the_manifest_rule_accepts_only_this_repository() {
         !manifest_is_ours("[workspace]\nmembers = [\"app\"]\n"),
         "a plain consumer workspace is not this repository either"
     );
+
+    // The fourth case lives in the IO half rather than in the rule: no manifest at
+    // all is what an unpacked crate looks like, and it must read as "packaged"
+    // rather than as an error.
+    let empty = std::env::temp_dir().join(format!("roteiro-no-manifest-{}", std::process::id()));
+    std::fs::create_dir_all(&empty).expect("create an empty directory");
+    assert!(
+        !is_repository_checkout(&empty),
+        "a directory with no manifest is a packaged crate, not this repository"
+    );
+    std::fs::remove_dir_all(&empty).ok();
 }
 
-/// **The exemption may not switch the rule off.** `is_repository_checkout()` is the
+/// **The exemption may not switch the rule off.** `is_repository_checkout(&repo_root())` is the
 /// one thing that can make a CI run skip these gates, so a marker that read `false`
 /// in a real checkout would restore #822 in full and say nothing.
 ///
@@ -307,7 +324,7 @@ fn the_package_exemption_cannot_claim_a_real_checkout() {
         .exists();
     if work_tree && our_layout {
         assert!(
-            is_repository_checkout(),
+            is_repository_checkout(&repo_root()),
             "git reports a work tree at {} but the package marker says this is a \
              packaged crate. That combination would let every CI run skip the corpus \
              gates silently — which is exactly #822 — so the marker, not this \

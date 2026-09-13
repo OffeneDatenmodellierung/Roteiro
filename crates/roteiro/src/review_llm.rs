@@ -1714,12 +1714,18 @@ mod tests {
     /// gates back on the CI of anyone who depends on Roteiro by git URL.
     #[test]
     fn the_manifest_rule_accepts_only_this_repository() {
-        let ours = std::fs::read_to_string(repo().join("Cargo.toml"))
-            .expect("this test runs from a checkout; the packaged case is covered below");
-        assert!(
-            manifest_is_ours(&ours),
-            "our own workspace manifest must qualify"
-        );
+        // Read, never `expect`: this module ships inside the published crate, where
+        // the workspace manifest is absent by design. A packaged run checks the
+        // three synthetic cases below — which are the rule — and says nothing about
+        // a file it was never going to have.
+        match std::fs::read_to_string(repo().join("Cargo.toml")) {
+            Ok(ours) => assert!(
+                manifest_is_ours(&ours),
+                "our own workspace manifest must qualify"
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => panic!("cannot read our own workspace manifest: {e}"),
+        }
 
         let url = REPOSITORY_FIELD
             .trim_start_matches("repository = ")
@@ -1738,6 +1744,18 @@ mod tests {
             !manifest_is_ours("[workspace]\nmembers = [\"app\"]\n"),
             "a plain consumer workspace is not this repository either"
         );
+
+        // The fourth case lives in the IO half rather than in the rule: no manifest
+        // at all is what an unpacked crate looks like, and it must read as
+        // "packaged" rather than as an error.
+        let empty =
+            std::env::temp_dir().join(format!("roteiro-no-manifest-llm-{}", std::process::id()));
+        std::fs::create_dir_all(&empty).expect("create an empty directory");
+        assert!(
+            !is_repository_checkout(&empty),
+            "a directory with no manifest is a packaged crate, not this repository"
+        );
+        std::fs::remove_dir_all(&empty).ok();
     }
 
     /// **The exemption may not switch the rule off** — the twin of
