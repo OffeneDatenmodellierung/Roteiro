@@ -284,23 +284,26 @@ and there is more than one enumeration, none of which currently matches the code
 |---|---|
 | [[crates/rto-graph/src/provenance.rs#Provenance]] | "an ADR, blueprint, or annotation" |
 | [[crates/rto-graph/src/model.rs#Node]] `provenance` | "ADR/blueprint/lat sections" |
-| [[crates/rto-render/src/okf.rs]] module table | "ADR and blueprint prose" — the narrowest of the three |
+| [[crates/rto-render/src/okf.rs]] module table | "ADR and blueprint prose" — the narrowest |
+| [[docs/adr/0021-open-knowledge-format-bundle.md]] provenance→tier table | "ADR and blueprint prose" — **a governing ADR**, so leaving it stale contradicts the decision, not just a comment |
 | **the code** | those, plus `site_page` **and `site_section`** ([[crates/rto-spec/src/site.rs]]), and imported `lat` docs ([[crates/rto-spec/src/lat.rs]]) |
 
-Three prose lists, no two of them agreeing, and a fourth, wider, actual usage.
+Four prose lists, no two of them agreeing, and a fifth, wider, actual usage.
 So `knowledge/` is not being added to a tidy set of three — it is the occasion to
-fix an enumeration that had already fallen behind three times. **That is a
+fix an enumeration that had already fallen behind four times. **That is a
 documentation debt this ADR inherits rather than creates**, and naming it here is
 the point: an implementation that adds a `layer.rs` arm and updates only
 `provenance.rs` leaves two other lists contradicting it, which is how the drift
 accumulated in the first place. None of this is a variant change, so the
-vocabulary cost stands as stated — but it is **four edits, not one**.
+vocabulary cost stands as stated — but it is **five edits, not one**, and one of
+them is an amendment to ADR-0021 rather than a doc comment.
 
-> Recorded because it happened here too: the first version of this table listed
-> three sites and named only `site_page`, and review found both the missing
-> fourth list and the missing `site_section`. An inventory written specifically
-> to stop a partial update was itself partial, twice. Treat the table as the
-> known minimum and grep `Provenance::Authored` before relying on it.
+> Recorded because it happened here too, three times: the first version of this
+> table listed three sites and named only `site_page`; review then found a fourth
+> list, the missing `site_section`, and finally ADR-0021's own mapping table. An
+> inventory written specifically to stop a partial update was itself partial at
+> every revision. **Treat the table as a known minimum, not a closed set**, and
+> grep `Provenance::Authored` before relying on it.
 
 A `knowledge/` page **as Option C defines it**
 is committed, diffed and reviewed before merge, and has a source blob. It would
@@ -407,7 +410,8 @@ cost is larger than a `layer.rs` arm, and this ADR states it rather than letting
 a reader infer a one-line change. Step 2 needs, at minimum:
 
 - a **`layer.rs` arm**, so the page is recognised as authored input at all;
-- the **`Authored` enumeration reconciled** across the four sites above;
+- the **`Authored` enumeration reconciled** across the five sites above, one of
+  which is a governing ADR;
 - a **`section_for` arm** — [[crates/rto-render/src/okf.rs#section_for]] routes
   every unrecognised kind to `symbols` (`_ => "symbols"`), so without one a
   research note lands in the symbol directory rather than the `knowledge/`
@@ -896,13 +900,15 @@ free and two conforming implementations would emit different bundles — which t
 determinism this whole ADR rests on does not permit, and which `okf diff` would
 report as a change that no commit explains. The tiebreak is therefore specified
 here rather than left to the implementer: **days descending by date; within a
-day, entries ascending by concept key.** The key is unique by construction, so
-that is a total order, and it is the same principle `assemble` already applies
+day, entries ascending by **member-qualified** concept key.** Plain key is not
+enough: `assemble` scopes identity by workspace member, so *"the same key in two
+members is two concepts"* ([[crates/rto-render/src/okf.rs]]) and `file:README.md`
+can legitimately appear twice. Qualified by member the order is total, and it is the same principle `assemble` already applies
 when it settles filename collisions where the whole set is visible.
 
 **The entry payload needs specifying for the same reason**, since `render_log`
 takes preformatted strings and would otherwise accept any of them: an entry is
-`**Update**: <title> (<key>)`, one per changed concept, with the title escaped as
+`**Update**: <title> (<member-qualified key>)`, one per changed concept, with the title escaped as
 frontmatter scalars already are — a raw newline in a heading must not be able to
 start a new list item. Ordering alone does not make a render reproducible if two
 implementations can disagree about what they are ordering. It costs no
@@ -910,6 +916,21 @@ new state, no new command and no
 new file to maintain; it is byte-reproducible for the same reason the trust tiers
 are; and it makes the log say something true — *these concepts changed on this
 date* — rather than something a process promised to append to.
+
+**Two preconditions the feed inherits, both from ADR-0021's own attribution
+path.** First, `last_authors` is **history-dependent, not a function of the
+rendered commit alone**: at a shallow boundary a commit's parents are absent, so
+ADR-0021 records that the concept confirms nothing and *"the workflow that
+publishes the bundle asks for full history so the published artifact is
+attributed rather than blank"*. A `log.md` fed from it is reproducible **given
+full history**, and blank without it — the same precondition the trust tiers
+already carry, so it is inherited rather than new, but it must be stated because
+"a function of the graph at the rendered commit" is not quite true of it. Second,
+the attribution map is looked up **by path, without re-checking provenance**
+(`r.authors.get(p)`, [[crates/roteiro/src/main.rs]]), so a *derived* concept
+sharing an authored document's path picks up that document's author rather than
+falling back. The fallback below is therefore the common case, not a universal
+one.
 
 **The dates are per-concept only for the authored layer, and the log must say so
 rather than imply otherwise.** `authored_paths` filters to
