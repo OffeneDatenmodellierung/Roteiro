@@ -1061,6 +1061,29 @@ enum Command {
         /// address is warned about (no auth — front it with a reverse proxy).
         #[arg(long, value_name = "ADDR")]
         addr: Option<String>,
+        /// What to serve (issue #810). **Default: `here`** — this directory's
+        /// repository and its OKF bundle, whatever config says about workspaces.
+        ///
+        /// `here` — this directory's repository (and its bundle). The default.
+        ///
+        /// `all` — every configured workspace. The default *before* this flag
+        /// existed, and the one scope `--workspace <ROOT>` extends.
+        ///
+        /// `workspace <NAME>` — one configured workspace, and only it. Unlike
+        /// `-w`, this narrows what is hosted rather than choosing a default.
+        ///
+        /// `bundle <PATH>` — one OKF bundle, ours or somebody else's, and
+        /// nothing else (ADR-0022 v1.4). No graph, so no explorer app.
+        ///
+        /// Also settable once, for a server that cannot be passed a flag, as
+        /// `[serve] scope` in config — same words, one string.
+        ///
+        /// Additive: it does not change what `--workspace <ROOT>` or
+        /// `--workspace-name` mean, and a combination that contradicts it is a
+        /// startup error rather than a silently chosen winner. `--scope project`
+        /// is deferred and refused by name.
+        #[arg(long, value_name = "SCOPE", num_args = 1..=2)]
+        scope: Vec<String>,
         /// Terminate TLS in-process using this PEM certificate-chain file (paired
         /// with `--tls-key`). Overrides `[serve] tls_cert`. Set both `--tls-cert`
         /// and `--tls-key` for HTTPS, or neither for plain HTTP; setting only one
@@ -1201,6 +1224,29 @@ enum Command {
         /// with a reverse proxy.
         #[arg(long, value_name = "ADDR")]
         addr: Option<String>,
+        /// What to serve (issue #810). **Default: `here`** — this directory's
+        /// repository and its OKF bundle, whatever config says about workspaces.
+        ///
+        /// `here` — this directory's repository (and its bundle). The default.
+        ///
+        /// `all` — every configured workspace. The default *before* this flag
+        /// existed, and the one scope `--workspace <ROOT>` extends.
+        ///
+        /// `workspace <NAME>` — one configured workspace, and only it. Unlike
+        /// `-w`, this narrows what is hosted rather than choosing a default.
+        ///
+        /// `bundle <PATH>` — one OKF bundle, ours or somebody else's, and
+        /// nothing else (ADR-0022 v1.4). No graph, so no explorer app.
+        ///
+        /// Also settable once, for a server that cannot be passed a flag, as
+        /// `[serve] scope` in config — same words, one string.
+        ///
+        /// Additive: it does not change what `--workspace <ROOT>` or
+        /// `--workspace-name` mean, and a combination that contradicts it is a
+        /// startup error rather than a silently chosen winner. `--scope project`
+        /// is deferred and refused by name.
+        #[arg(long, value_name = "SCOPE", num_args = 1..=2)]
+        scope: Vec<String>,
         /// The workspace the flat `/v1/graph/*` routes operate on. Default: the
         /// sole configured workspace, else the one containing the current repo.
         /// Nested `/v1/graph/workspaces/{ws}/…` routes always address a workspace
@@ -2557,6 +2603,7 @@ fn main() -> anyhow::Result<()> {
             models,
             http,
             addr,
+            scope,
             tls_cert,
             tls_key,
             workspace,
@@ -2596,6 +2643,14 @@ fn main() -> anyhow::Result<()> {
             &workspace,
             workspace_name.as_deref(),
             sync_on_access,
+            // Resolved here, beside the MCP surface and the remote grant, and for
+            // the same reason (issue #810). See `resolve_serve_scope`.
+            &resolve_serve_scope(
+                &cfg.effective,
+                &scope,
+                &workspace,
+                workspace_name.as_deref(),
+            )?,
         ),
         #[cfg(any(feature = "mcp", feature = "serve"))]
         Command::Mcp {
@@ -2616,8 +2671,15 @@ fn main() -> anyhow::Result<()> {
         #[cfg(feature = "explorer")]
         Command::Explorer {
             addr,
+            scope,
             workspace_name,
-        } => run_explorer(&cfg.effective, addr, workspace_name.as_deref()),
+        } => {
+            // `explorer` has no `--workspace <ROOT>`, so the only flag a scope can
+            // contradict here is `-w`.
+            let scope =
+                resolve_serve_scope(&cfg.effective, &scope, &[], workspace_name.as_deref())?;
+            run_explorer(&cfg.effective, addr, workspace_name.as_deref(), &scope)
+        }
     }
 }
 
@@ -2852,6 +2914,19 @@ fn print_config_sections(loaded: &config::Loaded) {
         "  addr   = {:?}  ({})",
         e.serve.addr,
         source(p.serve.addr.is_some(), u.serve.addr.is_some())
+    );
+    // Reported for the reason `max_context_tokens` below is: an operator who set
+    // this for a service manager comes here to check it took (issue #810). The
+    // *unset* case is spelled out rather than printed as `None`, because the
+    // built-in is a decision — `here`, the current directory's repository — and
+    // `None` would read as "no scope", which is not a mode this server has.
+    println!(
+        "  scope  = {}  ({})",
+        e.serve.scope.as_deref().map_or_else(
+            || "unset — `here` (this directory's repository)".to_owned(),
+            |s| format!("{s:?}")
+        ),
+        source(p.serve.scope.is_some(), u.serve.scope.is_some())
     );
     println!(
         "  models = {:?}  ({})",
@@ -13406,13 +13481,36 @@ fn run_explorer(
     cfg: &config::Config,
     addr: Option<String>,
     workspace_name: Option<&str>,
+    scope: &ResolvedScope,
 ) -> anyhow::Result<()> {
     use std::sync::Arc;
 
-    // Build the workspace set from config (ADR-0008). When no workspace is
-    // configured (the common single-repo case), fall back to hosting the current
-    // directory's repo alone, so `roteiro explorer` "just works" with no config.
-    let resolved = cfg.resolved_workspaces()?;
+    // Resolved before anything is built, and unconditionally, so a malformed
+    // workspace list is still a hard error under a scope that will not read it.
+    let configured = cfg.resolved_workspaces()?;
+    // The changed-default notice (issue #810): config defines workspaces, nothing
+    // asked for a scope, so this server is about to host the current directory.
+    if let Some(note) = scope_default_notice(
+        scope,
+        &configured
+            .iter()
+            .map(|r| r.name.clone())
+            .collect::<Vec<_>>(),
+    ) {
+        eprintln!("{note}");
+    }
+    let Some(ws_scope) = scope.scope.workspaces() else {
+        // `--scope bundle <PATH>`: one bundle, wherever it is — including from
+        // inside a repository, which no existing means could reach.
+        return serve_bundle_scope(cfg, &scope.scope, addr);
+    };
+
+    // Build the workspace set from config (ADR-0008), as the scope selects it.
+    // `here` reads no workspace list at all and falls back to hosting the current
+    // directory's repo alone — which is exactly what `roteiro explorer` did with
+    // no config before this flag existed, now the default rather than the
+    // consequence of an absent file.
+    let resolved = scoped_workspaces(cfg, &ws_scope)?;
     let from_config = !resolved.is_empty();
     let set = if from_config {
         rto_graph::WorkspaceSet::from_resolved(resolved.clone())?
@@ -13422,16 +13520,31 @@ fn run_explorer(
             // Not a repository. Before serving nothing, ask whether this is a
             // *bundle* directory — that is the `roteiro okf view <path>` case,
             // and it is the whole reason that command could be retired (ADR-0022
-            // v1.2). Only when there is no config either: a configured set that
-            // failed is a fault to report, not a cue to serve something else.
+            // v1.2). Kept under `here` as well as under an unconfigured `all`:
+            // `here` is "this directory's repo **and its bundle**", and a bundle
+            // with no repository around it is one of its four cases.
             Err(no_repo) => {
                 #[cfg(feature = "okf-viewer")]
                 {
                     let mounts =
                         okf_mounts(&rto_graph::WorkspaceSet::from_workspaces(std::iter::empty()));
                     if !mounts.is_empty() {
-                        return serve_okf_only(cfg, mounts, addr);
+                        return serve_okf_only(cfg, mounts, addr, "no repository here");
                     }
+                }
+                // No repository and no bundle. Under `here` that refusal must be
+                // loud and must name `--scope all`, never fall back to it
+                // (issue #810); under any other scope it is the git error it
+                // always was.
+                if matches!(ws_scope, WorkspaceScope::Here) {
+                    return Err(here_needs_a_repository(
+                        "explorer",
+                        no_repo,
+                        &configured
+                            .iter()
+                            .map(|r| r.name.clone())
+                            .collect::<Vec<_>>(),
+                    ));
                 }
                 return Err(no_repo);
             }
@@ -13454,6 +13567,7 @@ fn run_explorer(
     // workspaces — rather than booting a server whose flat `/v1/graph/*` routes
     // would then 404 on every request. The cwd-default / single-workspace paths
     // pass no name and are unaffected.
+    let workspace_name = effective_workspace_name(workspace_name, &ws_scope);
     if let Some(name) = workspace_name {
         set.select(Some(name))?;
     }
@@ -13482,11 +13596,13 @@ fn run_explorer(
         eprintln!("roteiro explorer: could not check for peer OKF bundles: {e}");
     }
     if from_config {
-        register_workspace_reload(&set, None, cfg.clone(), Vec::new());
+        // Under the scope it started with, so a SIGHUP cannot widen a
+        // `--scope workspace <NAME>` explorer to every workspace.
+        register_workspace_reload(&set, None, cfg.clone(), Vec::new(), ws_scope.clone());
     } else {
         register_no_reload(
             "this explorer hosts the current repository alone; configure \
-             `[[workspaces]]` for a reloadable set",
+             `[[workspaces]]` and use `--scope all` for a reloadable set",
         );
     }
     serve_graph_ui(cfg, "explorer", set, default, addr)
@@ -13503,12 +13619,25 @@ fn run_explorer(
 ///
 /// There is no graph here to explore, so no `/v1/graph` and no explorer app: `/`
 /// is the bundle. A page offering an "Explorer" link to a route that 404s would
-/// be worse than a page that does not.
+/// be worse than a page that does not — and that is the answer to the question
+/// issue #810 left open about `--scope bundle`. Serving an **empty** explorer
+/// beside a bundle would be the same defect wearing a nicer shell: a workspace
+/// list with nothing in it, a graph route that answers about nothing, and a UI
+/// whose every control is inert.
+///
+/// # Two ways in, one mode
+///
+/// `reason` names which — `cd` to a bundle with no repository around it (the
+/// fold ADR-0022 v1.2 kept), or `--scope bundle <PATH>` said so (v1.4, issue
+/// #810). It is only the startup line's wording: a person reading "no repository
+/// here" on a server they explicitly pointed at a path would reasonably think
+/// something had gone wrong.
 #[cfg(all(feature = "explorer", feature = "okf-viewer"))]
 fn serve_okf_only(
     cfg: &config::Config,
     mounts: Vec<okf_viewer::Mount>,
     addr: Option<String>,
+    reason: &str,
 ) -> anyhow::Result<()> {
     let addr = addr
         .or_else(|| cfg.serve.addr.clone())
@@ -13516,6 +13645,11 @@ fn serve_okf_only(
     let socket: std::net::SocketAddr = addr
         .parse()
         .map_err(|e| anyhow::anyhow!("invalid explorer address `{addr}`: {e}"))?;
+
+    // SIGHUP must be answered here too: this server hosts a path, so there is no
+    // configured set to re-scan, and the signal's default disposition would
+    // otherwise terminate it.
+    register_no_reload("this server hosts one OKF bundle; there is no configured set to re-scan");
 
     let names: Vec<String> = mounts.iter().map(|m| m.label.clone()).collect();
     let router = axum::Router::new()
@@ -13534,7 +13668,7 @@ fn serve_okf_only(
         let listener = tokio::net::TcpListener::bind(socket).await?;
         eprintln!(
             "roteiro explorer listening on http://{socket}{OKF_BASE} — \
-             no repository here, so {} OKF bundle(s) only: {}",
+             {reason}, so {} OKF bundle(s) only: {}",
             names.len(),
             names.join(", ")
         );
@@ -13895,6 +14029,866 @@ fn route_mcp(http: Option<String>) -> ServerRoute {
     }
 }
 
+// ---------------------------------------------------------------------------
+// `--scope`: what a server serves, asked for rather than inferred (issue #810)
+// ---------------------------------------------------------------------------
+
+/// What `roteiro serve` / `roteiro explorer` serve (issue #810).
+///
+/// # The decision this type carries
+///
+/// Until this existed the served set was decided by **absences**: a config with
+/// workspaces served all of them, a config without one served the current
+/// repository, and a directory holding a bundle but no repository served the
+/// bundle — each mode selected by what was *missing* rather than by what was
+/// asked for. Two flags already meant different things about scope
+/// ([`fold_cli_roots`]'s `--workspace ROOT` narrows; `-w` does not), and the
+/// single-bundle mode could not be reached from inside a repository at all.
+///
+/// So each mode is now requestable, and **`Here` is the default**: serving every
+/// configured workspace is [`ServeScope::All`], a conscious choice rather than
+/// what you get by standing in the wrong directory.
+///
+/// `--scope project <NAME>` is deliberately **not** here. ADR-0008's confinement
+/// is per-*workspace* — one [`rto_graph::WorkspaceSet`] entry, one tool registry,
+/// one `/v1/workspaces/{ws}/…` prefix — and there is no project-level equivalent
+/// to reuse, so project scope would be new machinery rather than a surfaced mode.
+/// [`ServeScope::parse`] refuses it by name and says so.
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ServeScope {
+    /// **The default.** This directory's repository, and its bundle — whatever
+    /// config says about workspaces. Exactly what each command did with no config
+    /// at all before this flag existed, which is what makes the change reviewable:
+    /// `here` moved no behaviour, it gave today's *unconfigured* behaviour a name
+    /// and made it the default.
+    Here,
+    /// Every configured workspace — the default until this flag existed, and
+    /// still the only scope `--workspace <ROOT>` extends.
+    All,
+    /// One configured workspace by name (`[[workspaces]]` / `[standalone]`, or
+    /// the legacy `[workspace]` folded to `default`). Unlike `-w`, this
+    /// **narrows what is hosted**: the others are neither listed nor reachable
+    /// through a nested route.
+    Workspace(String),
+    /// One OKF bundle by path — ours or somebody else's — and nothing else. This
+    /// is what the retired `roteiro okf view <path>` did; see
+    /// `serve_okf_only` and ADR-0022 v1.4.
+    Bundle(std::path::PathBuf),
+}
+
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+impl std::fmt::Display for ServeScope {
+    /// The invocation that would have produced this scope, so a diagnostic can
+    /// quote it back verbatim rather than describing it.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Here => f.write_str("here"),
+            Self::All => f.write_str("all"),
+            Self::Workspace(name) => write!(f, "workspace {name}"),
+            Self::Bundle(path) => write!(f, "bundle {}", path.display()),
+        }
+    }
+}
+
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+impl ServeScope {
+    /// Parse the `kind [value]` grammar, which the flag and `[serve] scope`
+    /// share.
+    ///
+    /// One grammar, two spellings of the same words: `--scope workspace one` and
+    /// `scope = "workspace one"` parse here identically, so a service manager's
+    /// config file and the flag an operator types cannot drift apart.
+    ///
+    /// # Errors
+    /// An unknown kind, a kind missing its value, a kind given one it does not
+    /// take, or `project` — which is deferred and refused by name, since a
+    /// silent "unknown scope" would read as a typo rather than as a decision.
+    fn parse(kind: &str, value: Option<&str>) -> anyhow::Result<Self> {
+        /// The whole grammar, in the one wording every diagnostic here quotes.
+        const FORMS: &str = "`here`, `all`, `workspace <NAME>` or `bundle <PATH>`";
+        let no_value = |scope: Self| match value {
+            Some(extra) => anyhow::bail!(
+                "scope `{kind}` takes no value, but got `{extra}` — write `{kind}` alone"
+            ),
+            None => Ok(scope),
+        };
+        let need_value = || -> anyhow::Result<&str> {
+            value.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "scope `{kind}` needs a value — write `{kind} <{}>`",
+                    if kind == "bundle" { "PATH" } else { "NAME" }
+                )
+            })
+        };
+        match kind {
+            "here" => no_value(Self::Here),
+            "all" => no_value(Self::All),
+            "workspace" => Ok(Self::Workspace(need_value()?.to_owned())),
+            // Tilde-expanded on the way in, exactly as `[workspace] roots` is
+            // (`collect_workspace_repo_paths`), so `~/bundles/x` means the same
+            // thing here as it does there and never reaches the filesystem as a
+            // literal `~`.
+            "bundle" => Ok(Self::Bundle(
+                config::expand_tilde(need_value()?).into_owned(),
+            )),
+            // Refused by name rather than falling through to "unknown scope": it
+            // is a deferred decision, not a typo, and the two deserve different
+            // sentences. See this type's documentation.
+            "project" => anyhow::bail!(
+                "scope `project` is deferred (issue #810): ADR-0008 confines by \
+                 *workspace*, and there is no project-level mechanism to reuse — \
+                 project scope would be new machinery rather than a surfaced mode. \
+                 Use `workspace <NAME>` for a whole workspace, or address one \
+                 project per request at `/v1/{{project}}/…`"
+            ),
+            other => anyhow::bail!("unknown scope `{other}` — expected {FORMS}"),
+        }
+    }
+
+    /// The scope a `--scope` invocation asked for, or `None` when the flag was
+    /// not passed.
+    ///
+    /// The flag takes one or two words (`num_args = 1..=2`) so the CLI spells the
+    /// grammar the way the issue and this file's prose do — `--scope workspace
+    /// one`, not a second spelling with a separator in it that documentation
+    /// would then have to teach.
+    ///
+    /// # Errors
+    /// Whatever [`ServeScope::parse`] refuses.
+    fn from_flag(tokens: &[String]) -> anyhow::Result<Option<Self>> {
+        match tokens {
+            [] => Ok(None),
+            [kind] => Self::parse(kind, None).map(Some),
+            [kind, value] => Self::parse(kind, Some(value)).map(Some),
+            // `num_args = 1..=2` caps this at the parser, so a third word is a
+            // clap contract change rather than user input. Reported rather than
+            // panicked: this is a startup path, and a refusal that names the flag
+            // is more use than a backtrace.
+            more => anyhow::bail!(
+                "`--scope` takes at most two words, got {}: {}",
+                more.len(),
+                more.join(" ")
+            ),
+        }
+    }
+
+    /// The scope `[serve] scope` states, as one string.
+    ///
+    /// Split at the **first** run of whitespace, not on every one: a workspace
+    /// name or a bundle path may contain a space, and splitting them all would
+    /// make `scope = "bundle /srv/my bundles/x"` unrepresentable in the one place
+    /// that exists so a deployment need not pass a flag.
+    ///
+    /// # Errors
+    /// Whatever [`ServeScope::parse`] refuses, with the key quoted — a
+    /// misconfigured value is a named startup error, never a silent fall-back to
+    /// the default (ADR-0007 v1.3's rule for a key whose *value* is wrong).
+    fn from_config(raw: &str) -> anyhow::Result<Self> {
+        use anyhow::Context as _;
+        let raw = raw.trim();
+        let (kind, value) = raw
+            .split_once(char::is_whitespace)
+            .map_or((raw, None), |(k, v)| (k, Some(v.trim())));
+        Self::parse(kind, value.filter(|v| !v.is_empty()))
+            .with_context(|| format!("`[serve] scope = {raw:?}` in config"))
+    }
+
+    /// The workspace-shaped reading of this scope, or `None` for
+    /// [`ServeScope::Bundle`] — which serves a bundle rather than a graph and is
+    /// dispatched before any workspace is built.
+    fn workspaces(&self) -> Option<WorkspaceScope> {
+        match self {
+            Self::Here => Some(WorkspaceScope::Here),
+            Self::All => Some(WorkspaceScope::All),
+            Self::Workspace(name) => Some(WorkspaceScope::Named(name.clone())),
+            Self::Bundle(_) => None,
+        }
+    }
+}
+
+/// The scopes that select a **set of workspaces**, which is every scope but
+/// [`ServeScope::Bundle`].
+///
+/// Its own type rather than a `match` arm that cannot happen: a bundle scope
+/// serves no graph, so the functions that build one take this and the
+/// impossibility is carried by the signature instead of by a comment. Owned
+/// rather than borrowed because the SIGHUP hook is `'static` and must hold the
+/// scope it reloads under — a reload that re-read the *whole* configured set
+/// would silently widen a narrowed server, which is the class of defect
+/// [`reload_workspaces`] exists to prevent.
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WorkspaceScope {
+    /// This directory's repository alone; the configured workspace list is not
+    /// consulted.
+    Here,
+    /// Every configured workspace.
+    All,
+    /// One configured workspace by name.
+    Named(String),
+}
+
+/// Where a resolved scope came from — which decides whether anything is said
+/// about it, and whether a conflicting flag is an error.
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScopeOrigin {
+    /// `--scope` on the command line.
+    Flag,
+    /// `[serve] scope` in config.
+    Config,
+    /// Nothing named a scope, but `--workspace <ROOT>` or `-w <NAME>` did name
+    /// what to serve — both of which are statements about the *configured* set,
+    /// so they select [`ServeScope::All`] rather than being overridden by a
+    /// default nobody typed.
+    Implied,
+    /// Nothing named a scope at all: [`ServeScope::Here`], the built-in.
+    Default,
+}
+
+/// A scope and where it came from.
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedScope {
+    /// What to serve.
+    scope: ServeScope,
+    /// Who decided.
+    origin: ScopeOrigin,
+}
+
+/// Resolve what this invocation serves: `--scope` > `[serve] scope` >
+/// `--workspace`/`-w` implying [`ServeScope::All`] > the [`ServeScope::Here`]
+/// default.
+///
+/// # Why the two workspace flags imply `all`
+///
+/// The default inverted; the flags did not. `roteiro serve --workspace ~/src`
+/// and `roteiro serve -w api` are already explicit statements about the served
+/// set — the first narrows it to ROOT's repos, the second names a **configured**
+/// workspace — so letting a default nobody typed turn either into an error would
+/// break every existing invocation to enforce a choice their author had already
+/// made. What the new default removes is scope decided by *absence*; these two
+/// are presence.
+///
+/// # Why the result is an argument and not a `ServeOptions` field
+///
+/// It belongs beside `mcp_surface` and `remote` by shape, and it is not there.
+/// `ServeOptions` is compiled into **every** build while [`ResolvedScope`] is
+/// compiled only with a server to scope, so the field would have needed a
+/// `#[cfg]` of its own — and a *second* `#[cfg]`-attributed field in that struct
+/// literal is a construct `tree-sitter-rust` cannot parse. It does not fail
+/// loudly: `main.rs` already contains two such constructs it cannot parse
+/// (`#[cfg]` on a **pattern** field and on a **call argument**, in the `Serve`
+/// and `Spec` arms), so the whole file parses under error recovery, and how much
+/// of it survives is decided by how much the recovery can absorb. With one gated
+/// field this file yields 302 top-level items to extraction; with two it yields
+/// **2**, every `[[crates/roteiro/src/main.rs#Symbol]]` link in the ADRs stops
+/// resolving, and `roteiro check` fails with twenty broken links that name the
+/// ADRs rather than the cause. That is how this was found. The file is one
+/// construct away from that outcome at all times — this note is here so the next
+/// person to add a gated field to a struct literal in `main.rs` knows what they
+/// are looking at.
+///
+/// # Errors
+/// A `--scope` or `[serve] scope` that will not parse, or one that contradicts a
+/// flag — see [`scope_flag_conflict`].
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+fn resolve_serve_scope(
+    cfg: &config::Config,
+    flag: &[String],
+    workspace_roots: &[String],
+    workspace_name: Option<&str>,
+) -> anyhow::Result<ResolvedScope> {
+    let resolved = if let Some(scope) = ServeScope::from_flag(flag)? {
+        ResolvedScope {
+            scope,
+            origin: ScopeOrigin::Flag,
+        }
+    } else if let Some(raw) = cfg.serve.scope.as_deref() {
+        ResolvedScope {
+            scope: ServeScope::from_config(raw)?,
+            origin: ScopeOrigin::Config,
+        }
+    } else if !workspace_roots.is_empty() || workspace_name.is_some() {
+        ResolvedScope {
+            scope: ServeScope::All,
+            origin: ScopeOrigin::Implied,
+        }
+    } else {
+        ResolvedScope {
+            scope: ServeScope::Here,
+            origin: ScopeOrigin::Default,
+        }
+    };
+    if let Some(conflict) = scope_flag_conflict(&resolved, workspace_roots, workspace_name) {
+        anyhow::bail!(conflict);
+    }
+    Ok(resolved)
+}
+
+/// The refusal (if any) for a scope that contradicts `--workspace <ROOT>` or
+/// `-w <NAME>` — issue #810's requirement that `--scope` be **additive**, and
+/// that a conflicting combination error rather than silently pick a winner.
+///
+/// # What conflicts, and what does not
+///
+/// | flag | `here` | `all` | `workspace <N>` | `bundle <P>` |
+/// |---|---|---|---|---|
+/// | `--workspace <ROOT>` | **error** | ok — the roots fold in | **error** | **error** |
+/// | `-w <NAME>` | ok — validated against the one workspace `here` hosts | ok — selects the flat default | **error** | **error** |
+///
+/// `--workspace ROOT` *replaces* the served set, so it agrees with `all` and with
+/// nothing else. `-w` does not change the set at all — it names the workspace the
+/// flat `/v1/graph/*` routes bind to — so it is compatible with any scope that
+/// leaves a set to select within, and contradicts only the two that have already
+/// named it. Under `here` it is what fixes issue #824: the single-repo fallback
+/// is now chosen by the scope, so `-w` selects *within* it instead of suppressing
+/// it.
+///
+/// Only an **asked-for** scope can conflict: [`ScopeOrigin::Implied`] and
+/// [`ScopeOrigin::Default`] are what these very flags produced, or what nobody
+/// typed.
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+fn scope_flag_conflict(
+    resolved: &ResolvedScope,
+    workspace_roots: &[String],
+    workspace_name: Option<&str>,
+) -> Option<String> {
+    let scope = &resolved.scope;
+    // Quoted as the reader wrote it: the flag they typed, or the config line they
+    // would have to go and edit. A refusal that named `--scope` at somebody whose
+    // scope came from a unit file would send them looking for a flag nobody passed.
+    let asked = match resolved.origin {
+        ScopeOrigin::Flag => format!("`--scope {scope}`"),
+        ScopeOrigin::Config => format!("`[serve] scope = \"{scope}\"`"),
+        ScopeOrigin::Implied | ScopeOrigin::Default => return None,
+    };
+    if !workspace_roots.is_empty() && !matches!(scope, ServeScope::All) {
+        return Some(format!(
+            "`--workspace <ROOT>` and {asked} each decide what this server hosts, and \
+             they disagree — `--scope all` is the one scope `--workspace` extends. \
+             Pass `--scope all` to serve the configured workspaces plus those roots, \
+             or drop `--workspace`."
+        ));
+    }
+    if let Some(name) = workspace_name
+        && matches!(scope, ServeScope::Workspace(_) | ServeScope::Bundle(_))
+    {
+        return Some(format!(
+            "`--workspace-name {name}` and {asked} both name what to serve, and \
+             {asked} has already selected it — so `--workspace-name` has nothing left \
+             to choose. Drop one of them."
+        ));
+    }
+    None
+}
+
+/// The one-line notice for a **changed default**: config defines workspaces, and
+/// nothing asked for a scope, so this server is hosting the current directory
+/// rather than all of them (issue #810, consequence 1).
+///
+/// The repository's established shape for this — a flag plus a one-line note
+/// rather than a prompt or a silent change ([`serve_deprecation_notice`],
+/// ADR-0002 §64, ADR-0006 §61). It names `--scope all`, because the one thing a
+/// reader of this line wants is the invocation that restores what they had.
+///
+/// **Only for [`ScopeOrigin::Default`].** Telling somebody who typed `--scope
+/// here`, or who wrote `scope = "here"` into a unit file, about `--scope all` is
+/// noise: they have already answered the question this line asks. The notice
+/// exists for the person who typed neither and got a different server than they
+/// did yesterday.
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+fn scope_default_notice(resolved: &ResolvedScope, configured: &[String]) -> Option<String> {
+    if resolved.origin != ScopeOrigin::Default || configured.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "note: serving this directory's repository only (`--scope here`, the default) — \
+         config defines {} workspace(s) that are NOT hosted: {}. Pass `--scope all` to \
+         serve them, or set `[serve] scope = \"all\"` for a server that cannot pass a flag.",
+        configured.len(),
+        configured.join(", ")
+    ))
+}
+
+/// The configured workspaces a scope selects, before any `--workspace <ROOT>` is
+/// folded in — the **one** place the scope decides which groups exist, so
+/// startup and a SIGHUP reload cannot answer it differently.
+///
+/// [`WorkspaceScope::Here`] returns nothing rather than reading the list: it is
+/// the scope that ignores it. Note what it does *not* ignore — the rest of the
+/// `[serve]` table still governs, because scope decides **what** is served and
+/// `addr`, the TLS pair and the model pins decide **how**. A scope that silently
+/// dropped the bind address would be a second, undocumented flag.
+///
+/// # Errors
+/// A config whose workspace list will not resolve, or a
+/// [`WorkspaceScope::Named`] naming a group that is not there — reported with the
+/// known names, in `WorkspaceSet::select`'s wording so the two surfaces read the
+/// same.
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+fn scoped_workspaces(
+    cfg: &config::Config,
+    scope: &WorkspaceScope,
+) -> anyhow::Result<Vec<rto_graph::ResolvedWorkspace>> {
+    match scope {
+        WorkspaceScope::Here => Ok(Vec::new()),
+        WorkspaceScope::All => cfg.resolved_workspaces(),
+        WorkspaceScope::Named(name) => {
+            let resolved = cfg.resolved_workspaces()?;
+            if let Some(one) = resolved.iter().find(|r| &r.name == name) {
+                return Ok(vec![one.clone()]);
+            }
+            let known: Vec<&str> = resolved.iter().map(|r| r.name.as_str()).collect();
+            anyhow::bail!(
+                "`--scope workspace {name}`: no workspace named `{name}` (known: {}){}",
+                if known.is_empty() {
+                    "none configured".to_owned()
+                } else {
+                    known.join(", ")
+                },
+                if known.is_empty() {
+                    format!(
+                        " — configure `[[workspaces]]` / `[standalone]` ({WORKSPACE_CONFIG_ADVICE}), or use `--scope here`"
+                    )
+                } else {
+                    String::new()
+                }
+            )
+        }
+    }
+}
+
+/// The refusal for [`WorkspaceScope::Here`] standing outside a repository —
+/// issue #810's consequence 2, and the one place that must never fall back
+/// silently.
+///
+/// A silent fall-back to `all` is precisely the implicitness `--scope` removes:
+/// it would mean the served set was decided by the absence of a `.git` directory
+/// again, one release after that was named as the defect. So this refuses, and
+/// spends its words on the invocation that would have worked — including
+/// `[serve] scope`, because the reader most likely to hit this is a service
+/// manager's unit file starting in `/`, where no flag can be passed at all.
+///
+/// The underlying git error is kept as the cause rather than replaced: "not a
+/// repository" is still the fact, and this is the sentence about what to do
+/// with it.
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+fn here_needs_a_repository(
+    cmd: &str,
+    source: anyhow::Error,
+    configured: &[String],
+) -> anyhow::Error {
+    let cwd = std::env::current_dir().map_or_else(
+        |_| "the current directory".to_owned(),
+        |p| p.display().to_string(),
+    );
+    let configured_note = if configured.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " Config defines {} workspace(s) — `--scope all` serves them: {}.",
+            configured.len(),
+            configured.join(", ")
+        )
+    };
+    source.context(format!(
+        "`roteiro {cmd} --scope here` serves the current directory's repository, and \
+         {cwd} is not one. Pass `--scope all` for every configured workspace, \
+         `--scope workspace <NAME>` for one of them, or `--scope bundle <PATH>` for an \
+         OKF bundle — or set `[serve] scope` in config, for a server started somewhere \
+         it cannot be told.{configured_note}"
+    ))
+}
+
+/// Unit tests for the parts of `--scope` that are decisions rather than servers
+/// (issue #810).
+///
+/// The end-to-end table in `crates/roteiro/tests/serve_mode_selection_cli.rs`
+/// drives the real binary, because mode selection reads the current directory and
+/// the config home and a spawned child is the only way to vary those. What it
+/// cannot do cheaply is enumerate: every cell there costs a process, a bound port
+/// and a graph. The grammar, the conflict matrix and the notice are pure
+/// functions of their arguments, so they are exhausted here and sampled there.
+#[cfg(all(test, any(feature = "mcp", feature = "serve", feature = "explorer")))]
+mod scope_tests {
+    use super::{
+        ResolvedScope, ScopeOrigin, ServeScope, WorkspaceScope, effective_workspace_name,
+        scope_default_notice, scope_flag_conflict,
+    };
+
+    /// `--scope <kind> [value]` and `scope = "<kind> [value]"` are the same
+    /// grammar, which is the point of having one parser: an operator who learns
+    /// the flag can write the config key, and neither documentation nor this
+    /// codebase has to teach a second spelling.
+    #[test]
+    fn the_flag_and_the_config_key_parse_the_same_words() {
+        let cases = [
+            ("here", ServeScope::Here),
+            ("all", ServeScope::All),
+            ("workspace one", ServeScope::Workspace("one".to_owned())),
+            (
+                "bundle /srv/bundles/x",
+                ServeScope::Bundle("/srv/bundles/x".into()),
+            ),
+            // A value may hold spaces, and only the FIRST run of whitespace
+            // separates it from its kind — otherwise the key that exists so a
+            // deployment need not pass a flag could not name a path with a space
+            // in it, which is not a hypothetical on macOS or Windows.
+            (
+                "bundle /srv/my bundles/x",
+                ServeScope::Bundle("/srv/my bundles/x".into()),
+            ),
+            (
+                "workspace the api",
+                ServeScope::Workspace("the api".to_owned()),
+            ),
+        ];
+        for (written, expected) in cases {
+            let tokens: Vec<String> = match written.split_once(' ') {
+                Some((kind, value)) => vec![kind.to_owned(), value.to_owned()],
+                None => vec![written.to_owned()],
+            };
+            assert_eq!(
+                ServeScope::from_flag(&tokens).expect("flag parses"),
+                Some(expected.clone()),
+                "`--scope {written}`"
+            );
+            assert_eq!(
+                ServeScope::from_config(written).expect("config parses"),
+                expected,
+                "`scope = {written:?}`"
+            );
+        }
+        assert_eq!(
+            ServeScope::from_flag(&[]).expect("no flag"),
+            None,
+            "an absent flag is not a scope; the caller decides the default"
+        );
+    }
+
+    /// Every scope round-trips through its own `Display`, which is what the
+    /// diagnostics quote.
+    ///
+    /// Not decoration: a conflict message quotes the scope back as the invocation
+    /// that produced it (`--scope workspace one`), and a `Display` that drifted
+    /// from the parser would print advice that does not parse — a message telling
+    /// somebody to type something that fails.
+    #[test]
+    fn every_scope_displays_as_an_invocation_that_parses_back() {
+        for scope in [
+            ServeScope::Here,
+            ServeScope::All,
+            ServeScope::Workspace("one".to_owned()),
+            ServeScope::Bundle("/srv/bundles/x".into()),
+        ] {
+            let written = scope.to_string();
+            assert_eq!(
+                ServeScope::from_config(&written).expect("displayed form parses"),
+                scope,
+                "`{written}` must parse back to what printed it"
+            );
+        }
+    }
+
+    /// The grammar's four refusals, each with its own sentence.
+    ///
+    /// `project` is the one that matters: it is a **deferred decision**, and
+    /// falling through to "unknown scope" would report it as a misspelling — a
+    /// reader would go looking for the right spelling of a mode that does not
+    /// exist, rather than reading why.
+    #[test]
+    fn the_grammar_refuses_by_reason_and_not_by_a_single_sentence() {
+        let err = |written: &str| {
+            let tokens: Vec<String> = written.split(' ').map(str::to_owned).collect();
+            ServeScope::from_flag(&tokens)
+                .expect_err(&format!("`--scope {written}` must refuse"))
+                .to_string()
+        };
+        assert!(err("everything").contains("unknown scope `everything`"));
+        assert!(
+            err("everything").contains("`workspace <NAME>`"),
+            "an unknown scope lists the whole grammar, since the reader has just \
+             demonstrated they do not know it"
+        );
+        assert!(err("workspace").contains("needs a value"));
+        assert!(
+            err("bundle").contains("bundle <PATH>"),
+            "the missing value is named as a PATH for `bundle` and a NAME for \
+             `workspace`; one placeholder for both would be wrong half the time"
+        );
+        assert!(err("here now").contains("takes no value"));
+        let project = err("project alpha");
+        assert!(
+            project.contains("deferred") && project.contains("workspace <NAME>"),
+            "`project` is refused as a decision with an alternative, not as a \
+             typo: {project}"
+        );
+        assert!(
+            !project.contains("unknown scope"),
+            "…and specifically not as a typo: {project}"
+        );
+    }
+
+    /// The conflict matrix on this repository's `scope_flag_conflict`
+    /// documentation, exhausted — eight scope×flag combinations plus the two
+    /// origins that cannot conflict at all.
+    #[test]
+    fn the_conflict_matrix_is_what_the_table_says_it_is() {
+        let roots = ["/srv/src".to_owned()];
+        let asked = |scope: ServeScope| ResolvedScope {
+            scope,
+            origin: ScopeOrigin::Flag,
+        };
+        // `--workspace <ROOT>` agrees with `all` and with nothing else.
+        assert!(scope_flag_conflict(&asked(ServeScope::All), &roots, None).is_none());
+        for scope in [
+            ServeScope::Here,
+            ServeScope::Workspace("one".to_owned()),
+            ServeScope::Bundle("/b".into()),
+        ] {
+            assert!(
+                scope_flag_conflict(&asked(scope.clone()), &roots, None).is_some(),
+                "`--workspace <ROOT>` must conflict with `{scope}`"
+            );
+        }
+        // `-w` chooses a default *within* a set, so it agrees with the two scopes
+        // that leave one and contradicts the two that have already chosen.
+        for scope in [ServeScope::Here, ServeScope::All] {
+            assert!(
+                scope_flag_conflict(&asked(scope.clone()), &[], Some("one")).is_none(),
+                "`-w` selects within `{scope}` rather than contradicting it"
+            );
+        }
+        for scope in [
+            ServeScope::Workspace("one".to_owned()),
+            ServeScope::Bundle("/b".into()),
+        ] {
+            assert!(
+                scope_flag_conflict(&asked(scope.clone()), &[], Some("two")).is_some(),
+                "`-w` must conflict with `{scope}`, which has already named it"
+            );
+        }
+        // A scope nobody asked for cannot conflict with the very flags that
+        // produced it — that would refuse every invocation this repository has
+        // shipped.
+        for origin in [ScopeOrigin::Implied, ScopeOrigin::Default] {
+            assert!(
+                scope_flag_conflict(
+                    &ResolvedScope {
+                        scope: ServeScope::All,
+                        origin
+                    },
+                    &roots,
+                    Some("one")
+                )
+                .is_none(),
+                "{origin:?} was not asked for and has nothing to contradict"
+            );
+        }
+    }
+
+    /// A conflict quotes the source the reader can actually edit.
+    ///
+    /// A refusal that said `--scope` at somebody whose scope came from a unit
+    /// file's `[serve] scope` would send them looking through an invocation that
+    /// does not contain it.
+    #[test]
+    fn a_conflict_names_the_flag_or_the_config_key_that_set_it() {
+        let roots = ["/srv/src".to_owned()];
+        let from = |origin| {
+            scope_flag_conflict(
+                &ResolvedScope {
+                    scope: ServeScope::Here,
+                    origin,
+                },
+                &roots,
+                None,
+            )
+            .expect("conflicts")
+        };
+        assert!(from(ScopeOrigin::Flag).contains("`--scope here`"));
+        assert!(from(ScopeOrigin::Config).contains("`[serve] scope = \"here\"`"));
+    }
+
+    /// The notice fires on exactly one combination: a default nobody typed, and a
+    /// config with workspaces it is not hosting.
+    #[test]
+    fn the_changed_default_notice_is_for_the_default_alone() {
+        let configured = ["one".to_owned(), "two".to_owned()];
+        let note = scope_default_notice(
+            &ResolvedScope {
+                scope: ServeScope::Here,
+                origin: ScopeOrigin::Default,
+            },
+            &configured,
+        )
+        .expect("the default changed something here");
+        assert!(
+            note.contains("--scope all") && note.contains("one, two"),
+            "the notice names the way back and what is being left out: {note}"
+        );
+        assert!(
+            note.contains("[serve] scope"),
+            "…and the way back for a server that cannot be passed a flag: {note}"
+        );
+        // Asked for, either way: the question has been answered.
+        for origin in [ScopeOrigin::Flag, ScopeOrigin::Config] {
+            assert!(
+                scope_default_notice(
+                    &ResolvedScope {
+                        scope: ServeScope::Here,
+                        origin
+                    },
+                    &configured
+                )
+                .is_none(),
+                "{origin:?} typed `here` on purpose"
+            );
+        }
+        // Nothing configured: `here` left nothing out, and there are no names to
+        // print — a notice here would be about workspaces that do not exist.
+        assert!(
+            scope_default_notice(
+                &ResolvedScope {
+                    scope: ServeScope::Here,
+                    origin: ScopeOrigin::Default
+                },
+                &[]
+            )
+            .is_none()
+        );
+    }
+
+    /// `--scope workspace <NAME>` supplies the flat default `-w` would have, and
+    /// an explicit `-w` still wins where the two can legally co-occur.
+    #[test]
+    fn a_named_scope_supplies_the_flat_default() {
+        let named = WorkspaceScope::Named("one".to_owned());
+        assert_eq!(effective_workspace_name(None, &named), Some("one"));
+        assert_eq!(effective_workspace_name(Some("two"), &named), Some("two"));
+        assert_eq!(
+            effective_workspace_name(None, &WorkspaceScope::All),
+            None,
+            "`all` names nothing; the set resolves its own default"
+        );
+        assert_eq!(
+            effective_workspace_name(Some("two"), &WorkspaceScope::Here),
+            Some("two"),
+            "under `here` the name is validated against the one workspace the \
+             fallback builds — issue #824's fix"
+        );
+    }
+}
+
+/// The workspace the flat routes should bind to, given the `-w` flag and the
+/// scope.
+///
+/// `--scope workspace <NAME>` has already named the only workspace there is, so
+/// it supplies the default `-w` would otherwise have had to; passing both is a
+/// conflict [`scope_flag_conflict`] refuses, which is why the flag wins here
+/// without the two ever actually competing.
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+fn effective_workspace_name<'a>(
+    flag: Option<&'a str>,
+    scope: &'a WorkspaceScope,
+) -> Option<&'a str> {
+    match (flag, scope) {
+        (Some(name), _) => Some(name),
+        (None, WorkspaceScope::Named(name)) => Some(name.as_str()),
+        (None, WorkspaceScope::Here | WorkspaceScope::All) => None,
+    }
+}
+
+/// Serve one OKF bundle and nothing else — `--scope bundle <PATH>` (issue #810).
+///
+/// # This reinstates what `roteiro okf view <path>` did, as a flag
+///
+/// ADR-0022 v1.2 retired that command and folded the viewer onto `explorer`,
+/// keeping the path-based entry **as the working directory**: `cd <path> &&
+/// roteiro explorer`. That worked for a bundle sitting on its own and was
+/// unreachable from inside a repository, where `Repo::discover` succeeds and the
+/// fallback arm is never taken — so "a viewer for any conformant bundle, ours or
+/// somebody else's" was true of one directory layout and false of the other.
+/// The flag makes the mode requestable from anywhere, which is what the ADR asks
+/// for in the same paragraph that removes the command. ADR-0022 v1.4 records the
+/// resolution.
+///
+/// # Errors
+/// A path that is not a bundle, or a build with no viewer compiled in.
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+// Which block is the tail expression depends on the feature set, exactly as in
+// `run_serve_network`: the `return` below is redundant in a build with the
+// viewer and load-bearing in one without, where the `bail!` follows it.
+#[allow(clippy::needless_return)]
+fn serve_bundle_scope(
+    cfg: &config::Config,
+    scope: &ServeScope,
+    addr: Option<String>,
+) -> anyhow::Result<()> {
+    // Restating the invariant its callers uphold rather than asserting it: both
+    // dispatch this scope and only this scope here, and a refusal beats a panic
+    // on a startup path.
+    let ServeScope::Bundle(path) = scope else {
+        anyhow::bail!("internal: scope `{scope}` serves a graph, not a bundle");
+    };
+    #[cfg(all(feature = "explorer", feature = "okf-viewer"))]
+    {
+        return serve_okf_only(cfg, bundle_mount_at(path)?, addr, "`--scope bundle`");
+    }
+    #[cfg(not(all(feature = "explorer", feature = "okf-viewer")))]
+    {
+        let _ = (cfg, addr);
+        anyhow::bail!(
+            "this build cannot serve an OKF bundle: `--scope bundle {}` needs the \
+             `okf-viewer` feature, which implies `explorer` (ADR-0022) — rebuild with \
+             `--features okf-viewer`",
+            path.display()
+        );
+    }
+}
+
+/// The single mount `--scope bundle <PATH>` serves.
+///
+/// Two readings of the path, for the reason `okf_mounts`' current-directory
+/// block has two: a person may name the bundle or the directory it sits in. The
+/// order is the other way round here, and deliberately — the cwd block tries
+/// `<cwd>/okf` first because standing at a repository root is the common case,
+/// while a path somebody typed after `--scope bundle` is most likely the bundle
+/// itself. The label is the admitted directory's name, as it is there.
+///
+/// # Errors
+/// Neither reading holds an `index.md` **file** — the same admission test
+/// `okf_mounts` applies, quoted in full so the refusal says what was looked for
+/// rather than only that it failed.
+#[cfg(all(feature = "explorer", feature = "okf-viewer"))]
+fn bundle_mount_at(path: &std::path::Path) -> anyhow::Result<Vec<okf_viewer::Mount>> {
+    let nested = path.join("okf");
+    for root in [path.to_path_buf(), nested.clone()] {
+        if !root.join("index.md").is_file() {
+            continue;
+        }
+        let label = root
+            .file_name()
+            .map_or_else(|| "bundle".to_owned(), |s| s.to_string_lossy().into_owned());
+        return Ok(vec![okf_viewer::Mount {
+            slug: okf_viewer::slug(&label),
+            label,
+            origin: root.display().to_string(),
+            root,
+        }]);
+    }
+    anyhow::bail!(
+        "`--scope bundle {}`: no OKF bundle there. A bundle is a directory holding an \
+         `index.md` FILE, and neither `{}` nor `{}` does — render one with \
+         `roteiro render okf`, or name the directory that holds the `index.md`",
+        path.display(),
+        path.join("index.md").display(),
+        nested.join("index.md").display()
+    )
+}
+
 /// The one-line stderr deprecation notice (if any) for a `roteiro serve`
 /// invocation, so the old-flag → new-command guidance is unit-testable. `None`
 /// means the invocation uses the current, non-deprecated surface. `--http` wins
@@ -13929,10 +14923,39 @@ fn run_serve(
     workspace_roots: &[String],
     workspace_name: Option<&str>,
     sync_on_access: bool,
+    scope: &ResolvedScope,
 ) -> anyhow::Result<()> {
     if let Some(notice) = serve_deprecation_notice(opts.models, opts.http.as_deref()) {
         eprintln!("{notice}");
     }
+    // The changed-default notice, before anything is built or bound: config
+    // defines workspaces and nothing asked for a scope, so this server is about
+    // to host the current directory instead of all of them (issue #810).
+    // `resolved_workspaces` is called rather than assumed-empty so a malformed
+    // workspace list is still a hard error under every scope.
+    if let Some(note) = scope_default_notice(
+        scope,
+        &cfg.resolved_workspaces()?
+            .into_iter()
+            .map(|r| r.name)
+            .collect::<Vec<_>>(),
+    ) {
+        eprintln!("{note}");
+    }
+    let Some(ws_scope) = scope.scope.workspaces() else {
+        // `--scope bundle <PATH>`: one bundle, no graph, no explorer app.
+        // Dispatched here rather than inside `route_serve`, because it selects a
+        // different *server* and not a different transport.
+        if let Some(addr) = opts.http.as_deref() {
+            anyhow::bail!(
+                "`--scope {}` serves an OKF bundle over HTTP, and `--http {addr}` is the \
+                 deprecated MCP-over-HTTP alias, which has no bundle to serve. Use \
+                 `roteiro mcp --http {addr}` for MCP, or drop `--http` to serve the bundle",
+                scope.scope
+            );
+        }
+        return serve_bundle_scope(cfg, &scope.scope, opts.addr.clone());
+    };
     match route_serve(opts.http.clone()) {
         ServerRoute::Network => {
             let ws = build_serve_workspaces(
@@ -13942,8 +14965,14 @@ fn run_serve(
                 workspace_roots,
                 workspace_name,
                 sync_on_access,
+                &ws_scope,
             )?;
-            run_serve_network(cfg, ws, workspace_name, opts)
+            run_serve_network(
+                cfg,
+                ws,
+                effective_workspace_name(workspace_name, &ws_scope),
+                opts,
+            )
         }
         // Deprecated `serve --http ADDR` → the networked MCP server (now `roteiro
         // mcp --http`). Kept so existing MCP-over-HTTP scripts don't break.
@@ -13957,6 +14986,7 @@ fn run_serve(
                     workspace_roots,
                     workspace_name,
                     sync_on_access,
+                    &ws_scope,
                 )?;
                 serve_mcp(ws.flat, Some(addr), &opts.mcp_surface)
             }
@@ -13988,6 +15018,14 @@ fn run_mcp(
     workspace_name: Option<&str>,
     sync_on_access: bool,
 ) -> anyhow::Result<()> {
+    // **`roteiro mcp` keeps today's scope.** Issue #810 inverts the default for
+    // `serve` and `explorer`, which are the two commands a person stands in a
+    // directory and runs; an MCP server's invocation is argv in a client's
+    // configuration file, where "the current directory" is whatever the client
+    // happened to be started in. Changing that default is a separate decision,
+    // so this passes `All` — today's behaviour — explicitly rather than by
+    // omission. It does inherit issue #824's fix, which lives in the fallback
+    // guard the two share.
     let ws = build_serve_workspaces(
         ingest,
         cfg,
@@ -13995,6 +15033,7 @@ fn run_mcp(
         workspace_roots,
         workspace_name,
         sync_on_access,
+        &WorkspaceScope::All,
     )?;
     match route_mcp(http) {
         ServerRoute::McpStdio => serve_mcp(ws.flat, None, surface),
@@ -14072,6 +15111,13 @@ fn run_serve_network(
 /// Shared by [`run_serve`] and [`run_mcp`]. `cmd` names the caller for the startup
 /// line. A lone repo with no workspace config builds its graph now and hosts it
 /// alone as `default` (the one path still needing a git cwd).
+///
+/// # `scope` decides which of those two shapes is built (issue #810)
+///
+/// [`WorkspaceScope::Here`] takes the single-repo path **always**, ignoring the
+/// configured list; [`WorkspaceScope::All`] takes it when nothing else selects a
+/// workspace, exactly as this function always has; [`WorkspaceScope::Named`]
+/// never takes it, because a name has already selected one.
 #[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
 fn build_serve_workspaces(
     ingest: rto_graph::IngestConfig,
@@ -14080,21 +15126,48 @@ fn build_serve_workspaces(
     workspace_roots: &[String],
     workspace_name: Option<&str>,
     sync_on_access: bool,
+    scope: &WorkspaceScope,
 ) -> anyhow::Result<ServeWorkspaces> {
     use std::sync::Arc;
 
     // The same source of truth `roteiro explorer` uses (`Config::resolved_workspaces()`:
     // the legacy `[workspace]` folded to `default`, every `[[workspaces]]`, and
-    // `[standalone]`), plus any explicit `--workspace <ROOT>` folded into `default`.
-    let resolved = cfg.resolved_workspaces()?;
+    // `[standalone]`), narrowed by the scope, plus any explicit `--workspace <ROOT>`
+    // folded into `default`.
+    let resolved = scoped_workspaces(cfg, scope)?;
 
-    // The true single-repo fallback fires ONLY when nothing selects a workspace: no
-    // configured workspaces, no `--workspace <ROOT>`, and no `--workspace-name`. Then
-    // build the current repo's graph now and host it alone as `default` (this is the
-    // one path that still needs a git cwd — a lone repo with no config still "just
-    // works", sharing the one store handle between `set` and `flat`).
-    if resolved.is_empty() && workspace_roots.is_empty() && workspace_name.is_none() {
-        let (repo, mut store, cache) = open_graph()?;
+    // The single-repo path: build the current repo's graph now and host it alone as
+    // `default` (the one path that still needs a git cwd — a lone repo with no
+    // config still "just works", sharing the one store handle between `set` and
+    // `flat`).
+    //
+    // **`--workspace-name` no longer suppresses it** (issue #824). It used to:
+    // the guard read `… && workspace_name.is_none()`, so `serve -w NAME` inside a
+    // repository with no workspace config could never start for *any* NAME, and
+    // bailed with "no workspaces to serve — run inside a repo" addressed to
+    // somebody who was inside one. The fallback is now chosen by the **scope**,
+    // and `-w` is validated against the set it produces — so it selects within
+    // the fallback, the way `explorer` has always done, or names what is wrong.
+    let solo = match scope {
+        WorkspaceScope::Here => true,
+        WorkspaceScope::All => resolved.is_empty() && workspace_roots.is_empty(),
+        WorkspaceScope::Named(_) => false,
+    };
+    if solo {
+        let (repo, mut store, cache) = match open_graph() {
+            Ok(opened) => opened,
+            // `here` standing outside a repository is the refusal issue #810
+            // requires be loud, and it must never fall back to `all`. Under any
+            // other scope this is the ordinary git error it always was.
+            Err(e) if matches!(scope, WorkspaceScope::Here) => {
+                return Err(here_needs_a_repository(
+                    cmd,
+                    e,
+                    &configured_workspace_names(cfg),
+                ));
+            }
+            Err(e) => return Err(e),
+        };
         build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
         let name = repo
             .workdir()
@@ -14106,13 +15179,27 @@ fn build_serve_workspaces(
             flat.clone(),
             flat.is_multi(),
         ));
+        // Validated against the set the fallback just built, rather than having
+        // suppressed it (issue #824). One workspace is a set, and `-w` selecting
+        // within it is the same thing it means everywhere else.
+        if let Some(name) = workspace_name {
+            set.select(Some(name))?;
+        }
         // Nothing here is derived from config, so there is no root to re-scan —
         // but SIGHUP must still be *answered*, because its default disposition
         // used to kill this exact path (exit 129).
-        register_no_reload(
-            "this server hosts the current repository alone; pass `--workspace <ROOT>` or \
-             configure `[[workspaces]]` for a reloadable set",
-        );
+        register_no_reload(match scope {
+            // Different advice, because the old sentence's advice is now a
+            // conflict: `--workspace <ROOT>` contradicts an explicit `here`.
+            WorkspaceScope::Here => {
+                "`--scope here` hosts the current repository alone; `--scope all` \
+                 serves the configured workspaces, which are reloadable"
+            }
+            _ => {
+                "this server hosts the current repository alone; pass `--workspace <ROOT>` or \
+                 configure `[[workspaces]]` for a reloadable set"
+            }
+        });
         return Ok(ServeWorkspaces { set, flat });
     }
 
@@ -14185,8 +15272,30 @@ fn build_serve_workspaces(
     // Both surfaces, from one snapshot: `set` backs `/v1/graph/*` and the UI,
     // `flat` backs the model tools, `/v1/{project}/…` and the MCP router. Reloading
     // only `flat` is what made a SIGHUP log three projects and serve two.
-    register_workspace_reload(&set, Some(&flat), cfg.clone(), workspace_roots.to_vec());
+    register_workspace_reload(
+        &set,
+        Some(&flat),
+        cfg.clone(),
+        workspace_roots.to_vec(),
+        scope.clone(),
+    );
     Ok(ServeWorkspaces { set, flat })
+}
+
+/// The names of every workspace config defines, for a diagnostic that wants to
+/// say what `--scope all` would have served.
+///
+/// Best-effort — a config that will not resolve yields no names rather than a
+/// second error, because every caller here is already reporting the first one and
+/// "…and also your config is broken" is not the sentence they came for. The
+/// resolution *is* still checked, on the path that acts on it.
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+fn configured_workspace_names(cfg: &config::Config) -> Vec<String> {
+    cfg.resolved_workspaces()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| r.name)
+        .collect()
 }
 
 /// What each scanned root actually offered, one line per root that skipped
@@ -14582,11 +15691,12 @@ fn register_workspace_reload(
     flat: Option<&std::sync::Arc<rto_graph::Workspace>>,
     cfg: config::Config,
     cli_roots: Vec<String>,
+    scope: WorkspaceScope,
 ) {
     let set = set.clone();
     let flat = flat.cloned();
     set_reload_hook(Box::new(move || {
-        match reload_workspaces(&set, flat.as_ref(), &cfg, &cli_roots) {
+        match reload_workspaces(&set, flat.as_ref(), &cfg, &cli_roots, &scope) {
             Ok(line) => eprintln!("workspace reloaded: {line}"),
             // Two failures, deliberately not one message. "Registry unchanged"
             // is a *claim*, and once a registry has been swapped it is a false
@@ -14706,10 +15816,16 @@ fn reload_workspaces(
     flat: Option<&std::sync::Arc<rto_graph::Workspace>>,
     cfg: &config::Config,
     cli_roots: &[String],
+    scope: &WorkspaceScope,
 ) -> Result<String, ReloadFailure> {
-    // One filesystem view, shared by both registries (point 1 above).
+    // One filesystem view, shared by both registries (point 1 above) — and under
+    // the **same scope the server started with** (issue #810). Re-reading the
+    // whole configured list here would let a SIGHUP silently widen a
+    // `--scope workspace <NAME>` server to every workspace, which is the shape of
+    // defect this function's consistency argument exists to rule out: the reload
+    // has to reproduce the start, not a different start.
     let effective = fold_cli_roots(
-        cfg.resolved_workspaces().map_err(ReloadFailure::planning)?,
+        scoped_workspaces(cfg, scope).map_err(ReloadFailure::planning)?,
         cli_roots,
     );
     // All the I/O, before either swap (point 2) — and it is **one** walk, not
@@ -21912,7 +23028,10 @@ mod serve_workspace_paths_tests {
 /// change fixes, because the flat view was the half that always reloaded.
 #[cfg(all(test, any(feature = "mcp", feature = "serve", feature = "explorer")))]
 mod sighup_reload_tests {
-    use super::{fold_cli_roots, reload_workspaces, resolved_repo_paths, set_project_names};
+    use super::{
+        WorkspaceScope, fold_cli_roots, reload_workspaces, resolved_repo_paths, scoped_workspaces,
+        set_project_names,
+    };
     use std::sync::Arc;
 
     /// A git repo with one commit at `dir`.
@@ -22002,7 +23121,8 @@ mod sighup_reload_tests {
         );
         drop(plan);
 
-        let line = reload_workspaces(&set, Some(&flat), &cfg, &[]).expect("reload");
+        let line =
+            reload_workspaces(&set, Some(&flat), &cfg, &[], &WorkspaceScope::All).expect("reload");
 
         let expected = vec!["one".to_owned(), "three".to_owned(), "two".to_owned()];
         assert_eq!(
@@ -22032,7 +23152,8 @@ mod sighup_reload_tests {
 
         // A repo removed from the root is dropped from both views.
         std::fs::remove_dir_all(root.join("two")).expect("rm repo");
-        reload_workspaces(&set, Some(&flat), &cfg, &[]).expect("reload after removal");
+        reload_workspaces(&set, Some(&flat), &cfg, &[], &WorkspaceScope::All)
+            .expect("reload after removal");
         let shrunk = vec!["one".to_owned(), "three".to_owned()];
         assert_eq!(flat.names(), shrunk);
         assert_eq!(set_project_names(&set), shrunk);
@@ -22078,7 +23199,7 @@ mod sighup_reload_tests {
         // The configured root disappears, so discovery — which is the whole of
         // the plan phase — fails before anything is swapped.
         std::fs::remove_dir_all(&root).expect("remove root");
-        let failure = reload_workspaces(&set, Some(&flat), &cfg, &[])
+        let failure = reload_workspaces(&set, Some(&flat), &cfg, &[], &WorkspaceScope::All)
             .expect_err("a vanished root must fail the reload");
         assert!(
             !failure.applied,
@@ -22117,12 +23238,77 @@ mod sighup_reload_tests {
         assert_eq!(set_project_names(&set), vec!["alpha".to_owned()]);
 
         repo(&root.join("beta"));
-        let line = reload_workspaces(&set, None, &cfg, &[]).expect("reload");
+        let line = reload_workspaces(&set, None, &cfg, &[], &WorkspaceScope::All).expect("reload");
         assert_eq!(
             set_project_names(&set),
             vec!["alpha".to_owned(), "beta".to_owned()]
         );
         assert!(line.contains("2 project(s) — alpha, beta"), "got: {line}");
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// **A SIGHUP reload stays inside the scope the server started with**
+    /// (issue #810).
+    ///
+    /// The reload re-reads the configured roots on purpose — a repo added under a
+    /// hosted root *is* picked up — and before `--scope` there was only one
+    /// reading of "the configured roots". Now there are three, and reading the
+    /// wrong one would silently widen a `--scope workspace <NAME>` server to
+    /// every workspace on the next signal: no error, no log line saying anything
+    /// had changed shape, and a set the startup line no longer describes.
+    ///
+    /// That is this module's own class of defect — a reload producing a server
+    /// the start would not have produced — so it is asserted the same way, with
+    /// an `all` control beside it so the narrowing is shown to be the scope's
+    /// doing rather than a reload that quietly did nothing.
+    #[test]
+    fn a_reload_does_not_widen_a_narrowed_scope() {
+        let base = std::env::temp_dir().join(format!("rto-sighup-scope-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        for (group, member) in [("wsA", "alpha"), ("wsB", "beta")] {
+            repo(&base.join(group).join(member));
+        }
+        let named = |name: &str, root: &str| crate::config::NamedWorkspace {
+            name: name.to_owned(),
+            roots: Some(vec![base.join(root).to_string_lossy().into_owned()]),
+            repos: None,
+            includes: None,
+        };
+        let cfg = crate::config::Config {
+            workspaces: vec![named("one", "wsA"), named("two", "wsB")],
+            ..crate::config::Config::default()
+        };
+
+        let scope = WorkspaceScope::Named("one".to_owned());
+        let resolved = scoped_workspaces(&cfg, &scope).expect("scoped");
+        let set = Arc::new(rto_graph::WorkspaceSet::from_resolved(resolved).expect("build set"));
+        assert_eq!(set.names(), vec!["one".to_owned()], "narrowed at startup");
+
+        // A repo appears under the workspace this server is NOT hosting, which is
+        // what a whole-config reload would sweep in.
+        repo(&base.join("wsB").join("gamma"));
+
+        let line = reload_workspaces(&set, None, &cfg, &[], &scope).expect("reload");
+        assert_eq!(
+            set.names(),
+            vec!["one".to_owned()],
+            "the reload must re-derive `one` alone; widening to `two` would host \
+             what nobody asked for, on a signal that reports success. got: {line}"
+        );
+        assert!(
+            !line.contains("beta") && !line.contains("gamma"),
+            "and the reload line must describe the narrowed set it reloaded; \
+             got: {line}"
+        );
+
+        let line = reload_workspaces(&set, None, &cfg, &[], &WorkspaceScope::All).expect("reload");
+        assert_eq!(
+            set.names(),
+            vec!["one".to_owned(), "two".to_owned()],
+            "control: `all` reaches both workspaces from the same config and the \
+             same set, so the narrowing above is the scope's. got: {line}"
+        );
 
         std::fs::remove_dir_all(&base).ok();
     }

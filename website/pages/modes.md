@@ -182,10 +182,27 @@ straight to the hub struct that defines it. Fully offline and model-free;
 requires `--features explorer`.
 
 <pre><code><span class="c"># Serve the explorer UI on loopback (no model needed)</span>
-roteiro explorer                        <span class="c"># → prints the URL to open in your browser</span>
+roteiro explorer                        <span class="c"># → this directory's repo (--scope here, the default)</span>
 
-<span class="c"># Pick a workspace by name, or default to the repo you're in</span>
+<span class="c"># Every configured workspace — what the default used to be</span>
+roteiro explorer --scope all
+
+<span class="c"># One configured workspace, and only it</span>
+roteiro explorer --scope workspace payments
+
+<span class="c"># One OKF bundle, ours or somebody else's — no graph, just the viewer</span>
+roteiro explorer --scope bundle ./their-bundle
+
+<span class="c"># Pick which workspace the flat /v1/graph routes bind to (does NOT narrow)</span>
 roteiro explorer --workspace-name payments</code></pre>
+
+<div class="note"><strong><code>--scope</code> defaults to <code>here</code>.</strong>
+Serving every configured workspace is <code>--scope all</code> — a choice you make
+rather than what you get by standing in the wrong directory. If a config defines
+workspaces and you did not name a scope, the server says so on one line and names
+<code>--scope all</code>. A server started by a service manager has no useful
+working directory, so set <code>[serve] scope</code> in config instead of passing a
+flag. <code>roteiro serve</code> takes the same flag and the same default.</div>
 
 <div class="note"><strong>Chat to your graph in the browser.</strong> Build with
 <code>--features serve,explorer</code> and run <code>roteiro serve</code>:

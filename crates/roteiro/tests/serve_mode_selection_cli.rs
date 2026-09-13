@@ -1,9 +1,23 @@
 //! **Characterisation tests.** What `roteiro explorer` and `roteiro serve`
 //! decide to serve, pinned as it behaves *today* — not as it ought to behave.
 //!
+//! # `--scope` landed (issue #810), and this file is its record
+//!
+//! These tables were written *before* the flag and pinned the behaviour it was
+//! going to move. It moved. What that means for the file:
+//!
+//! * Every table now runs under a **named scope**, because there is one. The
+//!   four-cell tables below carry the **new default** (`--scope here`); the two
+//!   `…_scope_all_is_the_previous_default` tables carry the **old** expectations
+//!   verbatim, under `--scope all`, which is what makes "the default inverted"
+//!   a checkable claim rather than a description. Where a cell moved it is
+//!   marked **(moved, #810)** with the reason on the same line.
+//! * `serve -w NAME` with no config **starts** now, and the cell that pinned it
+//!   as unstartable said it expected to go red when issue #824 was fixed. It was.
+//!
 //! # Why this file exists
 //!
-//! A `--scope` flag for these two commands will refactor exactly this decision,
+//! A `--scope` flag for these two commands refactored exactly this decision,
 //! and until now nothing exercised it: `okf_mounts` and `serve_okf_only` had no
 //! test at all, and the `{ws}/{project}` mount label — the string a scope flag is
 //! most likely to change by accident — was derived in one `format!` nothing read
@@ -13,7 +27,8 @@
 //! current behaviour is surprising it is pinned *as surprising*, with the
 //! surprise written down beside it. A test here going red does not by itself mean
 //! the change is wrong — it means the change moved something this file says is
-//! load-bearing, and the mover has to say which and why.
+//! load-bearing, and the mover has to say which and why. That is exactly what
+//! #810 did, and section 5 below is the surface it added.
 //!
 //! # Why it drives the real binary
 //!
@@ -30,7 +45,7 @@
 //! | mode | startup line | `/` | `/v1/graph/workspaces` |
 //! |------|--------------|-----|------------------------|
 //! | graph explorer (`serve_graph_ui`) | `listening on http://ADDR/ (UI) — API at …` | 200, the UI | 200 |
-//! | bundles only (`serve_okf_only`)   | `listening on http://ADDR/okf — no repository here, so N OKF bundle(s) only: …` | 307 → `/okf` | 404 |
+//! | bundles only (`serve_okf_only`)   | `listening on http://ADDR/okf — <reason>, so N OKF bundle(s) only: …` | 307 → `/okf` | 404 |
 //!
 //! Asserting on both means a refactor cannot satisfy these tests by starting
 //! *something* on the port.
@@ -112,11 +127,20 @@ fn graph(names: &[&str]) -> Mode {
 /// there is nothing to serve and the command **errors**. That is also the
 /// behavioural proof that `serve_okf_only` is never entered with an empty mount
 /// list — see [`the_zero_bundle_chooser_page_is_unreachable`].
+///
+/// **Under the default scope, which is now `here`** (issue #810). The two config
+/// cells moved, and moved in the two directions the inverted default predicts:
+/// with a repository, the repository wins over the configured list; without one,
+/// there is nothing left for `here` to serve and it refuses. The old
+/// expectations are not deleted — they are
+/// [`explorer_scope_all_is_the_previous_default`], run verbatim under
+/// `--scope all`.
 #[test]
 fn explorer_mode_truth_table_without_a_bundle() {
     run_matrix(
         "explorer-modes-nobundle",
         "explorer",
+        &[],
         &[
             Cell {
                 what: "no config, inside a repo, no bundle → the cwd repo alone",
@@ -135,8 +159,55 @@ fn explorer_mode_truth_table_without_a_bundle() {
                 repo: false,
                 bundle: false,
                 mode: Mode::Refuses,
+                // **(moved, #810)** — the git error is still the *cause*, and is
+                // still asserted here; what is new is the sentence wrapped round
+                // it, which has to name `--scope all` rather than fall back to
+                // it. `refusal` pins the cause; `scope_here_outside_a_repo_\
+                // refuses_and_names_scope_all` pins the sentence.
                 refusal: Some("Could not find a git repository"),
             },
+            Cell {
+                what: "**(moved, #810)** config, inside a repo, no bundle → the CWD \
+                       REPO, not the configured set: `here` is the default and does \
+                       not read the workspace list",
+                config: true,
+                repo: true,
+                bundle: false,
+                mode: graph(&["cell2"]),
+                refusal: None,
+            },
+            Cell {
+                what: "**(moved, #810)** config, no repo, no bundle → refuses: \
+                       `here` needs a repository and must never silently fall back \
+                       to `all`",
+                config: true,
+                repo: false,
+                bundle: false,
+                mode: Mode::Refuses,
+                refusal: Some("Could not find a git repository"),
+            },
+        ],
+    );
+}
+
+/// **`--scope all` is the default this repository shipped until #810**, asserted
+/// by running the two cells that moved with their *original* expectations.
+///
+/// This is the half that makes the change reviewable. "The default inverted" is
+/// a claim about two behaviours, and a diff that only edits the new one leaves
+/// the other described by prose. Here the old table is executable: if `all` ever
+/// stops meaning "every configured workspace", this goes red rather than a
+/// paragraph going stale.
+///
+/// The `config: false` cells are deliberately absent: they did not move, because
+/// with nothing configured `all` and `here` reach the same single-repo fallback.
+#[test]
+fn explorer_scope_all_is_the_previous_default() {
+    run_matrix(
+        "explorer-scope-all",
+        "explorer",
+        &["--scope", "all"],
+        &[
             Cell {
                 what: "config, inside a repo, no bundle → the configured set (the \
                        cwd repo is NOT added)",
@@ -174,12 +245,19 @@ fn explorer_mode_truth_table_without_a_bundle() {
 ///   different reason: `explorer_cwd_set` calls `Repo::discover`, which succeeds,
 ///   so the `Err` arm is never taken. Inside a repository the fallback arm is
 ///   **unreachable** however many bundles are lying around.
+///
+/// **Under the default scope, which is now `here`** (issue #810). The two config
+/// cells moved: `here` does not read the workspace list, so a repository wins and
+/// — where there is none — the bundle beside it does, which is `here`'s third
+/// case ("this directory's repo **and its bundle**"). The old expectations are
+/// [`explorer_scope_all_is_the_previous_default_with_a_bundle`].
 #[test]
 #[cfg(feature = "okf-viewer")]
 fn explorer_mode_truth_table_with_a_bundle() {
     run_matrix(
         "explorer-modes-bundle",
         "explorer",
+        &[],
         &[
             Cell {
                 what: "no config, inside a repo, a bundle → still the graph; \
@@ -199,6 +277,41 @@ fn explorer_mode_truth_table_with_a_bundle() {
                 mode: Mode::BundlesOnly,
                 refusal: None,
             },
+            Cell {
+                what: "**(moved, #810)** config, inside a repo, a bundle → the CWD \
+                       REPO, not the configured set",
+                config: true,
+                repo: true,
+                bundle: true,
+                mode: graph(&["cell2"]),
+                refusal: None,
+            },
+            Cell {
+                what: "**(moved, #810)** config, no repo, a bundle → BUNDLES ONLY. \
+                       Config no longer outranks the bundle fallback, because \
+                       `here` never consults it — and this is the cell that keeps \
+                       ADR-0022's premise alive by default rather than only where \
+                       no config exists",
+                config: true,
+                repo: false,
+                bundle: true,
+                mode: Mode::BundlesOnly,
+                refusal: None,
+            },
+        ],
+    );
+}
+
+/// The bundle half of [`explorer_scope_all_is_the_previous_default`]: under
+/// `--scope all`, config outranks the bundle fallback exactly as it always did.
+#[test]
+#[cfg(feature = "okf-viewer")]
+fn explorer_scope_all_is_the_previous_default_with_a_bundle() {
+    run_matrix(
+        "explorer-scope-all-bundle",
+        "explorer",
+        &["--scope", "all"],
+        &[
             Cell {
                 what: "config, inside a repo, a bundle → the configured set",
                 config: true,
@@ -233,6 +346,7 @@ fn explorer_without_the_viewer_has_no_bundle_fallback() {
     run_matrix(
         "explorer-modes-noviewer",
         "explorer",
+        &[],
         &[Cell {
             what: "no config, no repo, a bundle, no `okf-viewer` → refuses; there \
                    is no fallback compiled in",
@@ -261,11 +375,25 @@ fn explorer_without_the_viewer_has_no_bundle_fallback() {
 /// These cells run with no model installed (the isolated home has none), so
 /// `run_serve_network` degrades to the same llama-free graph server `explorer`
 /// serves — which is what makes the two comparable at all.
+/// **Under the default scope, which is now `here`** (issue #810). The two config
+/// cells moved, in the same two directions `explorer`'s did — which is itself the
+/// point: `serve` and `explorer` decide in two different functions, and the whole
+/// risk of this change was that one of them would move and the other would not.
+/// The old expectations are [`serve_scope_all_is_the_previous_default`].
+///
+/// `serve` has no bundles-only mode and does not gain one here. `--scope here`
+/// standing in a bundle directory with no repository **refuses**, naming
+/// `--scope bundle <PATH>` — see
+/// [`scope_here_outside_a_repo_refuses_and_names_scope_all`]. Quietly turning the
+/// model endpoint into a bundle viewer because of what was in the working
+/// directory is the shape of implicitness #810 exists to remove, and an explicit
+/// `--scope bundle` serves that case for both commands.
 #[test]
 fn serve_mode_truth_table() {
     run_matrix(
         "serve-modes",
         "serve",
+        &[],
         &[
             Cell {
                 what: "no config, inside a repo → the cwd repo alone, hosted as \
@@ -286,6 +414,36 @@ fn serve_mode_truth_table() {
                 mode: Mode::Refuses,
                 refusal: Some("Could not find a git repository"),
             },
+            Cell {
+                what: "**(moved, #810)** config, inside a repo → the CWD REPO as \
+                       `default`, not the configured set",
+                config: true,
+                repo: true,
+                bundle: false,
+                mode: graph(&["default"]),
+                refusal: None,
+            },
+            Cell {
+                what: "**(moved, #810)** config, no repo → refuses; `here` needs a \
+                       repository and config no longer supplies one",
+                config: true,
+                repo: false,
+                bundle: false,
+                mode: Mode::Refuses,
+                refusal: Some("Could not find a git repository"),
+            },
+        ],
+    );
+}
+
+/// [`explorer_scope_all_is_the_previous_default`] asked of `serve`.
+#[test]
+fn serve_scope_all_is_the_previous_default() {
+    run_matrix(
+        "serve-scope-all",
+        "serve",
+        &["--scope", "all"],
+        &[
             Cell {
                 what: "config, inside a repo → the configured set; the cwd repo is \
                        NOT added, exactly as for `explorer`",
@@ -317,6 +475,14 @@ fn serve_mode_truth_table() {
 /// the sentence, differing only in the `--workspace <ROOT>` clause that applies
 /// to one of them. Two copies of a message is two places for a refactor to move
 /// one and not the other, so both are pinned.
+///
+/// **(moved, #810)** Both halves now pass `--scope all`, because that is the
+/// scope this diagnostic belongs to: resolving the configured list is what `all`
+/// does, and `here` never reads it. The second half of the test is new and says
+/// so — under the default scope the very same ghost config is *ignored* and the
+/// cwd repository is served. That is not an incidental consequence: it is the
+/// inverted default, observed at the one fixture where "config resolved to
+/// nothing" and "config was not consulted" are distinguishable.
 #[test]
 fn a_config_resolving_to_nothing_bails_rather_than_falling_back() {
     let base = Scratch::new("explorer-empty-config");
@@ -342,16 +508,39 @@ fn a_config_resolving_to_nothing_bails_rather_than_falling_back() {
             "no workspaces to serve — run inside a repo, pass `--workspace <ROOT>`, or configure",
         ),
     ] {
-        let (status, stderr) = run_refusing(&[cmd, "--addr", &free_addr()], &cwd, &home);
+        let (status, stderr) = run_refusing(
+            &[cmd, "--scope", "all", "--addr", &free_addr()],
+            &cwd,
+            &home,
+        );
         assert!(
             !status.success(),
-            "`roteiro {cmd}` must refuse when config resolves to no workspace; \
-             it exited {status:?}"
+            "`roteiro {cmd} --scope all` must refuse when config resolves to no \
+             workspace; it exited {status:?}"
         );
         assert!(
             stderr.contains(expected),
-            "`roteiro {cmd}` must bail with its own `no workspaces to serve` \
-             diagnostic; got: {stderr}"
+            "`roteiro {cmd} --scope all` must bail with its own `no workspaces to \
+             serve` diagnostic; got: {stderr}"
+        );
+    }
+
+    // The other half of the same fixture: under the default scope the ghost
+    // config is not consulted at all, so the cwd repository is served and the
+    // command starts. This is the observation that separates "the configured set
+    // came out empty" from "the configured set was never read".
+    for cmd in ["explorer", "serve"] {
+        let server = Server::spawn(&[cmd, "--addr", "{addr}"], &cwd, &home);
+        let (addr, line) = server.wait_for_listening();
+        assert_eq!(
+            graph_projects(&addr),
+            vec!["solo".to_owned()],
+            "`roteiro {cmd}` under the default `--scope here` serves the cwd \
+             repository and never reads the ghost workspace; got: {line}"
+        );
+        assert!(
+            line.contains("1 workspace(s)"),
+            "`here` hosts exactly one workspace — the current repository; got: {line}"
         );
     }
 }
@@ -382,7 +571,13 @@ fn mount_labels_are_workspace_slash_project_and_the_cwd_is_the_exception() {
     let cwd = fx.base.join("elsewhere");
     write_bundle(&cwd.join("okf"));
 
-    let server = Server::spawn(&["explorer", "--addr", "{addr}"], &cwd, &fx.home);
+    // `--scope all`: this test is about labels derived from **hosted workspaces**,
+    // and `here` hosts none of them (#810).
+    let server = Server::spawn(
+        &["explorer", "--scope", "all", "--addr", "{addr}"],
+        &cwd,
+        &fx.home,
+    );
     let (addr, _line) = server.wait_for_listening();
 
     assert_eq!(
@@ -416,7 +611,13 @@ fn a_bundle_needs_an_index_md_file_to_be_mounted() {
     let cwd = fx.base.join("elsewhere");
     std::fs::create_dir_all(&cwd).expect("mkdir cwd");
 
-    let server = Server::spawn(&["explorer", "--addr", "{addr}"], &cwd, &fx.home);
+    // `--scope all`, for [`mount_labels_are_workspace_slash_project_and_the_cwd_is_the_exception`]'s
+    // reason: the admission under test is a hosted workspace's bundle (#810).
+    let server = Server::spawn(
+        &["explorer", "--scope", "all", "--addr", "{addr}"],
+        &cwd,
+        &fx.home,
+    );
     let (addr, _line) = server.wait_for_listening();
 
     // Exactly one mount remains, so `/okf` redirects to it rather than listing.
@@ -454,7 +655,13 @@ fn a_bundle_reachable_twice_is_mounted_once() {
     // Stand inside `alpha` by its REAL path, while config reaches it through the
     // link — so the two admissions disagree on the spelling and agree on the
     // directory.
-    let server = Server::spawn(&["explorer", "--addr", "{addr}"], &fx.alpha, &fx.home);
+    // `--scope all`: the dedup under test collapses a **workspace** spelling
+    // against a **cwd** spelling, and `here` produces only the second (#810).
+    let server = Server::spawn(
+        &["explorer", "--scope", "all", "--addr", "{addr}"],
+        &fx.alpha,
+        &fx.home,
+    );
     let (addr, _line) = server.wait_for_listening();
 
     assert_eq!(
@@ -669,6 +876,11 @@ fn workspace_name_selects_a_default_without_hiding_the_others() {
     let cwd = fx.base.join("elsewhere");
     std::fs::create_dir_all(&cwd).expect("mkdir cwd");
 
+    // No `--scope` here, deliberately: `-w` names a **configured** workspace, and
+    // #810 makes that an explicit statement about the served set — it implies
+    // `--scope all` rather than being overridden by a default nobody typed. This
+    // invocation is therefore unchanged, and that it still means what it meant is
+    // half of what "additive" claims.
     let server = Server::spawn(
         &["explorer", "-w", "one", "--addr", "{addr}"],
         &cwd,
@@ -700,62 +912,84 @@ fn workspace_name_selects_a_default_without_hiding_the_others() {
     );
 }
 
-/// **A pinned defect, recorded rather than fixed.**
+/// **The defect this file pinned, now fixed — issue #824.**
 ///
-/// With no workspace config, `roteiro serve -w NAME` inside a repository can
-/// never start — for **any** `NAME` — and the error it gives tells you to do the
-/// thing you are already doing.
+/// The cell it replaces said, in its own words, that it *expected to go red when
+/// the defect was fixed*, and that a deliberate fix should "arrive with a test
+/// diff that says what changed". This is that diff.
 ///
-/// `build_serve_workspaces`' single-repo fallback is guarded by
+/// # What it used to do
+///
+/// With no workspace config, `roteiro serve -w NAME` inside a repository could
+/// never start — for **any** `NAME`, including `default`, the name the fallback
+/// itself used. `build_serve_workspaces`' single-repo fallback was guarded by
 /// `resolved.is_empty() && workspace_roots.is_empty() && workspace_name.is_none()`,
-/// so passing `-w` suppresses it. With nothing in config there is then nothing to
-/// fold, the workspace set comes out empty, and the function bails with
-/// "no workspaces to serve — run inside a repo, …" — addressed to somebody who is
-/// inside a repo. `default`, the name the fallback itself would have used, does
-/// not work either.
+/// so passing `-w` *suppressed* it; the resolved set then came out empty and the
+/// command bailed with "no workspaces to serve — run inside a repo, …",
+/// addressed to somebody who was inside a repo.
 ///
-/// `roteiro explorer -w NAME` in the same directory answers precisely, because it
-/// builds the cwd fallback set *first* and then validates the name against it:
-/// "no workspace named `bogus` (known: plain)". Both halves are asserted here, so
-/// the asymmetry is the subject and not a detail of one message.
+/// # What fixed it, and why it is here rather than in its own change
 ///
-/// **This test is expected to go red when the defect is fixed.** That is what it
-/// is for: it is here so a `--scope` refactor cannot quietly change this into
-/// some third behaviour, and so a deliberate fix arrives with a test diff that
-/// says what changed. `roteiro mcp` reaches the same code and presumably behaves
-/// the same way; it is not asserted here because this file is about `serve` and
-/// `explorer`.
+/// It fell out of #810 rather than being chased. The fallback is now chosen by
+/// the **scope** — `here` always, `all` when nothing else selects a workspace —
+/// so `workspace_name` has no part in choosing it and is validated against the
+/// set it produces instead. That is fix direction 1 of the two #824 offered:
+/// "`-w` selects within the fallback too … and refuses anything else, the way
+/// `explorer` does". The two commands now give the same answer to the same
+/// question in the same directory, which was the contrast that made the defect
+/// legible.
 #[test]
-fn serve_with_a_workspace_name_and_no_config_cannot_start_at_all() {
+fn serve_with_a_workspace_name_selects_within_the_single_repo_fallback() {
     let base = Scratch::new("serve-w-no-config");
     let repo = base.join("plain");
     make_repo(&repo);
     let home = IsolatedHome::new("serve-w-no-config");
 
-    // No value of `-w` gets `serve` off the ground: not a made-up one, not the
-    // repo's own directory name, not `default`.
-    for name in ["bogus", "plain", "default"] {
+    // A name the fallback does not hold is refused **by name**, listing what is
+    // there — `explorer`'s answer, from `WorkspaceSet::select`'s one message.
+    // `plain` is in this list on purpose: it is the repository's own directory
+    // name, which `serve` does NOT use (it hosts the fallback as `default`), and
+    // it was one of the three values #824 reported as impossible.
+    for name in ["bogus", "plain"] {
         let (status, stderr) =
             run_refusing(&["serve", "-w", name, "--addr", &free_addr()], &repo, &home);
         assert!(
             !status.success(),
-            "`serve -w {name}` unexpectedly started; if that is the fix, this \
-             test is the changelog entry for it"
+            "`serve -w {name}` names no workspace this server holds and must refuse"
         );
         assert!(
-            stderr.contains("no workspaces to serve — run inside a repo"),
-            "`serve -w {name}` bails with the generic diagnostic — which advises \
-             running inside a repo, from inside a repo, and never mentions that \
-             `-w` is what suppressed the single-repo fallback. got: {stderr}"
+            stderr.contains(&format!("no workspace named `{name}`"))
+                && stderr.contains("known: default"),
+            "`serve -w {name}` must name the unknown value and list what is \
+             available — the precise message `explorer` has always given. got: {stderr}"
         );
         assert!(
-            !stderr.contains("no workspace named"),
-            "`serve` does not reach the precise `UnknownWorkspace` message that \
-             `explorer` gives; got: {stderr}"
+            !stderr.contains("no workspaces to serve — run inside a repo"),
+            "the generic diagnostic is what #824 reported: it advises running \
+             inside a repo, from inside a repo. It must not be reachable this \
+             way any more. got: {stderr}"
         );
     }
 
-    // The same flag, the same directory, the other command: precise.
+    // And the name the fallback *does* hold **starts the server**. This is the
+    // half that could not happen at all before: there was no value of `-w` that
+    // worked here.
+    let server = Server::spawn(
+        &["serve", "-w", "default", "--addr", "{addr}"],
+        &repo,
+        &home,
+    );
+    let (addr, line) = server.wait_for_listening();
+    assert_eq!(
+        graph_projects(&addr),
+        vec!["plain".to_owned()],
+        "`serve -w default` selects the single-repo fallback's own workspace and \
+         serves the repository in it; got: {line}"
+    );
+    drop(server);
+
+    // The same flag, the same directory, the other command: unchanged, and now
+    // matched rather than contrasted.
     let (status, stderr) = run_refusing(
         &["explorer", "-w", "bogus", "--addr", &free_addr()],
         &repo,
@@ -765,7 +999,475 @@ fn serve_with_a_workspace_name_and_no_config_cannot_start_at_all() {
     assert!(
         stderr.contains("no workspace named `bogus`") && stderr.contains("known: plain"),
         "`explorer` validates `-w` against the cwd fallback set and says so — \
-         this is the half `serve` is missing; got: {stderr}"
+         `serve` now does the same, against the set *it* builds; got: {stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 5. `--scope`: the surface issue #810 added
+// ---------------------------------------------------------------------------
+
+/// **`--scope here` outside a repository refuses, and the refusal names
+/// `--scope all`** (issue #810, consequence 2).
+///
+/// This is the one behaviour the issue would not let be a fall-back. `here`
+/// becoming the default means somebody's working `roteiro serve` will one day
+/// resolve to nothing, and a silent switch to `all` at that moment would put the
+/// served set back under the control of whether a `.git` directory happened to be
+/// above the working directory — which is the implicitness the whole flag exists
+/// to remove. So it stops, and spends its words on the invocations that work.
+///
+/// Asserted on **both** commands and on **both** shapes of the sentence: the
+/// route out (`--scope all`, `--scope bundle`, `[serve] scope`) and the fact
+/// (what config holds, so a reader can see what `all` would have served). The
+/// underlying git error is asserted too — it is still the cause, and replacing it
+/// rather than wrapping it would lose the only part that says *where*.
+#[test]
+fn scope_here_outside_a_repo_refuses_and_names_scope_all() {
+    let fx = TwoWorkspaces::new("scope-here-no-repo");
+    let cwd = fx.base.join("nowhere");
+    std::fs::create_dir_all(&cwd).expect("mkdir cwd");
+
+    for cmd in ["explorer", "serve"] {
+        let (status, stderr) = run_refusing(
+            &[cmd, "--scope", "here", "--addr", &free_addr()],
+            &cwd,
+            &fx.home,
+        );
+        assert!(
+            !status.success(),
+            "`roteiro {cmd} --scope here` outside a repository must refuse"
+        );
+        for expected in [
+            "--scope all",
+            "--scope bundle <PATH>",
+            "[serve] scope",
+            // What `all` would have served, so the reader can judge whether they
+            // want it — the notice's information, on the refusal path.
+            "one, two",
+            // Still the cause, not replaced by the advice.
+            "Could not find a git repository",
+        ] {
+            assert!(
+                stderr.contains(expected),
+                "`roteiro {cmd} --scope here` must name {expected:?} in its \
+                 refusal; got: {stderr}"
+            );
+        }
+    }
+}
+
+/// **The changed-default notice fires exactly when the default changed something,
+/// and never otherwise** (issue #810, consequence 1).
+///
+/// Four invocations, because "prints a notice" is the easy half and the
+/// interesting half is the three silences. A notice that also fired at somebody
+/// who typed `--scope here` would be telling them about a choice they had just
+/// made; one that fired with no config would be naming workspaces that do not
+/// exist. Both are how a well-meant notice becomes noise people learn to skip,
+/// and by then it is not doing the job it was added for.
+#[test]
+fn the_changed_default_notice_fires_only_for_a_default_nobody_typed() {
+    const NOTICE: &str = "note: serving this directory's repository only";
+
+    let fx = TwoWorkspaces::new("scope-notice");
+    // Inside a hosted repo, so every case below actually starts a server: the
+    // notice is a property of a *successful* start, not of a refusal.
+    let cwd = &fx.alpha;
+
+    // 1. Nothing asked for a scope, and config defines workspaces `here` is not
+    //    hosting: say so, and name the way back.
+    let server = Server::spawn(&["explorer", "--addr", "{addr}"], cwd, &fx.home);
+    let (_addr, _line, stderr) = server.wait_for_listening_verbose();
+    assert!(
+        stderr.contains(NOTICE) && stderr.contains("--scope all") && stderr.contains("one, two"),
+        "the default resolved to `here` while config defines two workspaces — the \
+         notice must say so and name `--scope all`; got: {stderr}"
+    );
+    drop(server);
+
+    // 2. Asked for `here` explicitly: the question has been answered.
+    let server = Server::spawn(
+        &["explorer", "--scope", "here", "--addr", "{addr}"],
+        cwd,
+        &fx.home,
+    );
+    let (_addr, _line, stderr) = server.wait_for_listening_verbose();
+    assert!(
+        !stderr.contains(NOTICE),
+        "`--scope here` is the answer to the question this notice asks; got: {stderr}"
+    );
+    drop(server);
+
+    // 3. Asked for `all`: nothing is being left out.
+    let server = Server::spawn(
+        &["explorer", "--scope", "all", "--addr", "{addr}"],
+        cwd,
+        &fx.home,
+    );
+    let (_addr, _line, stderr) = server.wait_for_listening_verbose();
+    assert!(
+        !stderr.contains(NOTICE),
+        "`--scope all` hosts everything; there is nothing to notice; got: {stderr}"
+    );
+    drop(server);
+
+    // 4. No config at all: `here` is not a *change*, it is the only thing there
+    //    ever was, and there are no workspace names to print.
+    let bare = Scratch::new("scope-notice-bare");
+    let repo = bare.join("solo");
+    make_repo(&repo);
+    let home = IsolatedHome::new("scope-notice-bare");
+    let server = Server::spawn(&["explorer", "--addr", "{addr}"], &repo, &home);
+    let (_addr, _line, stderr) = server.wait_for_listening_verbose();
+    assert!(
+        !stderr.contains(NOTICE),
+        "with no config the default changed nothing and has no names to list; \
+         got: {stderr}"
+    );
+}
+
+/// **`--scope workspace <NAME>` narrows what is hosted** — which is what makes it
+/// a different thing from `-w`, not a synonym.
+///
+/// Asserted against the observable that separates them:
+/// [`workspace_name_selects_a_default_without_hiding_the_others`] proves `-w two`
+/// leaves `one` listed and reachable through its nested route. Here the nested
+/// route for `one` **404s**, because `one` is not hosted at all. Same directory,
+/// same config, two flags, two meanings — stated by a test rather than by a
+/// paragraph, since the flags' names do not distinguish them.
+#[test]
+fn scope_workspace_narrows_where_workspace_name_does_not() {
+    let fx = TwoWorkspaces::new("scope-workspace");
+    let cwd = fx.base.join("elsewhere");
+    std::fs::create_dir_all(&cwd).expect("mkdir cwd");
+
+    let server = Server::spawn(
+        &[
+            "explorer",
+            "--scope",
+            "workspace",
+            "two",
+            "--addr",
+            "{addr}",
+        ],
+        &cwd,
+        &fx.home,
+    );
+    let (addr, line) = server.wait_for_listening();
+
+    assert_eq!(
+        workspace_names(&addr),
+        vec!["two".to_owned()],
+        "`--scope workspace two` hosts that workspace and no other; got: {line}"
+    );
+    assert_eq!(
+        graph_projects(&addr),
+        vec!["beta".to_owned()],
+        "the flat routes bind to it without a `-w` — the scope has already named it"
+    );
+    assert_eq!(
+        http_get(&addr, "/v1/graph/workspaces/one/projects").0,
+        404,
+        "`one` is not hosted, so its nested route is not there either — this is \
+         the half `-w` does NOT do"
+    );
+    assert!(
+        line.contains("1 workspace(s): two"),
+        "the startup line reports the narrowed set; got: {line}"
+    );
+}
+
+/// **`--scope bundle <PATH>` reaches bundles-only mode from inside a
+/// repository** — which nothing could do before (issue #810; ADR-0022 v1.4).
+///
+/// This is the capability half of the flag rather than a rearrangement of
+/// existing ones. `serve_okf_only` had exactly one call site, in the `Err(no_repo)`
+/// arm of `explorer`'s cwd fallback, and `explorer_cwd_set` calls
+/// `Repo::discover` — so inside a repository that arm is unreachable and **a user
+/// standing in a repository could not reach bundle-only mode by any existing
+/// means**. The fixture stands inside a configured repository, with a bundle of
+/// its own beside it, and asks for somebody else's.
+///
+/// The mode is asserted by the route table and not only by the startup line: `/`
+/// redirects to `/okf`, and `/v1/graph/workspaces` is **absent**. That last one
+/// is the answer to the question #810 left open — no SPA under this scope. There
+/// is no graph in a bundle, and an explorer app whose workspace list, search and
+/// project routes all answer about nothing is a worse page than no page, which is
+/// the argument `serve_okf_only` already carries for the case it could reach.
+#[test]
+#[cfg(feature = "okf-viewer")]
+fn scope_bundle_serves_one_bundle_from_inside_a_repository() {
+    let fx = TwoWorkspaces::new("scope-bundle");
+    // Somebody else's bundle: not under any workspace root, not the cwd.
+    let theirs = fx.base.join("a-peers-bundle");
+    write_bundle(&theirs);
+
+    let server = Server::spawn(
+        &[
+            "explorer",
+            "--scope",
+            "bundle",
+            utf8_arg(&theirs),
+            "--addr",
+            "{addr}",
+        ],
+        // Standing inside `alpha`, which is a repository AND a hosted project AND
+        // has a bundle of its own — every reason the old code had to serve
+        // something else.
+        &fx.alpha,
+        &fx.home,
+    );
+    let (addr, line) = server.wait_for_listening();
+
+    assert_eq!(
+        bundles_only_labels(&line),
+        Some(vec!["a-peers-bundle".to_owned()]),
+        "the named bundle is the only one served — not `alpha`'s, not the \
+         configured workspaces'; got: {line}"
+    );
+    assert!(
+        line.contains("`--scope bundle`"),
+        "the startup line says WHY this is bundles-only. `no repository here` \
+         would be false: there is one, and it is being deliberately ignored. \
+         got: {line}"
+    );
+    assert_eq!(
+        http_get(&addr, "/").0,
+        307,
+        "`/` redirects to the viewer, as bundles-only always has"
+    );
+    assert_eq!(
+        http_get(&addr, "/v1/graph/workspaces").0,
+        404,
+        "no graph API under a bundle scope — and therefore no explorer app to \
+         link to one"
+    );
+    assert_eq!(
+        single_mount_redirect(&addr),
+        Some("/okf/a-peers-bundle".to_owned()),
+        "one bundle, so `/okf` redirects to it rather than offering a chooser \
+         with one row"
+    );
+}
+
+/// A `--scope bundle` path that is not a bundle refuses, saying what a bundle is
+/// and which two paths were tried.
+///
+/// Both readings are named because both are tried: the path itself and its `okf/`
+/// subdirectory, the same two `okf_mounts` reads for the current directory. A
+/// refusal that said only "not a bundle" would leave the reader unable to tell a
+/// wrong path from a bundle that has not been rendered yet.
+#[test]
+#[cfg(feature = "okf-viewer")]
+fn scope_bundle_refuses_a_path_that_holds_no_bundle() {
+    let base = Scratch::new("scope-bundle-missing");
+    let empty = base.join("not-a-bundle");
+    std::fs::create_dir_all(&empty).expect("mkdir");
+    let home = IsolatedHome::new("scope-bundle-missing");
+
+    let (status, stderr) = run_refusing(
+        &[
+            "explorer",
+            "--scope",
+            "bundle",
+            utf8_arg(&empty),
+            "--addr",
+            &free_addr(),
+        ],
+        &base.path,
+        &home,
+    );
+    assert!(!status.success(), "a path with no bundle must refuse");
+    assert!(
+        stderr.contains("no OKF bundle there") && stderr.contains("index.md"),
+        "the refusal must say what was looked for; got: {stderr}"
+    );
+    assert!(
+        stderr.contains("not-a-bundle/index.md") && stderr.contains("not-a-bundle/okf/index.md"),
+        "both readings of the path are named, so a rendered-vs-wrong-path \
+         mistake is distinguishable; got: {stderr}"
+    );
+}
+
+/// **`--scope` is additive: a contradiction is an error, never a silent winner**
+/// (issue #810, consequence 4).
+///
+/// The pairs that conflict, and — the half that matters as much — the pairs that
+/// do not. `--workspace <ROOT>` extends `all` and contradicts everything else;
+/// `-w` names a default *within* a set and contradicts only the two scopes that
+/// have already chosen one. Left alone, both flags keep meaning what they meant,
+/// which is what "additive" claims and what
+/// [`workspace_root_displaces_the_cwd_repo`] and
+/// [`workspace_name_selects_a_default_without_hiding_the_others`] still assert
+/// unchanged.
+#[test]
+fn conflicting_scope_and_workspace_flags_refuse_rather_than_choosing() {
+    let fx = TwoWorkspaces::new("scope-conflicts");
+    let root_path = fx.base.join("wsA");
+    let root = utf8_arg(&root_path).to_owned();
+
+    for (args, expected) in [
+        (
+            vec!["--scope", "here", "--workspace", root.as_str()],
+            "`--workspace <ROOT>` and `--scope here`",
+        ),
+        (
+            vec![
+                "--scope",
+                "bundle",
+                "/nowhere",
+                "--workspace",
+                root.as_str(),
+            ],
+            "`--workspace <ROOT>` and `--scope bundle /nowhere`",
+        ),
+        (
+            vec!["--scope", "workspace", "one", "-w", "two"],
+            "`--workspace-name two` and `--scope workspace one`",
+        ),
+        (
+            vec!["--scope", "bundle", "/nowhere", "-w", "two"],
+            "`--workspace-name two` and `--scope bundle /nowhere`",
+        ),
+    ] {
+        let mut full = vec!["serve"];
+        full.extend_from_slice(&args);
+        let addr = free_addr();
+        full.extend_from_slice(&["--addr", &addr]);
+        let (status, stderr) = run_refusing(&full, &fx.alpha, &fx.home);
+        assert!(!status.success(), "`roteiro {full:?}` must refuse");
+        assert!(
+            stderr.contains(expected),
+            "the refusal must quote BOTH things that decided, so the reader can \
+             drop the one they did not mean. expected {expected:?}; got: {stderr}"
+        );
+    }
+
+    // The pair that does NOT conflict: `--workspace <ROOT>` is what `all` extends.
+    let server = Server::spawn(
+        &[
+            "serve",
+            "--scope",
+            "all",
+            "--workspace",
+            root.as_str(),
+            "--addr",
+            "{addr}",
+        ],
+        &fx.alpha,
+        &fx.home,
+    );
+    let (addr, line) = server.wait_for_listening();
+    assert!(
+        workspace_names(&addr).contains(&"one".to_owned()),
+        "`--scope all --workspace <ROOT>` serves the configured set with the \
+         roots folded in; got: {line}"
+    );
+}
+
+/// **`[serve] scope` declares the scope for a server that cannot be passed a
+/// flag** (issue #810, consequence 1's second half).
+///
+/// The deployment this key exists for is the one the new default would otherwise
+/// have broken with no way to fix it: a service manager starts its process in `/`
+/// or `$HOME`, where `here` resolves to nothing and the server refuses to start,
+/// and a unit file's `ExecStart` is not something every operator can edit or
+/// every image rebuild. So the same words that go after `--scope` go into config,
+/// and the flag still wins over them — CLI > project > user > default (ADR-0007),
+/// unchanged by this key existing.
+#[test]
+fn the_serve_scope_config_key_declares_the_scope_and_the_flag_still_wins() {
+    let fx = TwoWorkspaces::new("scope-config-key");
+    // A directory that is not a repository — the daemon's `/` or `$HOME`, where
+    // `here` has nothing to serve.
+    let cwd = fx.base.join("no-repo-here");
+    std::fs::create_dir_all(&cwd).expect("mkdir cwd");
+    append_config(&fx.home, "[serve]\nscope = \"all\"\n");
+
+    // The key alone gets the server up, with no flag passed at all.
+    let server = Server::spawn(&["explorer", "--addr", "{addr}"], &cwd, &fx.home);
+    let (addr, line) = server.wait_for_listening();
+    assert_eq!(
+        workspace_names(&addr),
+        vec!["one".to_owned(), "two".to_owned()],
+        "`[serve] scope = \"all\"` serves the configured workspaces from a \
+         directory where `here` would have refused; got: {line}"
+    );
+    drop(server);
+
+    // And a flag still overrides it — here, back to a refusal, which is the
+    // sharpest way to observe that the config value was not consulted.
+    let (status, stderr) = run_refusing(
+        &["explorer", "--scope", "here", "--addr", &free_addr()],
+        &cwd,
+        &fx.home,
+    );
+    assert!(
+        !status.success() && stderr.contains("--scope all"),
+        "`--scope here` on the command line overrides `[serve] scope = \"all\"`; \
+         got: {stderr}"
+    );
+
+    // A value that will not parse is a named startup error quoting the key, not a
+    // silent fall-back to the default (ADR-0007 v1.3's rule for a bad value).
+    let broken = IsolatedHome::new("scope-config-broken");
+    std::fs::write(
+        broken.path().join("config.toml"),
+        "[serve]\nscope = \"everything\"\n",
+    )
+    .expect("write config");
+    let (status, stderr) = run_refusing(&["explorer", "--addr", &free_addr()], &cwd, &broken);
+    assert!(!status.success(), "an unparseable scope must refuse");
+    assert!(
+        stderr.contains("unknown scope `everything`") && stderr.contains("[serve] scope"),
+        "the refusal names the bad value AND the key that holds it; got: {stderr}"
+    );
+}
+
+/// **`--scope project` is refused by name, as a deferred decision.**
+///
+/// Not as an unknown scope, which is what it would be if the enum simply did not
+/// have the variant — and the two deserve different sentences, because one is a
+/// typo and the other is a design position somebody may be about to re-derive.
+/// ADR-0008's confinement is per-*workspace* (`workspace_handles` → one tool
+/// registry per workspace → `/v1/workspaces/{ws}/chat/completions`) and there is
+/// no project-level equivalent to surface, so project scope is new machinery
+/// rather than a mode that already exists unnamed. The refusal says that, and
+/// points at the two things that do work today.
+#[test]
+fn scope_project_is_refused_as_deferred_and_not_as_a_typo() {
+    let base = Scratch::new("scope-project");
+    let repo = base.join("solo");
+    make_repo(&repo);
+    let home = IsolatedHome::new("scope-project");
+
+    let (status, stderr) = run_refusing(
+        &[
+            "serve",
+            "--scope",
+            "project",
+            "alpha",
+            "--addr",
+            &free_addr(),
+        ],
+        &repo,
+        &home,
+    );
+    assert!(!status.success(), "`--scope project` must refuse");
+    assert!(
+        stderr.contains("scope `project` is deferred"),
+        "refused as a decision, not as a typo; got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("unknown scope"),
+        "`unknown scope` is the sentence for a misspelling, and would send a \
+         reader looking for the right spelling of something that does not \
+         exist; got: {stderr}"
+    );
+    assert!(
+        stderr.contains("workspace <NAME>"),
+        "the refusal names what to use instead; got: {stderr}"
     );
 }
 
@@ -775,7 +1477,7 @@ fn serve_with_a_workspace_name_and_no_config_cannot_start_at_all() {
 
 /// Run every cell and report **all** mismatches at once: a truth table read one
 /// failure at a time hides how much a refactor moved.
-fn run_matrix(label: &str, cmd: &'static str, cells: &[Cell]) {
+fn run_matrix(label: &str, cmd: &'static str, scope: &[&str], cells: &[Cell]) {
     let base = Scratch::new(label);
     std::fs::create_dir_all(&base.path).expect("mkdir matrix base");
     // The configured set, built once and shared: no cell mutates it.
@@ -799,7 +1501,7 @@ fn run_matrix(label: &str, cmd: &'static str, cells: &[Cell]) {
         } else {
             &unconfigured
         };
-        let (observed, stderr) = observe_mode(cell.what, cmd, &cwd, home);
+        let (observed, stderr) = observe_mode(cell.what, cmd, scope, &cwd, home);
         if let Some(expected) = cell.refusal
             && observed == Mode::Refuses
             && !stderr.contains(expected)
@@ -841,9 +1543,18 @@ fn run_matrix(label: &str, cmd: &'static str, cells: &[Cell]) {
 /// stayed alive — satisfied the refusal cells. A cell that a hang can satisfy
 /// pins nothing, and this file exists to rule exactly that out, so the child is
 /// now required to have **exited** and its status is reported.
-fn observe_mode(what: &str, cmd: &'static str, cwd: &Path, home: &IsolatedHome) -> (Mode, String) {
+fn observe_mode(
+    what: &str,
+    cmd: &'static str,
+    scope: &[&str],
+    cwd: &Path,
+    home: &IsolatedHome,
+) -> (Mode, String) {
     let addr = free_addr();
-    let mut child = spawn(&[cmd, "--addr", &addr], cwd, home);
+    let mut args: Vec<&str> = vec![cmd];
+    args.extend_from_slice(scope);
+    args.extend_from_slice(&["--addr", &addr]);
+    let mut child = spawn(&args, cwd, home);
     let lines = stderr_lines(&mut child);
     let mut server = Server { child, lines };
 
@@ -891,7 +1602,11 @@ fn observe_mode(what: &str, cmd: &'static str, cwd: &Path, home: &IsolatedHome) 
     };
 
     let graph_line = line.contains(&format!("http://{addr}/ (UI)"));
-    let bundles_line = line.contains(&format!("http://{addr}/okf — no repository here"));
+    // The **route**, not the reason. Bundles-only is now reachable two ways — the
+    // cwd fallback ("no repository here") and `--scope bundle <PATH>`, which says
+    // so instead — and matching one reason would classify the other as "a new
+    // mode?" while it is the same server on the same route.
+    let bundles_line = line.contains(&format!("http://{addr}{OKF_BASE} — "));
     // `/v1/graph/workspaces` and not `/v1/graph/projects`: the flat route 400s
     // with "several workspaces configured" whenever the set holds more than one
     // and nothing selected a default, which is two of the cells below. The
@@ -1102,6 +1817,21 @@ fn write_config(home: &IsolatedHome, workspaces: &[(&str, &Path)]) {
     std::fs::write(home.path().join("config.toml"), toml).expect("write config.toml");
 }
 
+/// Add more TOML to a home's `config.toml`, after [`write_config`] has written the
+/// workspace list.
+///
+/// Appended rather than composed into `write_config`, because the fixtures that
+/// want an extra table want *different* extra tables and threading each one
+/// through the shared constructor would make every caller name a key it does not
+/// care about.
+fn append_config(home: &IsolatedHome, extra: &str) {
+    let path = home.path().join("config.toml");
+    let mut toml = std::fs::read_to_string(&path).unwrap_or_default();
+    toml.push('\n');
+    toml.push_str(extra);
+    std::fs::write(&path, toml).expect("append config.toml");
+}
+
 /// Escape a value for a TOML **basic** string.
 ///
 /// Backslash and quote are the obvious two. The rest are not decoration: a basic
@@ -1242,6 +1972,18 @@ impl Server {
     /// The `listening on` line, plus the address it names — failing loudly if the
     /// server never got there, because every caller's assertions assume it did.
     fn wait_for_listening(&self) -> (String, String) {
+        let (addr, line, _stderr) = self.wait_for_listening_verbose();
+        (addr, line)
+    }
+
+    /// The same, keeping **everything printed before** the startup line.
+    ///
+    /// Which is where the notices are. `--scope`'s changed-default note (issue
+    /// #810) is printed on a server that then starts perfectly well, so it is
+    /// invisible to `run_refusing` and was being thrown away by
+    /// [`Server::wait_for_listening`] — a one-line notice nothing can observe is
+    /// a one-line notice nothing pins.
+    fn wait_for_listening_verbose(&self) -> (String, String, String) {
         let mut seen = String::new();
         let line = self
             .wait_for_line(|l| l.contains(" listening on http://"), &mut seen)
@@ -1257,7 +1999,7 @@ impl Server {
             .next()
             .expect("address in listening line")
             .to_owned();
-        (addr, line)
+        (addr, line, seen)
     }
 }
 
@@ -1370,7 +2112,8 @@ fn run_refusing(
         }
         // Fail *fast* the moment it starts serving, instead of spending the whole
         // deadline discovering it. `serve_with_a_workspace_name_and_no_config…`
-        // pins a defect and is expected to go red when that defect is fixed —
+        // pinned a defect and was expected to go red when it was fixed. It did
+        // (issue #824); the guard stays, because the next pinned defect will —
         // three cases each burning 90s would turn a legible "this now starts"
         // into a four-and-a-half-minute timeout that reads like CI trouble.
         assert!(
