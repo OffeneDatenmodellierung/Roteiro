@@ -196,7 +196,10 @@ deliberately.
    explicit ingest path under ADR-0025's per-file consent. Local by default; the
    ingest path resolves symlinks where the scan refuses them, and **must screen
    what it ingests**, because the exclusion removes the screen the walk was
-   providing. See Resolved question 2.
+   providing. **A committed manifest ships with it, in every storage mode** —
+   identity, content hash (`blob_oid` over the bytes), origin, access date,
+   licence — since without it a summary cannot tell an absent source from a
+   changed one. See Resolved question 2.
 2. `knowledge/` recognised as authored-layer input, with `render okf` projecting
    it into the bundle as its own kind.
 3. The MCP surface narrowed — see below.
@@ -281,16 +284,23 @@ and there is more than one enumeration, none of which currently matches the code
 |---|---|
 | [[crates/rto-graph/src/provenance.rs#Provenance]] | "an ADR, blueprint, or annotation" |
 | [[crates/rto-graph/src/model.rs#Node]] `provenance` | "ADR/blueprint/lat sections" |
-| the code | those, **plus `site_page`** ([[crates/rto-spec/src/site.rs]]) **and imported `lat` docs** ([[crates/rto-spec/src/lat.rs]]) |
+| [[crates/rto-render/src/okf.rs]] module table | "ADR and blueprint prose" — the narrowest of the three |
+| **the code** | those, plus `site_page` **and `site_section`** ([[crates/rto-spec/src/site.rs]]), and imported `lat` docs ([[crates/rto-spec/src/lat.rs]]) |
 
-Two prose lists that disagree with each other and a third, wider, actual usage.
+Three prose lists, no two of them agreeing, and a fourth, wider, actual usage.
 So `knowledge/` is not being added to a tidy set of three — it is the occasion to
-fix an enumeration that had already fallen behind twice. **That is a
+fix an enumeration that had already fallen behind three times. **That is a
 documentation debt this ADR inherits rather than creates**, and naming it here is
 the point: an implementation that adds a `layer.rs` arm and updates only
-`provenance.rs` leaves `model.rs` contradicting it, which is how the list drifted
-in the first place. None of this is a variant change, so the vocabulary cost
-stands as stated — but it is three edits, not one.
+`provenance.rs` leaves two other lists contradicting it, which is how the drift
+accumulated in the first place. None of this is a variant change, so the
+vocabulary cost stands as stated — but it is **four edits, not one**.
+
+> Recorded because it happened here too: the first version of this table listed
+> three sites and named only `site_page`, and review found both the missing
+> fourth list and the missing `site_section`. An inventory written specifically
+> to stop a partial update was itself partial, twice. Treat the table as the
+> known minimum and grep `Provenance::Authored` before relying on it.
 
 A `knowledge/` page **as Option C defines it**
 is committed, diffed and reviewed before merge, and has a source blob. It would
@@ -397,7 +407,7 @@ cost is larger than a `layer.rs` arm, and this ADR states it rather than letting
 a reader infer a one-line change. Step 2 needs, at minimum:
 
 - a **`layer.rs` arm**, so the page is recognised as authored input at all;
-- the **`Authored` enumeration reconciled** across the three sites above;
+- the **`Authored` enumeration reconciled** across the four sites above;
 - a **`section_for` arm** — [[crates/rto-render/src/okf.rs#section_for]] routes
   every unrecognised kind to `symbols` (`_ => "symbols"`), so without one a
   research note lands in the symbol directory rather than the `knowledge/`
@@ -888,7 +898,14 @@ report as a change that no commit explains. The tiebreak is therefore specified
 here rather than left to the implementer: **days descending by date; within a
 day, entries ascending by concept key.** The key is unique by construction, so
 that is a total order, and it is the same principle `assemble` already applies
-when it settles filename collisions where the whole set is visible. It costs no
+when it settles filename collisions where the whole set is visible.
+
+**The entry payload needs specifying for the same reason**, since `render_log`
+takes preformatted strings and would otherwise accept any of them: an entry is
+`**Update**: <title> (<key>)`, one per changed concept, with the title escaped as
+frontmatter scalars already are — a raw newline in a heading must not be able to
+start a new list item. Ordering alone does not make a render reproducible if two
+implementations can disagree about what they are ordering. It costs no
 new state, no new command and no
 new file to maintain; it is byte-reproducible for the same reason the trust tiers
 are; and it makes the log say something true — *these concepts changed on this
