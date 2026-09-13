@@ -512,6 +512,10 @@ fn the_cwd_is_read_both_as_a_bundle_and_as_its_parent() {
         single_mount_redirect(&addr),
         Some("/okf/my-bundle".to_owned())
     );
+    // Before the cleanup below, not after it: this child's cwd is `inside`, and
+    // on Windows a directory cannot be removed while a process is sitting in it.
+    // `.ok()` would swallow that and leak the fixture on every successful run.
+    drop(server);
 
     std::fs::remove_dir_all(&base).ok();
 }
@@ -649,13 +653,7 @@ fn workspace_root_displaces_the_cwd_repo() {
 
     // With it: the roots under ROOT, and the cwd repo is gone.
     let server = Server::spawn(
-        &[
-            "serve",
-            "--workspace",
-            &root.display().to_string(),
-            "--addr",
-            "{addr}",
-        ],
+        &["serve", "--workspace", utf8_arg(&root), "--addr", "{addr}"],
         &cwd,
         &home,
     );
@@ -1104,6 +1102,25 @@ fn write_bundle(root: &Path) {
         "---\nokf_version: \"0.2\"\n---\n\n# Bundle\n",
     )
     .expect("write index.md");
+}
+
+/// A fixture path as a command-line argument, refusing rather than mangling.
+///
+/// The same limit `write_config` runs into, by a different route: `--workspace`
+/// is a `Vec<String>` in the CLI, so roteiro cannot take a non-UTF-8 root there
+/// either. `display()` would hand the child a *different* path — replacement
+/// characters for the invalid bytes — and the resulting "alpha not found" would
+/// read as a defect in what is being pinned rather than as a fixture that could
+/// never have been expressed.
+fn utf8_arg(path: &Path) -> &str {
+    path.to_str().unwrap_or_else(|| {
+        panic!(
+            "fixture path is not valid UTF-8, so it cannot be passed as \
+             `--workspace` at all: {}. That is a limit of the CLI's `Vec<String>`, \
+             not something this test can escape around.",
+            path.display()
+        )
+    })
 }
 
 /// A fresh git repo with one commit, so `serve` can build a graph for it.
