@@ -11,7 +11,7 @@ architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.8"
+version: "1.9"
 last-modified: 2026-09-13
 confluence-url:
 ---
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | Accepted |
 | **Architectural Significance** | HIGH |
 | **Domain** | Developer Tooling |
-| **Document version** | 1.8 |
+| **Document version** | 1.9 |
 
 ## Reference
 
@@ -159,7 +159,7 @@ not.
 So `Provenance` is deliberately exhaustive in Rust and closed on the wire, and
 that is a decision rather than an oversight. Marking it `#[non_exhaustive]` would
 be **weaker documentation than the current silence**: it would tell a reader that
-a fourth variant is anticipated, when three consecutive ADRs establish that it is
+a fourth variant is anticipated, when four consecutive ADRs establish that it is
 not. The precedent for stating this at the definition is
 [[crates/rto-remote/src/escalation.rs#Trigger]], whose doc comment records the
 same reasoning — exhaustiveness is the right default where a set is closed by a
@@ -221,3 +221,4 @@ Accepted by the project team without external advisory review — single-team op
 | 1.6 | 2026-09-02 | **Adopts the MSRV rule from `BUILD_PLAN.md`**, which has been archived to `docs/history/` along with `BUILD_PLAN_V2.md`. Both plans were delivered and their work moved to tracked issues, so they are marked `status: deprecated` — OKF §5.4's value, whose gloss is exactly this case: *"kept for links and history; no longer current."* Archiving rather than deleting follows the same principle this project already applies to ADR-0005's go/no-go spike table and `BUILD_PLAN_V2`'s own baseline snapshot: a record of what was decided or measured at the time is not rewritten to match the present. **One rule did not retire with them.** v1.4 above cites *"BUILD_PLAN's standing rule that a bump is ADR-worthy and happens only when a dependency forces one"*, which would have left a live constraint sourced from a dead document; it now has a section of its own here. No architectural decision changes — this moves a rule and a pair of documents, and adds nothing. |
 | 1.7 | 2026-09-13 | **A fourth consecutive decline, on new grounds** ([[docs/adr/0026-research-knowledge-layer.md]] v0.2). v1.3 counted three refusals to extend `derived \| authored \| inferred` and read them all the same way: what did not fit was *not a graph fact*. A model-written research note breaks that pattern — it would have a source blob, be committed and reviewed, and — once ADR-0026's step 2 lands — be drift-checked by `roteiro check`, making it a graph fact by every test this ADR applies. (Stated as the target state deliberately: ADR-0026 is `For Review` and `crates/rto-spec/src/layer.rs` has no `knowledge` arm, so nothing here describes current behaviour.) It still needs no class. The reason is one level up and is now written into the section: `authored` has always read *"a human **or agent**"* at the definition, and ADR-0013 states the discriminator as *"deliberately wrote this in a **reviewed** file"* — so the human/model question is about **who authored**, an actor, which OKF carries in `generated.by` / `verified.by` independently of the trust tier `Provenance` decides (issue #799 is the render-path fix that stops collapsing them). Recorded because the rule generalises: a fourth class is not merely for things that are not graph facts, but for a fourth way of **producing** one — a distinction of *who* belongs on the actor, and a distinction of *how* on the class. v1.5's `external-*` is consistent rather than a counter-example: externality entered the tier only because an imported fact has no local source blob and no locally checkable tier, so `origin_for` would otherwise be forced onto one arm and launder by round-trip. A reviewed file in this repository has both. The second candidate for the same slot resolved identically and independently — issue #801's citation records are **closed** with *"no new provenance class"*, an extracted citation staying `derived` under `(path, blob id, bytes)`. No architectural decision changes; the enum, its six tokens and the `#[non_exhaustive]` refusal are all untouched. |
 | 1.8 | 2026-09-13 | **Corrects v1.7's tense, not its decision** (PR #816 review). v1.7 asserted that a model-written `knowledge/` page *"is committed and reviewed, `roteiro check` drift-checks it"*. `roteiro check` does no such thing: [[crates/rto-spec/src/layer.rs]] classifies ADRs, blueprints, annotations and site pages and has **no `knowledge` arm**, and ADR-0026 — where that layer is proposed — is `For Review` and unbuilt. The sentence described the target state in the present tense, which in an ADR is the document people trust to say what *is* (the defect class of issue #811). Both the body bullet and the v1.7 history row now read as target state and name the gate. **The decision is unchanged**: a `knowledge/` page would be a graph fact and still needs no fourth `Provenance` class, because what a fourth class would carry is *who authored it* — an actor, which OKF names in `generated.by` / `verified.by` separately from the tier. |
+| 1.9 | 2026-09-13 | **Finishes the count v1.7 started** (PR #816 review). v1.7 changed the section opener to *"four times running"* and added the ADR-0026 bullet, but left the `#[non_exhaustive]` paragraph below still reading *"three consecutive ADRs establish that it is not"* — a stale count inside the very argument the fourth case strengthens. Now four. The **v1.3 history row keeps "three"**, deliberately: it records what v1.3 said when three was the count, and rewriting it would make the changelog disagree with itself. No architectural decision changes. |
