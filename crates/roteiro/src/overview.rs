@@ -1241,6 +1241,16 @@ mod tests {
             html.contains(crate::theme::TOKENS),
             "the export must inline `assets/tokens.css` verbatim"
         );
+        let local: Vec<String> = crate::theme::declarations(CSS)
+            .into_iter()
+            .filter(|(prop, _)| prop.starts_with("--"))
+            .map(|(prop, _)| prop)
+            .collect();
+        assert!(
+            local.is_empty(),
+            "the overview stylesheet declares {local:?} of its own — custom \
+             properties belong in `assets/tokens.css`"
+        );
         let literals = crate::theme::colour_literals(CSS);
         assert!(
             literals.is_empty(),

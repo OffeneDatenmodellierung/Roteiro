@@ -1432,6 +1432,19 @@ mod tests {
             "`okf-viewer.css` declares a `:root` block — the palette belongs in \
              `assets/tokens.css`, which every in-app surface reads"
         );
+        // `:root` is not the only place a palette can hide: any rule may declare
+        // a custom property, and `.local { --accent-copy: … }` would be a second
+        // home for a colour.
+        let local: Vec<String> = crate::theme::declarations(VIEWER_CSS)
+            .into_iter()
+            .filter(|(prop, _)| prop.starts_with("--"))
+            .map(|(prop, _)| prop)
+            .collect();
+        assert!(
+            local.is_empty(),
+            "`okf-viewer.css` declares {local:?} of its own — custom properties \
+             belong in `assets/tokens.css`"
+        );
         let literals = crate::theme::colour_literals(VIEWER_CSS);
         assert!(
             literals.is_empty(),

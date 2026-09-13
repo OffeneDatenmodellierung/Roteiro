@@ -734,6 +734,40 @@ mod tests {
         );
     }
 
+    /// The review tool splices the palette the same way the server does.
+    ///
+    /// `scripts/resolve-explorer-theme.py` resolves the shell's declarations to
+    /// literals so two revisions of a palette change can be diffed — it is what
+    /// `shell_colour_vars_are_one_namespace_declared_by_both_views` tells a
+    /// reader to reach for. Moving the palette behind a marker broke it: it
+    /// parsed `index.html` directly, found no variable definitions at all, and
+    /// reported `defines vars on []` with `<UNRESOLVED --bg>` for every colour
+    /// on the page. It said so out loud and still nobody read it for a round.
+    ///
+    /// The marker is the seam between the two, so it is the thing to pin.
+    #[test]
+    fn the_theme_review_script_uses_the_same_splice_marker() {
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/resolve-explorer-theme.py");
+        let Ok(text) = std::fs::read_to_string(&script) else {
+            // A packaged crate has no `scripts/`. In a repository checkout the
+            // file is always there, so this returns only where there is nothing
+            // to compare.
+            return;
+        };
+        assert!(
+            text.contains(TOKENS_MARKER),
+            "`resolve-explorer-theme.py` does not know the `{TOKENS_MARKER}` \
+             marker, so it will read a shell with no palette and resolve every \
+             colour to `<UNRESOLVED>`"
+        );
+        assert!(
+            text.contains("assets/tokens.css"),
+            "`resolve-explorer-theme.py` must read the same token master the \
+             server splices in"
+        );
+    }
+
     /// The shell declares no colour of its own — it only names tokens.
     ///
     /// Scanned against `SHELL_TEMPLATE` (pre-splice), so the master's own values
@@ -758,6 +792,43 @@ mod tests {
             dangling.is_empty(),
             "the shell names {dangling:?}, which `assets/tokens.css` does not \
              declare — they resolve to nothing and fall back to inherited/initial"
+        );
+
+        // The stylesheet is not the only consumer. `app.js` resolves graph
+        // colours with `getComputedStyle`, so those names are invisible to a
+        // `var(--…)` scan — and `--match` and `--fg-strong` are reached from
+        // NOWHERE else. Renaming either in the master would have returned `""`
+        // to cytoscape, drawing an unstyled border, with every guard green.
+        let declared = crate::theme::declared_names();
+        let script_refs = crate::theme::script_token_refs(APP_JS);
+        assert!(
+            script_refs.len() >= 10,
+            "only {} token lookups found in `app.js`; the scan has stopped \
+             matching the accessor and is measuring nothing",
+            script_refs.len()
+        );
+        let unresolved: Vec<&String> = script_refs
+            .iter()
+            .filter(|name| !declared.contains(*name))
+            .collect();
+        assert!(
+            unresolved.is_empty(),
+            "`app.js` asks `getComputedStyle` for {unresolved:?}, which \
+             `assets/tokens.css` does not declare — the property resolves to an \
+             empty string and cytoscape draws the element unstyled"
+        );
+
+        // The palette lives in ONE file. A rule declaring its own custom property
+        // is a second place a colour can live, however local it looks.
+        let local: Vec<String> = crate::theme::declarations(style_block(SHELL_TEMPLATE))
+            .into_iter()
+            .filter(|(prop, _)| prop.starts_with("--"))
+            .map(|(prop, _)| prop)
+            .collect();
+        assert!(
+            local.is_empty(),
+            "`index.html` declares {local:?} of its own — custom properties \
+             belong in `assets/tokens.css`, which every in-app surface reads"
         );
     }
 

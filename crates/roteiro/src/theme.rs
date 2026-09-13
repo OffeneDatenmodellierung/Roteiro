@@ -94,7 +94,6 @@ const NON_COLOUR_PROPERTIES: &[&str] = &[
     "cursor",
     "direction",
     "display",
-    "filter",
     "flex",
     "flex-basis",
     "flex-direction",
@@ -239,18 +238,32 @@ const VALUE_KEYWORDS: &[&str] = &[
 /// or not it existed when this was written.
 #[cfg(test)]
 const VALUE_FUNCTIONS: &[&str] = &[
+    "blur",
+    "brightness",
     "calc",
     "clamp",
     "conic-gradient",
+    "contrast",
     "env",
+    "grayscale",
+    "hue-rotate",
+    "invert",
     "linear-gradient",
     "max",
     "min",
+    "opacity",
     "radial-gradient",
     "repeating-conic-gradient",
     "repeating-linear-gradient",
     "repeating-radial-gradient",
+    "saturate",
+    "sepia",
 ];
+
+// Note what is NOT here: `drop-shadow`. `filter` is the one property that looks
+// like pure presentation and yet accepts a `<color>` —
+// `filter: drop-shadow(0 0 2px #fff)` — so it is scanned like any other, its
+// colourless functions are admitted above, and `drop-shadow` is reported.
 
 /// Every `property: value` declaration in a stylesheet, comments stripped.
 ///
@@ -318,6 +331,36 @@ pub(crate) fn dangling_tokens(text: &str) -> Vec<String> {
         .into_iter()
         .filter(|name| !declared.contains(name))
         .collect()
+}
+
+/// The token names `app.js` resolves through `getComputedStyle`, as `--name`.
+///
+/// The graph colours are read with a `t("panel")`-style accessor, so they are
+/// invisible to a `var(--…)` scan of the stylesheets — `--match` and
+/// `--fg-strong` are reached from nowhere else, and renaming either in the
+/// master would have left `getComputedStyle` returning `""` and cytoscape
+/// drawing an unstyled border, with every guard green.
+///
+/// Gated on `explorer` because `app.js` is that feature's asset — without it
+/// there is no script to scan and this would be dead code under `-D warnings`.
+#[cfg(all(test, feature = "explorer"))]
+pub(crate) fn script_token_refs(js: &str) -> Vec<String> {
+    let js = without_comments(js);
+    let mut out: Vec<String> = js
+        .match_indices("t(\"")
+        .map(|(i, _)| &js[i + 3..])
+        .filter_map(|rest| rest.find('"').map(|end| &rest[..end]))
+        .filter(|name| {
+            !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        })
+        .map(|name| format!("--{name}"))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Split a value into the tokens the allowlist judges, with `var(--name)`
@@ -394,7 +437,11 @@ fn is_numeric(token: &str) -> bool {
 pub(crate) fn colour_literals(css: &str) -> Vec<String> {
     let mut out = Vec::new();
     for (prop, value) in declarations(css) {
-        if NON_COLOUR_PROPERTIES.contains(&prop.as_str()) || prop.starts_with("--") {
+        // Custom properties are NOT exempt. `.x { --accent-copy: #fff; color:
+        // var(--accent-copy) }` states a colour as surely as `color: #fff` does,
+        // and skipping `--*` let it through. A consumer declaring a colourless
+        // token (`--gap: 4px`) still passes on the value rule.
+        if NON_COLOUR_PROPERTIES.contains(&prop.as_str()) {
             continue;
         }
         for token in value_tokens(&value) {
