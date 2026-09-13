@@ -24,8 +24,12 @@ whether you send a `tools` array — nothing else.
 
 | you send | mode | the model's tools are | grounded in your graph |
 |---|---|---|---|
-| **no `tools`** | **Ask** | Roteiro's graph tools — `search`, `context`, `path`, `debt`, … | **yes** |
-| **`tools` present** | **general** | **yours only** — the graph tools are not injected | no |
+| **no `tools`**, or an empty `tools: []` | **Ask** | Roteiro's graph tools — `search`, `context`, `path`, `debt`, … | **yes** |
+| **a non-empty `tools`** | **general** | **yours only** — the graph tools are not injected | no |
+
+The question is *did you bring tools*, so an empty array answers no and is read
+exactly as an absent one. Both wires agree on that, and a test pins them together
+so they cannot drift apart on it.
 
 In Ask mode the endpoint is the Ask panel over HTTP: the server runs an agent
 loop, calls the graph's own tools, and answers from what it finds. That is the
@@ -299,9 +303,11 @@ rather than ignored.
 | a message content part other than `input_text` / `output_text` | **400** | an image or a file you believed was read would otherwise produce a confident answer about content the model never saw |
 | a message `role` other than `system` / `developer` / `user` / `assistant` | **400** | `developer` is mapped to `system`; an unrecognised role would be rendered *literally* into the prompt by the chat template, arriving as text rather than as a turn |
 | `instructions` | **supported** | mapped to a leading `system` turn |
+| a `namespace` tool | **flattened** | a `namespace` groups `function` tools rather than naming one OpenAI executes — `codex-cli` sends `multi_agent_v1` holding five — so its members are advertised on their own names and schemas, and the namespace itself is not a callable tool. Read **one level**: a namespace inside a namespace is a `400`, because nothing has been seen to send one and walking an unobserved shape is a guess |
+| a tool whose `type` is neither `function`, `namespace`, nor one of those | **400** | an unrecognised type is far likelier to be a misspelling (`web_serach`) than a hosted tool this list has not met, and dropping it would remove a tool you meant to send and answer anyway. The list is an allowlist read on 2026-09-13; a genuinely new hosted tool is refused by name until it is added, which is the failure worth having |
 | a `tools` array in which **every** entry is hosted | **still general mode** | the graph tools stay suppressed. Sending `tools` is what chooses the mode, not what survives translation — a client that asked for its own tools does not get Roteiro's instead, and does not pay the ~3,100 tokens of graph schemas that behaviour exists to spare it. It gets no tools at all, which is the honest answer when none of the ones it sent can be served |
 | `strict` on a function tool | **accepted, not enforced** | schema-constrained arguments are grammar-constrained sampling, which lands with the grammar work — the same reason `tool_choice` is not enforced. The chat wire ignores `function.strict` too; it is declared here rather than half-implemented, so a `strict: true` tool may still come back with arguments its schema would have rejected. Validate on your side before executing |
-| a hosted tool — `web_search`, `code_interpreter`, … | **dropped** | Roteiro executes no hosted tool and never advertises one to the model, so the model cannot call it and no answer can be falsely attributed to it. **This diverges from the chat wire**, where a tool whose `type` is not `function` is a `400`: there, `tools` is function-only by construction and a `retrieval` entry is a mistake; here a hosted tool is a normal part of every request from a real client, and refusing it would fail every turn over a tool that was never going to be used |
+| a hosted tool — `web_search`, `file_search`, `code_interpreter`, `image_generation`, `local_shell`, `mcp`, `computer_use_preview` | **dropped** | Roteiro executes no hosted tool and never advertises one to the model, so the model cannot call it and no answer can be falsely attributed to it. **This diverges from the chat wire**, where a tool whose `type` is not `function` is a `400`: there, `tools` is function-only by construction and a `retrieval` entry is a mistake; here a hosted tool is a normal part of every request from a real client, and refusing it would fail every turn over a tool that was never going to be used |
 | `/v1/{project}/responses`, `/v1/workspaces/{ws}/responses` | **404** | scope parity is not built, and there is no substitute: `/v1/{project}/chat/completions` speaks the other wire — it takes `messages`, not `input` — so a Responses-native client cannot reach a scoped graph at all today. Until it lands, a scoped answer needs a server started in that project. The seam these routes will reuse is the same `ChatScope` the chat routes already pass, not a second confinement mechanism (ADR-0008) |
 
 ### A tool round trip, and why it is byte-identical to the chat one

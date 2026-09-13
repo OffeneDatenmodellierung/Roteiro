@@ -318,10 +318,23 @@ pub const RESPONSES_PARAMS: &[Param] = &[
                 prose: "Send `store: false` and keep the turns yourself, replaying them in `input`; that is the only conversation state this endpoint has.",
             },
         },
-        // `false` is both OpenAI's default and what this endpoint does, so a
-        // client library sending it has asked for exactly what it gets. Only
-        // `true` is a decision that would not be honoured — and the one real
-        // client measured here sends `false`.
+        // `false` is inert here for the *second* of this module's two reasons,
+        // not the first — and the distinction is worth stating because on the
+        // Responses wire OpenAI's documented default is `true`, not `false`.
+        //
+        // A value is not a decision when it is OpenAI's default, **or when it is
+        // a decision this endpoint honours**. `store: false` is the latter: the
+        // caller asked for nothing to be retained and nothing is retained, so
+        // refusing it would be a refusal fired at a caller who got exactly what
+        // it asked for. Only `true` is a decision that would not be honoured.
+        //
+        // A request that omits `store` is not refused either, and that is
+        // deliberate rather than an oversight: an absent key is no decision for
+        // any parameter here, and refusing every caller who left OpenAI's
+        // default implicit would refuse almost everyone — the fire-on-nobody
+        // refusal this module exists not to ship. Such a caller is told what
+        // happened by the response itself, whose envelope always carries
+        // `"store": false`.
         inert: &["false"],
     },
     Param {
@@ -621,7 +634,46 @@ fn map_role(role: &str) -> Result<String, String> {
 /// chat wire, where a non-`function` tool **is** a `400` — there, `tools` is
 /// function-only by construction, so a `retrieval` entry is a mistake rather
 /// than a normal part of the protocol.
-fn tool_spec(tool: &Value) -> Result<Option<ToolSpec>, String> {
+/// The tool types OpenAI's own servers execute, which this endpoint drops.
+///
+/// **An allowlist, not "everything that is not `function`".** The difference is
+/// a typo: `{"type": "web_serach"}` is not a hosted tool, it is a tool the
+/// caller meant to send, and treating every unrecognised string as hosted
+/// removed it silently and answered anyway. A denylist of the things that might
+/// be misspelled cannot be written; an allowlist that is out of date refuses
+/// visibly — with a message naming the type — which is the failure worth having.
+///
+/// Read from the Responses tool schema on 2026-09-13. A genuinely new hosted
+/// tool is a one-line addition here, and until then its request is refused
+/// rather than half-served.
+const HOSTED_TOOL_TYPES: &[&str] = &[
+    "code_interpreter",
+    "computer_use_preview",
+    "file_search",
+    "image_generation",
+    "local_shell",
+    "mcp",
+    "web_search",
+    "web_search_preview",
+    "web_search_preview_2025_03_11",
+];
+
+/// A `namespace` entry is a **container of `function` tools**, not a hosted one.
+///
+/// `codex-cli` 0.147.0 sends `{"type": "namespace", "name": "multi_agent_v1",
+/// "tools": [{"type": "function", …}, …]}` — five real client tools inside one
+/// envelope. Treating it as hosted dropped all five silently, which is what this
+/// adapter did until review of #825 forced the question: the entry *looks* like
+/// a tool type nothing here can run, and its contents are exactly the kind this
+/// endpoint serves.
+///
+/// So it is flattened one level and its members advertised on their own names,
+/// which is how they name themselves. One level only: a namespace inside a
+/// namespace is refused rather than walked, because nothing has been seen to
+/// send one and a recursion with no observed shape is a guess.
+const NAMESPACE_TOOL_TYPE: &str = "namespace";
+
+fn tool_spec(tool: &Value) -> Result<Vec<ToolSpec>, String> {
     // Absent means `function` — some clients omit it — but a present non-string
     // is malformed, and coercing it would advertise `{"type": 123, "name": "x"}`
     // to the model as a function tool, slipping past both the hosted/function
@@ -636,8 +688,46 @@ fn tool_spec(tool: &Value) -> Result<Option<ToolSpec>, String> {
             ));
         }
     };
+    if kind == NAMESPACE_TOOL_TYPE {
+        let members = tool.get("tools").and_then(Value::as_array).ok_or_else(|| {
+            format!(
+                "a `namespace` tool must carry a `tools` array of the `function` tools \
+                 it groups, and `{}` does not. Send its members in `tools`, or send \
+                 them as top-level `function` tools.",
+                tool.get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("this one")
+            )
+        })?;
+        let mut flattened = Vec::with_capacity(members.len());
+        for member in members {
+            let member_kind = member
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("function");
+            if member_kind != "function" {
+                return Err(format!(
+                    "a `namespace` may only group `function` tools, and this one contains \
+                     a `{member_kind}`. Nesting is read one level deep; send anything \
+                     further out as a top-level tool."
+                ));
+            }
+            flattened.extend(tool_spec(member)?);
+        }
+        return Ok(flattened);
+    }
     if kind != "function" {
-        return Ok(None);
+        if HOSTED_TOOL_TYPES.contains(&kind) {
+            return Ok(Vec::new());
+        }
+        return Err(format!(
+            "`{kind}` is not a tool type this endpoint recognises. A tool OpenAI's \
+             own servers execute — {} — is dropped, because nothing here can run \
+             one; anything else is refused rather than removed silently, since a \
+             misspelling is far likelier than a hosted tool this list has not \
+             heard of. Send `\"type\": \"function\"` for a tool you will execute.",
+            HOSTED_TOOL_TYPES.join(", ")
+        ));
     }
     let name = tool
         .get("name")
@@ -671,14 +761,28 @@ fn tool_spec(tool: &Value) -> Result<Option<ToolSpec>, String> {
             ));
         }
     };
-    Ok(Some(ToolSpec {
+    // Declared `accepted, not enforced` (see `docs/SERVING.md`), which is a
+    // promise about a **boolean**. A non-boolean is malformed, and the fields
+    // either side of it are already refused rather than dropped.
+    match tool.get("strict") {
+        None | Some(Value::Null | Value::Bool(_)) => {}
+        Some(other) => {
+            return Err(format!(
+                "tool `{name}` has a `strict` that is not a boolean (`{other}`). \
+                 Send `true` or `false`, or omit it — note that `strict` is accepted \
+                 and not enforced here, so arguments are not schema-constrained \
+                 either way."
+            ));
+        }
+    }
+    Ok(vec![ToolSpec {
         kind: "function".to_owned(),
         function: FunctionSpec {
             name: name.to_owned(),
             description,
             parameters,
         },
-    }))
+    }])
 }
 
 /// Bound the `tools` array **as the caller sent it**, before hosted entries are
@@ -780,9 +884,7 @@ impl ResponsesRequest {
         bound_declared_tools(&declared, limits)?;
         let mut tools = Vec::new();
         for tool in declared {
-            if let Some(spec) = tool_spec(&tool)? {
-                tools.push(spec);
-            }
+            tools.extend(tool_spec(&tool)?);
         }
         Ok(ChatCompletionRequest {
             model: self.model,
@@ -1643,6 +1745,125 @@ mod tests {
         chat_of(json!({"model": "echo", "stream": true, "input": "hi",
                        "tools": [{"type": "function", "name": "t"}]}))
         .expect("a tool may carry neither");
+    }
+
+    /// **A `namespace` groups `function` tools; it is not a hosted one.**
+    ///
+    /// `codex-cli` sends one — `multi_agent_v1`, holding five real client tools
+    /// — and this adapter dropped it as "not `function`", silently removing all
+    /// five. The earlier live runs did not notice because the turn under test
+    /// called `exec_command`, which sits at the top level.
+    #[test]
+    fn a_namespace_tool_is_flattened_rather_than_dropped() {
+        let body = json!({
+            "model": "echo", "stream": true, "input": "hi",
+            "tools": [
+                {"type": "function", "name": "exec_command", "parameters": {"type": "object"}},
+                {"type": "namespace", "name": "multi_agent_v1",
+                 "description": "Tools for spawning and managing sub-agents.",
+                 "tools": [
+                     {"type": "function", "name": "spawn_agent", "description": "start one",
+                      "parameters": {"type": "object"}},
+                     {"type": "function", "name": "wait_agent",
+                      "parameters": {"type": "object"}},
+                 ]},
+            ],
+        });
+        let normalised = serde_json::from_value::<ResponsesRequest>(body)
+            .expect("a well-formed body")
+            .normalise(Limits::default())
+            .expect("normalisable");
+        let names: Vec<&str> = normalised
+            .client_tools
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["exec_command", "spawn_agent", "wait_agent"]);
+        // Members are advertised on their own names, with their own schemas —
+        // the namespace itself is not a callable tool and does not appear.
+        assert_eq!(
+            normalised.client_tools[1].description, "start one",
+            "a member keeps its own description"
+        );
+    }
+
+    /// Nesting is read one level. A `namespace` with no `tools`, or one holding
+    /// something that is not a `function`, is refused rather than guessed at.
+    #[test]
+    fn a_malformed_namespace_is_refused() {
+        let no_members = chat_of(json!({"model": "echo", "stream": true, "input": "hi",
+                                        "tools": [{"type": "namespace", "name": "ns"}]}))
+        .expect_err("a refusal");
+        assert!(no_members.contains("`ns`"), "{no_members}");
+
+        let nested = chat_of(json!({"model": "echo", "stream": true, "input": "hi",
+                                    "tools": [{"type": "namespace", "name": "ns",
+                                               "tools": [{"type": "namespace", "name": "inner",
+                                                          "tools": []}]}]}))
+        .expect_err("a refusal");
+        assert!(nested.contains("one level"), "{nested}");
+    }
+
+    /// A misspelled tool type is not a hosted tool. Treating every non-`function`
+    /// string as hosted removed a tool the caller meant to send and answered
+    /// anyway; the allowlist refuses it by name instead.
+    #[test]
+    fn a_misspelled_tool_type_is_refused_not_dropped_as_hosted() {
+        let msg = chat_of(json!({"model": "echo", "stream": true, "input": "hi",
+                                 "tools": [{"type": "functon", "name": "t"}]}))
+        .expect_err("a refusal");
+        assert!(msg.contains("`functon`"), "names the type: {msg}");
+        // A real hosted tool is still dropped, and the message says which ones
+        // those are.
+        assert!(msg.contains("web_search"), "lists the hosted tools: {msg}");
+        chat_of(json!({"model": "echo", "stream": true, "input": "hi",
+                       "tools": [{"type": "file_search"}, {"type": "mcp"}]}))
+        .expect("a known hosted tool is dropped, not refused");
+    }
+
+    /// `strict` is published as **accepted, not enforced**, which is a promise
+    /// about a boolean. A non-boolean is malformed, like the fields either side
+    /// of it.
+    #[test]
+    fn a_non_boolean_strict_is_refused() {
+        let msg = chat_of(json!({"model": "echo", "stream": true, "input": "hi",
+                                 "tools": [{"type": "function", "name": "t", "strict": 123}]}))
+        .expect_err("a refusal");
+        assert!(msg.contains("`strict`"), "{msg}");
+        chat_of(json!({"model": "echo", "stream": true, "input": "hi",
+                       "tools": [{"type": "function", "name": "t", "strict": true}]}))
+        .expect("a boolean is accepted, and not enforced");
+    }
+
+    /// **The two wires must agree on what an empty `tools` array means**, and
+    /// they do: it is read as "the caller brought no tools", so the graph tools
+    /// are injected exactly as they are for a request with no `tools` key.
+    ///
+    /// Recorded as a test because the published mode table says "`tools`
+    /// present", and an empty array is literally present — a reading under which
+    /// this would be a bug on *both* wires. The rule the table means is "did the
+    /// caller bring tools", and `[]` answers no. Pinning it here stops the two
+    /// wires drifting apart on a question neither of them should answer alone.
+    #[test]
+    fn an_empty_tools_array_means_the_same_on_both_wires() {
+        let via_responses = serde_json::from_value::<ResponsesRequest>(json!({
+            "model": "echo", "stream": true, "input": "hi", "tools": [],
+        }))
+        .expect("a well-formed body")
+        .normalise(Limits::default())
+        .expect("normalisable");
+
+        let via_chat = serde_json::from_value::<crate::types::ChatCompletionRequest>(json!({
+            "model": "echo",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [],
+        }))
+        .expect("a well-formed chat body")
+        .normalise(Limits::default())
+        .expect("normalisable");
+
+        assert!(via_responses.client_tools.is_empty());
+        assert!(via_chat.client_tools.is_empty());
     }
 
     #[test]
