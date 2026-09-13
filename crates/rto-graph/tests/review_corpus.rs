@@ -40,6 +40,90 @@ fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/review")
 }
 
+/// This repository, from the crate whose tests these are.
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+/// Whether this is a runner. Both variables are set by GitHub Actions; `CI` alone
+/// is the convention every other provider follows too.
+fn on_ci() -> bool {
+    std::env::var_os("CI").is_some() || std::env::var_os("GITHUB_ACTIONS").is_some()
+}
+
+/// A skip that can be found in a log, written to **real** stderr.
+///
+/// `eprintln!` is captured by libtest and then discarded for a test that *passes*,
+/// so the existing `SKIP:` lines were invisible without `--nocapture` — half of how
+/// #822 stayed invisible on CI. `std::io::stderr()` writes to the file descriptor,
+/// which the capture does not intercept, so the line reaches a CI log and a terminal
+/// alike. It also says **how many assertions did not run**: a skip that does not
+/// quantify what it withheld reads exactly like a pass.
+fn loud_skip(test: &str, reason: &str, assertions_skipped: usize) {
+    use std::io::Write;
+    let mut err = std::io::stderr().lock();
+    let _ = writeln!(
+        err,
+        "SKIP: {test} — {reason}. {assertions_skipped} corpus row assertions did \
+         not run. `git fetch --unshallow` runs them; CI checks out with \
+         `fetch-depth: 0` in every job that runs tests (`.github/workflows/ci.yml`)."
+    );
+    let _ = err.flush();
+}
+
+/// Whether the git history these checks need is present here, and a loud skip if
+/// it is not — **except on a runner, where a shallow clone fails instead.**
+///
+/// # Why the hatch is no longer symmetric
+///
+/// `reviewed_shas_resolve_in_this_repository` named this loophole in its own
+/// comment — *"or a typo'd sha would skip its way to green"* — and then fell
+/// through it. Every `actions/checkout` in `ci.yml` took the action's default
+/// `fetch-depth: 1`, so all three history-dependent checks here printed one
+/// invisible line and passed on every run since they were written, while two of
+/// the corpus's `reviewed_sha` values were force-pushed out of existence and `main`
+/// stayed green (#822).
+///
+/// So the depth is now stated in the workflow **and** enforced from here. On a
+/// runner a shallow clone is a workflow defect rather than a property of the
+/// checkout, and it fails: that is what stops a future edit quietly deleting the
+/// `fetch-depth: 0` lines and restoring the silence, because the hatch can no
+/// longer be the reason CI is green. Off a runner it stays a skip — a
+/// contributor's shallow clone is not a defect and must not read as one.
+fn history_or_loud_skip(test: &str, assertions_skipped: usize) -> bool {
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_root())
+            .args(args)
+            .output()
+    };
+    let inside =
+        matches!(git(&["rev-parse", "--is-inside-work-tree"]), Ok(o) if o.status.success());
+    if !inside {
+        // Not made fatal on CI, unlike shallowness: "no work tree" is what a build
+        // from a packaged tarball looks like, and that is not this file's business
+        // to police. Shallowness is, because the workflow states the depth.
+        loud_skip(test, "not a git work tree", assertions_skipped);
+        return false;
+    }
+    let shallow = git(&["rev-parse", "--is-shallow-repository"])
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "true");
+    if !shallow {
+        return true;
+    }
+    assert!(
+        !on_ci(),
+        "shallow clone on CI: {test} needs the git history and must not skip it \
+         here. `.github/workflows/ci.yml` checks out with `fetch-depth: 0` in every \
+         job that runs tests, so this means that was removed — restore it rather \
+         than widening this skip, which is how the corpus-sha gate went unrun from \
+         the day it was written until #822."
+    );
+    loud_skip(test, "shallow clone", assertions_skipped);
+    false
+}
+
 /// The corpus, loaded the way a scorer loads it. A parse failure fails here with
 /// the loader's own message, which names the line and the field.
 fn corpus() -> Corpus {
@@ -209,11 +293,17 @@ fn the_readme_class_table_matches_the_corpus() {
 /// Confirms each `reviewed_sha` names a real commit in this repository, which
 /// catches a truncated or mistyped sha that the format check alone would pass.
 ///
-/// Needs the git history, so it reports and passes in a shallow clone rather than
-/// failing — the same shape as the model-gated tests in `audio_ingest.rs`.
+/// Needs the git history. Only a shallow clone licenses skipping it — in a full
+/// clone an unresolvable sha is a corrupt row, not a missing object, so the two
+/// must be told apart or a typo'd sha would skip its way to green. That is what
+/// happened: see [`history_or_loud_skip`], which now refuses the skip on CI.
 #[test]
 fn reviewed_shas_resolve_in_this_repository() {
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let corpus = corpus();
+    if !history_or_loud_skip("reviewed_shas_resolve_in_this_repository", corpus.len()) {
+        return;
+    }
+    let repo = repo_root();
     let git = |args: &[&str]| {
         std::process::Command::new("git")
             .arg("-C")
@@ -222,25 +312,7 @@ fn reviewed_shas_resolve_in_this_repository() {
             .output()
     };
 
-    match git(&["rev-parse", "--is-inside-work-tree"]) {
-        Ok(o) if o.status.success() => {}
-        _ => {
-            eprintln!("SKIP: not a git work tree, cannot resolve review shas");
-            return;
-        }
-    }
-
-    // Only a shallow clone licenses skipping. In a full clone an unresolvable sha
-    // is a corrupt row, not a missing object — so the two must be told apart here,
-    // or a typo'd sha would skip its way to green.
-    let shallow = git(&["rev-parse", "--is-shallow-repository"])
-        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "true");
-    if shallow {
-        eprintln!("SKIP: shallow clone, review shas are not all present");
-        return;
-    }
-
-    for row in corpus().rows() {
+    for row in corpus.rows() {
         let out = git(&["cat-file", "-t", &row.reviewed_sha]).expect("git cat-file runs");
         assert!(
             out.status.success(),
@@ -271,7 +343,14 @@ fn reviewed_shas_resolve_in_this_repository() {
 /// git history exactly like the test above.
 #[test]
 fn every_anchor_exists_in_the_tree_it_was_reviewed_on() {
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let corpus = corpus();
+    if !history_or_loud_skip(
+        "every_anchor_exists_in_the_tree_it_was_reviewed_on",
+        corpus.len(),
+    ) {
+        return;
+    }
+    let repo = repo_root();
     let git = |args: &[&str]| {
         std::process::Command::new("git")
             .arg("-C")
@@ -279,21 +358,8 @@ fn every_anchor_exists_in_the_tree_it_was_reviewed_on() {
             .args(args)
             .output()
     };
-    match git(&["rev-parse", "--is-inside-work-tree"]) {
-        Ok(o) if o.status.success() => {}
-        _ => {
-            eprintln!("SKIP: not a git work tree, cannot read reviewed trees");
-            return;
-        }
-    }
-    if git(&["rev-parse", "--is-shallow-repository"])
-        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "true")
-    {
-        eprintln!("SKIP: shallow clone, reviewed trees are not all present");
-        return;
-    }
 
-    for row in corpus().rows() {
+    for row in corpus.rows() {
         let spec = format!("{}:{}", row.reviewed_sha, row.path);
         let out = git(&["show", &spec]).expect("git show runs");
         assert!(
@@ -339,7 +405,14 @@ fn every_anchor_exists_in_the_tree_it_was_reviewed_on() {
 /// score it yields looks like a measurement.
 #[test]
 fn every_row_reconstructs_a_non_empty_reviewed_diff() {
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let corpus = corpus();
+    if !history_or_loud_skip(
+        "every_row_reconstructs_a_non_empty_reviewed_diff",
+        corpus.len(),
+    ) {
+        return;
+    }
+    let repo = repo_root();
     let git = |args: &[&str]| {
         std::process::Command::new("git")
             .arg("-C")
@@ -350,27 +423,24 @@ fn every_row_reconstructs_a_non_empty_reviewed_diff() {
     };
     let out = |args: &[&str]| String::from_utf8_lossy(&git(args).stdout).trim().to_owned();
 
-    if !git(&["rev-parse", "--is-inside-work-tree"])
-        .status
-        .success()
-    {
-        eprintln!("SKIP: not a git work tree, cannot reconstruct reviewed diffs");
-        return;
-    }
-    if out(&["rev-parse", "--is-shallow-repository"]) == "true" {
-        eprintln!("SKIP: shallow clone, reviewed history is not all present");
-        return;
-    }
     // `origin/main` is not guaranteed to exist (a fresh clone of a fork, a worktree
     // with a different remote name), and its absence is a property of the checkout
-    // rather than of the corpus.
+    // rather than of the corpus. Unlike shallowness this is *not* fatal on CI: the
+    // workflow states the fetch depth, so a shallow runner is a defect in it, but
+    // which remote-tracking refs a checkout created is not something this file can
+    // read off `ci.yml`. It is loud, which is what makes the difference visible if
+    // it ever fires there.
     let main = ["origin/main", "main"].into_iter().find(|r| {
         git(&["rev-parse", "--verify", "--quiet", r])
             .status
             .success()
     });
     let Some(main) = main else {
-        eprintln!("SKIP: neither origin/main nor main resolves here");
+        loud_skip(
+            "every_row_reconstructs_a_non_empty_reviewed_diff",
+            "neither origin/main nor main resolves here",
+            corpus.len(),
+        );
         return;
     };
 
@@ -380,7 +450,7 @@ fn every_row_reconstructs_a_non_empty_reviewed_diff() {
     // Cached per commit, not per row: several comments share a review commit, and
     // walking the ancestry path is the expensive part.
     let mut fork_points: BTreeMap<String, String> = BTreeMap::new();
-    for row in corpus().rows() {
+    for row in corpus.rows() {
         let sha = row.reviewed_sha.as_str();
         let fork = if let Some(cached) = fork_points.get(sha) {
             cached.clone()

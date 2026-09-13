@@ -20,8 +20,10 @@
 //! The corpus keys on each comment's `reviewed_sha`, and getting the base wrong
 //! yields a silent zero from either direction: the merged PR head contains the
 //! *fix* commits, and the obvious `merge-base main <sha>` yields an **empty
-//! diff** for 13 of the 15 review commits, because a merged branch is an ancestor
-//! of `main`. [`fork_point`] implements the corrected recipe — find the merge that
+//! diff** for every one of the 15 review commits, because each is an ancestor of
+//! `main` (it was 13 of 15 while two rows pinned commits a force-push had removed
+//! from the repository; #822 re-pinned those, so the count is now all of them).
+//! [`fork_point`] implements the corrected recipe — find the merge that
 //! brought the branch in, and diff from its first parent's merge base — and
 //! `every_corpus_commit_reconstructs_a_diff_touching_its_anchor` holds it to every
 //! row. The fixture README states the same rule in prose; the two agree because
@@ -640,7 +642,7 @@ pub struct ReviewSet {
     /// Paths git reported as changed but produced no hunk for — binary blobs,
     /// and pure mode or rename records.
     ///
-    /// **Counted, never quietly dropped.** Six of the corpus's 190 changed paths
+    /// **Counted, never quietly dropped.** Six of the corpus's 182 changed paths
     /// are binary audio fixtures whose whole diff is `Binary files … differ`.
     /// Sending that to a model buys a call's latency and returns noise that lands
     /// in the unadjudicated count, so they are set aside — but a run that reduced
@@ -1464,10 +1466,46 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
     }
 
-    /// Whether the git history this test needs is present, printing the reason if
-    /// not — the pattern `dependency_axis.rs` uses for the OSV database. A shallow
-    /// clone is a property of the checkout, never of the code.
-    fn history_available(repo: &Path) -> bool {
+    /// A skip that can be found in a log, written to **real** stderr.
+    ///
+    /// `eprintln!` goes through libtest's capture, which discards the output of a
+    /// test that *passes* — so the `SKIP:` lines this used to print were unreadable
+    /// without `--nocapture`, and on CI nobody ever read them. `std::io::stderr()`
+    /// writes to the file descriptor, which the capture does not intercept. The
+    /// count is part of the message on purpose: a skip that does not say how much it
+    /// withheld reads exactly like a pass, which is how five of these tests reported
+    /// green on every CI run while never reconstructing a single commit (#822).
+    fn loud_skip(test: &str, reason: &str) {
+        use std::io::Write;
+        let mut err = std::io::stderr().lock();
+        let _ = writeln!(
+            err,
+            "SKIP: review_llm::tests::{test} — {reason}. None of the {} corpus \
+             commits were reconstructed. `git fetch --unshallow` runs them; CI \
+             checks out with `fetch-depth: 0` in every job that runs tests \
+             (`.github/workflows/ci.yml`).",
+            corpus_shas().len()
+        );
+        let _ = err.flush();
+    }
+
+    /// Whether the git history this test needs is present, loudly if not — **and on
+    /// a runner, a shallow clone fails here instead of skipping.**
+    ///
+    /// The skip was modelled on `dependency_axis.rs`'s OSV gate, and for a missing
+    /// database that shape is right: a shallow clone is a property of the checkout,
+    /// never of the code. What made it wrong here is that it was *always* taken on
+    /// CI — every `actions/checkout` in `ci.yml` used the action's default
+    /// `fetch-depth: 1` — so the five tests below were invoked, returned
+    /// immediately, and reported green for their whole existence, including while
+    /// two of the corpus's `reviewed_sha` values no longer existed anywhere (#822).
+    ///
+    /// The workflow now asks for full history, and this refuses to be the reason a
+    /// runner is green without it: on CI a shallow clone is a defect in the workflow
+    /// and fails. Off a runner it stays a skip, because a contributor's shallow
+    /// clone is not a defect — and `rto-graph`'s `review_corpus.rs` holds the same
+    /// rule for the same corpus, so the two must be changed together.
+    fn history_available(repo: &Path, test: &str) -> bool {
         let ok = std::process::Command::new("git")
             .arg("-C")
             .arg(repo)
@@ -1475,7 +1513,10 @@ mod tests {
             .output()
             .is_ok_and(|o| o.status.success());
         if !ok {
-            eprintln!("SKIP: not a git work tree, cannot reconstruct reviewed diffs");
+            // Deliberately not fatal on CI, unlike shallowness: a build with no work
+            // tree is what a packaged tarball looks like, whereas the fetch depth is
+            // stated in the workflow and can therefore be held to.
+            loud_skip(test, "not a git work tree");
             return false;
         }
         let shallow = std::process::Command::new("git")
@@ -1485,11 +1526,24 @@ mod tests {
             .output()
             .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "true");
         if shallow {
-            eprintln!("SKIP: shallow clone — run `git fetch --unshallow` to reconstruct");
+            let on_ci =
+                std::env::var_os("CI").is_some() || std::env::var_os("GITHUB_ACTIONS").is_some();
+            assert!(
+                !on_ci,
+                "shallow clone on CI: review_llm::tests::{test} needs the git history \
+                 and must not skip it here. `.github/workflows/ci.yml` checks out \
+                 with `fetch-depth: 0` in every job that runs tests, so this means \
+                 that was removed — restore it rather than widening this skip, which \
+                 is how the corpus replay went unrun on every CI run until #822."
+            );
+            loud_skip(test, "shallow clone");
             return false;
         }
         if main_ref(repo).is_err() {
-            eprintln!("SKIP: neither origin/main nor main resolves here");
+            // Loud but not fatal even on CI: which remote-tracking refs a checkout
+            // created is not something this file can read off the workflow, unlike
+            // the depth.
+            loud_skip(test, "neither origin/main nor main resolves here");
             return false;
         }
         true
@@ -1518,7 +1572,10 @@ mod tests {
     #[test]
     fn the_graph_arm_is_built_at_the_reviewed_commit_not_at_head() {
         let repo_path = repo();
-        if !history_available(&repo_path) {
+        if !history_available(
+            &repo_path,
+            "the_graph_arm_is_built_at_the_reviewed_commit_not_at_head",
+        ) {
             return;
         }
         let Some((repo, cache)) = graph_inputs() else {
@@ -1588,7 +1645,10 @@ mod tests {
     #[test]
     fn the_live_surface_builds_the_same_graph_as_the_replay() {
         let repo_path = repo();
-        if !history_available(&repo_path) {
+        if !history_available(
+            &repo_path,
+            "the_live_surface_builds_the_same_graph_as_the_replay",
+        ) {
             return;
         }
         let Ok(store) = super::worktree_graph(&repo_path, rto_graph::IngestConfig::default())
@@ -1649,7 +1709,10 @@ mod tests {
     #[test]
     fn the_graph_arm_supplies_provenance_tagged_context_on_the_corpus() {
         let repo_path = repo();
-        if !history_available(&repo_path) {
+        if !history_available(
+            &repo_path,
+            "the_graph_arm_supplies_provenance_tagged_context_on_the_corpus",
+        ) {
             return;
         }
         let Some((repo, cache)) = graph_inputs() else {
@@ -1741,7 +1804,10 @@ mod tests {
     #[test]
     fn every_corpus_commit_reconstructs_a_diff_touching_its_anchor() {
         let repo = repo();
-        if !history_available(&repo) {
+        if !history_available(
+            &repo,
+            "every_corpus_commit_reconstructs_a_diff_touching_its_anchor",
+        ) {
             return;
         }
         let main = main_ref(&repo).expect("checked above");
@@ -1787,7 +1853,7 @@ mod tests {
     }
 
     /// **No adjudicated row is anchored to a file the harness sets aside.** Six of
-    /// the corpus's 190 changed paths are binary audio fixtures with no reviewable
+    /// the corpus's 182 changed paths are binary audio fixtures with no reviewable
     /// diff. Skipping them is free only while that stays true — a skip rule that
     /// quietly excluded a file carrying a real defect would raise recall by
     /// shrinking its own denominator, which is the most flattering mistake
@@ -1795,7 +1861,10 @@ mod tests {
     #[test]
     fn nothing_the_harness_skips_carries_an_adjudicated_row() {
         let repo = repo();
-        if !history_available(&repo) {
+        if !history_available(
+            &repo,
+            "nothing_the_harness_skips_carries_an_adjudicated_row",
+        ) {
             return;
         }
         let main = main_ref(&repo).expect("checked above");
@@ -1822,18 +1891,30 @@ mod tests {
     }
 
     /// The measured scale of a replay, asserted so a change to the recipe that
-    /// quietly reviews half the corpus is caught. The budget analysis was computed
-    /// over 197 changed paths on 16 commits, of which **191 are reviewable** —
-    /// both halves are asserted, because a drop in either is a different bug.
+    /// quietly reviews half the corpus is caught. The replay window is **182
+    /// changed paths on 15 commits, of which 176 are reviewable** — both halves
+    /// are asserted, because a drop in either is a different bug.
     ///
     /// These numbers move when the **corpus** gains a commit, which is the guard
     /// working rather than failing: the replay window is the corpus's distinct
     /// `reviewed_sha` values, so adjudicating a comment on a new commit widens
     /// it. #736 took it from 15 commits and 190 paths to 16 and 197.
+    ///
+    /// #822 took it back to 15 and 182, and that is the one direction worth
+    /// explaining, because a *shrinking* window is what this assertion is for.
+    /// Two of those 16 commits were PR #293's pre-force-push shas, which no
+    /// longer exist in the repository or the remote; they are re-pinned to the
+    /// surviving rebased commits `ab3b1bc` and `fec606e`, and `fec606e` was
+    /// already a `reviewed_sha` here — so two review commits collapsed into one
+    /// the window already held, and one commit's worth of changed paths left it.
+    /// The 197/191 pair was honest when #736 measured it and became
+    /// unverifiable, not wrong, when those objects were lost: this assertion has
+    /// never run on CI (every checkout was shallow, so `history_available`
+    /// returned early), so nothing outside a developer's own clone re-checked it.
     #[test]
     fn a_replay_covers_the_measured_number_of_files() {
         let repo = repo();
-        if !history_available(&repo) {
+        if !history_available(&repo, "a_replay_covers_the_measured_number_of_files") {
             return;
         }
         let main = main_ref(&repo).expect("checked above");
@@ -1845,8 +1926,8 @@ mod tests {
         }
         assert_eq!(
             (corpus_shas().len(), changed, reviewable),
-            (16, 197, 191),
-            "16 commits, 197 changed paths, 191 with a reviewable diff"
+            (15, 182, 176),
+            "15 commits, 182 changed paths, 176 with a reviewable diff"
         );
     }
 

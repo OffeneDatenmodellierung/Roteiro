@@ -60,18 +60,20 @@ defects that are no longer there, and will appear to have missed all of them.
 
 This paragraph previously recommended
 `git diff $(git merge-base <base> <reviewed_sha>) <reviewed_sha>`. **That produces
-an empty diff for 13 of the 15 review commits here**, which is the same silent zero
-arrived at from the other side: these PRs were merged with merge commits, so each
-`reviewed_sha` is an *ancestor* of `main`, which makes `merge-base main
-<reviewed_sha>` the review commit itself.
+an empty diff for every one of the 15 review commits here**, which is the same
+silent zero arrived at from the other side: these PRs were merged with merge
+commits, so each `reviewed_sha` is an *ancestor* of `main`, which makes
+`merge-base main <reviewed_sha>` the review commit itself.
 
 The base you want is where the PR branch forked. Find the merge commit `M` that
 brought the branch in — `reviewed_sha` is an ancestor of `M^2` but not of `M^1`,
 and it is the earliest such merge on `git rev-list --merges --ancestry-path
 <reviewed_sha>..main` — then diff from `git merge-base M^1 <reviewed_sha>`. Where
-there is no such merge (a branch rebased or squashed away, as PR #293's two rows
-were) the commit is no longer an ancestor and `merge-base main <reviewed_sha>` is
-right after all.
+there is no such merge — a branch rebased or squashed away, so the commit is not
+an ancestor of `main` — `merge-base main <reviewed_sha>` is right after all. No
+row is in that state today: the two that were (PR #293's, see below) pinned
+commits that had been force-pushed out of existence, and re-pinning them made the
+first branch of the rule cover the whole file.
 
 Do not trust this paragraph either: `every_row_reconstructs_a_non_empty_reviewed_diff`
 in [`../../review_corpus.rs`](../../review_corpus.rs) is the recipe's executable
@@ -81,6 +83,38 @@ the file the comment is anchored to.
 `fix_commit` is a different sha for the same reason: it points *forward*, to the
 change that resolved the finding, and is what a reader follows to see the defect
 and its repair.
+
+### Three rows are pinned to a rebased equivalent, not to `original_commit_id`
+
+**PR #293's branch was force-pushed**, at `2026-08-15T09:06:23Z`, over the two
+commits Copilot had already reviewed. Neither survives: `git cat-file -e` fails
+for both in a full clone, and `git fetch origin refs/pull/293/head` recovers
+neither, because that ref was moved by the same push. So three rows pinned commits
+that no longer exist anywhere, and every check that needs history failed on them —
+for as long as anyone ran those checks at all (#822).
+
+They are re-pinned to the commits the force-push left in their place. The
+substitution is recorded here, in full, because it is the one place this file
+knowingly departs from "`reviewed_sha` is the comment's `original_commit_id`":
+
+| Row | Was | Now | On what evidence |
+|---|---|---|---|
+| `3789014471` | `4bed7d81cf79…` | `fec606e6ad88…` | **GitHub re-anchored the comment itself.** The API reports `original_commit_id: 4bed7d81`, `commit_id: fec606e6`, and `original_line: 600` equal to `line: 600` — same file, same line, not marked outdated |
+| `3788996405`, `3788996424` | `474d2ff39256…` | `ab3b1bcaae03…` | `ab3b1bc` is the rebased first commit of the same branch, and it carries **both anchors at their recorded lines**: `crates/rto-graph/src/findings.rs:60` and `crates/rto-exec/src/runner.rs:30` are each `#[error("invalid analyzer id: {0:?} (expected lowercase [a-z0-9._-], non-empty)")]`, the exact text both rows describe |
+
+What the substitution costs, stated plainly: for these three rows `reviewed_sha` is
+**the surviving commit with the same anchored content**, not the literal object the
+reviewer read. The force-push rebased the branch onto PR #292's merge commit, which
+landed at `08:52:52Z` — *after* the `08:50:25Z` review — so the reviewed tree and
+`ab3b1bc`'s tree differ in files PR #292 touched. The anchors, their line numbers
+and the defect at them do not differ, which is the whole of what a row is scored
+on, and `every_anchor_exists_in_the_tree_it_was_reviewed_on` plus
+`every_row_reconstructs_a_non_empty_reviewed_diff` now hold for both.
+
+Deleting the rows was the alternative and it is the worse one: they are the whole
+of the `error-text-drift` class and half of `permissive-constraint`, and a corpus
+that drops the evidence a force-push inconvenienced is a corpus that measures
+whoever last rewrote history.
 
 ## The adjudication rule
 
@@ -92,12 +126,25 @@ decisive — but only one that actually compiled the code in question, which is
 narrower than "CI is green" and is spelled out there. Follow that file, not this
 paragraph, when adding rows.
 
-Three rows carry an **empty `fix_commit`** — the PR #299 `vacuous-test` findings
-(ids `3789173576`, `3789173583`, `3789173587`). All three were accepted and
-fixed, with failure-injection evidence in the thread replies, but the fixes
-landed inside a branch rework rather than as one attributable commit. The field
-is left blank rather than filled with a plausible-looking guess: a corpus whose
-provenance is partly invented is worse than one that admits a gap.
+Four rows carry an **empty `fix_commit`**, for two different reasons, and neither
+is "we could not be bothered to look".
+
+Three are the PR #299 `vacuous-test` findings (ids `3789173576`, `3789173583`,
+`3789173587`). All three were accepted and fixed, with failure-injection evidence
+in the thread replies, but the fixes landed inside a branch rework rather than as
+one attributable commit. The field is left blank rather than filled with a
+plausible-looking guess: a corpus whose provenance is partly invented is worse
+than one that admits a gap.
+
+The fourth is `3789014471`, the `split_escaped` row, and it is blank because the
+defect is **accepted and not yet fixed**: `split_escaped` at `HEAD` is
+byte-identical to the function the comment was made on, and the decision to
+tighten it is carried as its own open issue, #798 (`findings.rs` cites the row
+from the test that records the current behaviour). Its previous value pointed at
+the reviewed commit itself, which cannot be a fix for a defect reviewed there.
+`real` stays the verdict — the finding is true and was accepted — so read the
+adjudication rule's "a real defect has a commit fixing it" as satisfied by
+acceptance plus a tracked decision here, and follow #798 rather than this field.
 
 ## Classes
 
@@ -162,11 +209,32 @@ Only the table is parsed, never prose: counts therefore live in exactly one plac
 here, and `docs/REVIEW_CHECKLIST.md` links to this file rather than restating
 them.
 
-One check is gated rather than skipped silently: `reviewed_shas_resolve_in_this_repository`
-confirms each `reviewed_sha` is a real object here, which catches a typo'd or
-truncated sha. It needs the git history, so in a shallow clone it prints a `SKIP:`
-line and passes, following the pattern the model-dependent tests in
-`../audio_ingest.rs` use.
+Three checks need the git history — `reviewed_shas_resolve_in_this_repository`
+(each `reviewed_sha` is a real object here, which catches a typo'd or truncated
+sha), `every_anchor_exists_in_the_tree_it_was_reviewed_on` and
+`every_row_reconstructs_a_non_empty_reviewed_diff` — and five more do in
+`roteiro`'s `review_llm` module.
+
+**All eight used to skip on CI, and that is how the force-pushed shas above went
+unnoticed.** The skip was modelled on the model-dependent tests in
+`../audio_ingest.rs`, which is the right shape for a missing model and the wrong one
+here: every `actions/checkout` in `ci.yml` took the action's default
+`fetch-depth: 1`, so the history was *always* absent on a runner, and the `SKIP:`
+line each test printed went through libtest's capture, which discards the output of
+a test that passed. Eight tests were invoked, reported green and asserted nothing,
+for their whole existence (#822).
+
+Two things changed together, and neither is sufficient alone:
+
+* `ci.yml` now checks out with `fetch-depth: 0` in every job that runs tests — the
+  three that run `cargo test` and the coverage job — and *not* in `msrv`, which
+  only runs `cargo check`.
+* On a runner, a shallow clone now **fails** these tests instead of skipping them,
+  with a message naming the workflow setting. Off a runner it is still a skip,
+  because a contributor's shallow clone is not a defect — but the line is written
+  to the real stderr rather than through `eprintln!`, so it survives libtest's
+  capture, and it states how many assertions it withheld. A skip that cannot be
+  read, and does not say what it cost, is indistinguishable from a pass.
 
 ## Consumers (Stage 35)
 
@@ -220,21 +288,25 @@ falsify a reviewer decisively; it cannot finely rank two good ones.
 
 ### Measured cost of using it
 
-Reconstructing all 16 review diffs at `-U3` costs about **531k tokens in total**,
+Reconstructing all 15 review diffs at `-U3` costs about **496k tokens in total**,
 averaging **33k per commit** and reaching **103k** on PR #339. Against a measured
-single-call budget of ~30k on this repository, **9 of the 16 diffs do not fit in one
+single-call budget of ~30k on this repository, **8 of the 15 diffs do not fit in one
 call before any context is added**, which is why a whole-diff reviewer is not the
 shape to build.
 
-The 16th (PR #736, ~18k) was added when its comment was adjudicated. It does not
-change the conclusion — it is one of the seven that *would* fit — and the totals
-are restated rather than left at 15 so the figures keep describing the corpus
-that is actually here. (Figures are `len(diff) / 4`, so they are an estimate of the same
-order, not a tokeniser's count.)
+The window has been 15, then 16 (PR #736's comment was adjudicated), then 15 again:
+#822 re-pinned three rows and, in doing so, collapsed two of PR #293's review
+commits into one the corpus already held. Neither move changes the conclusion, and
+the totals are restated each time rather than left at whichever count was measured
+first, so the figures keep describing the corpus that is actually here. (Figures are
+`len(diff) / 4`, so they are an estimate of the same order, not a tokeniser's count.)
 
 **Per file, the budget is not the constraint at all** — measured in Stage 35b over
-all **190 changed paths**, of which **184 have a reviewable diff** (six are binary
-audio fixtures):
+all **182 changed paths**, of which **176 have a reviewable diff** (six are binary
+audio fixtures). The table below is the Stage 35b measurement, taken on the
+then-190-path window; re-measuring it on today's 182 moves the raw mean from 2,704
+to 2,723 and the max not at all, so it is left as it was measured rather than
+restated to three digits of false precision:
 
 | | raw | as sent |
 |---|---:|---:|
@@ -246,7 +318,7 @@ audio fixtures):
 "As sent" includes the line-number column `reviewer::annotate_diff` adds, which
 costs a measured **1.21×** here — 9 characters per *line*, so ~1.2× on ordinary
 source and far more on a diff of very short lines. Even so, exactly **one of the
-190 exceeds the single-call budget**, and it is a generated JSON fixture; the next
+182 exceeds the single-call budget**, and it is a generated JSON fixture; the next
 largest is `Cargo.lock`. **The largest reviewable *source* file-diff in the corpus
 is 14,034 tokens raw and 17,202 as sent.**
 
