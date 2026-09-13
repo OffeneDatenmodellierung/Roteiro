@@ -2,6 +2,12 @@
 //! and the optional MCP server (feature `mcp`) — are build products of the
 //! same store, so humans and agents always see the same data.
 
+// APA 7 rendering of a citable external work (issue #801). A rendering concern,
+// so it is here and not beside the record it reads: `rto_graph::reference` holds
+// what we know about a work, and this holds what one citation style requires of
+// it. Pure — no I/O, no clock, no graph — and it refuses rather than emit a
+// reference with a field nobody has checked.
+pub mod apa;
 mod docs;
 pub mod okf;
 pub mod tool_class;

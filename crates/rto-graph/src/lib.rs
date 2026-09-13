@@ -67,6 +67,14 @@ pub mod model_choice;
 mod models;
 mod provenance;
 mod query;
+// A citable external work (issue #801). In *this* crate for the reason
+// `model_choice` and `review_corpus` are, and with more at stake: `gix` is
+// pinned here without transports, so a record whose every field — author, year,
+// publisher, DOI — invites a lookup structurally cannot grow one. It is also the
+// crate the eventual extraction layer lives in, and the one `rto-render` depends
+// on, so both ends can name the type. What a *citation style* requires of such a
+// record is a different question and lives with the renderer.
+pub mod reference;
 // Stage 35 — the adjudicated review corpus, and the two pure decisions made over
 // it. In *this* crate for the same reason `model_choice` is: `gix` is pinned here
 // without transports, and both a historical record that must not be "refreshed
@@ -176,6 +184,11 @@ pub use query::{
     Explanation, GeneratedHit, Listing, MemoryHit, NodeSummary, Path, PathHop, RedactionState,
     SCHEMA, SearchHit, SearchOptions, SearchResults, config_secrets, coupling, debt, debt_density,
     explain, list_kind, path, search, search_channels, window,
+};
+pub use reference::{
+    AccessDate, Attested, Author, Day, Doi, GivenName, Locator, Month, NotADay, NotADoi,
+    NotAGivenName, NotAYear, PublicationDate, Reference, Stability, WorkKind, Year,
+    is_printable_identifier,
 };
 pub use store::{ImportApplied, SchemaAhead, Store, StoreError};
 pub use sync::{
