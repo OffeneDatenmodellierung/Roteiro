@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.13.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v5.12.1...rto-spec-v5.13.0) - 2026-09-13
+
+### Fixed
+
+- *(graph)* an image is its own kind, and three claims that were too strong
+
+### Other
+
+- *(graph)* one markdown link extractor, and it reads inline links
+
 ## [5.12.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v5.11.0...rto-spec-v5.12.0) - 2026-09-12
 
 ### Added
