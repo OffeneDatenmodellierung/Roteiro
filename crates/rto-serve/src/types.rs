@@ -53,7 +53,7 @@ pub(crate) const DEFAULT_MAX_TOKENS: u32 = 2048;
 /// Max entries in a client's `tools` array. OpenAI's own documented ceiling, so
 /// a client written against their API cannot trip this without already having
 /// tripped theirs.
-const MAX_CLIENT_TOOLS: usize = 128;
+pub(crate) const MAX_CLIENT_TOOLS: usize = 128;
 
 /// Max total bytes of client tool names, descriptions and schemas — the payload
 /// that reaches the prompt verbatim via `tool_system_prompt`.

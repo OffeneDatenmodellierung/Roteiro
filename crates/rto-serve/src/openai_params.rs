@@ -828,7 +828,7 @@ pub fn param(name: &str) -> Option<&'static Param> {
 ///
 /// `null` is inert everywhere: a client library serialising an unset optional
 /// has made no decision, and refusing it would be a refusal fired at nobody.
-fn is_inert(param: &Param, value: &Value) -> bool {
+pub(crate) fn is_inert(param: &Param, value: &Value) -> bool {
     if value.is_null() {
         return true;
     }
