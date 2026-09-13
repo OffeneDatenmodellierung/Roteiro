@@ -45,8 +45,11 @@ whole of what follows describes a target state. A `raw/` source root **would be
 added and excluded** from the walk extraction already performs, reached instead
 by an explicit ingest path under the consent rule
 [[docs/adr/0025-document-extraction-consent.md]] set — so that a document **would
-be** graphed once, as its summary, rather than twice (issue #812). Today it
-is graphed twice, because the scan has no `raw/` exclusion to apply. A **`knowledge/`
+be** graphed once, as its summary, rather than twice (issue #812). The
+duplication is a property of the design *without* the exclusion, not of the
+repository today: there are no `knowledge/` summaries yet, so a `raw/` document
+is currently graphed once, as the raw file. The exclusion is what keeps it at one
+after the summaries exist. A **`knowledge/`
 directory would become part of the authored layer**, maintained by a model
 rather than a person, and be projected into the existing OKF bundle beside
 `symbols/` and `decisions/`. And the MCP surface narrows to a **read-only**
@@ -374,9 +377,11 @@ and the fallback if that proves unworkable is **not** a fourth class but ADR-001
 answer: a separate store, outside `nodes`/`edges`, taking no boost.
 
 **Unblocks:** step 2 of Implementation — `knowledge/` can be wired as
-authored-layer input with no schema, wire or enum change. It takes a dependency
-on #799 for the actor split, which is a render-path fix, not a blocker to
-building the layer.
+authored-layer input with **no OKF format, wire or `Provenance` change**, needing
+only a `layer.rs` arm and the widened `Authored` doc comment above. It takes a
+dependency on #799 for the actor split, which is not a blocker to building the
+layer — though, as recorded there, #799 itself needs a breaking `rto-render`
+change to carry two actors, shipping as a minor under the `rto-*` carve-out.
 
 ### 2. `raw/` is **local by default**, and excluded from the standard scan
 
@@ -661,7 +666,10 @@ Neither gap is closed by wiring the existing screener up and moving on — but
 **one of #813's worries is discharged by measurement rather than inherited, and
 this ADR should not repeat it as fact.** #813 asks, conditionally, whether *"if
 concealment can never be detected in a PDF"* a PDF could then only ever reach
-`quarantine`. The antecedent is false. `screen_text` marks a directive
+`quarantine`. **The reasoning behind that antecedent is wrong, and its truth is
+unestablished** — two different things, and the ADR needs both. What is wrong is
+the premise that the screen's concealment detection is exclusively HTML-shaped:
+`screen_text` marks a directive
 `concealed` when it is revealed **only by stripping invisible codepoints** —
 zero-width characters, bidi controls — and returns `Verdict::Block` on that
 basis ([[crates/rto-graph/src/screen.rs#screen_text]], guarded by
