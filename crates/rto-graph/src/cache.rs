@@ -53,7 +53,8 @@ pub struct ObjectSweep {
     pub failed: usize,
     /// Files under the root that are **not** entries: a
     /// `.json.tmp.<pid>-<nanos>-<seq>` from a [`ObjectCache::put`] still in flight
-    /// (see [`temp_path`] for the third field), or anything a later format
+    /// (the third field is a process-wide counter, without which two threads
+    /// choose one temp name), or anything a later format
     /// puts here. Never shown to `retain` and never deleted — a sweep that
     /// guesses at a name it does not recognise is a sweep that deletes another
     /// process's half-written work.

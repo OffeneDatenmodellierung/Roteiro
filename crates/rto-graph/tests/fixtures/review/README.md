@@ -212,29 +212,38 @@ them.
 Three checks need the git history — `reviewed_shas_resolve_in_this_repository`
 (each `reviewed_sha` is a real object here, which catches a typo'd or truncated
 sha), `every_anchor_exists_in_the_tree_it_was_reviewed_on` and
-`every_row_reconstructs_a_non_empty_reviewed_diff` — and five more do in
+`every_row_reconstructs_a_non_empty_reviewed_diff` — and six more do in
 `roteiro`'s `review_llm` module.
 
-**All eight used to skip on CI, and that is how the force-pushed shas above went
+**All nine used to skip on CI, and that is how the force-pushed shas above went
 unnoticed.** The skip was modelled on the model-dependent tests in
 `../audio_ingest.rs`, which is the right shape for a missing model and the wrong one
 here: every `actions/checkout` in `ci.yml` took the action's default
 `fetch-depth: 1`, so the history was *always* absent on a runner, and the `SKIP:`
 line each test printed went through libtest's capture, which discards the output of
-a test that passed. Eight tests were invoked, reported green and asserted nothing,
-for their whole existence (#822).
+a test that passed. Nine tests were invoked, reported green and asserted nothing,
+for their whole existence (#822). Eight is the number that *failed* once anyone ran
+them in a full clone; the ninth,
+`the_live_surface_builds_the_same_graph_as_the_replay`, happens not to touch a
+`reviewed_sha` and so passed locally while skipping on CI with the rest — which is
+why the gated count, not the failing count, is the one that describes the hole.
 
 Two things changed together, and neither is sufficient alone:
 
 * `ci.yml` now checks out with `fetch-depth: 0` in every job that runs tests — the
   three that run `cargo test` and the coverage job — and *not* in `msrv`, which
   only runs `cargo check`.
-* On a runner, a shallow clone now **fails** these tests instead of skipping them,
-  with a message naming the workflow setting. Off a runner it is still a skip,
-  because a contributor's shallow clone is not a defect — but the line is written
-  to the real stderr rather than through `eprintln!`, so it survives libtest's
-  capture, and it states how many assertions it withheld. A skip that cannot be
-  read, and does not say what it cost, is indistinguishable from a pass.
+* On a runner these tests now **fail** instead of skipping — and for *every*
+  precondition, not only shallowness: a deep checkout with no `origin/main`, or a
+  `git` that cannot be run, would otherwise skip its way to green by the identical
+  mechanism. Each of those is a defect in the environment that is supposed to supply
+  them, and nothing in `release-plz.yml` runs `cargo test`, so no packaged-tarball
+  build is caught by the rule. Off a runner it is still a skip, because a
+  contributor's shallow clone is not a defect — but the line is written to the real
+  stderr rather than through `eprintln!`, so it survives libtest's capture, it says
+  what went unchecked, and its remedy matches the reason (unshallowing does not
+  create a missing `origin/main`). A skip that cannot be read, and does not say what
+  it cost, is indistinguishable from a pass.
 
 ## Consumers (Stage 35)
 

@@ -45,10 +45,44 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// Whether this is a runner. Both variables are set by GitHub Actions; `CI` alone
-/// is the convention every other provider follows too.
-fn on_ci() -> bool {
-    std::env::var_os("CI").is_some() || std::env::var_os("GITHUB_ACTIONS").is_some()
+/// Why the history these checks need is not available, and what to do about it.
+///
+/// The remedy travels with the reason because one shared remedy was wrong for two
+/// of the three: the old skip told every reader to run `git fetch --unshallow`,
+/// which does nothing for a checkout that is not a work tree and does not create a
+/// missing `origin/main`.
+#[derive(Debug, Clone, Copy)]
+enum NoHistory {
+    /// `git rev-parse --is-inside-work-tree` did not answer yes — a packaged
+    /// tarball, an inaccessible path, or no `git` on `PATH`.
+    NotAWorkTree,
+    /// A `fetch-depth: 1`-shaped checkout: the objects the corpus names are past
+    /// the shallow boundary.
+    Shallow,
+    /// Deep, but with neither `origin/main` nor `main` — a restricted refspec, or a
+    /// fork clone of a differently-named default branch.
+    NoMainRef,
+}
+
+impl NoHistory {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::NotAWorkTree => "not a git work tree, or git could not be run here",
+            Self::Shallow => "shallow clone",
+            Self::NoMainRef => "neither origin/main nor main resolves here",
+        }
+    }
+
+    fn remedy(self) -> &'static str {
+        match self {
+            Self::NotAWorkTree => "Run these from a checkout of the repository.",
+            Self::Shallow => "`git fetch --unshallow` runs them.",
+            Self::NoMainRef => {
+                "Fetch the default branch (`git fetch origin main:refs/remotes/origin/main`) \
+                 — unshallowing alone does not create that ref."
+            }
+        }
+    }
 }
 
 /// A skip that can be found in a log, written to **real** stderr.
@@ -57,40 +91,71 @@ fn on_ci() -> bool {
 /// so the existing `SKIP:` lines were invisible without `--nocapture` — half of how
 /// #822 stayed invisible on CI. `std::io::stderr()` writes to the file descriptor,
 /// which the capture does not intercept, so the line reaches a CI log and a terminal
-/// alike. It also says **how many assertions did not run**: a skip that does not
-/// quantify what it withheld reads exactly like a pass.
-fn loud_skip(test: &str, reason: &str, assertions_skipped: usize) {
+/// alike. It also says **what went unchecked**: a skip that does not quantify what
+/// it withheld reads exactly like a pass.
+fn loud_skip(test: &str, why: NoHistory, rows: usize) {
     use std::io::Write;
     let mut err = std::io::stderr().lock();
     let _ = writeln!(
         err,
-        "SKIP: {test} — {reason}. {assertions_skipped} corpus row assertions did \
-         not run. `git fetch --unshallow` runs them; CI checks out with \
-         `fetch-depth: 0` in every job that runs tests (`.github/workflows/ci.yml`)."
+        "SKIP: {test} — {}. Every assertion this test makes over all {rows} corpus \
+         rows went unchecked. {} CI checks out with `fetch-depth: 0` in every job \
+         that runs tests (`.github/workflows/ci.yml`) and fails these tests rather \
+         than skipping them, so this line can only appear off a runner.",
+        why.reason(),
+        why.remedy()
     );
     let _ = err.flush();
 }
 
-/// Whether the git history these checks need is present here, and a loud skip if
-/// it is not — **except on a runner, where a shallow clone fails instead.**
+/// Whether this is a runner. Both variables are set by GitHub Actions; `CI` alone
+/// is the convention every other provider follows too.
+fn on_ci() -> bool {
+    std::env::var_os("CI").is_some() || std::env::var_os("GITHUB_ACTIONS").is_some()
+}
+
+/// Take a skip — loudly off a runner, **never on one**.
 ///
-/// # Why the hatch is no longer symmetric
+/// # Why no precondition is forgiven on CI
 ///
 /// `reviewed_shas_resolve_in_this_repository` named this loophole in its own
 /// comment — *"or a typo'd sha would skip its way to green"* — and then fell
 /// through it. Every `actions/checkout` in `ci.yml` took the action's default
-/// `fetch-depth: 1`, so all three history-dependent checks here printed one
-/// invisible line and passed on every run since they were written, while two of
-/// the corpus's `reviewed_sha` values were force-pushed out of existence and `main`
+/// `fetch-depth: 1`, so the three history-dependent checks here printed one
+/// invisible line and passed on every run since they were written, while two of the
+/// corpus's `reviewed_sha` values were force-pushed out of existence and `main`
 /// stayed green (#822).
 ///
-/// So the depth is now stated in the workflow **and** enforced from here. On a
-/// runner a shallow clone is a workflow defect rather than a property of the
-/// checkout, and it fails: that is what stops a future edit quietly deleting the
-/// `fetch-depth: 0` lines and restoring the silence, because the hatch can no
-/// longer be the reason CI is green. Off a runner it stays a skip — a
-/// contributor's shallow clone is not a defect and must not read as one.
-fn history_or_loud_skip(test: &str, assertions_skipped: usize) -> bool {
+/// So the depth is stated in the workflow **and** enforced from here, and the
+/// enforcement covers *every* reason this could skip rather than only shallowness.
+/// A narrower rule would leave the same shape behind: a deep checkout with no
+/// `origin/main`, or a `git` that cannot be executed, would skip its way to green
+/// exactly as a shallow one used to. On a runner each of those is a defect in the
+/// environment that is supposed to provide them, so each fails here. The release
+/// path does not run tests — nothing in `release-plz.yml` invokes `cargo test` — so
+/// no packaged-tarball build is caught by that.
+///
+/// Off a runner it stays a skip: a contributor's shallow clone is not a defect and
+/// must not read as one.
+fn loud_skip_unless_on_ci(test: &str, why: NoHistory, rows: usize) {
+    assert!(
+        !on_ci(),
+        "{test} cannot run on CI: {}. These tests are the corpus's only gate and \
+         must not be skipped here — `.github/workflows/ci.yml` checks out with \
+         `fetch-depth: 0` in every job that runs tests, so fix the environment \
+         rather than widening this skip, which is how the corpus-sha gate went \
+         unrun from the day it was written until #822. {}",
+        why.reason(),
+        why.remedy()
+    );
+    loud_skip(test, why, rows);
+}
+
+/// Whether the git history these checks need is present here.
+///
+/// Returns `false` only off a runner; on one, a missing precondition panics — see
+/// [`loud_skip_unless_on_ci`].
+fn history_or_loud_skip(test: &str, rows: usize) -> bool {
     let git = |args: &[&str]| {
         std::process::Command::new("git")
             .arg("-C")
@@ -101,27 +166,16 @@ fn history_or_loud_skip(test: &str, assertions_skipped: usize) -> bool {
     let inside =
         matches!(git(&["rev-parse", "--is-inside-work-tree"]), Ok(o) if o.status.success());
     if !inside {
-        // Not made fatal on CI, unlike shallowness: "no work tree" is what a build
-        // from a packaged tarball looks like, and that is not this file's business
-        // to police. Shallowness is, because the workflow states the depth.
-        loud_skip(test, "not a git work tree", assertions_skipped);
+        loud_skip_unless_on_ci(test, NoHistory::NotAWorkTree, rows);
         return false;
     }
     let shallow = git(&["rev-parse", "--is-shallow-repository"])
         .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "true");
-    if !shallow {
-        return true;
+    if shallow {
+        loud_skip_unless_on_ci(test, NoHistory::Shallow, rows);
+        return false;
     }
-    assert!(
-        !on_ci(),
-        "shallow clone on CI: {test} needs the git history and must not skip it \
-         here. `.github/workflows/ci.yml` checks out with `fetch-depth: 0` in every \
-         job that runs tests, so this means that was removed — restore it rather \
-         than widening this skip, which is how the corpus-sha gate went unrun from \
-         the day it was written until #822."
-    );
-    loud_skip(test, "shallow clone", assertions_skipped);
-    false
+    true
 }
 
 /// The corpus, loaded the way a scorer loads it. A parse failure fails here with
@@ -424,21 +478,20 @@ fn every_row_reconstructs_a_non_empty_reviewed_diff() {
     let out = |args: &[&str]| String::from_utf8_lossy(&git(args).stdout).trim().to_owned();
 
     // `origin/main` is not guaranteed to exist (a fresh clone of a fork, a worktree
-    // with a different remote name), and its absence is a property of the checkout
-    // rather than of the corpus. Unlike shallowness this is *not* fatal on CI: the
-    // workflow states the fetch depth, so a shallow runner is a defect in it, but
-    // which remote-tracking refs a checkout created is not something this file can
-    // read off `ci.yml`. It is loud, which is what makes the difference visible if
-    // it ever fires there.
+    // with a different remote name), and off a runner its absence is a property of
+    // the checkout rather than of the corpus. On a runner it is treated exactly like
+    // shallowness, because a deep checkout with no base ref skips its way to green
+    // by the same mechanism — `fetch-depth: 0` creates `refs/remotes/origin/*`, and
+    // the `checks` job's log confirms this resolved there once the depth was set.
     let main = ["origin/main", "main"].into_iter().find(|r| {
         git(&["rev-parse", "--verify", "--quiet", r])
             .status
             .success()
     });
     let Some(main) = main else {
-        loud_skip(
+        loud_skip_unless_on_ci(
             "every_row_reconstructs_a_non_empty_reviewed_diff",
-            "neither origin/main nor main resolves here",
+            NoHistory::NoMainRef,
             corpus.len(),
         );
         return;

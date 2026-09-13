@@ -21,8 +21,9 @@
 //! yields a silent zero from either direction: the merged PR head contains the
 //! *fix* commits, and the obvious `merge-base main <sha>` yields an **empty
 //! diff** for every one of the 15 review commits, because each is an ancestor of
-//! `main` (it was 13 of 15 while two rows pinned commits a force-push had removed
-//! from the repository; #822 re-pinned those, so the count is now all of them).
+//! `main` (it was 13 of 15 while three rows, on two commits, pinned objects a
+//! force-push had removed from the repository; #822 re-pinned them, so the count is
+//! now all of them).
 //! [`fork_point`] implements the corrected recipe — find the merge that
 //! brought the branch in, and diff from its first parent's merge base — and
 //! `every_corpus_commit_reconstructs_a_diff_touching_its_anchor` holds it to every
@@ -1466,45 +1467,101 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
     }
 
-    /// A skip that can be found in a log, written to **real** stderr.
+    /// Why the history these tests need is not available, and what to do about it.
+    ///
+    /// The remedy travels with the reason because one shared remedy was wrong for
+    /// two of the three: the old skip told every reader to run
+    /// `git fetch --unshallow`, which does nothing for a checkout that is not a work
+    /// tree and does not create a missing `origin/main`. Kept in step with the same
+    /// three reasons in `rto-graph`'s `tests/review_corpus.rs`, which gates the same
+    /// corpus and must be changed with this.
+    #[derive(Debug, Clone, Copy)]
+    enum NoHistory {
+        NotAWorkTree,
+        Shallow,
+        NoMainRef,
+    }
+
+    impl NoHistory {
+        fn reason(self) -> &'static str {
+            match self {
+                Self::NotAWorkTree => "not a git work tree, or git could not be run here",
+                Self::Shallow => "shallow clone",
+                Self::NoMainRef => "neither origin/main nor main resolves here",
+            }
+        }
+
+        fn remedy(self) -> &'static str {
+            match self {
+                Self::NotAWorkTree => "Run these from a checkout of the repository.",
+                Self::Shallow => "`git fetch --unshallow` runs them.",
+                Self::NoMainRef => {
+                    "Fetch the default branch (`git fetch origin \
+                     main:refs/remotes/origin/main`) — unshallowing alone does not create \
+                     that ref."
+                }
+            }
+        }
+    }
+
+    /// A skip that can be found in a log, written to **real** stderr — and **never
+    /// taken on a runner**, where every one of these reasons is an environment
+    /// defect rather than a property of the checkout.
     ///
     /// `eprintln!` goes through libtest's capture, which discards the output of a
     /// test that *passes* — so the `SKIP:` lines this used to print were unreadable
     /// without `--nocapture`, and on CI nobody ever read them. `std::io::stderr()`
-    /// writes to the file descriptor, which the capture does not intercept. The
-    /// count is part of the message on purpose: a skip that does not say how much it
-    /// withheld reads exactly like a pass, which is how five of these tests reported
-    /// green on every CI run while never reconstructing a single commit (#822).
-    fn loud_skip(test: &str, reason: &str) {
+    /// writes to the file descriptor, which the capture does not intercept. What
+    /// went unchecked is part of the message on purpose: a skip that does not say
+    /// how much it withheld reads exactly like a pass, which is how all six tests
+    /// gated on this reported green on every CI run while never reconstructing a
+    /// single commit (#822).
+    ///
+    /// The CI half covers every reason, not only shallowness: a deep checkout with
+    /// no `origin/main`, or a `git` that cannot be executed, would skip its way to
+    /// green by the identical mechanism. Nothing in `release-plz.yml` runs
+    /// `cargo test`, so no packaged-tarball build is caught by that.
+    fn loud_skip_unless_on_ci(test: &str, why: NoHistory) {
         use std::io::Write;
+
+        let on_ci =
+            std::env::var_os("CI").is_some() || std::env::var_os("GITHUB_ACTIONS").is_some();
+        assert!(
+            !on_ci,
+            "review_llm::tests::{test} cannot run on CI: {}. This is half of the \
+             corpus's gate and must not be skipped here — `.github/workflows/ci.yml` \
+             checks out with `fetch-depth: 0` in every job that runs tests, so fix \
+             the environment rather than widening this skip, which is how the corpus \
+             replay went unrun on every CI run until #822. {}",
+            why.reason(),
+            why.remedy()
+        );
         let mut err = std::io::stderr().lock();
         let _ = writeln!(
             err,
-            "SKIP: review_llm::tests::{test} — {reason}. None of the {} corpus \
-             commits were reconstructed. `git fetch --unshallow` runs them; CI \
-             checks out with `fetch-depth: 0` in every job that runs tests \
-             (`.github/workflows/ci.yml`).",
-            corpus_shas().len()
+            "SKIP: review_llm::tests::{test} — {}. None of the {} corpus commits were \
+             reconstructed. {} CI checks out with `fetch-depth: 0` in every job that \
+             runs tests (`.github/workflows/ci.yml`) and fails these tests rather \
+             than skipping them, so this line can only appear off a runner.",
+            why.reason(),
+            corpus_shas().len(),
+            why.remedy()
         );
         let _ = err.flush();
     }
 
-    /// Whether the git history this test needs is present, loudly if not — **and on
-    /// a runner, a shallow clone fails here instead of skipping.**
+    /// Whether the git history this test needs is present.
     ///
     /// The skip was modelled on `dependency_axis.rs`'s OSV gate, and for a missing
     /// database that shape is right: a shallow clone is a property of the checkout,
     /// never of the code. What made it wrong here is that it was *always* taken on
     /// CI — every `actions/checkout` in `ci.yml` used the action's default
-    /// `fetch-depth: 1` — so the five tests below were invoked, returned
+    /// `fetch-depth: 1` — so the six tests gated on it were invoked, returned
     /// immediately, and reported green for their whole existence, including while
     /// two of the corpus's `reviewed_sha` values no longer existed anywhere (#822).
     ///
-    /// The workflow now asks for full history, and this refuses to be the reason a
-    /// runner is green without it: on CI a shallow clone is a defect in the workflow
-    /// and fails. Off a runner it stays a skip, because a contributor's shallow
-    /// clone is not a defect — and `rto-graph`'s `review_corpus.rs` holds the same
-    /// rule for the same corpus, so the two must be changed together.
+    /// Returns `false` only off a runner; on one, a missing precondition panics —
+    /// see [`loud_skip_unless_on_ci`].
     fn history_available(repo: &Path, test: &str) -> bool {
         let ok = std::process::Command::new("git")
             .arg("-C")
@@ -1513,10 +1570,7 @@ mod tests {
             .output()
             .is_ok_and(|o| o.status.success());
         if !ok {
-            // Deliberately not fatal on CI, unlike shallowness: a build with no work
-            // tree is what a packaged tarball looks like, whereas the fetch depth is
-            // stated in the workflow and can therefore be held to.
-            loud_skip(test, "not a git work tree");
+            loud_skip_unless_on_ci(test, NoHistory::NotAWorkTree);
             return false;
         }
         let shallow = std::process::Command::new("git")
@@ -1526,24 +1580,11 @@ mod tests {
             .output()
             .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "true");
         if shallow {
-            let on_ci =
-                std::env::var_os("CI").is_some() || std::env::var_os("GITHUB_ACTIONS").is_some();
-            assert!(
-                !on_ci,
-                "shallow clone on CI: review_llm::tests::{test} needs the git history \
-                 and must not skip it here. `.github/workflows/ci.yml` checks out \
-                 with `fetch-depth: 0` in every job that runs tests, so this means \
-                 that was removed — restore it rather than widening this skip, which \
-                 is how the corpus replay went unrun on every CI run until #822."
-            );
-            loud_skip(test, "shallow clone");
+            loud_skip_unless_on_ci(test, NoHistory::Shallow);
             return false;
         }
         if main_ref(repo).is_err() {
-            // Loud but not fatal even on CI: which remote-tracking refs a checkout
-            // created is not something this file can read off the workflow, unlike
-            // the depth.
-            loud_skip(test, "neither origin/main nor main resolves here");
+            loud_skip_unless_on_ci(test, NoHistory::NoMainRef);
             return false;
         }
         true

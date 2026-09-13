@@ -220,6 +220,18 @@ pub struct CorpusRow {
     /// how to reconstruct the diff this names, and the integration test
     /// `every_row_reconstructs_a_non_empty_reviewed_diff` holds that recipe to the
     /// data — the prose form of it had already gone wrong for most of the rows.
+    ///
+    /// **Three rows are an admitted exception, and a reader of this type should
+    /// learn it here rather than only from the fixture README.** PR #293's branch
+    /// was force-pushed over the two commits it had been reviewed at, and neither
+    /// object exists in this repository or the remote any more. Rows `3788996405`,
+    /// `3788996424` and `3789014471` therefore name the **surviving rebased
+    /// equivalent** — the commit carrying the same anchor, at the same line, with the
+    /// same defect at it — rather than the literal `original_commit_id`. The evidence
+    /// for each substitution is tabulated in `tests/fixtures/review/README.md`
+    /// (#822). Such a row is still scorable, which a row naming a lost object is
+    /// not; the alternative was deleting real findings because a force push
+    /// inconvenienced them.
     pub reviewed_sha: String,
     /// File the comment is anchored to.
     pub path: String,
@@ -230,8 +242,14 @@ pub struct CorpusRow {
     /// The kind of defect asserted.
     pub defect_class: DefectClass,
     /// Short sha of the commit that fixed it, or empty where no single commit is
-    /// attributable (three rows legitimately have none — a blank is honest where a
+    /// attributable (four rows legitimately have none — a blank is honest where a
     /// plausible-looking guess would corrupt every future score).
+    ///
+    /// Blank covers two distinct cases, and the fixture README names the rows in
+    /// each: three where the fix landed inside a branch rework, and one
+    /// (`3789014471`) where the finding is accepted but **not yet fixed**, with the
+    /// decision tracked as its own issue. A reader must not take a blank as "not a
+    /// real defect" — `verdict` is the field that says that.
     pub fix_commit: String,
     /// One line stating the defect, or stating why the claim is wrong.
     pub description: String,

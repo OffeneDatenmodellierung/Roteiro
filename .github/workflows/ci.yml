@@ -173,12 +173,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # ## Full history, because this job's tests read it and had been quietly
-          # declining to
+          # declining to run for want of it
           #
           # The review corpus pins each adjudicated comment to the commit it was
-          # made on, and eight tests reconstruct those commits: three in
-          # `crates/rto-graph/tests/review_corpus.rs`, five in `roteiro`'s
-          # `review_llm` module. The action's default is `fetch-depth: 1`, which
+          # made on, and NINE tests are gated on being able to reconstruct those
+          # commits: three in `crates/rto-graph/tests/review_corpus.rs` and six in
+          # `roteiro`'s `review_llm` module. (Eight of the nine also *fail* in a full
+          # clone today; the ninth returned early on CI with the rest while passing
+          # locally, which is why the gated count is the one to state here.) The action's default is `fetch-depth: 1`, which
           # leaves one commit and a shallow boundary, so every one of them returned
           # early — printing a `SKIP:` line that libtest captures and then discards
           # for a passing test. They were invoked, reported as passed, and asserted
@@ -468,7 +470,7 @@ jobs:
           # Full history; see the `checks` job for what reads it and what the eight
           # tests that need it were doing without it. This job is the one whose
           # `--no-fail-fast` counts are meant to be a measurement rather than a
-          # lower bound, and eight tests reporting as passed while asserting
+          # lower bound, and nine tests reporting as passed while asserting
           # nothing is the other way to get a number that is not one.
           fetch-depth: 0
       # Pinned toolchain, `master` ref of the action; see the `checks` job for
