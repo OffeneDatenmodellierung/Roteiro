@@ -156,7 +156,7 @@ pub fn parse_blueprint(rel_path: &str, text: &str) -> BlueprintDoc {
                 text: String::new(),
             });
         }
-        for raw in crate::text::scan_wiki_links(line) {
+        for raw in crate::text::wiki_link_targets(line) {
             let from = match &current {
                 Some(slug) => format!("{key}#{slug}"),
                 None => key.clone(),

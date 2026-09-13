@@ -426,13 +426,15 @@ fn rewrite_doc_link(
     source: Option<&SourceBase>,
     depth: usize,
 ) -> Option<String> {
-    if dest.starts_with("http://")
-        || dest.starts_with("https://")
-        || dest.starts_with("//")
-        || dest.starts_with("mailto:")
-        || dest.starts_with('#')
-        || dest.starts_with('/')
-    {
+    // Nothing this function does can make these land on a page the site serves.
+    // The scope half is [`rto_graph::link_scope`] rather than the four prefixes
+    // that used to be listed here, so the renderer and the rendered-site link
+    // gate answer "whose is this?" with one rule: they had a prefix list each,
+    // both of which read `tel:`, `ftp:` and `data:` as repository-relative.
+    // The other two are site-relative rather than foreign — a bare `#fragment`
+    // addresses the page it is written on, and a leading `/` is already the
+    // site root — so they stay a separate test.
+    if rto_graph::link_scope(dest).is_external() || dest.starts_with(['#', '/']) {
         return None;
     }
     let (path, frag) = dest
@@ -739,8 +741,11 @@ fn rewrite_wiki_links(md: &str, adr_prefix: &str) -> String {
     let mut out = String::new();
     let mut in_fence = false;
     for line in md.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+        // [`rto_graph::is_code_fence`] rather than a local prefix test, so the
+        // one place that says what a fence delimiter is can also say — where a
+        // reader will find it — that `rto_spec`'s four document scanners
+        // recognise only the backtick half of it.
+        if rto_graph::is_code_fence(line) {
             in_fence = !in_fence;
             out.push_str(line);
             out.push('\n');
@@ -757,74 +762,31 @@ fn rewrite_wiki_links(md: &str, adr_prefix: &str) -> String {
     out
 }
 
-/// Rewrite wiki-links in one line, leaving `CommonMark` inline code spans
-/// untouched. A code span opens with a run of *n* backticks and closes with the
-/// next run of *exactly* *n* backticks; anything between (including `[[…]]`
-/// examples) is emitted verbatim. Backtick runs with no matching close are
-/// literal text and do not shield what follows.
+/// Rewrite every `[[…]]` in one line, leaving `CommonMark` inline code spans
+/// untouched — a `[[…]]` written as a documentation example inside backticks is
+/// emitted verbatim.
+///
+/// Finding them is [`rto_graph::markdown_links`]'s job, not this file's (#801).
+/// It reports each link's byte range, so a rewrite is a splice rather than a
+/// second scanner: this had its own backtick reader and its own `[[`/`]]` walk,
+/// and both disagreed with the one `roteiro check` counts with. The disagreement
+/// was not theoretical — an **escaped** backtick opened a span here and opens
+/// none there, so ``\` a [[docs/adr/x.md]] b ` `` was a link the gate resolved
+/// and the site rendered as literal brackets. Three more followed from the same
+/// split: an unclosed `[[` stopped the gate's scan and not this one, an empty
+/// `[[]]` became an empty code span, and a link straddling a code span was a
+/// link to one side and prose to the other. Raised in review on #806.
 fn rewrite_line_outside_code(line: &str, adr_prefix: &str, out: &mut String) {
-    let bytes = line.as_bytes();
-    let mut text_start = 0;
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] != b'`' {
-            i += 1;
+    let mut at = 0;
+    for link in rto_graph::markdown_links(line) {
+        if link.kind() != rto_graph::LinkKind::Wiki {
             continue;
         }
-        let run_start = i;
-        while i < bytes.len() && bytes[i] == b'`' {
-            i += 1;
-        }
-        let run = i - run_start;
-        if let Some(rel) = find_closing_run(&bytes[i..], run) {
-            // Text before the opening delimiter is ordinary prose.
-            rewrite_wiki_in(&line[text_start..run_start], adr_prefix, out);
-            let code_end = i + rel + run;
-            out.push_str(&line[run_start..code_end]); // span, delimiters included
-            i = code_end;
-            text_start = i;
-        }
-        // No close → treat the run as literal text; keep it in the pending
-        // buffer (rewrite_wiki_in leaves backticks alone) and keep scanning.
+        out.push_str(&line[at..link.span().start]);
+        out.push_str(&wiki_target(link.target(), adr_prefix));
+        at = link.span().end;
     }
-    rewrite_wiki_in(&line[text_start..], adr_prefix, out);
-}
-
-/// Byte offset (within `bytes`) of the next backtick run of *exactly* `run`
-/// backticks, or `None`. Longer or shorter runs are skipped, per `CommonMark`.
-fn find_closing_run(bytes: &[u8], run: usize) -> Option<usize> {
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] != b'`' {
-            i += 1;
-            continue;
-        }
-        let start = i;
-        while i < bytes.len() && bytes[i] == b'`' {
-            i += 1;
-        }
-        if i - start == run {
-            return Some(start);
-        }
-    }
-    None
-}
-
-/// Rewrite every `[[…]]` in one non-code text segment.
-fn rewrite_wiki_in(seg: &str, adr_prefix: &str, out: &mut String) {
-    let mut rest = seg;
-    while let Some(open) = rest.find("[[") {
-        out.push_str(&rest[..open]);
-        let after = &rest[open + 2..];
-        if let Some(close) = after.find("]]") {
-            out.push_str(&wiki_target(&after[..close], adr_prefix));
-            rest = &after[close + 2..];
-        } else {
-            out.push_str("[[");
-            rest = after;
-        }
-    }
-    out.push_str(rest);
+    out.push_str(&line[at..]);
 }
 
 /// Resolve one wiki-link's inner text to Markdown.
@@ -1033,6 +995,25 @@ mod tests {
         assert!(
             stray.contains("<a href=\"0001-x.html\">ADR-0001</a>"),
             "unterminated backtick must not shield: {stray}"
+        );
+    }
+
+    /// An **escaped** backtick opens no code span here either, so a link after
+    /// one renders as a link.
+    ///
+    /// This is the renderer half of a disagreement that used to exist: this file
+    /// had its own backtick reader, which treated `` \` `` as an opener, while
+    /// `rto_spec`'s — the one `roteiro check` counts with — does not. So the line
+    /// below was an authored link the gate resolved and the site rendered as
+    /// literal brackets, in the exact class of defect #524 and #469 were. Both
+    /// sides now read [`rto_graph::code_spans`], so they cannot differ; this
+    /// pins the answer rather than the arrangement. Raised in review on #806.
+    #[test]
+    fn an_escaped_backtick_shields_nothing_here_either() {
+        let escaped = markdown_to_html("a \\` b [[docs/adr/0001-x.md]] c ` d\n");
+        assert!(
+            escaped.contains("<a href=\"0001-x.html\">ADR-0001</a>"),
+            "an escaped backtick must not open a span: {escaped}"
         );
     }
 

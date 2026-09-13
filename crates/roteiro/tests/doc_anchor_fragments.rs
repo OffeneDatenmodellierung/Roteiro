@@ -105,29 +105,42 @@ fn slugify(text: &str) -> String {
 /// `text` alone, whereas slugifying the raw source would fold the target in
 /// too. Backticks, `*` and `#` need no stripping: `slugify` already drops every
 /// character that is neither alphanumeric nor `-`/`_`/whitespace.
+///
+/// Finding those links is [`rto_graph::markdown_links`]'s job rather than this
+/// file's (#801): it is the one Markdown link reader in the workspace, it keeps
+/// the link **text** — which is exactly the half this needs and the half no
+/// other reader used to keep — and it reports the byte range to splice over.
+/// The copy this replaced read to the *first* `]`, so `[see [x]](y)` reduced to
+/// `see [x](y)` rather than `see [x]`; and it did not know about code spans, so
+/// a heading documenting the `[a](b)` form was reduced instead of left alone —
+/// which is what rustdoc does to it, since a code span's content is literal.
 fn heading_text(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
-    let mut rest = raw;
-    while let Some(open) = rest.find('[') {
-        out.push_str(&rest[..open]);
-        let after = &rest[open + 1..];
-        // `[text](target)` — keep `text`, drop `(target)`. Anything else falls
-        // through as literal text, which slugify then handles.
-        match (after.find(']'), after.find("](")) {
-            (Some(close), Some(link)) if close == link => {
-                out.push_str(&after[..close]);
-                match after[close + 2..].find(')') {
-                    Some(end) => rest = &after[close + 2 + end + 1..],
-                    None => return out,
-                }
-            }
-            _ => {
-                out.push('[');
-                rest = after;
-            }
+    let mut at = 0;
+    for link in rto_graph::markdown_links(raw) {
+        // An image reduces the same way — to its alt text — and for the same
+        // reason: `![diagram](img.png)` reads as "diagram", so folding the
+        // source in would anchor the heading at `diagram-img-png`. Wiki-links
+        // are left alone, as the helper this replaced left them.
+        if link.kind() == rto_graph::LinkKind::Wiki {
+            continue;
         }
+        // `markdown_links` may report **overlapping** ranges — an inline link
+        // encloses a `[[…]]` written inside its label — so a link already inside
+        // one that has been spliced is skipped, rather than slicing a backwards
+        // range. Not reachable today: overlap only ever pairs a wiki-link with
+        // an inline one, and the `continue` above drops every wiki-link. It is
+        // here because that is a fact about the filter one line up, not about
+        // the contract, and the contract is what the next reader will trust.
+        // Raised in review on #806; kept after checking the claim.
+        if link.span().start < at {
+            continue;
+        }
+        out.push_str(&raw[at..link.span().start]);
+        out.push_str(link.text());
+        at = link.span().end;
     }
-    out.push_str(rest);
+    out.push_str(&raw[at..]);
     out
 }
 
@@ -283,49 +296,44 @@ struct AnchorLink {
 /// unterminated run is literal and shields nothing, matching the markdown spec
 /// and `rto_render::docs`'s own renderer. Without this, documenting the very
 /// pattern this file checks would trip the check.
+///
+/// That last claim used to be made by a private copy of the rule, and the copy
+/// did not keep it (#801): it closed on the first run of *at least* `n`
+/// backticks rather than exactly `n`, and an escaped `` \` `` opened a span —
+/// the two ways #790 found of swallowing the rest of a line. It is
+/// [`rto_graph::strip_code_spans`] now, which is the rule the renderer actually
+/// uses, so "matching" is by construction rather than by agreement.
 fn without_code_spans(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(open) = rest.find('`') {
-        let ticks = rest[open..].len() - rest[open..].trim_start_matches('`').len();
-        let fence = &rest[open..open + ticks];
-        let body = &rest[open + ticks..];
-        let Some(close) = body.find(fence) else {
-            // Unterminated: the rest of the line is literal text.
-            out.push_str(rest);
-            return out;
-        };
-        out.push_str(&rest[..open]);
-        rest = &body[close + ticks..];
-    }
-    out.push_str(rest);
-    out
+    rto_graph::strip_code_spans(text)
 }
 
 /// Pull every `self#anchor` / `#anchor` link target out of one doc-text line.
 ///
 /// Covers both the inline form and the whole-line reference-definition form.
+///
+/// # The inline half is [`rto_graph::markdown_links`], not a walk of its own
+///
+/// It used to be a hand-rolled one: first `]`, then `](`, then everything up to
+/// the first `)`. That is the sixth implementation of "find a Markdown link"
+/// this change exists to remove, sitting in a file the change already touches —
+/// and it was wrong in the way a first-`)` scan is always wrong. A title may
+/// hold the bracket that would close the link, so
+/// `[t](self#paging "a ) b")` yielded the anchor `paging "a `: a fragment that
+/// matches no heading, reported against a link that is perfectly well formed.
+/// Raised in review on #806 (the example given there, `[see [x]](self#paging)`,
+/// is in fact read correctly — the loop re-enters on the inner `]` — but the
+/// mechanism named was real and this is the input that shows it).
+///
+/// # The reference-definition half stays, and cannot move
+///
+/// `[x]: self#anchor` is a **link reference definition**, which
+/// [`rto_graph::markdown_links`] deliberately does not read: it is a
+/// line-oriented scanner and a definition's meaning depends on the document
+/// around it. Teaching it that form would change what the shared rule accepts
+/// everywhere, to serve one guard. So it is read here, and said so here.
 fn anchor_links(doc: &DocLine<'_>) -> Vec<AnchorLink> {
     let mut found = Vec::new();
-    let stripped = without_code_spans(doc.text);
-    let line_initial = stripped.trim_start().starts_with('[');
-    let mut rest = stripped.as_str();
-    while let Some(close) = rest.find(']') {
-        let after = &rest[close + 1..];
-        let target = if let Some(t) = after.strip_prefix('(') {
-            t.split(')').next().unwrap_or("")
-        } else if let Some(t) = after.strip_prefix(':') {
-            // A reference definition is the whole line, so its target runs to
-            // the end; mid-sentence `]:` is prose and never a link.
-            if !line_initial {
-                rest = after;
-                continue;
-            }
-            t.trim()
-        } else {
-            rest = after;
-            continue;
-        };
+    let push = |target: &str, found: &mut Vec<AnchorLink>| {
         let qualified = target.starts_with("self#");
         let anchor = if qualified {
             Some(&target["self#".len()..])
@@ -340,7 +348,36 @@ fn anchor_links(doc: &DocLine<'_>) -> Vec<AnchorLink> {
                 line_no: doc.line_no,
             });
         }
-        rest = after;
+    };
+
+    // Inline links, from the one scanner. It skips code spans itself, so a link
+    // written *about* links is prose here for the same reason it is everywhere
+    // else. Images carry no anchor worth resolving and wiki-links are not this
+    // file's business, so only `LinkKind::Inline` is read.
+    for link in rto_graph::markdown_links(doc.text) {
+        if link.kind() == rto_graph::LinkKind::Inline {
+            push(link.target(), &mut found);
+        }
+    }
+
+    // A reference definition is the whole line, so its target runs to the end;
+    // mid-sentence `]:` is prose and never a link.
+    //
+    // The `]:` has to be the **first** `]`, which is the label's own close: a
+    // definition's label cannot contain an unescaped `]`. Scanning the whole
+    // line for `]:` instead found one inside a link title, so
+    // `[x](self#real "a ]: self#fake")` reported the real anchor *and* a
+    // fabricated `fake")` — a fragment matching no heading, which is a false
+    // failure from a guard rather than a missed one. This file's own docs say
+    // why that is the worse direction: a gate that cries wolf is the one that
+    // gets switched off. Raised in review on #806.
+    let stripped = without_code_spans(doc.text);
+    let trimmed = stripped.trim_start();
+    if let Some(rest) = trimmed.strip_prefix('[')
+        && let Some(close) = rest.find(']')
+        && let Some(target) = rest[close + 1..].strip_prefix(':')
+    {
+        push(target.trim(), &mut found);
     }
     found
 }
@@ -594,6 +631,32 @@ fn slugify_matches_rustdocs_rule() {
     );
     // Non-ASCII is kept verbatim — rustdoc lowercases only ASCII.
     assert_eq!(slugify(&heading_text("Ünicode kept")), "Ünicode-kept");
+    // An image reduces to its alt text, not to alt text plus the source path.
+    assert_eq!(
+        slugify(&heading_text("A ![diagram](img.png) here")),
+        "a-diagram-here"
+    );
+    // A wiki-link inside an inline link: `markdown_links` reports both, and the
+    // inline one's range **encloses** the wiki one's. The label is what survives,
+    // wiki brackets and all, because this reduces markdown to what a reader sees
+    // and the renderer is what turns a `[[…]]` into something else.
+    assert_eq!(
+        slugify(&heading_text("See [x [[docs/y.md]]](self#paging)")),
+        "see-x-docsymd"
+    );
+    // An image whose **whole** alt text is a wiki token reduces the same way.
+    // The scanner used to step over the `[[…]]` before it could see the `](…)`
+    // that makes this an image at all, so no `LinkKind::Image` was reported and
+    // the source came through into the anchor. Raised in review on #806.
+    assert_eq!(
+        slugify(&heading_text("A ![[diagram]](img.png) here")),
+        "a-diagram-here"
+    );
+    // A code span before a `!` does not make what follows an image: the `!` and
+    // the span are outside the link, so only `[label](t.md)` is spliced away.
+    // Reading the `!` off the code-span-stripped string called this an image and
+    // deleted the span with it. Raised in review on #806.
+    assert_eq!(heading_text("A !`x`[label](t.md) here"), "A !`x`label here");
 }
 
 #[test]
@@ -753,4 +816,56 @@ fn file_modules_are_not_a_scope_boundary() {
     let report = check_file("x.rs", src);
     assert_eq!(report.links, 1);
     assert!(report.problems.is_empty(), "{:?}", report.problems);
+}
+
+/// The inline half reads links the way the rest of the workspace does.
+///
+/// Every shape here went through a hand-rolled first-`]`/first-`)` walk until
+/// #806's fifth round. The title case is the one that was actually wrong:
+/// `[t](self#paging "a ) b")` yielded the anchor `paging "a `, a fragment that
+/// matches no heading, from a link that is perfectly well formed. The rest are
+/// here because a scan that gets those right by luck should be pinned before
+/// somebody "simplifies" it back.
+#[test]
+fn an_anchor_is_read_by_the_one_scanner() {
+    let anchors = |text: &str| {
+        let doc = DocLine {
+            text,
+            inner: false,
+            top_level: true,
+            line_no: 1,
+        };
+        anchor_links(&doc)
+            .iter()
+            .map(|a| (a.anchor.clone(), a.qualified))
+            .collect::<Vec<_>>()
+    };
+    let paging = vec![("paging".to_owned(), true)];
+    // A `)` inside a title does not end the destination.
+    assert_eq!(anchors(r#"See [t](self#paging "a ) b")"#), paging);
+    // Brackets nest, so the link closes at its own `]`.
+    assert_eq!(anchors("See [see [x]](self#paging)"), paging);
+    // A code span in the label is content; one around the link makes it prose.
+    assert_eq!(anchors("See [a `]` b](self#paging)"), paging);
+    assert_eq!(anchors("Not `[x](self#nope)` a link"), vec![]);
+    // An image's own destination carries no anchor; the link around it does.
+    assert_eq!(anchors("See [![i](i.png)](self#paging)"), paging);
+    // Both forms still read, and the bare one is still unqualified.
+    assert_eq!(
+        anchors("See [x](#paging)"),
+        vec![("paging".to_owned(), false)]
+    );
+    assert_eq!(anchors("[x]: self#paging"), paging);
+    // A reference definition mid-sentence is prose, not a definition.
+    assert_eq!(anchors("see [x]: self#paging"), vec![]);
+    // And a `]:` inside a link title is title text, not a definition. Scanning
+    // the whole line for `]:` invented a second anchor here.
+    assert_eq!(
+        anchors(r#"[x](self#real "a ]: self#fake")"#),
+        vec![("real".to_owned(), true)]
+    );
+    assert_eq!(
+        anchors("See [a](self#one) and [b](self#two)"),
+        vec![("one".to_owned(), true), ("two".to_owned(), true)]
+    );
 }
