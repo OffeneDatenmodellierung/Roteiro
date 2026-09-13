@@ -233,9 +233,9 @@ already exist, and workspace routes already confine a registry to one workspace.
 
 ### Distillation runs locally by default
 
-`ModelTask` — `Embed`, `Draft`, `Chat`, `Review` — is the existing per-task tier
-switch, and distillation is a fifth variant rather than a fifth bespoke selection
-rule. Summarisation is the ideal local workload: batch, latency-insensitive, with
+`ModelTask` — `Embed`, `Draft`, `Chat`, `Review`, plus the three media tasks — is
+the existing per-task tier switch, and distillation is **one more variant** on it
+rather than one more bespoke selection rule. Summarisation is the ideal local workload: batch, latency-insensitive, with
 nobody waiting.
 
 **Remote is a different consent question from the one
@@ -949,8 +949,9 @@ in the direction v0.1 named as the acceptable one:
   keeping, since an absent reserved file is a bundle that never made the claim,
   where an empty one would be a bundle asserting that nothing happened.
 
-So there is no append-only file to reconcile and never was: the slot is wired,
-typed and derived-by-construction, and simply unfed. The open question was
+So there is no append-only file to reconcile in the code as it stands: the slot
+is wired, typed and derived-by-construction, and simply unfed. (As above, that is
+a reading of the current source, not a claim about every past release.) The open question was
 really *what feeds `days`*, and determinism answers it — the log must be a
 function of the graph at the rendered commit, exactly as every other file in the
 bundle is.
@@ -1000,8 +1001,11 @@ rendered commit alone**: at a shallow boundary a commit's parents are absent, so
 ADR-0021 records that the concept confirms nothing and *"the workflow that
 publishes the bundle asks for full history so the published artifact is
 attributed rather than blank"*. A `log.md` fed from it is reproducible **given
-full history**, and blank without it — the same precondition the trust tiers
-already carry, so it is inherited rather than new, but it must be stated because
+full history**, and **partial** without it: `last_authors` skips a boundary or
+unreadable commit but still resolves every path whose last change is inside the
+visible history, so a shallow render loses the documents it cannot date rather
+than the whole log. The precondition is therefore **completeness of history**,
+not its presence — the same one the trust tiers already carry, so it is inherited rather than new, but it must be stated because
 "a function of the graph at the rendered commit" is not quite true of it. Second,
 the attribution map is looked up **by path, without re-checking provenance**
 (`r.authors.get(p)`, [[crates/roteiro/src/main.rs]]), so a *derived* concept
