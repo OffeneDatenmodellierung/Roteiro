@@ -105,11 +105,29 @@ knowingly departs from "`reviewed_sha` is the comment's `original_commit_id`":
 What the substitution costs, stated plainly: for these three rows `reviewed_sha` is
 **the surviving commit with the same anchored content**, not the literal object the
 reviewer read. The force-push rebased the branch onto PR #292's merge commit, which
-landed at `08:52:52Z` — *after* the `08:50:25Z` review — so the reviewed tree and
-`ab3b1bc`'s tree differ in files PR #292 touched. The anchors, their line numbers
-and the defect at them do not differ, which is the whole of what a row is scored
-on, and `every_anchor_exists_in_the_tree_it_was_reviewed_on` plus
-`every_row_reconstructs_a_non_empty_reviewed_diff` now hold for both.
+landed at `08:52:52Z` — *after* the `08:50:25Z` review — so the reviewed *tree* and
+`ab3b1bc`'s tree differ in the six files PR #292 touched.
+
+**What a replay actually sees, measured rather than asserted**, because "the trees
+differ" and "the scorer is shown something the reviewer was not" are different
+claims and only the second would matter:
+
+* The replayed diff is `fork_point..reviewed_sha`, and the fork point is PR #292's
+  merge commit — so #292's changes are in the *base*, never in the diff. Every one
+  of the 15 files in it was changed by the branch itself; a replay cannot show a
+  file the reviewer never saw.
+* Both anchored files are **added** by the branch (`git diff --name-status` reports
+  `A` for `crates/rto-graph/src/findings.rs` and `crates/rto-exec/src/runner.rs`)
+  and neither appears in PR #292's six. A file created whole by the branch cannot
+  be perturbed by rebasing onto a commit that does not touch it, so the diff at
+  every anchor is what the reviewer read.
+* The bounded residual: two files in the replayed diff — `crates/roteiro/src/main.rs`
+  and `crates/rto-graph/src/lib.rs` — were also touched by #292, so their hunk
+  *context* may have shifted under the rebase. Neither anchors a row, so no
+  adjudicated finding rests on them.
+
+`every_anchor_exists_in_the_tree_it_was_reviewed_on` and
+`every_row_reconstructs_a_non_empty_reviewed_diff` hold for all three rows.
 
 Deleting the rows was the alternative and it is the worse one: they are the whole
 of the `error-text-drift` class and half of `permissive-constraint`, and a corpus
