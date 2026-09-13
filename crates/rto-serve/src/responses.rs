@@ -140,11 +140,24 @@ pub const STREAM_ONLY: &str = "`stream` must be `true`: this endpoint serves the
 /// has an answer for, and what it does with each.
 ///
 /// Sorted by name, and carrying the same [`Param`] rows the chat table uses, so
-/// the two declarations read alike and share one refusal shape. It is
-/// deliberately **shorter** than [`crate::openai_params::OPENAI_CHAT_PARAMS`]:
-/// that table is exhaustive over a frozen wire, this one covers the parameters
-/// a Responses client actually sends, and a key in no row here passes through
-/// untouched exactly as an unknown chat key does.
+/// the two declarations read alike and share one refusal shape.
+///
+/// **Read from the Responses request schema on 2026-09-13**, and cross-checked
+/// against the top level of a captured `codex-cli` 0.147.0 request. Provenance
+/// is recorded because a key in no row here passes through untouched — the same
+/// rule the chat wire has, and the right one (see `docs/SERVING.md` on why
+/// `deny_unknown_fields` is the wrong instrument) — which means **a stateful
+/// parameter this table has not heard of is a silent wrong answer, not a
+/// harmless unknown**. That is not hypothetical: `conversation` was missing
+/// from the first version of this table and review caught it, so a request
+/// naming a server-side conversation would have been answered from the turns
+/// in `input` alone. When OpenAI adds a parameter that moves state or output
+/// off the request, it belongs here.
+///
+/// It stays deliberately **shorter** than
+/// [`crate::openai_params::OPENAI_CHAT_PARAMS`], which is exhaustive over a
+/// frozen wire: this one carries the parameters a Responses client sends plus
+/// every one whose absence would mislead.
 pub const RESPONSES_PARAMS: &[Param] = &[
     Param {
         name: "background",
@@ -158,6 +171,19 @@ pub const RESPONSES_PARAMS: &[Param] = &[
             },
         },
         inert: &["false"],
+    },
+    Param {
+        name: "conversation",
+        served_by: None,
+        note: "",
+        support: Support::Rejected {
+            because: "a conversation object lives on the server that issued it and there is no such object here, so the turns it names are not in this request and the model would answer having never seen them",
+            forward: Forward::Do {
+                mentions: &[Mention::Parameter("input")],
+                prose: "Send the whole conversation in `input` each turn, which is what a stateless endpoint needs.",
+            },
+        },
+        inert: &[],
     },
     Param {
         name: "include",
@@ -254,6 +280,13 @@ pub const RESPONSES_PARAMS: &[Param] = &[
         inert: &[],
     },
     Param {
+        name: "prompt_cache_retention",
+        served_by: None,
+        note: "as `prompt_cache_key`",
+        support: Support::Dropped,
+        inert: &[],
+    },
+    Param {
         name: "reasoning",
         served_by: None,
         note: "a model's `<think>` block is stripped on every Roteiro surface and no `reasoning` item is ever emitted, so neither the effort nor the summary setting has anything to act on — see the divergence table above",
@@ -286,6 +319,13 @@ pub const RESPONSES_PARAMS: &[Param] = &[
         served_by: None,
         note: "the typed SSE event sequence; **`true` is the only value served** and `false` is a `400` — see the divergence table above",
         support: Support::Supported,
+        inert: &[],
+    },
+    Param {
+        name: "stream_options",
+        served_by: None,
+        note: "its one field, `include_obfuscation`, pads events against traffic analysis on a network this endpoint does not cross — it is bound to loopback, so the padding would defend nothing and its absence changes no field you can read",
+        support: Support::Dropped,
         inert: &[],
     },
     Param {
@@ -606,8 +646,25 @@ impl ResponsesRequest {
                     .to_owned(),
             );
         }
+        let declared = self.tools.unwrap_or_default();
+        // Bounded on what the **caller sent**, before hosted tools are filtered
+        // out. Filtering first would apply the bound only to the `function`
+        // entries and leave the count of dropped ones unbounded — a request
+        // could hand this loop an arbitrarily long array and have every entry
+        // deserialised and walked, which is exactly the request-side allocation
+        // the chat wire's cap exists to refuse. Raised in review of #825.
+        if declared.len() > crate::types::MAX_CLIENT_TOOLS {
+            return Err(format!(
+                "too many tools: {} (max {}). The bound counts every entry of \
+                 `tools`, including hosted ones this endpoint drops — it is a \
+                 cap on what one request may make the server read, not on what \
+                 the model ends up being shown.",
+                declared.len(),
+                crate::types::MAX_CLIENT_TOOLS
+            ));
+        }
         let mut tools = Vec::new();
-        for tool in self.tools.unwrap_or_default() {
+        for tool in declared {
             if let Some(spec) = tool_spec(&tool)? {
                 tools.push(spec);
             }
@@ -1313,6 +1370,42 @@ mod tests {
         chat_of(json!({"model": "echo", "stream": true, "input": "hi",
                        "top_p": null, "previous_response_id": null}))
         .expect("nulls express no preference");
+    }
+
+    /// Responses' *other* way of naming state that lives on the server. Missing
+    /// from the first version of this table, which is what
+    /// `RESPONSES_PARAMS`' provenance note now records: an unlisted stateful
+    /// parameter is a silently wrong answer, not a harmless unknown.
+    #[test]
+    fn conversation_is_refused_because_nothing_is_stored() {
+        let msg = chat_of(json!({"model": "echo", "stream": true, "input": "hi",
+                                 "conversation": "conv_123"}))
+        .expect_err("a refusal");
+        assert!(msg.starts_with("`conversation` is not supported"), "{msg}");
+        assert!(msg.contains("`input`"), "names the way forward: {msg}");
+    }
+
+    /// The tool bound counts what the **caller sent**, not what survives the
+    /// hosted-tool filter. Filtering first would leave the count of dropped
+    /// entries unbounded, so a request could make the server deserialise and
+    /// walk an arbitrarily long array and never meet the cap.
+    #[test]
+    fn a_flood_of_hosted_tools_is_refused_before_they_are_filtered() {
+        let hosted: Vec<serde_json::Value> = (0..=crate::types::MAX_CLIENT_TOOLS)
+            .map(|_| json!({"type": "web_search", "external_web_access": true}))
+            .collect();
+        let msg = chat_of(json!({"model": "echo", "stream": true, "input": "hi",
+                                 "tools": hosted}))
+        .expect_err("a refusal");
+        assert!(msg.starts_with("too many tools"), "{msg}");
+        // And the bound is not merely "some hosted tools are refused": the same
+        // count of `function` tools is refused too, and one fewer is served.
+        let at_limit: Vec<serde_json::Value> = (0..crate::types::MAX_CLIENT_TOOLS)
+            .map(|_| json!({"type": "web_search", "external_web_access": true}))
+            .collect();
+        chat_of(json!({"model": "echo", "stream": true, "input": "hi",
+                       "tools": at_limit}))
+        .expect("the limit itself is served");
     }
 
     #[test]

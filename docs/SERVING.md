@@ -356,13 +356,23 @@ client that reads the optional events gets a live stream instead of a silent wai
 
 Read the four status words exactly as the chat table above defines them. This
 table is shorter than that one on purpose: the chat table is exhaustive over a
-frozen wire, and this one covers the parameters a Responses client actually
-sends. A key in no row here is passed through untouched, exactly as an unknown
-chat key is.
+frozen wire, and this one carries the parameters a Responses client sends plus
+every one whose absence would mislead you. A key in no row here is passed
+through untouched, exactly as an unknown chat key is — and for the same reason
+(`deny_unknown_fields` would refuse the habitual keys clients send and harm
+nobody).
+
+**That rule puts a duty on this table rather than on you.** A parameter that
+moves state or output *off the request* — `previous_response_id`, `conversation`
+— is a silently wrong answer if it is missing here, not a harmless unknown, so
+those are listed and refused. The rows below were read from the Responses
+request schema on 2026-09-13 and cross-checked against a captured `codex-cli`
+0.147.0 request.
 
 | parameter | status | what happens |
 |---|---|---|
 | `background` | **400** | `background` is not supported: there is no job store behind this endpoint, so a background response would be started and then never be retrievable by the id you were given. Send `stream: true` and read the events as they arrive; a loopback server has nothing to gain by deferring the work. |
+| `conversation` | **400** | `conversation` is not supported: a conversation object lives on the server that issued it and there is no such object here, so the turns it names are not in this request and the model would answer having never seen them. Send the whole conversation in `input` each turn, which is what a stateless endpoint needs. |
 | `include` | **dropped** | asks for optional output fields — encrypted reasoning, log probabilities — that this endpoint never produces; the items simply do not appear |
 | `input` | **supported** | the conversation, including `function_call` and `function_call_output` items |
 | `instructions` | **supported** | the system prompt; mapped to a leading `system` turn |
@@ -374,11 +384,13 @@ chat key is.
 | `previous_response_id` | **400** | `previous_response_id` is not supported: nothing is stored here, so the turns that id names are not on the server and the model would answer having never seen them. Send the whole conversation in `input` each turn — every prior `message`, `function_call` and `function_call_output` — which is what a stateless endpoint needs. |
 | `prompt` | **400** | `prompt` is not supported: a stored prompt template lives in OpenAI's dashboard and cannot be resolved from here, so the instructions you believe were applied were not. Send the template's resolved text as `instructions`. |
 | `prompt_cache_key` | **dropped** | a cache-bucketing hint for OpenAI's prompt cache; nothing about the response depends on it |
+| `prompt_cache_retention` | **dropped** | as `prompt_cache_key` |
 | `reasoning` | **dropped** | a model's `<think>` block is stripped on every Roteiro surface and no `reasoning` item is ever emitted, so neither the effort nor the summary setting has anything to act on — see the divergence table above |
 | `safety_identifier` | **dropped** | an end-user label for OpenAI's abuse tooling; a loopback server has no such tooling and the response is identical either way |
 | `service_tier` | **dropped** | selects OpenAI's processing tier for latency and billing; there is one tier here and the output is unaffected |
 | `store` | **dropped** | asks OpenAI to retain the response; Roteiro stores nothing and sends nothing anywhere, and the echoed value is always `false` |
 | `stream` | **supported** | the typed SSE event sequence; **`true` is the only value served** and `false` is a `400` — see the divergence table above |
+| `stream_options` | **dropped** | its one field, `include_obfuscation`, pads events against traffic analysis on a network this endpoint does not cross — it is bound to loopback, so the padding would defend nothing and its absence changes no field you can read |
 | `temperature` | **supported** | the one sampling control this endpoint honours; `0` (or omitted) is greedy |
 | `text` | **400** | `text` is not supported: there is no grammar-constrained sampling on this endpoint, so a `json_schema` format would return prose that need not parse and a verbosity setting would not change the length. Ask for the shape and the length you want in the prompt, and parse defensively. |
 | `tool_choice` | **accepted, not enforced** | forcing a named function is grammar-constrained sampling, which lands with the grammar work; half-implementing it would tell a client it was honoured |
