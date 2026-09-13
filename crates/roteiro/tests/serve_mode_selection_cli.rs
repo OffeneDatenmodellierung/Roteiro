@@ -319,8 +319,8 @@ fn serve_mode_truth_table() {
 /// one and not the other, so both are pinned.
 #[test]
 fn a_config_resolving_to_nothing_bails_rather_than_falling_back() {
-    let base = scratch_dir("explorer-empty-config");
-    std::fs::create_dir_all(&base).expect("mkdir base");
+    let base = Scratch::new("explorer-empty-config");
+    std::fs::create_dir_all(&base.path).expect("mkdir base");
     // A root that exists and holds no repository: `resolved_workspaces` yields one
     // named workspace, and `WorkspaceSet::from_resolved` then finds nothing in it.
     let ghost = base.join("holds-no-repo");
@@ -354,8 +354,6 @@ fn a_config_resolving_to_nothing_bails_rather_than_falling_back() {
              diagnostic; got: {stderr}"
         );
     }
-
-    std::fs::remove_dir_all(&base).ok();
 }
 
 // ---------------------------------------------------------------------------
@@ -480,7 +478,7 @@ fn a_bundle_reachable_twice_is_mounted_once() {
 #[test]
 #[cfg(feature = "okf-viewer")]
 fn the_cwd_is_read_both_as_a_bundle_and_as_its_parent() {
-    let base = scratch_dir("okf-cwd-readings");
+    let base = Scratch::new("okf-cwd-readings");
     let home = IsolatedHome::new("okf-cwd-readings");
 
     // Standing *above* a bundle: the admitted root is `<cwd>/okf`, so the label
@@ -512,12 +510,6 @@ fn the_cwd_is_read_both_as_a_bundle_and_as_its_parent() {
         single_mount_redirect(&addr),
         Some("/okf/my-bundle".to_owned())
     );
-    // Before the cleanup below, not after it: this child's cwd is `inside`, and
-    // on Windows a directory cannot be removed while a process is sitting in it.
-    // `.ok()` would swallow that and leak the fixture on every successful run.
-    drop(server);
-
-    std::fs::remove_dir_all(&base).ok();
 }
 
 /// A project whose workspace knows **no repository root** contributes no mount,
@@ -539,7 +531,7 @@ fn the_cwd_is_read_both_as_a_bundle_and_as_its_parent() {
 #[test]
 #[cfg(feature = "okf-viewer")]
 fn a_project_with_no_known_repository_root_contributes_no_mount() {
-    let base = scratch_dir("okf-no-repo-root");
+    let base = Scratch::new("okf-no-repo-root");
     let repo = base.join("solo");
     make_repo(&repo);
     write_bundle(&repo.join("okf"));
@@ -561,8 +553,6 @@ fn a_project_with_no_known_repository_root_contributes_no_mount() {
         !line.contains("default/solo"),
         "there is no `{{ws}}/{{project}}` mount to be had here; got: {line}"
     );
-
-    std::fs::remove_dir_all(&base).ok();
 }
 
 // ---------------------------------------------------------------------------
@@ -587,7 +577,7 @@ fn a_project_with_no_known_repository_root_contributes_no_mount() {
 #[test]
 #[cfg(feature = "okf-viewer")]
 fn the_zero_bundle_chooser_page_is_unreachable() {
-    let base = scratch_dir("okf-empty");
+    let base = Scratch::new("okf-empty");
     let repo = base.join("bundleless");
     make_repo(&repo);
     let home = IsolatedHome::new("okf-empty");
@@ -617,8 +607,6 @@ fn the_zero_bundle_chooser_page_is_unreachable() {
         "the rest of the router is untouched — this is `mount_okf` declining to \
          merge, not a server that failed to build"
     );
-
-    std::fs::remove_dir_all(&base).ok();
 }
 
 // ---------------------------------------------------------------------------
@@ -634,7 +622,7 @@ fn the_zero_bundle_chooser_page_is_unreachable() {
 /// the cwd repo, it displaces it.
 #[test]
 fn workspace_root_displaces_the_cwd_repo() {
-    let base = scratch_dir("serve-workspace-root");
+    let base = Scratch::new("serve-workspace-root");
     let cwd = base.join("standing-here");
     make_repo(&cwd);
     let root = base.join("roots");
@@ -664,8 +652,6 @@ fn workspace_root_displaces_the_cwd_repo() {
         "`--workspace ROOT` narrows the served set to ROOT's repos — the current \
          directory's repo is NOT folded in alongside"
     );
-
-    std::fs::remove_dir_all(&base).ok();
 }
 
 /// **`-w`/`--workspace-name` does not narrow anything.** It selects the default
@@ -741,7 +727,7 @@ fn workspace_name_selects_a_default_without_hiding_the_others() {
 /// `explorer`.
 #[test]
 fn serve_with_a_workspace_name_and_no_config_cannot_start_at_all() {
-    let base = scratch_dir("serve-w-no-config");
+    let base = Scratch::new("serve-w-no-config");
     let repo = base.join("plain");
     make_repo(&repo);
     let home = IsolatedHome::new("serve-w-no-config");
@@ -781,8 +767,6 @@ fn serve_with_a_workspace_name_and_no_config_cannot_start_at_all() {
         "`explorer` validates `-w` against the cwd fallback set and says so — \
          this is the half `serve` is missing; got: {stderr}"
     );
-
-    std::fs::remove_dir_all(&base).ok();
 }
 
 // ---------------------------------------------------------------------------
@@ -792,8 +776,8 @@ fn serve_with_a_workspace_name_and_no_config_cannot_start_at_all() {
 /// Run every cell and report **all** mismatches at once: a truth table read one
 /// failure at a time hides how much a refactor moved.
 fn run_matrix(label: &str, cmd: &'static str, cells: &[Cell]) {
-    let base = scratch_dir(label);
-    std::fs::create_dir_all(&base).expect("mkdir matrix base");
+    let base = Scratch::new(label);
+    std::fs::create_dir_all(&base.path).expect("mkdir matrix base");
     // The configured set, built once and shared: no cell mutates it.
     let cfg = TwoWorkspaces::new(&format!("{label}-cfg"));
     // A home with no config at all, for the `config: false` cells.
@@ -801,7 +785,7 @@ fn run_matrix(label: &str, cmd: &'static str, cells: &[Cell]) {
 
     let mut failures: Vec<String> = Vec::new();
     for (i, cell) in cells.iter().enumerate() {
-        let cwd = base.join(format!("cell{i}"));
+        let cwd = base.join(&format!("cell{i}"));
         if cell.repo {
             make_repo(&cwd);
         } else {
@@ -844,8 +828,6 @@ fn run_matrix(label: &str, cmd: &'static str, cells: &[Cell]) {
          table and say which cell moved and why.\n{}",
         failures.join("\n")
     );
-
-    std::fs::remove_dir_all(&base).ok();
 }
 
 /// Start `roteiro explorer` in `cwd` and classify what it became, by the startup
@@ -952,6 +934,40 @@ fn observe_mode(what: &str, cmd: &'static str, cwd: &Path, home: &IsolatedHome) 
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
+
+/// A scratch tree that removes itself, **after** the servers standing in it.
+///
+/// Rust drops bindings in reverse declaration order, so a test that declares its
+/// `Scratch` first and its `Server`s later gets the right order for free: every
+/// child is killed, then the tree goes. That ordering is the whole point.
+/// Removing a directory a live process is sitting in fails on Windows, and the
+/// `.ok()` these call sites used would swallow the failure and leak the fixture
+/// on every *successful* run.
+///
+/// Written as a guard rather than a `drop(server)` before each cleanup because
+/// the manual version had already been got wrong: it was added at one of the
+/// three sites that needed it and forgotten at the other two. A rule that must
+/// be remembered at every call site is a rule that will be missed at one.
+struct Scratch {
+    path: PathBuf,
+}
+
+impl Scratch {
+    fn new(label: &str) -> Self {
+        let path = scratch_dir(label);
+        Self { path }
+    }
+
+    fn join(&self, rel: &str) -> PathBuf {
+        self.path.join(rel)
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.path).ok();
+    }
+}
 
 /// Two named workspaces, one repo each, each carrying a rendered bundle — so
 /// `{ws}/` in the mount label is load-bearing and a dropped workspace is visible.
