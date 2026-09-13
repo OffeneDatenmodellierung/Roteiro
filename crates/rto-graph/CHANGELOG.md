@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.14.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v5.13.0...rto-graph-v5.14.0) - 2026-09-13
+
+### Fixed
+
+- *(review)* the marker needs two signals, and every count must match the file
+- *(review)* a bare repo is not a work tree, and a diagnostic must not promise
+- *(review)* exempt a packaged crate, and close the last three hatches
+- *(review)* no precondition may skip these tests on CI, and the remedy must fit
+- *(cache)* a temp name two threads can share loses one put to ENOENT
+- *(review)* re-pin two orphaned corpus shas and make CI run the gate
+
+### Other
+
+- *(review)* say "open decision" so the debt scan counts the debt, not its description
+- *(cache)* hold the call site, not only the helper
+- *(review)* measure what a replay of a re-pinned row actually shows
+
 ## [5.13.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v5.12.1...rto-graph-v5.13.0) - 2026-09-13
 
 ### Fixed

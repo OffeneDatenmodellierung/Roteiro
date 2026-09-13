@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.14.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.13.0...roteiro-v5.14.0) - 2026-09-13
+
+### Fixed
+
+- *(test)* a closed stderr is not a reaped process
+
+### Other
+
+- Merge pull request #826 from OffeneDatenmodellierung/polly/fix-corpus-sha-gate
+- Merge pull request #823 from OffeneDatenmodellierung/polly/pin-serve-mode-selection
+- *(serve)* assert graph mode's `/` contract, not just bundles-only's
+- *(serve)* make fixture cleanup ordered by construction, not by memory
+- *(serve)* carry the start-then-exit guard across to observe_mode
+- *(serve)* refuse an unrepresentable fixture on the CLI path too
+- *(serve)* give `serve` its own truth table, and pin which refusal each cell is
+- *(serve)* prove the dedup key is canonical, and name a test for what it does
+- *(serve)* handle hostile paths and stop describing a loud failure as quiet
+- *(serve)* stop assuming things about the machine the tests run on
+- *(serve)* make the mode cells discriminate what they claim
+- *(serve)* pin what `serve`/`explorer` decide to serve
+
 ## [5.13.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.12.1...roteiro-v5.13.0) - 2026-09-13
 
 ### Fixed
