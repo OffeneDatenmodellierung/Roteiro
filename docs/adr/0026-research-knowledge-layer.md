@@ -11,7 +11,7 @@ architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "0.11"
+version: "0.12"
 last-modified: 2026-09-13
 confluence-url:
 ---
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | For Review |
 | **Architectural Significance** | HIGH |
 | **Domain** | Developer Tooling |
-| **Document version** | 0.11 |
+| **Document version** | 0.12 |
 | **Related** | [[docs/adr/0021-open-knowledge-format-bundle.md]] · [[docs/adr/0022-dynamic-okf-viewer.md]] · [[docs/adr/0025-document-extraction-consent.md]] · [[docs/adr/0019-remote-model-tier.md]] · [[docs/adr/0013-agent-memory-artifact-store.md]] |
 
 ## Reference
@@ -499,8 +499,15 @@ Two consequences follow, and they are requirements rather than observations:
 
 - **Content hashes are load-bearing.** A summary is tied to an exact source
   version by hash, so a source that changed underneath it is detectable. Reuse
-  what the project already hashes — the `(path, blob id, bytes)` derivation basis
-  — rather than inventing a second scheme.
+  what the project already computes rather than inventing a scheme — but **the
+  right thing to reuse is the content hash, not the extraction key**, and v0.3
+  conflated them by naming the `(path, blob id, bytes)` tuple. That tuple is the
+  *derivation basis* of a derived fact and folds in a path and an extractor
+  version; a manifest wants only *these bytes, this version of this work*. The
+  function to reuse is [[crates/rto-graph/src/git.rs#Repo]] `blob_oid`, which
+  computes a git blob id **from bytes alone** via `gix::objs::compute_hash` — no
+  object database required, so it works for bytes that are not in the repository
+  at all. That is what makes it the right primitive for an out-of-tree corpus.
 - **A `knowledge/` page whose source is absent must say so.** `roteiro check`
   already treats a stale reference as drift for the authored kinds it recognises,
   which is the mechanism to extend; what it needs is a `knowledge` arm (it has
@@ -626,8 +633,22 @@ concealment can never be detected in a PDF"* a PDF could then only ever reach
 zero-width characters, bidi controls — and returns `Verdict::Block` on that
 basis ([[crates/rto-graph/src/screen.rs#screen_text]], guarded by
 `strip_then_scan_reveals_a_directive_hidden_by_zero_width_characters`). Those
-codepoints are format-independent and survive PDF text extraction, so **`block`
-is reachable for PDF input today**.
+codepoints are format-independent **as far as the screen is concerned** — nothing
+in `screen_text` is HTML-specific about them — so the concealment channel exists
+for any text input, PDF included.
+
+> **One step of that is reasoned rather than measured, and this ADR says so
+> rather than repeating its own mistake.** Whether a zero-width or bidi codepoint
+> in a PDF actually *survives* `pdf_extract` into the string `decoded_content`
+> screens is **not established**: the existing guard exercises `screen_text`
+> directly, and no fixture drives a real PDF through `pdf_content` into it. It
+> plausibly depends on the document's font encoding — a `ToUnicode` CMap can
+> carry U+200B where a `WinAnsiEncoding` text stream cannot. **The test that
+> settles it is a PDF fixture containing a zero-width-obfuscated directive,
+> driven through `pdf_content` → `decoded_content`, asserting `Verdict::Block`**,
+> and it should be written before anyone relies on this paragraph. What is
+> established is the negative: the presentation-shaped and PDF-native classes are
+> definitely not detected.
 
 What does *not* transfer is the **presentation** half — `display:none`, the
 `hidden` attribute, a close tag splitting a phrase — and with it the PDF-native
@@ -803,3 +824,4 @@ ingest half of that belongs in a service of its own.
 | 0.9 | 2026-09-13 | **Final review pass; one real cost this ADR had understated, and two residues.** **(a) Splitting `generated` from `verified` needs a Rust change, which v0.2–v0.8 said it did not.** [[crates/rto-render/src/okf.rs#Origin]] holds a **single** `Actor`, and `Frontmatter::render` writes that one actor into both keys — which is the mechanical reason #799 measures them as identical rather than an oversight in the render path. Carrying two actors means changing `Origin` or `Frontmatter`, a breaking change to `rto-render`'s Rust surface. The claim is narrowed to what is true — **no OKF format change and no `Provenance` change** — and the Rust cost is stated and priced against existing precedent: under `AGENTS.md`'s `rto-*` carve-out, recorded at ADR-0001 v1.5, it ships as a **minor** with no `!`. Worth noting the shape of the error: *"no Rust break"* was inferred from *"no wire break"*, and they are separate questions this repository has already had to separate once. **(b)** One more present-tense residue: *"`raw/` produces no `file:` nodes by design"* described the target state as current. It produces them today — `IngestConfig` has no `raw` exclusion — and the text now says so. **(c)** The v0.3 row's superseded claim that all three symlink refusals guard a `file:` key now carries the v0.5 and v0.8 corrections inline, so a reader of the changelog alone is not left with the wrong family. |
 | 0.10 | 2026-09-13 | **Reconciles two sections of this ADR that contradicted each other, and closes a gap in its own requirement.** **(a)** v0.7–v0.9 argued that nothing can name a path outside the tree; v0.8 then recorded that the derived extractor follows tracked symlinks. Both cannot stand, and the resolution is an asymmetry worth having: on the **committed** path a tracked symlink resolves to the **git blob**, whose content is the target *path string*, so out-of-tree bytes are unreachable; on the **worktree** overlay `std::fs::read` follows the link and they are reachable. Measured both ways. **This is why the bundle argument survives**: `render okf` and `export` deliberately read the committed source — *"a shareable snapshot, whose whole value is being reproducible from a commit"* — so out-of-tree bytes cannot enter a **published bundle**, which is the property #812's blocker rests on. What they can enter is a local worktree preview and its `search` results. Smaller and different from what v0.4–v0.8 claimed, and now stated rather than glossed. **(b) The screening requirement only covered PDFs**, while the text two paragraphs above establishes that third-party markdown in `raw/` has *never* been screened and that ADR-0025's first-party prose carve-out does not transfer to it. Split into two parts: **foreign prose must be screened** (a widening of today's rule, not a re-wiring), and **PDF concealment must declare its coverage** — naming the presentation-shaped and PDF-native classes as undetected while the invisible-codepoint class is covered. **(c)** The v0.2 row still called `log.md` *"already implemented"*; corrected inline to the machinery, consistent with the Q3 heading fixed at v0.5. |
 | 0.11 | 2026-09-13 | **Closes a laundering path the layer split creates, which every previous screening pass missed.** Screening `raw/` at ingest does not cover `knowledge/`. `ModelTask::Distil` writes a `knowledge/*.md` page; that page is **prose**, and prose is precisely what [[crates/rto-graph/src/extract.rs]] exempts from the screen — so a summary of a foreign document re-enters the graph through the unscreened branch however carefully its source was checked. Screening a source and then admitting a model's unscreened restatement of it is a gate with a bypass beside it. Added as a **third part** of the ingest screening requirement, with the implementation choice left open (screen `knowledge/` on the authored path, or screen the distiller's output before it is written) and the obligation not. This is distinct from part (1): ingest screening covers *bytes somebody else wrote*, and this covers *bytes a model wrote from them* — arriving in the one format ADR-0025 measured a carve-out for, where that measurement was over this repository's own prose rather than over machine restatements of third-party documents. Two populations, one exemption, and only one of them ever in evidence. **Also:** *"one working tree"* omitted `sync_tree`'s arbitrary revision, which is listed as an entry point two sentences earlier; now *"one tree — a commit's tree (`HEAD`, or any revision `sync_tree` is given), the index, or a workdir-rooted dirwalk"*. |
+| 0.12 | 2026-09-13 | **Qualifies a claim this ADR reasoned rather than measured, and separates two hashes it had conflated.** **(a)** v0.6–v0.11 stated flatly that zero-width and bidi codepoints *"survive PDF text extraction"*, making `block` reachable for PDF input. The screen half is established — nothing in `screen_text`'s codepoint handling is HTML-specific. The **extraction** half is not: the existing guard exercises `screen_text` directly, and no fixture drives a real PDF through `pdf_content` into `decoded_content`. Whether U+200B survives plausibly depends on the document's font encoding — a `ToUnicode` CMap can carry it where a `WinAnsiEncoding` text stream cannot. The paragraph now names the test that would settle it (a PDF fixture with a zero-width-obfuscated directive, asserting `Verdict::Block` through the real path) and marks the claim as pending it. Recorded because it is the **same** error this ADR corrected at v0.6 — asserting an unverified antecedent about PDFs — committed again while correcting it, in the opposite direction. The negative remains established: the presentation-shaped and PDF-native classes are definitely undetected. **(b)** The manifest requirement said to reuse the `(path, blob id, bytes)` basis. That is the *derivation basis of a derived fact*, folding in a path and an extractor version; a manifest wants only *these bytes, this version of this work*. The right primitive is [[crates/rto-graph/src/git.rs#Repo]] `blob_oid`, which computes a git blob id **from bytes alone** through `gix::objs::compute_hash` — needing no object database, and therefore usable on bytes that are not in the repository at all, which is exactly the out-of-tree case. |
