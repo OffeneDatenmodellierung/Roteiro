@@ -522,8 +522,6 @@ git's own view, so it cannot *enumerate* a path outside the tree.
 the argument actually needs.** A tracked symlink is a path git can name whose
 target is outside, so enumeration is not the whole story:
 
-| source | a tracked symlink resolves to | out-of-tree bytes? |
-|---|---|---|
 | scenario | source | what happens | out-of-tree bytes? |
 |---|---|---|---|
 | a symlink **committed as a symlink** | `Committed`, `sync_tree`, `Index` | **the entry is skipped** — every enumerator filters to regular-file modes (`walk_tree_blobs`: `entry.mode.is_blob()`; `index_files`: `Mode::FILE \| FILE_EXECUTABLE`) | **no** — and no node at all |
@@ -545,8 +543,9 @@ the symlink section below, where that is recorded as a live defect).
 **This is why the bundle argument survives.** `render okf` and `export`
 deliberately read the **committed** source — *"a shareable snapshot, whose whole
 value is being reproducible from a commit"*
-([[crates/roteiro/src/main.rs]]) — and on that path a symlink is a blob holding a
-path string. So out-of-tree bytes cannot enter a **published bundle**, which is
+([[crates/roteiro/src/main.rs]]) — and on that path a committed symlink is
+**skipped by the tree walk entirely**, so there is nothing to read and no node to
+carry it. Out-of-tree bytes therefore cannot enter a **published bundle**, which is
 the property #812's blocker rests on. What they can enter is a local worktree
 preview and its `search` results, which is a smaller and different claim than
 a blanket "unreachable everywhere" would claim, and is stated here rather than
