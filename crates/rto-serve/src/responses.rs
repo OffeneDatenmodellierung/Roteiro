@@ -831,20 +831,8 @@ impl ResponseWriter {
         (name, data.to_string())
     }
 
-    /// The terminal event and response `status` one finish reason produces.
-    ///
-    /// **A generation cut at the token cap is not a completed one**, and saying
-    /// so is the whole of this function. OpenAI spells that `response.incomplete`
-    /// with an `incomplete_details.reason`, and the chat wire here already
-    /// spells it `finish_reason: "length"` — reporting `response.completed`
-    /// instead would hand a client a truncated answer with nothing on the wire
-    /// to say it was truncated, which is the silent-contradiction class the rest
-    /// of this module refuses by name.
-    ///
-    /// Measured rather than assumed, the same way the rest of the sequence was:
-    /// served from a mock to `codex-cli` 0.147.0, `response.incomplete` is
-    /// understood and surfaces as `Incomplete response returned, reason:
-    /// max_output_tokens` — a named error, not a wedged stream.
+    /// The terminal event name and response `status` one finish reason produces.
+    /// See [`Self::finish`] for why a truncated generation gets its own pair.
     const fn terminal(finish: FinishReason) -> (&'static str, &'static str) {
         match finish {
             FinishReason::Stop => ("response.completed", "completed"),
@@ -931,7 +919,7 @@ impl ResponseWriter {
     /// the response's `output` so the terminal event carries it.
     ///
     /// The item's own `status` follows `finish`: a message cut at the token cap
-    /// is `incomplete`, matching the response status [`Self::terminal`] sets.
+    /// is `incomplete`, matching the response status [`Self::finish`] sets.
     pub fn message_done(&mut self, text: &str, finish: FinishReason) -> Vec<Frame> {
         let item_id = format!("msg_{}_{}", self.id, self.output_index);
         let output_index = self.output_index;
@@ -1029,8 +1017,22 @@ impl ResponseWriter {
     /// The terminal event — without one, a client waits forever.
     ///
     /// `response.completed` for a generation that stopped on its own, and
-    /// `response.incomplete` for one the token budget cut short. See
-    /// [`Self::terminal`].
+    /// `response.incomplete`, carrying an `incomplete_details.reason`, for one
+    /// the token budget cut short.
+    ///
+    /// **A generation cut at the token cap is not a completed one**, and saying
+    /// so is the whole of the distinction. The chat wire here already spells it
+    /// `finish_reason: "length"`; reporting `response.completed` on this wire
+    /// would hand a client a truncated answer with nothing on the wire to say it
+    /// was truncated, which is the silent-contradiction class the rest of this
+    /// module refuses by name.
+    ///
+    /// Measured rather than assumed, the same way the rest of the sequence was:
+    /// served from a mock to `codex-cli` 0.147.0, `response.incomplete` is
+    /// understood and surfaces as `Incomplete response returned, reason:
+    /// max_output_tokens` — a named error, not a wedged stream. That mattered,
+    /// because `response.completed` is the one event that client cannot do
+    /// without, so replacing it needed checking rather than assuming.
     pub fn finish(&mut self, usage: &crate::types::Usage, finish: FinishReason) -> Frame {
         let (event, status) = Self::terminal(finish);
         let mut response = self.envelope(status, Some(usage));
