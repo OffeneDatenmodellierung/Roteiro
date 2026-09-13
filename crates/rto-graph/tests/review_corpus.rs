@@ -114,6 +114,37 @@ fn on_ci() -> bool {
     std::env::var_os("CI").is_some() || std::env::var_os("GITHUB_ACTIONS").is_some()
 }
 
+/// Whether this is a repository checkout rather than a packaged crate.
+///
+/// **The reason the CI rule below is not simply "never skip".** `rto-graph` is
+/// published and this test ships inside the package, so a downstream `cargo test` on
+/// the unpacked crate runs it against a directory that is not this repository —
+/// usually with `CI=true` set. Failing there would be our defect landing on somebody
+/// who did nothing wrong. A package therefore skips even on a runner; a real
+/// checkout missing its history does not.
+///
+/// The marker is the workspace manifest, following
+/// `crates/roteiro/tests/common/mod.rs`, which reasons it out in full and is the
+/// canonical copy — not importable from another crate's test binary, so this is a
+/// deliberate transcription kept identical on purpose. **Only `NotFound` means
+/// "packaged"**: collapsing every IO error into that would turn "cannot read the
+/// repository" into "this is not a repository", which is the same vacuity one level
+/// up.
+fn is_repository_checkout() -> bool {
+    let manifest = repo_root().join("Cargo.toml");
+    match std::fs::read_to_string(&manifest) {
+        Ok(text) => text.lines().any(|line| line.trim() == "[workspace]"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => panic!(
+            "cannot read {} ({:?}: {e}). Without it a guard cannot tell a packaged \
+             crate from a repository checkout, and guessing would make it skip in \
+             silence — which is the failure this guard exists to rule out.",
+            manifest.display(),
+            e.kind(),
+        ),
+    }
+}
+
 /// Take a skip — loudly off a runner, **never on one**.
 ///
 /// # Why no precondition is forgiven on CI
@@ -131,18 +162,21 @@ fn on_ci() -> bool {
 /// A narrower rule would leave the same shape behind: a deep checkout with no
 /// `origin/main`, or a `git` that cannot be executed, would skip its way to green
 /// exactly as a shallow one used to. On a runner each of those is a defect in the
-/// environment that is supposed to provide them, so each fails here. The release
-/// path does not run tests — nothing in `release-plz.yml` invokes `cargo test` — so
-/// no packaged-tarball build is caught by that.
+/// environment that is supposed to provide them, so each fails here.
+///
+/// **A packaged crate is the one exemption**, and it is the boundary of what the
+/// rule is about rather than a hole in it: this file ships in the published
+/// `rto-graph`, a tarball cannot carry this repository's history, and a downstream
+/// `cargo test` usually runs with `CI=true`. See [`is_repository_checkout`].
 ///
 /// Off a runner it stays a skip: a contributor's shallow clone is not a defect and
 /// must not read as one.
 fn loud_skip_unless_on_ci(test: &str, why: NoHistory, rows: usize) {
     assert!(
-        !on_ci(),
+        !on_ci() || !is_repository_checkout(),
         "{test} cannot run on CI: {}. These tests are the corpus's only gate and \
-         must not be skipped here — `.github/workflows/ci.yml` checks out with \
-         `fetch-depth: 0` in every job that runs tests, so fix the environment \
+         must not be skipped in a checkout — `.github/workflows/ci.yml` checks out \
+         with `fetch-depth: 0` in every job that runs tests, so fix the environment \
          rather than widening this skip, which is how the corpus-sha gate went \
          unrun from the day it was written until #822. {}",
         why.reason(),
@@ -176,6 +210,37 @@ fn history_or_loud_skip(test: &str, rows: usize) -> bool {
         return false;
     }
     true
+}
+
+/// **The exemption may not switch the rule off.** `is_repository_checkout()` is the
+/// one thing that can make a CI run skip these gates, so a marker that read `false`
+/// in a real checkout would restore #822 in full and say nothing.
+///
+/// Only the dangerous direction is asserted: where git reports a work tree, the
+/// marker must agree that this is a checkout. The converse — a manifest with no git
+/// (an unpacked zip of the repository) — is deliberately not failed here, because
+/// off a runner that is a legitimate way to read the code, and on one the gates
+/// themselves already refuse it. In a packaged crate this test is vacuous by
+/// construction, which is the correct behaviour there and is said rather than
+/// hidden.
+#[test]
+fn the_package_exemption_cannot_claim_a_real_checkout() {
+    let work_tree = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root())
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if work_tree {
+        assert!(
+            is_repository_checkout(),
+            "git reports a work tree at {} but the package marker says this is a \
+             packaged crate. That combination would let every CI run skip the corpus \
+             gates silently — which is exactly #822 — so the marker, not this \
+             assertion, is what needs fixing",
+            repo_root().display()
+        );
+    }
 }
 
 /// The corpus, loaded the way a scorer loads it. A parse failure fails here with

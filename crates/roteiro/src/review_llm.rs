@@ -1467,27 +1467,32 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
     }
 
-    /// Why the history these tests need is not available, and what to do about it.
+    /// Why a corpus test cannot run here, and what to do about it.
     ///
     /// The remedy travels with the reason because one shared remedy was wrong for
-    /// two of the three: the old skip told every reader to run
-    /// `git fetch --unshallow`, which does nothing for a checkout that is not a work
-    /// tree and does not create a missing `origin/main`. Kept in step with the same
-    /// three reasons in `rto-graph`'s `tests/review_corpus.rs`, which gates the same
-    /// corpus and must be changed with this.
+    /// most of them: the old skip told every reader to run `git fetch --unshallow`,
+    /// which does nothing for a checkout that is not a work tree and does not create
+    /// a missing `origin/main`. The three history reasons are mirrored in
+    /// `rto-graph`'s `tests/review_corpus.rs`, which gates the same corpus and must
+    /// be changed with this; the last two are this module's own, because only these
+    /// tests build a graph.
     #[derive(Debug, Clone, Copy)]
-    enum NoHistory {
+    enum CannotRun {
         NotAWorkTree,
         Shallow,
         NoMainRef,
+        NoObjectCache,
+        NoWorktreeGraph,
     }
 
-    impl NoHistory {
+    impl CannotRun {
         fn reason(self) -> &'static str {
             match self {
                 Self::NotAWorkTree => "not a git work tree, or git could not be run here",
                 Self::Shallow => "shallow clone",
                 Self::NoMainRef => "neither origin/main nor main resolves here",
+                Self::NoObjectCache => "the repository's object cache could not be opened",
+                Self::NoWorktreeGraph => "the working-tree graph could not be assembled",
             }
         }
 
@@ -1500,7 +1505,44 @@ mod tests {
                      main:refs/remotes/origin/main`) — unshallowing alone does not create \
                      that ref."
                 }
+                Self::NoObjectCache | Self::NoWorktreeGraph => {
+                    "This is a failure rather than a missing precondition: read the \
+                     error above it, because a checkout that cannot build its own graph \
+                     cannot measure a reviewer either."
+                }
             }
+        }
+    }
+
+    /// Whether this is a repository checkout rather than a packaged crate.
+    ///
+    /// **The reason the CI rule below is not simply "never skip".** `roteiro` is
+    /// published, and these tests ship inside the package — a downstream `cargo test`
+    /// on the unpacked crate runs them against a directory that is not this
+    /// repository, usually with `CI=true` set. Failing there would be our defect
+    /// reaching somebody who did nothing wrong, so a package skips even on a runner;
+    /// a real checkout that is missing history does not.
+    ///
+    /// The marker is the workspace manifest, following
+    /// `crates/roteiro/tests/common/mod.rs`, which reasons this out in full and is
+    /// the canonical copy. It cannot be imported here — that module serves the
+    /// integration tests, and this is a unit-test module inside the binary — so this
+    /// is a deliberate fourth transcription of a twelve-line rule, kept identical on
+    /// purpose. **Only `NotFound` means "packaged"**: collapsing every IO error into
+    /// that would turn "cannot read the repository" into "this is not a repository",
+    /// which is the same vacuity one level up.
+    fn is_repository_checkout(repo: &Path) -> bool {
+        let manifest = repo.join("Cargo.toml");
+        match std::fs::read_to_string(&manifest) {
+            Ok(text) => text.lines().any(|line| line.trim() == "[workspace]"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => panic!(
+                "cannot read {} ({:?}: {e}). Without it a guard cannot tell a packaged \
+                 crate from a repository checkout, and guessing would make it skip in \
+                 silence — which is the failure these guards exist to rule out.",
+                manifest.display(),
+                e.kind(),
+            ),
         }
     }
 
@@ -1518,21 +1560,25 @@ mod tests {
     /// single commit (#822).
     ///
     /// The CI half covers every reason, not only shallowness: a deep checkout with
-    /// no `origin/main`, or a `git` that cannot be executed, would skip its way to
-    /// green by the identical mechanism. Nothing in `release-plz.yml` runs
-    /// `cargo test`, so no packaged-tarball build is caught by that.
-    fn loud_skip_unless_on_ci(test: &str, why: NoHistory) {
+    /// no `origin/main`, a `git` that cannot be executed, or a graph that will not
+    /// assemble would each skip its way to green by the identical mechanism.
+    ///
+    /// **A packaged crate is the one exemption**, and it is not a loophole in the
+    /// rule but the boundary of what the rule is about: a published tarball cannot
+    /// contain this repository's history, so failing there would be our defect
+    /// landing on somebody who did nothing wrong. See [`is_repository_checkout`].
+    fn loud_skip_unless_on_ci(test: &str, why: CannotRun) {
         use std::io::Write;
 
         let on_ci =
             std::env::var_os("CI").is_some() || std::env::var_os("GITHUB_ACTIONS").is_some();
         assert!(
-            !on_ci,
+            !on_ci || !is_repository_checkout(&repo()),
             "review_llm::tests::{test} cannot run on CI: {}. This is half of the \
-             corpus's gate and must not be skipped here — `.github/workflows/ci.yml` \
-             checks out with `fetch-depth: 0` in every job that runs tests, so fix \
-             the environment rather than widening this skip, which is how the corpus \
-             replay went unrun on every CI run until #822. {}",
+             corpus's gate and must not be skipped in a checkout — \
+             `.github/workflows/ci.yml` checks out with `fetch-depth: 0` in every job \
+             that runs tests, so fix the environment rather than widening this skip, \
+             which is how the corpus replay went unrun on every CI run until #822. {}",
             why.reason(),
             why.remedy()
         );
@@ -1570,7 +1616,7 @@ mod tests {
             .output()
             .is_ok_and(|o| o.status.success());
         if !ok {
-            loud_skip_unless_on_ci(test, NoHistory::NotAWorkTree);
+            loud_skip_unless_on_ci(test, CannotRun::NotAWorkTree);
             return false;
         }
         let shallow = std::process::Command::new("git")
@@ -1580,11 +1626,11 @@ mod tests {
             .output()
             .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "true");
         if shallow {
-            loud_skip_unless_on_ci(test, NoHistory::Shallow);
+            loud_skip_unless_on_ci(test, CannotRun::Shallow);
             return false;
         }
         if main_ref(repo).is_err() {
-            loud_skip_unless_on_ci(test, NoHistory::NoMainRef);
+            loud_skip_unless_on_ci(test, CannotRun::NoMainRef);
             return false;
         }
         true
@@ -1620,7 +1666,10 @@ mod tests {
             return;
         }
         let Some((repo, cache)) = graph_inputs() else {
-            eprintln!("SKIP: cannot open the repository's object cache");
+            loud_skip_unless_on_ci(
+                "the_graph_arm_is_built_at_the_reviewed_commit_not_at_head",
+                CannotRun::NoObjectCache,
+            );
             return;
         };
         for sha in &corpus_shas() {
@@ -1694,7 +1743,10 @@ mod tests {
         }
         let Ok(store) = super::worktree_graph(&repo_path, rto_graph::IngestConfig::default())
         else {
-            eprintln!("SKIP: the working-tree graph could not be assembled here");
+            loud_skip_unless_on_ci(
+                "the_live_surface_builds_the_same_graph_as_the_replay",
+                CannotRun::NoWorktreeGraph,
+            );
             return;
         };
         let on_disk = std::fs::read_dir(repo_path.join("docs/adr"))
@@ -1757,7 +1809,10 @@ mod tests {
             return;
         }
         let Some((repo, cache)) = graph_inputs() else {
-            eprintln!("SKIP: cannot open the repository's object cache");
+            loud_skip_unless_on_ci(
+                "the_graph_arm_supplies_provenance_tagged_context_on_the_corpus",
+                CannotRun::NoObjectCache,
+            );
             return;
         };
         let main = main_ref(&repo_path).expect("checked above");
