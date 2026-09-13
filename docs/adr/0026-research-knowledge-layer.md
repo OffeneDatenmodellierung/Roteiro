@@ -11,7 +11,7 @@ architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "0.12"
+version: "0.13"
 last-modified: 2026-09-13
 confluence-url:
 ---
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | For Review |
 | **Architectural Significance** | HIGH |
 | **Domain** | Developer Tooling |
-| **Document version** | 0.12 |
+| **Document version** | 0.13 |
 | **Related** | [[docs/adr/0021-open-knowledge-format-bundle.md]] · [[docs/adr/0022-dynamic-okf-viewer.md]] · [[docs/adr/0025-document-extraction-consent.md]] · [[docs/adr/0019-remote-model-tier.md]] · [[docs/adr/0013-agent-memory-artifact-store.md]] |
 
 ## Reference
@@ -44,8 +44,9 @@ Three decisions, none of them yet built — this is a `For Review` ADR and the
 whole of what follows describes a target state. A `raw/` source root **would be
 added and excluded** from the walk extraction already performs, reached instead
 by an explicit ingest path under the consent rule
-[[docs/adr/0025-document-extraction-consent.md]] set — so a document is graphed
-once, as its summary, rather than twice (v0.3, issue #812). A **`knowledge/`
+[[docs/adr/0025-document-extraction-consent.md]] set — so that a document **would
+be** graphed once, as its summary, rather than twice (v0.3, issue #812). Today it
+is graphed twice, because the scan has no `raw/` exclusion to apply. A **`knowledge/`
 directory would become part of the authored layer**, maintained by a model
 rather than a person, and be projected into the existing OKF bundle beside
 `symbols/` and `decisions/`. And the MCP surface narrows to a **read-only**
@@ -659,7 +660,10 @@ PDFs"**: one concealment channel carries over and one does not, and a PDF
 concealing by the second class reaches at most `quarantine`.
 
 This ADR therefore adopts #813's acceptable outcomes as a condition on the ingest
-step, in **two parts**, because the two gaps above are not the same gap:
+step, in **three parts**, because the gaps are not one gap: two of them are in
+what the walk screens today (foreign prose, and PDF concealment), and the third
+is created by this ADR's own layer split (a model's restatement re-entering as
+prose):
 
 1. **Foreign prose must be screened.** ADR-0025's carve-out exempts prose from
    the screen, and that exemption was measured on *first-party* files. A
@@ -673,8 +677,11 @@ step, in **two parts**, because the two gaps above are not the same gap:
    covered.
 3. **The distilled output must be screened too, and this is the one the layer
    split creates.** Screening `raw/` at ingest does not cover `knowledge/`.
-   `ModelTask::Distil` writes a `knowledge/*.md` page, which is **prose**, and
-   prose is exactly what `extract.rs` exempts from the screen — so a page
+   The distillation step this ADR proposes — the `ModelTask::Distil` variant
+   named in Implementation, which **does not exist**; the enum today runs
+   `Embed`, `Draft`, `Chat`, `Review` and the media tasks — would write a
+   `knowledge/*.md` page. That page is **prose**, and prose is exactly what
+   `extract.rs` exempts from the screen — so a page
    summarising a foreign document re-enters the graph through the unscreened
    branch no matter how carefully its source was checked. Screening a source and
    then admitting a model's unscreened restatement of it is a gate with a bypass
@@ -825,3 +832,4 @@ ingest half of that belongs in a service of its own.
 | 0.10 | 2026-09-13 | **Reconciles two sections of this ADR that contradicted each other, and closes a gap in its own requirement.** **(a)** v0.7–v0.9 argued that nothing can name a path outside the tree; v0.8 then recorded that the derived extractor follows tracked symlinks. Both cannot stand, and the resolution is an asymmetry worth having: on the **committed** path a tracked symlink resolves to the **git blob**, whose content is the target *path string*, so out-of-tree bytes are unreachable; on the **worktree** overlay `std::fs::read` follows the link and they are reachable. Measured both ways. **This is why the bundle argument survives**: `render okf` and `export` deliberately read the committed source — *"a shareable snapshot, whose whole value is being reproducible from a commit"* — so out-of-tree bytes cannot enter a **published bundle**, which is the property #812's blocker rests on. What they can enter is a local worktree preview and its `search` results. Smaller and different from what v0.4–v0.8 claimed, and now stated rather than glossed. **(b) The screening requirement only covered PDFs**, while the text two paragraphs above establishes that third-party markdown in `raw/` has *never* been screened and that ADR-0025's first-party prose carve-out does not transfer to it. Split into two parts: **foreign prose must be screened** (a widening of today's rule, not a re-wiring), and **PDF concealment must declare its coverage** — naming the presentation-shaped and PDF-native classes as undetected while the invisible-codepoint class is covered. **(c)** The v0.2 row still called `log.md` *"already implemented"*; corrected inline to the machinery, consistent with the Q3 heading fixed at v0.5. |
 | 0.11 | 2026-09-13 | **Closes a laundering path the layer split creates, which every previous screening pass missed.** Screening `raw/` at ingest does not cover `knowledge/`. `ModelTask::Distil` writes a `knowledge/*.md` page; that page is **prose**, and prose is precisely what [[crates/rto-graph/src/extract.rs]] exempts from the screen — so a summary of a foreign document re-enters the graph through the unscreened branch however carefully its source was checked. Screening a source and then admitting a model's unscreened restatement of it is a gate with a bypass beside it. Added as a **third part** of the ingest screening requirement, with the implementation choice left open (screen `knowledge/` on the authored path, or screen the distiller's output before it is written) and the obligation not. This is distinct from part (1): ingest screening covers *bytes somebody else wrote*, and this covers *bytes a model wrote from them* — arriving in the one format ADR-0025 measured a carve-out for, where that measurement was over this repository's own prose rather than over machine restatements of third-party documents. Two populations, one exemption, and only one of them ever in evidence. **Also:** *"one working tree"* omitted `sync_tree`'s arbitrary revision, which is listed as an entry point two sentences earlier; now *"one tree — a commit's tree (`HEAD`, or any revision `sync_tree` is given), the index, or a workdir-rooted dirwalk"*. |
 | 0.12 | 2026-09-13 | **Qualifies a claim this ADR reasoned rather than measured, and separates two hashes it had conflated.** **(a)** v0.6–v0.11 stated flatly that zero-width and bidi codepoints *"survive PDF text extraction"*, making `block` reachable for PDF input. The screen half is established — nothing in `screen_text`'s codepoint handling is HTML-specific. The **extraction** half is not: the existing guard exercises `screen_text` directly, and no fixture drives a real PDF through `pdf_content` into `decoded_content`. Whether U+200B survives plausibly depends on the document's font encoding — a `ToUnicode` CMap can carry it where a `WinAnsiEncoding` text stream cannot. The paragraph now names the test that would settle it (a PDF fixture with a zero-width-obfuscated directive, asserting `Verdict::Block` through the real path) and marks the claim as pending it. Recorded because it is the **same** error this ADR corrected at v0.6 — asserting an unverified antecedent about PDFs — committed again while correcting it, in the opposite direction. The negative remains established: the presentation-shaped and PDF-native classes are definitely undetected. **(b)** The manifest requirement said to reuse the `(path, blob id, bytes)` basis. That is the *derivation basis of a derived fact*, folding in a path and an extractor version; a manifest wants only *these bytes, this version of this work*. The right primitive is [[crates/rto-graph/src/git.rs#Repo]] `blob_oid`, which computes a git blob id **from bytes alone** through `gix::objs::compute_hash` — needing no object database, and therefore usable on bytes that are not in the repository at all, which is exactly the out-of-tree case. |
+| 0.13 | 2026-09-13 | **Three residues from this PR's own edits; no new evidence, no decision change.** **(a)** v0.11 introduced the distilled-output screening requirement using `ModelTask::Distil` as though it were an existing API. It is not — [[crates/rto-graph/src/model_choice.rs#ModelTask]] runs `Embed`, `Draft`, `Chat`, `Review` and the media tasks, and `Distil` is the variant Implementation step 4 *proposes*. Reworded so the requirement is clearly about a step this ADR is asking for, which is also why the requirement matters: it has to be designed in, not retrofitted. **(b)** The same v0.11 edit added a third numbered obligation under a lead saying *"in **two parts**"*, leaving the layer-split requirement looking like an aside outside the accepted condition. Now three, with the split named — two gaps in what the walk screens today (foreign prose, PDF concealment) and one created by this ADR's own layer split. **(c)** One present-tense residue survived v0.7's Summary rewrite: *"so a document is graphed once"* stated the outcome of an unbuilt exclusion as current, in a paragraph whose first sentence says the opposite. It now says a document *would be* graphed once, and that today it is graphed twice because the scan has no `raw/` exclusion to apply. |
