@@ -552,8 +552,13 @@ fn message_text(content: Option<&Value>) -> Result<String, String> {
             for part in parts {
                 let kind = part.get("type").and_then(Value::as_str).unwrap_or("");
                 if !matches!(kind, "input_text" | "output_text") {
+                    // "content part", not "message content part": this helper
+                    // also reads a `function_call_output`'s `output`, and naming
+                    // the wrong field sends a caller looking in the wrong place
+                    // — which `docs/REVIEW_CHECKLIST.md` counts against a
+                    // refusal, not merely against its prose.
                     return Err(format!(
-                        "a message content part of type `{kind}` is not supported on this \
+                        "a content part of type `{kind}` is not supported on this \
                          endpoint: only `input_text` and `output_text` parts are read, so \
                          anything else would be silently absent from what the model saw. \
                          Send the part's information as text."

@@ -3491,6 +3491,59 @@ mod tests {
         assert_eq!(item["name"], "get_weather");
     }
 
+    /// **The declaration that stands in for a refusal on `store`.**
+    ///
+    /// A request that omits `store` is not refused (see `docs/SERVING.md` for
+    /// why, and for why the default OpenAI applies could not be verified
+    /// offline), so the response itself has to say what happened — in the field
+    /// a client reads to find out, on *every* lifecycle event rather than only
+    /// the terminal one. A client that reads `response.created` and stops must
+    /// learn the same thing as one that waits.
+    #[tokio::test]
+    async fn every_lifecycle_event_says_nothing_was_stored() {
+        // `store` omitted entirely — the case the declaration exists for.
+        let resp = test_app()
+            .oneshot(responses_body(&serde_json::json!({
+                "model": "echo", "stream": true, "input": "hi there",
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let sse = sse_text(resp).await;
+        let carriers: Vec<(String, serde_json::Value)> = responses_events(&sse)
+            .into_iter()
+            .filter(|(_, v)| v.get("response").is_some())
+            .collect();
+        assert_eq!(
+            carriers.len(),
+            2,
+            "created and completed both carry a `response` object: {sse}"
+        );
+        for (kind, event) in &carriers {
+            assert_eq!(
+                event["response"]["store"], false,
+                "`{kind}` must say nothing was stored: {sse}"
+            );
+        }
+
+        // And on the truncated path, whose terminal event is a different one.
+        let engine = ReasoningEngine::in_pieces("cut off here", 3, FinishReason::Length);
+        let resp = app(engine)
+            .oneshot(responses_body(&serde_json::json!({
+                "model": "echo", "stream": true, "input": "go on",
+                "max_output_tokens": 2,
+            })))
+            .await
+            .unwrap();
+        let sse = sse_text(resp).await;
+        let incomplete = responses_events(&sse)
+            .into_iter()
+            .find(|(t, _)| t == "response.incomplete")
+            .expect("a `response.incomplete` event")
+            .1;
+        assert_eq!(incomplete["response"]["store"], false, "{sse}");
+    }
+
     #[tokio::test]
     async fn responses_refuses_a_non_streaming_request_by_name() {
         let resp = test_app()

@@ -300,15 +300,44 @@ rather than ignored.
 | `stream: false`, or omitted | **400** | `stream` must be `true`: this endpoint serves the Responses API as a typed SSE event stream only, so a non-streaming request would have no body shape to return. Send `stream: true` and read `response.completed`, whose `response.output` carries exactly what a non-streaming body would have. |
 | `input` as a bare string, or as items of type `message`, `function_call`, `function_call_output` | **supported** | mapped onto the chat wire's turns — see below |
 | any other `input` item type — `reasoning`, `web_search_call`, `item_reference`, … | **400** | the item is named in the message. Dropping it silently would leave the model answering from a conversation it was never shown, and a replayed `reasoning` item is the likeliest case |
-| a message content part other than `input_text` / `output_text` | **400** | an image or a file you believed was read would otherwise produce a confident answer about content the model never saw |
+| a content part other than `input_text` / `output_text`, in a message **or** in a `function_call_output` | **400** | an image or a file you believed was read would otherwise produce a confident answer about content the model never saw |
 | a message `role` other than `system` / `developer` / `user` / `assistant` | **400** | `developer` is mapped to `system`; an unrecognised role would be rendered *literally* into the prompt by the chat template, arriving as text rather than as a turn |
 | `instructions` | **supported** | mapped to a leading `system` turn |
 | a `namespace` tool | **flattened** | a `namespace` groups `function` tools rather than naming one OpenAI executes — `codex-cli` sends `multi_agent_v1` holding five — so its members are advertised on their own names and schemas, and the namespace itself is not a callable tool. Read **one level**: a namespace inside a namespace is a `400`, because nothing has been seen to send one and walking an unobserved shape is a guess |
 | a tool whose `type` is neither `function`, `namespace`, nor one of those | **400** | an unrecognised type is far likelier to be a misspelling (`web_serach`) than a hosted tool this list has not met, and dropping it would remove a tool you meant to send and answer anyway. The list is an allowlist read on 2026-09-13; a genuinely new hosted tool is refused by name until it is added, which is the failure worth having |
 | a `tools` array in which **every** entry is hosted | **still general mode** | the graph tools stay suppressed. Sending `tools` is what chooses the mode, not what survives translation — a client that asked for its own tools does not get Roteiro's instead, and does not pay the ~3,100 tokens of graph schemas that behaviour exists to spare it. It gets no tools at all, which is the honest answer when none of the ones it sent can be served |
+| storage of any kind | **nothing is stored, and every response says so** | `store: true` is a `400`. A request that omits `store` is **not** refused — see the note below for why, and for the one thing that turns on it |
 | `strict` on a function tool | **accepted, not enforced** | schema-constrained arguments are grammar-constrained sampling, which lands with the grammar work — the same reason `tool_choice` is not enforced. The chat wire ignores `function.strict` too; it is declared here rather than half-implemented, so a `strict: true` tool may still come back with arguments its schema would have rejected. Validate on your side before executing |
 | a hosted tool — `web_search`, `file_search`, `code_interpreter`, `image_generation`, `local_shell`, `mcp`, `computer_use_preview` | **dropped** | Roteiro executes no hosted tool and never advertises one to the model, so the model cannot call it and no answer can be falsely attributed to it. **This diverges from the chat wire**, where a tool whose `type` is not `function` is a `400`: there, `tools` is function-only by construction and a `retrieval` entry is a mistake; here a hosted tool is a normal part of every request from a real client, and refusing it would fail every turn over a tool that was never going to be used |
 | `/v1/{project}/responses`, `/v1/workspaces/{ws}/responses` | **404** | scope parity is not built, and there is no substitute: `/v1/{project}/chat/completions` speaks the other wire — it takes `messages`, not `input` — so a Responses-native client cannot reach a scoped graph at all today. Until it lands, a scoped answer needs a server started in that project. The seam these routes will reuse is the same `ChatScope` the chat routes already pass, not a second confinement mechanism (ADR-0008) |
+
+**Nothing is stored, and the response says so rather than leaving you to infer
+it.** Every event this endpoint emits carries `"store": false` inside its
+`response` object — `response.created`, `response.completed` and
+`response.incomplete` alike — whatever you sent or omitted. That is the
+declaration, and it is in the field a client would read to find out.
+
+`store: true` is refused, because it asks for something that will not happen.
+A request that **omits** `store` is not refused, and that is a deliberate
+decision rather than an oversight:
+
+* An absent key is no decision, for every parameter on both wires. Refusing
+  everyone who left a default unstated would be the refusal-fired-at-nobody this
+  page's chat half is at pains to avoid.
+* **The only thing storage buys is retrieval, and every retrieval path here is
+  already a `400` that names the cause.** `previous_response_id` and
+  `conversation` both refuse, saying that nothing is stored and that the whole
+  conversation must be sent in `input`. So there is no sequence in which a
+  client believes a turn was kept and later gets a wrong answer instead of a
+  refusal — the worst case is a refusal one turn later than it could have come,
+  with the same sentence.
+* The default OpenAI applies when `store` is absent could not be verified from
+  anything available offline: `openai` 6.40.0's own type documentation says only
+  *"Whether to store the generated model response for later retrieval via API"*
+  and states no default, while documenting one three fields earlier for
+  `service_tier` (*"When not set, the default behavior is 'auto'"*). Building a
+  refusal on an unverified default would be worse than declaring the behaviour,
+  which is true whatever that default turns out to be.
 
 ### A tool round trip, and why it is byte-identical to the chat one
 
