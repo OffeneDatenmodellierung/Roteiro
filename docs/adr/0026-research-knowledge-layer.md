@@ -278,7 +278,7 @@ model produced it; the same table rejects a `Provenance` variant for it outright
 on a second ground — *"memory has no source blob; it would break the
 pure-function-of-source promise"*.
 
-**Step 2 must reconcile `Authored`'s documentation across three sites, and it is
+**Step 2 must reconcile `Authored`'s documentation across four prose sites, and it is
 already drifted before this ADR touches it.** The *"human or agent"* half is what
 carries this resolution; the **enumeration** attached to it is what must grow —
 and there is more than one enumeration, none of which currently matches the code:
@@ -291,13 +291,16 @@ and there is more than one enumeration, none of which currently matches the code
 | [[docs/adr/0021-open-knowledge-format-bundle.md]] provenance→tier table | "ADR and blueprint prose" — **a governing ADR**, so leaving it stale contradicts the decision, not just a comment |
 | **the code** | those, plus `site_page` **and `site_section`** ([[crates/rto-spec/src/site.rs]]), and imported `lat` docs ([[crates/rto-spec/src/lat.rs]]) |
 
-Four prose lists, no two of them agreeing, and a fifth, wider, actual usage.
+Four prose lists whose scopes overlap but do not agree — two of them identical
+(the `rto-render` module table and ADR-0021 both say "ADR and blueprint prose")
+and narrower than the other two — over a fifth, wider, actual usage.
 So `knowledge/` is not being added to a tidy set of three — it is the occasion to
 fix an enumeration that had already fallen behind four times. **That is a
 documentation debt this ADR inherits rather than creates**, and naming it here is
 the point: an implementation that adds a `layer.rs` arm and updates only
-`provenance.rs` leaves two other lists contradicting it, which is how the drift
-accumulated in the first place. None of this is a variant change, so the
+`provenance.rs` leaves **three** other lists contradicting it — `model.rs`, the
+`rto-render` module table and ADR-0021 — which is how the drift accumulated in
+the first place. None of this is a variant change, so the
 vocabulary cost stands as stated — but it is **five edits, not one**, and one of
 them is an amendment to ADR-0021 rather than a doc comment.
 
@@ -588,7 +591,10 @@ the ignore rule is inert over a tracked path. That is not a hypothetical
 sequence: it is precisely the journey this decision permits (a user commits their
 corpus) followed by the regret it anticipates (they think better of it and add an
 ignore rule). At that point the duplicate nodes are present, the screen is
-behaving differently from the ingest path, and nobody changed a setting — the
+behaving differently from the ingest path, and **no Roteiro setting changed** —
+adding a `.gitignore` entry is of course a change, but it is a git one, which is
+precisely the point: the ingest behaviour moved without anything in the ingest
+configuration moving. The
 user believes they opted out and the graph disagrees. So the exclusion must be a **rule in the ingest configuration**, holding
 for a committed `raw/` exactly as for an ignored one, and not a side effect of
 where the bytes happen to live.
@@ -983,7 +989,9 @@ rather than imply otherwise.** `authored_paths` filters to
 `Provenance::Authored` before the history walk ([[crates/roteiro/src/main.rs]]),
 deliberately — *"a derived symbol is confirmed by the tool, and looking up who
 last touched its file would answer a question nobody asked"*. Every other concept
-falls back to the render's `HEAD` commit time, so a log fed naively from all
+**whose path is not itself an authored one** falls back to the render's `HEAD`
+commit time — a derived symbol inside an ADR does inherit that document's date,
+per the by-path lookup noted above — so a log fed naively from all
 concepts would put nine thousand derived symbols in one undifferentiated group
 dated at `HEAD`, which says nothing. The determinism is unaffected — the fallback
 is a *commit* time, not `SystemTime::now()` — but the content would be noise. So
@@ -1000,8 +1008,10 @@ deterministic render. What is refused is an *unrecorded* ingest moment read from
 the clock — not the idea of dating an ingest. Two renders of one commit would disagree, which is the
 `SystemTime::now()` defect ADR-0021 already refused. If an ingest record is
 wanted, it is a committed artifact in **`knowledge/`** — not `raw/`, which this
-ADR excludes from the scan, so a file there becomes no concept at all and
-`authored_paths` would never see it, leaving `log.md` unable to reflect the very
+ADR excludes from **both** scans, so once that exclusion is in place a file there
+becomes no concept at all and `authored_paths` would never see it (today, before
+it is built, a committed `raw/*.md` declaring `type: adr` would be read as an ADR
+— which is the hazard the two-scan section above exists to close), leaving `log.md` unable to reflect the very
 record that was meant to feed it. Placed in `knowledge/`, it is an authored file
 like any other and `log.md` reflects its commits. ADR-0025's per-file consent
 record is the natural **shape** for it — it already records a per-file decision —
