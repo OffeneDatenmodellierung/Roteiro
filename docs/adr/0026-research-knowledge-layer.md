@@ -272,15 +272,25 @@ model produced it; the same table rejects a `Provenance` variant for it outright
 on a second ground — *"memory has no source blob; it would break the
 pure-function-of-source promise"*.
 
-**Step 2 must widen `Authored`'s own definition, and this resolution depends on
-that.** The variant documents itself as *"Authored by a human or agent in an ADR,
-blueprint, or annotation"* ([[crates/rto-graph/src/provenance.rs#Provenance]]) —
-a list that does not include `knowledge/`. The *"human or agent"* half is what
-carries this resolution; the enumeration is what must grow. That is a doc comment
-and a `layer.rs` arm, not a variant, so the cost stands as stated — but it is a
-change the resolution requires rather than one it can assume, and an
-implementation that adds the arm without the doc leaves the vocabulary
-contradicting the layer.
+**Step 2 must reconcile `Authored`'s documentation across three sites, and it is
+already drifted before this ADR touches it.** The *"human or agent"* half is what
+carries this resolution; the **enumeration** attached to it is what must grow —
+and there is more than one enumeration, none of which currently matches the code:
+
+| site | what it says `Authored` covers |
+|---|---|
+| [[crates/rto-graph/src/provenance.rs#Provenance]] | "an ADR, blueprint, or annotation" |
+| [[crates/rto-graph/src/model.rs#Node]] `provenance` | "ADR/blueprint/lat sections" |
+| the code | those, **plus `site_page`** ([[crates/rto-spec/src/site.rs]]) **and imported `lat` docs** ([[crates/rto-spec/src/lat.rs]]) |
+
+Two prose lists that disagree with each other and a third, wider, actual usage.
+So `knowledge/` is not being added to a tidy set of three — it is the occasion to
+fix an enumeration that had already fallen behind twice. **That is a
+documentation debt this ADR inherits rather than creates**, and naming it here is
+the point: an implementation that adds a `layer.rs` arm and updates only
+`provenance.rs` leaves `model.rs` contradicting it, which is how the list drifted
+in the first place. None of this is a variant change, so the vocabulary cost
+stands as stated — but it is three edits, not one.
 
 A `knowledge/` page **as Option C defines it**
 is committed, diffed and reviewed before merge, and has a source blob. It would
@@ -381,8 +391,25 @@ and the fallback if that proves unworkable is **not** a fourth class but ADR-001
 answer: a separate store, outside `nodes`/`edges`, taking no boost.
 
 **Unblocks:** step 2 of Implementation — `knowledge/` can be wired as
-authored-layer input with **no OKF format, wire or `Provenance` change**, needing
-only a `layer.rs` arm and the widened `Authored` doc comment above. It takes a
+authored-layer input with **no OKF format, wire or `Provenance` change**. That is
+the claim this resolution makes, and it is the only one it makes: the *rendering*
+cost is larger than a `layer.rs` arm, and this ADR states it rather than letting
+a reader infer a one-line change. Step 2 needs, at minimum:
+
+- a **`layer.rs` arm**, so the page is recognised as authored input at all;
+- the **`Authored` enumeration reconciled** across the three sites above;
+- a **`section_for` arm** — [[crates/rto-render/src/okf.rs#section_for]] routes
+  every unrecognised kind to `symbols` (`_ => "symbols"`), so without one a
+  research note lands in the symbol directory rather than the `knowledge/`
+  section this ADR requires; and
+- **`knowledge` added to the body allowlist** — the bundle attaches prose only
+  for `"file" | "adr" | "blueprint" | "doc" | "site_page"`
+  ([[crates/roteiro/src/main.rs]]), so without it a `knowledge/` concept renders
+  with **no body at all**, which is the one thing a research note consists of.
+
+The last two are the ones a reader would otherwise miss, because both fail
+*quietly*: an unrouted kind is misfiled rather than rejected, and a page outside
+the allowlist is empty rather than absent. It takes a
 dependency on #799 for the actor split, which is not a blocker to building the
 layer — though, as recorded there, #799 itself needs a breaking `rto-render`
 change to carry two actors, shipping as a minor under the `rto-*` carve-out.
@@ -465,7 +492,7 @@ a blanket "unreachable everywhere" would claim, and is stated here rather than
 glossed.
 
 **`.gitignore` does not un-graph a file git already tracks — it is inert over
-tracked paths.** v0.2's *"an ignored file is in neither"* quoted a code comment
+tracked paths.** The *"an ignored file is in neither"* reading quoted a code comment
 scoped to the working-tree overlay and generalised it to the whole system. The
 comment is right about what it describes; the generalisation is not. Measured on
 a scratch repository:
@@ -476,10 +503,10 @@ a scratch repository:
 | `raw/paper.md` committed, `.gitignore` added afterwards | **reports it as *not* ignored** | **yes** |
 | `raw/paper.md` ignored, then `git add -f` (staged, uncommitted) | ignored | **yes** |
 
-The middle row is the one v0.2 missed, and it needs no `git add -f`: adding an
+The middle row is the one that first reading missed, and it needs no `git add -f`: adding an
 ignore rule over a tracked path changes nothing at all, and git does not even
 consider the file ignored. So the retained half of the finding is narrower than
-v0.2 claimed — **an ignored file that git is not already tracking** yields no
+first claimed — **an ignored file that git is not already tracking** yields no
 nodes — and the third row confirms the code comment exactly as written.
 
 That finding forced "committed" **only while `raw/` was expected to be scanned**.
@@ -769,8 +796,8 @@ acceptable, and this repository has paid for that shape twice already.
 #### Out-of-line storage: still deferred, and #812 sharpens the same question
 
 "Shared storage" is the out-of-line option, and it is now **decided in principle
-and blocked in practice** — which is a change of status from v0.2's plain
-deferral, not a change of finding. #812 names the same blocker this ADR reached
+and blocked in practice** — a change of status from a plain deferral, not a
+change of finding. #812 names the same blocker this ADR reached
 independently: *"extraction works only for files already inside a repository,
 with no path to ingest a source from outside the tree. If that holds, an
 out-of-tree `raw/` is blocked until that limitation is lifted, and the ADR must
@@ -840,7 +867,17 @@ purpose.** ADR-0021 resolves a concept's `verified.at` to the commit that last
 changed that document's own path, *"rather than the render's"* — via
 [[crates/rto-graph/src/git.rs#Repo]] `last_authors` — precisely so the bundle
 carries no `SystemTime::now()`. That `(date, author)` pair, grouped by date and
-rendered newest-first, is `log.md`. It costs no new state, no new command and no
+rendered newest-first, is `log.md`. **The order must be total, not just
+newest-first.** [[crates/rto-render/src/okf.rs#render_log]] emits days and
+entries in the order its caller supplies, so "grouped by date" alone leaves ties
+free and two conforming implementations would emit different bundles — which the
+determinism this whole ADR rests on does not permit, and which `okf diff` would
+report as a change that no commit explains. The tiebreak is therefore specified
+here rather than left to the implementer: **days descending by date; within a
+day, entries ascending by concept key.** The key is unique by construction, so
+that is a total order, and it is the same principle `assemble` already applies
+when it settles filename collisions where the whole set is visible. It costs no
+new state, no new command and no
 new file to maintain; it is byte-reproducible for the same reason the trust tiers
 are; and it makes the log say something true — *these concepts changed on this
 date* — rather than something a process promised to append to.
