@@ -894,6 +894,17 @@ fn observe_mode(what: &str, cmd: &'static str, cwd: &Path, home: &IsolatedHome) 
              merely the absence of a server."
         );
         stderr.push_str(&stderr_of(&server));
+        // The drain can surface a startup line the scan above never saw — one
+        // written just before a non-zero exit. Unchecked, that start-then-exit
+        // would be classified `Refuses` and satisfy a refusal cell, which is the
+        // same hole `run_refusing` had one commit earlier; it was fixed there and
+        // not carried across to here.
+        assert!(
+            !stderr.contains(" listening on http://"),
+            "{what}: `roteiro {cmd}` STARTED A SERVER and then exited \
+             ({status:?}). That is not a refusal, and classifying it as one would \
+             let this cell pass on a server that came up.\n{stderr}"
+        );
         return (Mode::Refuses, stderr);
     };
 
