@@ -52,7 +52,9 @@ by an explicit ingest path under the consent rule
 be** graphed once, as its summary, rather than twice (issue #812). The
 duplication is a property of the design *without* the exclusion, not of the
 repository today: there are no `knowledge/` summaries yet, so a `raw/` document
-is currently graphed once, as the raw file. The exclusion is what keeps it at one
+that the scan can see at all is currently graphed once, as the raw file — and one
+the scan cannot see, a never-tracked file under an ignored `raw/`, has **no node
+at all**. The exclusion is what keeps it at one
 after the summaries exist. A **`knowledge/`
 directory would become part of the authored layer**, maintained by a model
 rather than a person, and be projected into the existing OKF bundle beside
@@ -199,7 +201,8 @@ deliberately.
    providing. **A committed manifest ships with it, in every storage mode** —
    identity, content hash (`blob_oid` over the bytes), origin, access date,
    licence — since without it a summary cannot tell an absent source from a
-   changed one. See Resolved question 2.
+   changed one. **The exclusion must be applied to both readers** — see below.
+   See Resolved question 2.
 2. `knowledge/` recognised as authored-layer input, with `render okf` projecting
    it into the bundle as its own kind.
 3. The MCP surface narrowed — see below.
@@ -442,6 +445,43 @@ the asymmetry is what settles it: opting *in* is a decision a user can make abou
 their own corpus, while opting *out* afterwards is not, because git history keeps
 the bytes.
 
+#### The exclusion covers **two** scans, not one
+
+**This is the part of the decision most easily under-built, and it is recorded
+here because getting it wrong is silent** (issue #817). "Excluded from the
+standard scan" reads as one rule against one walk. There are **two independent
+readers of committed blobs**, and `raw/` must be excluded from both:
+
+1. **Derived extraction** — the walk that produces `file:` nodes and
+   `meta.content`. This is the one the duplicate-node argument above is about.
+2. **The authored layer** — [[crates/rto-spec/src/layer.rs#authored_blobs]] walks
+   *every* path independently (`walk_blobs` / `index_files`, plus
+   `added_since_head` on the worktree), and `authored_docs_from` then classifies
+   what it finds **by content, not by location**.
+
+The second reader has **three doors**, and a committed markdown file under `raw/`
+— which #812 explicitly permits — can walk through any of them:
+
+| door | rule | consequence for a `raw/` file |
+|---|---|---|
+| `type: adr` | `crate::adr::declares_adr(&text)` matches **anywhere**, deliberately: *"a document that declares `type: adr` has said otherwise, wherever it sits and whatever it is called"* | a third party's paper is parsed as **one of our ADRs** |
+| `site-page:` | `crate::site::is_site_page(&text)` | it is published to the docs site |
+| **everything else** | the `else` arm scans **every remaining file** for `@rto:` annotations | it contributes authored edges into our code |
+
+The first is the sharpest: that path rule is a good one — it is what lets a
+repository keep its decisions somewhere other than `docs/adr/` — and it is
+exactly what makes an ingested third-party document dangerous, because the
+document decides its own class. This is the same hazard the three symlink
+refusals exist to prevent — *out-of-repo content behind a repo-relative-looking
+claim* — arriving through content classification rather than through a link.
+
+**So the exclusion is a rule in the ingest configuration, applied at both
+readers, and not a property of where the bytes sit.** That is the same conclusion
+the `.gitignore` finding reached from the other direction, and the two together
+are why it cannot be left implicit: a `raw/` that is merely untracked is excluded
+by accident at both readers, and the moment a user commits their corpus — the
+choice this decision grants them — both accidents end at once.
+
 The reason the choice is *free* is the exclusion. Once `knowledge/` exists, a
 document reached through the standard scan **would be** graphed **twice** — once
 as the `knowledge/` summary, which already links to its source, and once as the
@@ -481,23 +521,22 @@ target is outside, so enumeration is not the whole story:
 
 | source | a tracked symlink resolves to | out-of-tree bytes? |
 |---|---|---|
-| `Committed` (`sync`) | the **git blob**, whose content is the target *path string* | **no** |
-| `sync_tree` (any revision) | the same, at that revision | **no** |
-| `Index` (`sync_index`) | **nothing — the entry is skipped**, since `index_files` admits only `Mode::FILE \| FILE_EXECUTABLE` | **no** |
-| `Worktree` overlay | `std::fs::read` **follows** the link | **yes** |
+| scenario | source | what happens | out-of-tree bytes? |
+|---|---|---|---|
+| a symlink **committed as a symlink** | `Committed`, `sync_tree`, `Index` | **the entry is skipped** — every enumerator filters to regular-file modes (`walk_tree_blobs`: `entry.mode.is_blob()`; `index_files`: `Mode::FILE \| FILE_EXECUTABLE`) | **no** — and no node at all |
+| a **tracked regular file replaced on disk** by a symlink | `Worktree` overlay | the tree still holds the regular blob; `std::fs::read` **follows** the link | **yes** |
 
-All four sources are listed deliberately: an exhaustive-looking matrix that quietly
-omitted one would be worse than an admittedly partial one, and `Index` is the
-source whose omission already forced one correction to this ADR. Note the `Index`
-row reaches the same answer by a **different mechanism** from the tree rows — it
-never sees the entry at all, rather than seeing a blob that holds a path string
-([[crates/rto-graph/src/git.rs#Repo]] `index_files`). Same outcome, and worth
-distinguishing, because "resolves to the blob" would be a plausible-sounding
-guess that happens to be wrong.
+**Two scenarios, not four sources, and conflating them is what this table got
+wrong twice.** A committed symlink is invisible to every tree- and index-based
+enumerator for one shared reason — mode filtering — so there is no "resolves to a
+blob holding a path string" anywhere; that was a plausible model of git rather
+than a reading of the code. The worktree row is a *different situation*: the
+committed object is an ordinary blob, and only the on-disk file has been swapped.
 
-Measured both ways. Committing a symlink to a file outside the repository and
-running a committed sync stores no node for its content at all; doing the same
-through the worktree overlay stores the target's bytes under the tracked key (see
+Measured both ways. Committing a symlink to a file outside the repository
+(`120000 blob …`) and running a sync produces **no node for that path at all** —
+the blob count is one lower than the file count; replacing a tracked regular file
+on disk stores the target's bytes under the tracked key (see
 the symlink section below, where that is recorded as a live defect).
 
 **This is why the bundle argument survives.** `render okf` and `export`
@@ -906,9 +945,16 @@ members is two concepts"* ([[crates/rto-render/src/okf.rs]]) and `file:README.md
 can legitimately appear twice. Qualified by member the order is total, and it is the same principle `assemble` already applies
 when it settles filename collisions where the whole set is visible.
 
+**One precondition on granularity.** `last_authors` resolves one record per
+repository-relative **path**, not per concept, so every `adr_section` from one
+file carries that file's date and "which section changed" is not recoverable from
+it. Entries are therefore per **document**, not per section — which is what a
+reader of a change log wants anyway, and is stated so the implementer does not
+discover it after writing the section-level version.
+
 **The entry payload needs specifying for the same reason**, since `render_log`
 takes preformatted strings and would otherwise accept any of them: an entry is
-`**Update**: <title> (<member-qualified key>)`, one per changed concept, with the title escaped as
+`**Update**: <title> (<member-qualified key>)`, one per changed document, with the title escaped as
 frontmatter scalars already are — a raw newline in a heading must not be able to
 start a new list item. Ordering alone does not make a render reproducible if two
 implementations can disagree about what they are ordering. It costs no
@@ -946,8 +992,12 @@ which is both the only per-concept signal available and the only one a reader of
 a research bundle wants.
 
 **What is declined, explicitly.** An ingest log that records "this PDF was read
-at this time" is *not* derivable from a commit, because ingest time is not a
-property of the tree. Two renders of one commit would disagree, which is the
+at this time" **from the clock at render time** is not derivable from a commit,
+because that moment is not a property of the tree. Note the narrow scope: Q2
+already requires the manifest to carry a committed **access date**, and once that
+timestamp is in the tree it is tree data like any other and can feed a
+deterministic render. What is refused is an *unrecorded* ingest moment read from
+the clock — not the idea of dating an ingest. Two renders of one commit would disagree, which is the
 `SystemTime::now()` defect ADR-0021 already refused. If an ingest record is
 wanted, it is a committed artifact in **`knowledge/`** — not `raw/`, which this
 ADR excludes from the scan, so a file there becomes no concept at all and
