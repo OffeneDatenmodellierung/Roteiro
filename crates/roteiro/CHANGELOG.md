@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.14.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.14.0...roteiro-v5.14.1) - 2026-09-13
+
+### Fixed
+
+- *(review)* the remote is the only signal a vendored copy cannot present
+- *(review)* the new guard would itself have failed a packaged crate
+- *(review)* two signals each side, so a vendored crate is nobody's checkout
+
+### Other
+
+- Merge pull request #832 from OffeneDatenmodellierung/polly/serve-scope-flag
+- *(review)* hold the manifest rule against manifests that are not ours
+
 ## [5.14.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.13.0...roteiro-v5.14.0) - 2026-09-13
 
 ### Fixed
