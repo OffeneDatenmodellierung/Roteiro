@@ -6541,6 +6541,134 @@ fn mount_okf(
     )
 }
 
+/// **Characterisation tests for the empty mount list**, the half of `mount_okf`
+/// that `crates/roteiro/tests/serve_mode_selection_cli.rs` can observe only from
+/// the outside.
+///
+/// The end-to-end file pins that a server with no bundle answers 404 at `/okf`.
+/// What it cannot show is *why*: that `okf_viewer`'s chooser has a zero-bundle
+/// page which renders perfectly well, and that no production caller can hand it
+/// an empty list. Both halves are here, because "the page is unreachable" and
+/// "the page does not exist" are different facts and only one of them is true.
+#[cfg(all(test, feature = "okf-viewer"))]
+mod okf_mount_tests {
+    use super::{OKF_BASE, mount_okf, okf_mounts, okf_viewer};
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt as _;
+    use tower::ServiceExt as _; // for `oneshot`
+
+    /// `(status, body)` for one GET against `router`.
+    async fn get(router: axum::Router, uri: &str) -> (StatusCode, String) {
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let status = response.status();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// A workspace set hosting nothing, which is what `run_explorer` passes on the
+    /// no-repository path.
+    fn empty_set() -> rto_graph::WorkspaceSet {
+        rto_graph::WorkspaceSet::from_workspaces(std::iter::empty())
+    }
+
+    /// With no bundle to mount, `mount_okf` hands back the router it was given —
+    /// **unchanged**, not merged with an empty viewer. "A `/okf` that 404s every
+    /// request is a worse answer than an absent one."
+    ///
+    /// This is why the chooser's zero-bundle page is dead code from this caller:
+    /// the branch that would render it returns before `mounts_router` is reached.
+    #[tokio::test]
+    async fn an_empty_mount_list_leaves_the_router_untouched() {
+        let set = empty_set();
+        // Asserted, not assumed. `okf_mounts` also reads the **current
+        // directory**, which under `cargo test` is this crate's manifest
+        // directory — so if a bundle ever lands at `crates/roteiro/okf/index.md`
+        // this test would start passing for a reason that has nothing to do with
+        // what it claims. Then it is this assertion that fails, and it says so.
+        assert!(
+            okf_mounts(&set).is_empty(),
+            "this test needs `okf_mounts` to find nothing: the workspace set is \
+             empty, so the only remaining source is the current directory. \
+             Something now looks like a bundle at or below {:?} — move it, or \
+             this test is vacuous.",
+            std::env::current_dir()
+        );
+
+        let probe = axum::Router::new().route(
+            "/probe",
+            axum::routing::get(|| async { "the router this test passed in" }),
+        );
+        let (router, note) = mount_okf(probe, &set, Some("/".to_owned()));
+
+        assert!(
+            note.is_empty(),
+            "an empty mount list produces no startup note; got `{note}`"
+        );
+        assert_eq!(
+            get(router.clone(), OKF_BASE).await.0,
+            StatusCode::NOT_FOUND,
+            "`{OKF_BASE}` must not be mounted at all — not even to serve the \
+             chooser's zero-bundle page"
+        );
+        assert_eq!(
+            get(router.clone(), &format!("{OKF_BASE}/okf-viewer.css"))
+                .await
+                .0,
+            StatusCode::NOT_FOUND,
+            "the viewer's own stylesheet route comes with `mounts_router`, so its \
+             absence is the proof that nothing was merged"
+        );
+        let (status, body) = get(router, "/probe").await;
+        assert_eq!(
+            (status, body.as_str()),
+            (StatusCode::OK, "the router this test passed in"),
+            "everything the caller already had is still served"
+        );
+    }
+
+    /// The zero-bundle page **exists and works** — it is just unreachable.
+    ///
+    /// Handed an empty list directly, `mounts_router` mounts a chooser that says
+    /// what is missing and what writes one. Nothing in production hands it that
+    /// list: `mount_okf` returns early (above), and `serve_okf_only`'s one call
+    /// site in `run_explorer` is inside `if !mounts.is_empty()`, which is why
+    /// "no config, no repo, no bundle" **errors** rather than starting an empty
+    /// bundle server (pinned end to end in `serve_mode_selection_cli.rs`).
+    ///
+    /// Pinned deliberately, not deleted: a `--scope` flag that narrows a server
+    /// to nothing is exactly the change that would make this page reachable for
+    /// the first time, and then it matters what it says.
+    #[tokio::test]
+    async fn the_zero_bundle_chooser_page_renders_when_it_is_reached() {
+        let router = okf_viewer::mounts_router(OKF_BASE, Vec::new(), Some("/".to_owned()));
+        let (status, body) = get(router, OKF_BASE).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains("No bundle is mounted"),
+            "the page names what is missing rather than rendering an empty list \
+             that reads as \"these projects have no concepts\"; got: {body}"
+        );
+        assert!(
+            body.contains("roteiro render okf"),
+            "and names what writes one; got: {body}"
+        );
+    }
+}
+
 /// Dispatch a `roteiro okf` action.
 fn run_okf(action: OkfAction) -> anyhow::Result<()> {
     match action {
