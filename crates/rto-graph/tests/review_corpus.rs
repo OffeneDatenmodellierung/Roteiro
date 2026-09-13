@@ -28,7 +28,7 @@
 //! `docs/REVIEW_CHECKLIST.md` for the adjudication rule that decides a verdict.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use rto_graph::review_corpus::{COMPLETE_THROUGH_PR, Corpus, DefectClass, Verdict};
 
@@ -40,9 +40,35 @@ fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/review")
 }
 
-/// This repository's own `repository` URL, which a vendored copy under someone
-/// else's workspace will not carry — see [`is_repository_checkout`].
-const REPOSITORY_URL: &str = "https://github.com/OffeneDatenmodellierung/Roteiro";
+/// This repository's path, as it appears in a clone's remote URL — the one signal a
+/// vendored copy cannot present, because a consumer's remote is their own. Used by
+/// the two guards below to decide whether they are looking at *this* repository.
+const REPOSITORY_PATH: &str = "OffeneDatenmodellierung/Roteiro";
+
+/// Whether the checkout at `repo_root()` was cloned from this repository.
+///
+/// Independent of everything the guards check: not the manifest (a vendored crate
+/// sits under a consumer's), not the layout (the corpus fixture ships inside the
+/// package, so `consumer/crates/rto-graph/tests/fixtures/…` exists too), and not
+/// the marker itself, which is the thing being held. A fork reports its own path
+/// and so declines to assert, which is the right way for a guard to fail.
+fn cloned_from_this_repository() -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root())
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .is_ok_and(|o| {
+            o.status.success() && String::from_utf8_lossy(&o.stdout).contains(REPOSITORY_PATH)
+        })
+}
+
+/// This workspace manifest's **own** `repository =` line. Matched as a whole line
+/// rather than searched for: a consumer that depends on Roteiro by git URL has that
+/// URL in its manifest too, and `contains` would call their project ours — see
+/// [`is_repository_checkout`].
+const REPOSITORY_FIELD: &str =
+    "repository = \"https://github.com/OffeneDatenmodellierung/Roteiro\"";
 
 /// This repository, from the crate whose tests these are.
 fn repo_root() -> PathBuf {
@@ -119,6 +145,19 @@ fn on_ci() -> bool {
     std::env::var_os("CI").is_some() || std::env::var_os("GITHUB_ACTIONS").is_some()
 }
 
+/// The manifest rule, as a pure function of the text — the half that can be tested
+/// against manifests this checkout does not contain.
+///
+/// **Both conditions are whole-line matches, and the second one is the interesting
+/// one.** A consumer that depends on Roteiro by git URL has our URL in its manifest,
+/// so a `contains` search would call their project ours and run our corpus gates on
+/// their CI. Matching the manifest's own `repository =` line tells "this is Roteiro"
+/// apart from "this uses Roteiro".
+fn manifest_is_ours(text: &str) -> bool {
+    text.lines().any(|line| line.trim() == "[workspace]")
+        && text.lines().any(|line| line.trim() == REPOSITORY_FIELD)
+}
+
 /// Whether this is **this repository's** checkout rather than a packaged crate.
 ///
 /// **The reason the CI rule below is not simply "never skip".** `rto-graph` is
@@ -137,12 +176,10 @@ fn on_ci() -> bool {
 /// `NotFound` means "packaged"**: collapsing every IO error into that would turn
 /// "cannot read the repository" into "this is not a repository", which is the same
 /// vacuity one level up.
-fn is_repository_checkout() -> bool {
-    let manifest = repo_root().join("Cargo.toml");
+fn is_repository_checkout(root: &Path) -> bool {
+    let manifest = root.join("Cargo.toml");
     match std::fs::read_to_string(&manifest) {
-        Ok(text) => {
-            text.lines().any(|line| line.trim() == "[workspace]") && text.contains(REPOSITORY_URL)
-        }
+        Ok(text) => manifest_is_ours(&text),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
         Err(e) => panic!(
             "cannot read {} ({:?}: {e}). Without it a guard cannot tell a packaged \\
@@ -156,7 +193,7 @@ fn is_repository_checkout() -> bool {
 
 /// Take a skip — loudly off a runner, **never on one**.
 ///
-/// # Why no precondition is forgiven on CI
+/// # Which preconditions are forgiven on CI, and which are not
 ///
 /// `reviewed_shas_resolve_in_this_repository` named this loophole in its own
 /// comment — *"or a typo'd sha would skip its way to green"* — and then fell
@@ -182,7 +219,7 @@ fn is_repository_checkout() -> bool {
 /// must not read as one.
 fn loud_skip_unless_on_ci(test: &str, why: NoHistory, rows: usize) {
     assert!(
-        !on_ci() || !is_repository_checkout(),
+        !on_ci() || !is_repository_checkout(&repo_root()),
         "{test} cannot run on CI: {}. These tests are the corpus's only gate and \
          must not be skipped in a checkout — `.github/workflows/ci.yml` checks out \
          with `fetch-depth: 0` in every job that runs tests, so fix the environment \
@@ -224,17 +261,74 @@ fn history_or_loud_skip(test: &str, rows: usize) -> bool {
     true
 }
 
-/// **The exemption may not switch the rule off.** `is_repository_checkout()` is the
+/// **The manifest rule, held against manifests that are not ours.**
+///
+/// The real-checkout assertion below cannot catch a rule that is too *loose*: this
+/// repository satisfies a substring search just as well as a whole-line match, so
+/// reverting to `contains` would leave the suite green and put our corpus gates back
+/// on the CI of anyone who depends on Roteiro by git URL. These three inputs
+/// separate the two rules, and the second is the one that does it.
+#[test]
+fn the_manifest_rule_accepts_only_this_repository() {
+    // The live manifest is only checked where the remote says this checkout is ours.
+    // A packaged crate has no manifest there; a crate vendored under a consumer has
+    // *their* manifest there, and asserting on it would fail their `cargo test` for
+    // being correctly packaged. The three synthetic cases below are the rule and run
+    // everywhere.
+    if cloned_from_this_repository() {
+        let ours = std::fs::read_to_string(repo_root().join("Cargo.toml"))
+            .expect("a checkout of this repository has a workspace manifest");
+        assert!(
+            manifest_is_ours(&ours),
+            "our own workspace manifest no longer satisfies the rule — every CI run \
+             would now take the packaged exemption and skip the corpus gates in \
+             silence, so this is the marker's problem, not this assertion's"
+        );
+    }
+
+    let consumer_depending_on_us = format!(
+        "[workspace]\nmembers = [\"app\"]\n\n[dependencies]\n\
+         rto-graph = {{ git = \"{}\" }}\n",
+        REPOSITORY_FIELD
+            .trim_start_matches("repository = ")
+            .trim_matches('"')
+    );
+    assert!(
+        !manifest_is_ours(&consumer_depending_on_us),
+        "a workspace that DEPENDS on Roteiro is not Roteiro; a substring search \
+         cannot tell those apart, which is why the rule matches whole lines"
+    );
+
+    assert!(
+        !manifest_is_ours("[workspace]\nmembers = [\"app\"]\n"),
+        "a plain consumer workspace is not this repository either"
+    );
+
+    // The fourth case lives in the IO half rather than in the rule: no manifest at
+    // all is what an unpacked crate looks like, and it must read as "packaged"
+    // rather than as an error.
+    let empty = std::env::temp_dir().join(format!("roteiro-no-manifest-{}", std::process::id()));
+    std::fs::create_dir_all(&empty).expect("create an empty directory");
+    assert!(
+        !is_repository_checkout(&empty),
+        "a directory with no manifest is a packaged crate, not this repository"
+    );
+    std::fs::remove_dir_all(&empty).ok();
+}
+
+/// **The exemption may not switch the rule off.** `is_repository_checkout(&repo_root())` is the
 /// one thing that can make a CI run skip these gates, so a marker that read `false`
 /// in a real checkout would restore #822 in full and say nothing.
 ///
-/// Only the dangerous direction is asserted: where git reports a work tree, the
-/// marker must agree that this is a checkout. The converse — a manifest with no git
-/// (an unpacked zip of the repository) — is deliberately not failed here, because
-/// off a runner that is a legitimate way to read the code, and on one the gates
-/// themselves already refuse it. In a packaged crate this test is vacuous by
-/// construction, which is the correct behaviour there and is said rather than
-/// hidden.
+/// Only the dangerous direction is asserted, and only where two signals independent
+/// of the marker agree that this is our checkout: git reports a work tree **and**
+/// the corpus fixture sits at its own path. Either alone is not enough — a vendored
+/// copy inside somebody else's repository has a work tree, and an unpacked zip of
+/// this repository has the layout but no git. The converse direction (a manifest
+/// with no git) is deliberately not failed here: off a runner that is a legitimate
+/// way to read the code, and on one the gates themselves already refuse it. In a
+/// packaged crate this test is vacuous by construction, which is correct there and
+/// is said rather than hidden.
 #[test]
 fn the_package_exemption_cannot_claim_a_real_checkout() {
     // Reads the output for the same reason the gate does: a bare repository exits 0
@@ -246,9 +340,15 @@ fn the_package_exemption_cannot_claim_a_real_checkout() {
         .args(["rev-parse", "--is-inside-work-tree"])
         .output()
         .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "true");
-    if work_tree {
+    // A vendored copy inside somebody's repository has a work tree too, and the
+    // marker rightly says "packaged" there — asserting on the work tree alone would
+    // fail their `cargo test`, which is the defect this exemption exists to avoid.
+    // The layout is not the second signal either: the corpus fixture ships in the
+    // package, so `consumer/crates/rto-graph/tests/fixtures/…` exists as well. The
+    // remote is what a vendored copy cannot present.
+    if work_tree && cloned_from_this_repository() {
         assert!(
-            is_repository_checkout(),
+            is_repository_checkout(&repo_root()),
             "git reports a work tree at {} but the package marker says this is a \
              packaged crate. That combination would let every CI run skip the corpus \
              gates silently — which is exactly #822 — so the marker, not this \
