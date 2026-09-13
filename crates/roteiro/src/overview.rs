@@ -1241,7 +1241,7 @@ mod tests {
             html.contains(crate::theme::TOKENS),
             "the export must inline `assets/tokens.css` verbatim"
         );
-        let literals = crate::theme::hex_literals(CSS);
+        let literals = crate::theme::colour_literals(CSS);
         assert!(
             literals.is_empty(),
             "the overview stylesheet hard-codes colours {literals:?} — name a \

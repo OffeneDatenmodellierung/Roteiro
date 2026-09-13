@@ -634,13 +634,6 @@
       elements,
       wheelSensitivity: 0.2,
       style: workspaceGraphStyle(host),
-            width: "label",
-            height: "label",
-            padding: "10px",
-            label: (n) => `${n.data("label")}\n${n.data("sub")}`,
-            "text-wrap": "wrap",
-            "text-valign": "center",
-            "text-halign": "center",
       layout: {
         name: "concentric",
         concentric: (n) => (n.data("role") === "hub" ? 2 : 1),
@@ -1130,6 +1123,19 @@
   const setDark = (on) => {
     if (on) document.documentElement.dataset.theme = "dark";
     else delete document.documentElement.dataset.theme;
+    // cytoscape holds RESOLVED colours, not custom properties, so a graph keeps
+    // whichever mode it was last styled under until something restyles it — and
+    // `#topology` sits OUTSIDE `#view-project`, so while the project view forces
+    // dark on `<html>` the hidden workspace graph resolves dark too. Flip the OS
+    // to light with the project view open and the workspace graph was restyled
+    // dark; walking back re-renders nothing when the workspace has not changed
+    // (`route` only calls `loadWorkspace` when `state.current` differs), so the
+    // topology sat dark on a light panel.
+    //
+    // Re-resolving on every mode change is the fix, and this is the ONLY place
+    // the attribute is written — a second write site would be a second chance to
+    // forget. `the_theme_is_set_in_one_place_that_restyles` pins that.
+    restyleGraphs();
   };
 
   function showSelectView() {
@@ -1150,14 +1156,16 @@
     $("#view-select").hidden = true;
     $("#view-project").hidden = true;
     $("#view-workspace").hidden = false;
-    setDark(false);
     // Free the (potentially ~1,300-node) project graph when backing out. Also
     // drop the cached RAW graph (`pGraph`, kept only so the "hide tooling config"
     // toggle can re-render without a refetch) so it can be GC'd off-view.
+    // Before `setDark`, so the restyle it triggers never touches a graph that is
+    // one statement from being destroyed.
     if (state.pcy) {
       state.pcy.destroy();
       state.pcy = null;
     }
+    setDark(false);
     state.pGraph = null;
     state.pRendered = null;
     state.searching = false;
@@ -1347,8 +1355,10 @@
   // special-cased, because "which surfaces are mode-locked" is the stylesheet's
   // business and not this listener's.
   function restyleGraphs() {
-    if (state.cy) state.cy.style(workspaceGraphStyle($("#topology")));
-    if (state.pcy) state.pcy.style(projectGraphStyle($("#p-graph"), state.pBig));
+    const ws = $("#topology");
+    if (state.cy && ws) state.cy.style(workspaceGraphStyle(ws));
+    const pg = $("#p-graph");
+    if (state.pcy && pg) state.pcy.style(projectGraphStyle(pg, state.pBig));
   }
   const darkMedia = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)");
   if (darkMedia && darkMedia.addEventListener) {

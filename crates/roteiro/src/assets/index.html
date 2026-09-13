@@ -35,7 +35,7 @@
         margin: 0;
         background: var(--bg);
         color: var(--fg);
-        font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        font: 14px/1.5 var(--font);
       }
       /* Links. The shell had no rule for `a` at all: every link it draws sat on a
          white panel where the UA's default blue passed for a choice, and the
@@ -47,7 +47,7 @@
       }
       code,
       .mono {
-        font: 12.5px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+        font: 12.5px/1.4 var(--font-mono);
       }
       main {
         max-width: 1240px;
@@ -179,7 +179,7 @@
       .select-card:hover,
       .select-card:focus-visible {
         border-color: var(--hub-line);
-        box-shadow: 0 4px 12px rgba(16, 24, 40, 0.1);
+        box-shadow: var(--shadow-lifted);
         transform: translateY(-1px);
         outline: none;
       }
@@ -712,7 +712,7 @@
         padding: 0.2rem 0.45rem;
         font-size: 0.72rem;
         white-space: nowrap;
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+        box-shadow: var(--shadow-lifted);
       }
       .p-chip.xrepo {
         border-style: dashed;
@@ -1034,7 +1034,7 @@
         border: 1px solid var(--line);
         border-radius: 5px;
         background: var(--code-bg);
-        font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+        font-family: var(--font-mono);
         font-size: 0.7rem;
         color: var(--muted);
         word-break: break-all;

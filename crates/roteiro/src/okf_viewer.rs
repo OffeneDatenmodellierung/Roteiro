@@ -1423,7 +1423,7 @@ mod tests {
         );
 
         // (1) No palette of its own. A `:root` block here would shadow or
-        // duplicate the master; a hex literal would bypass it entirely. Scanned
+        // duplicate the master; a stated colour would bypass it entirely. Scanned
         // with comments stripped — this file's own header names the palette it
         // replaced, and prose must not be able to fail a guard.
         let own = crate::theme::without_comments(VIEWER_CSS);
@@ -1432,7 +1432,7 @@ mod tests {
             "`okf-viewer.css` declares a `:root` block — the palette belongs in \
              `assets/tokens.css`, which every in-app surface reads"
         );
-        let literals = crate::theme::hex_literals(VIEWER_CSS);
+        let literals = crate::theme::colour_literals(VIEWER_CSS);
         assert!(
             literals.is_empty(),
             "`okf-viewer.css` hard-codes colours {literals:?} — name a token from \

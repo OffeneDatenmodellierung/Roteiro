@@ -738,12 +738,16 @@ mod tests {
     ///
     /// Scanned against `SHELL_TEMPLATE` (pre-splice), so the master's own values
     /// are not what is being looked at: this is about the ~1,200 lines of rules
-    /// *around* it. Both halves fail independently — a hex literal renders fine
+    /// *around* it. Both halves fail independently — a stated colour renders fine
     /// and silently forks the identity, while a `var()` naming a token the master
     /// dropped renders plausibly wrong and errors nowhere.
+    ///
+    /// "Colour" means every syntax, not every syntax somebody listed: this guard
+    /// first shipped recognising `#rrggbb` only, and two `rgba()` shadows sat
+    /// here while it stayed green. See [`crate::theme::colour_literals`].
     #[test]
     fn the_shell_declares_no_colour_of_its_own() {
-        let literals = crate::theme::hex_literals(style_block(SHELL_TEMPLATE));
+        let literals = crate::theme::colour_literals(style_block(SHELL_TEMPLATE));
         assert!(
             literals.is_empty(),
             "`index.html` hard-codes colours {literals:?} — name a token from \
@@ -754,6 +758,213 @@ mod tests {
             dangling.is_empty(),
             "the shell names {dangling:?}, which `assets/tokens.css` does not \
              declare — they resolve to nothing and fall back to inherited/initial"
+        );
+    }
+
+    /// JS with string, template and comment contents blanked out, so a brace or a
+    /// key-looking word inside one cannot be read as structure.
+    ///
+    /// **Length-preserving**: every blanked character is replaced one-for-one, so
+    /// an offset into the result indexes the original. That is what lets
+    /// `cytoscape_option_keys` report the key a reader can search for rather than
+    /// the run of spaces it was blanked to.
+    fn js_without_literals(js: &str) -> String {
+        // Blank one character to as many spaces as it had BYTES: `js.len()` is a
+        // byte count, and this file is full of `—`, `⚠` and `→`. Replacing a
+        // 3-byte char with a 1-byte space silently shortens the copy and every
+        // offset after it points at the wrong place.
+        fn blank(out: &mut String, c: char) {
+            if c == '\n' {
+                out.push('\n');
+            } else {
+                for _ in 0..c.len_utf8() {
+                    out.push(' ');
+                }
+            }
+        }
+        let mut out = String::with_capacity(js.len());
+        let mut chars = js.chars().peekable();
+        let mut quote: Option<char> = None;
+        while let Some(c) = chars.next() {
+            match quote {
+                Some(q) => {
+                    if c == '\\' {
+                        blank(&mut out, c);
+                        if let Some(next) = chars.next() {
+                            blank(&mut out, next);
+                        }
+                        continue;
+                    }
+                    if c == q {
+                        quote = None;
+                        out.push(c);
+                    } else {
+                        blank(&mut out, c);
+                    }
+                }
+                None => match c {
+                    '"' | '\'' | '`' => {
+                        quote = Some(c);
+                        out.push(c);
+                    }
+                    '/' if chars.peek() == Some(&'/') => {
+                        blank(&mut out, c);
+                        while let Some(c) = chars.peek().copied() {
+                            if c == '\n' {
+                                break;
+                            }
+                            blank(&mut out, c);
+                            chars.next();
+                        }
+                    }
+                    _ => out.push(c),
+                },
+            }
+        }
+        out
+    }
+
+    /// The top-level keys of every `cytoscape({ … })` options object in `app.js`.
+    ///
+    /// Structure is read from the blanked copy; the key TEXT is sliced out of the
+    /// original at the same offsets, so a quoted key reports as `"text-valign"`
+    /// and not as the spaces it was blanked to.
+    fn cytoscape_option_keys(js: &str) -> BTreeSet<String> {
+        let blanked = js_without_literals(js);
+        assert_eq!(
+            blanked.len(),
+            js.len(),
+            "`js_without_literals` must be length-preserving for the offsets below"
+        );
+        let mut keys = BTreeSet::new();
+        for (start, _) in blanked.match_indices("cytoscape({") {
+            let base = start + "cytoscape({".len();
+            let body = &blanked[base..];
+            let mut depth = 0i32;
+            let mut key_start: Option<usize> = None;
+            for (i, c) in body.char_indices() {
+                match c {
+                    '{' | '[' | '(' => depth += 1,
+                    // The options object's own closing brace, at depth 0, ends
+                    // this call; anything else nested just unwinds a level.
+                    '}' if depth == 0 => break,
+                    ']' | ')' | '}' => depth -= 1,
+                    ':' if depth == 0 => {
+                        if let Some(from) = key_start.take() {
+                            let name = js[base + from..base + i].trim().trim_matches('"');
+                            if !name.is_empty() {
+                                keys.insert(name.to_owned());
+                            }
+                        }
+                    }
+                    ',' if depth == 0 => key_start = None,
+                    c if depth == 0 && !c.is_whitespace() => {
+                        key_start.get_or_insert(i);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        keys
+    }
+
+    /// Graph styling lives in the two `*GraphStyle` builders, and nowhere else.
+    ///
+    /// Extracting those builders out of the `cytoscape({…})` calls left seven
+    /// style properties — `width`, `height`, `padding`, `label`, `text-wrap`,
+    /// `text-valign`, `text-halign` — stranded at the TOP LEVEL of the options
+    /// object, where cytoscape has no such options and simply ignored them. It
+    /// parsed, it rendered correctly (the builder carries the same seven), and
+    /// nothing said a word. Only the node stylesheet's own copy was doing any
+    /// work.
+    ///
+    /// An allowlist of cytoscape's core options, so residue from the NEXT
+    /// extraction is caught the same way — a key nobody listed is a failure
+    /// rather than a silence.
+    #[test]
+    fn the_graph_options_carry_no_stranded_style_properties() {
+        const CORE_OPTIONS: &[&str] = &[
+            "autolock",
+            "autoungrabify",
+            "autounselectify",
+            "boxSelectionEnabled",
+            "container",
+            "elements",
+            "headless",
+            "hideEdgesOnViewport",
+            "layout",
+            "maxZoom",
+            "minZoom",
+            "motionBlur",
+            "pan",
+            "panningEnabled",
+            "pixelRatio",
+            "selectionType",
+            "style",
+            "styleEnabled",
+            "textureOnViewport",
+            "touchTapThreshold",
+            "userPanningEnabled",
+            "userZoomingEnabled",
+            "wheelSensitivity",
+            "zoom",
+            "zoomingEnabled",
+        ];
+        let keys = cytoscape_option_keys(APP_JS);
+        assert!(
+            keys.contains("style") && keys.contains("layout"),
+            "the scan found no cytoscape options at all, so it is measuring \
+             nothing: {keys:?}"
+        );
+        let stray: Vec<&String> = keys
+            .iter()
+            .filter(|k| !CORE_OPTIONS.contains(&k.as_str()))
+            .collect();
+        assert!(
+            stray.is_empty(),
+            "{stray:?} sit at the top level of a `cytoscape({{…}})` call, where \
+             they are not options and do nothing. Style properties belong inside \
+             a rule in `workspaceGraphStyle`/`projectGraphStyle`."
+        );
+    }
+
+    /// The document's mode is written in ONE place, and that place re-resolves
+    /// every live graph.
+    ///
+    /// cytoscape holds resolved colours rather than custom properties, and
+    /// `#topology` sits OUTSIDE `#view-project` — so while the project view
+    /// forces `data-theme="dark"` on `<html>`, the hidden workspace graph
+    /// resolves dark too. Flipping the OS to light with the project view open
+    /// restyled it dark, and walking back re-renders nothing when the workspace
+    /// has not changed (`route` only calls `loadWorkspace` when `state.current`
+    /// differs), so the topology sat dark on a light panel. Reproduced over CDP
+    /// before the fix: panel `rgb(255,255,255)`, nodes `rgb(22,27,34)`.
+    ///
+    /// **This guard is structural, and that is a real limit.** This repository
+    /// has no JavaScript engine and no browser in CI — nothing runs `app.js` —
+    /// so no test here can observe the rendered colour. What it can hold is the
+    /// shape that made the bug possible: two write sites, one of which forgot.
+    /// It fails if a second write site appears, or if the single one stops
+    /// restyling. It would NOT catch `restyleGraphs` itself regressing.
+    #[test]
+    fn the_theme_is_set_in_one_place_that_restyles() {
+        let js = js_without_literals(APP_JS);
+        let writes = js.matches("documentElement.dataset.theme").count();
+        assert_eq!(
+            writes, 2,
+            "`documentElement.dataset.theme` is touched {writes} time(s); it must \
+             be exactly the set and the delete inside `setDark`, so there is one \
+             place that can forget to restyle"
+        );
+        let body = js
+            .split_once("const setDark =")
+            .map(|(_, rest)| rest.split_once("};").map_or(rest, |(b, _)| b))
+            .expect("`app.js` defines `setDark`");
+        assert!(
+            body.contains("documentElement.dataset.theme") && body.contains("restyleGraphs()"),
+            "`setDark` must both write the mode and re-resolve the live graphs — \
+             a graph styled under the old mode keeps it until something restyles \
+             it. Body was: {body}"
         );
     }
 
