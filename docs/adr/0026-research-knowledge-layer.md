@@ -11,7 +11,7 @@ architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "0.7"
+version: "0.8"
 last-modified: 2026-09-13
 confluence-url:
 ---
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | For Review |
 | **Architectural Significance** | HIGH |
 | **Domain** | Developer Tooling |
-| **Document version** | 0.7 |
+| **Document version** | 0.8 |
 | **Related** | [[docs/adr/0021-open-knowledge-format-bundle.md]] · [[docs/adr/0022-dynamic-okf-viewer.md]] · [[docs/adr/0025-document-extraction-consent.md]] · [[docs/adr/0019-remote-model-tier.md]] · [[docs/adr/0013-agent-memory-artifact-store.md]] |
 
 ## Reference
@@ -378,9 +378,9 @@ both corrections make the case for the exclusion stronger rather than weaker**
 [[crates/rto-graph/src/sync.rs#sync_worktree]] (`HEAD` plus a disk overlay),
 `sync_index` (the staged blobs, *"exactly what a commit would record"*) and
 `sync_tree` (an arbitrary revision). What is actually true, and is what the
-argument needed, is that **every input path is one git can name**: it comes from
-the `HEAD` tree, from the index, or from a **workdir-rooted, gitignore-aware
-dirwalk** ([[crates/rto-graph/src/git.rs#Repo]] `untracked_files`, which also
+argument needed, is that **every input path comes from git's own enumeration of
+one working tree**: the `HEAD` tree, the index, or a **workdir-rooted,
+gitignore-aware dirwalk** ([[crates/rto-graph/src/git.rs#Repo]] `untracked_files`, which also
 skips nested repositories, symlinks and non-regular files). There *is* a
 filesystem walk — saying otherwise, as v0.4 did, was the same overreach in a new
 spelling — but it is rooted at the repository workdir and classified against
@@ -506,7 +506,25 @@ The three refusals protect a **tree-relative claim**, in two variants. Two of th
 guard a walk whose output is a node key carrying a path — `lat:<path>` for
 `collect_markdown`'s importer, `okf:<peer>/<path>` for the bundle walk (and not
 `file:<path>`, which is the derived extractor's family) — where the path asserts
-*this content is at this location in this tree*. A symlink defeats that assertion
+*this content is at this location in this tree*.
+
+> **The derived extractor is a fourth case, and it does *not* refuse symlinks.**
+> This ADR previously implied the scan refuses them everywhere. It does not.
+> `sync_worktree` reads each tracked path with plain `std::fs::read`
+> ([[crates/rto-graph/src/sync.rs#sync_worktree]]), which **follows** a link, so
+> replacing a tracked regular file with a symlink pointing outside the repository
+> makes the extractor store the target's bytes under the tracked path's key.
+> Measured on a scratch repository: after `rm docs/note.md && ln -s
+> ../outside/secret.md docs/note.md`, a worktree sync stores the out-of-repo
+> content as `file:docs/note.md`. That is exactly the false-key defect the other
+> three walks were written to prevent, in the one family this ADR named as their
+> example. It is **pre-existing behaviour in `main`, not something this decision
+> introduces**, and it is reported rather than fixed here because this ADR
+> changes no code — but it must be recorded, because an ADR arguing from "the
+> scan refuses symlinks" would otherwise rest on a guarantee the scan does not
+> give. It also means the ingest path resolving links is *less* anomalous than
+> the three refusals suggest; what still distinguishes it is that it mints no
+> tree-relative key, not that it is alone in following a link. A symlink defeats that assertion
 silently: the key says `docs/x.md`, the bytes came from `/etc/`, and nothing in
 the graph records the difference. The third, `markdown_files`, mints no key at
 all; it bounds where `docs fmt` may **write**, which is the same claim pointed
@@ -520,12 +538,15 @@ an ingested document is recorded as a manifest entry with its own identity,
 origin and hash, not as a node keyed by a tree-relative path. There is nothing
 for a symlink to falsify. Following the link is the feature.
 
-So the rule is: **a walk that makes a tree-relative claim refuses symlinks; the
-ingest path, which makes none, resolves them.** Anyone tempted to unify the two should
-change this paragraph first, because unifying them in either direction breaks
-something real — resolving them in the scan reintroduces the false-key defect
-three separate call sites were written to prevent, and refusing them in ingest
-deletes the shared-storage case this decision exists to permit.
+So the rule is: **a walk that makes a tree-relative claim should refuse symlinks;
+the ingest path, which makes none, resolves them.** *Should*, not *does* — three
+walks implement it and the derived extractor's worktree read does not, which is
+the gap recorded above rather than a licence to widen. Anyone tempted to unify
+the two should change this paragraph first, because unifying them in either
+direction breaks something real — resolving them in the walks that do refuse
+reintroduces the false-key defect three separate call sites were written to
+prevent, and refusing them in ingest deletes the shared-storage case this
+decision exists to permit.
 
 Two things the ingest path inherits from the refusals rather than discarding
 with them, because they are about walk safety rather than key honesty: a
@@ -716,3 +737,4 @@ ingest half of that belongs in a service of its own.
 | 0.5 | 2026-09-13 | **Second review round on PR #816; four more false code claims corrected, no decision changes.** **(a) The OKF frontmatter example was wrong in three ways** and would have been copied. `Frontmatter::render` ([[crates/rto-render/src/okf.rs]]) emits `generated` as a **mapping** (`by`, `at`) and `verified` as a **sequence** of `{by, at}`; v0.4 showed both as one-line sequences and omitted `at` from each. The placeholder `<the model that drafted it>` is also not an emittable token: the grammar admits exactly `human:<id>`, `<producer>/<version>` and `process:<id>` ([[crates/rto-render/src/okf.rs#Actor]]). The example now shows the real shapes, and the token mapping is handed back to #799 — a co-author trailer gives a display name with no version, which #799 itself says *"needs deciding rather than assuming"* against `lint_actor_convention` (L6). This ADR fixes only which **key** a model belongs under, not how it is spelled. **(b) The symlink invariant named the wrong key family.** v0.4 said the three refusals guard a `file:<path>` key; they do not. `collect_markdown`'s importer mints `lat:<path>` and the bundle walk mints `okf:<peer>/<path>`, while `file:` belongs to the derived extractor. And `markdown_files` mints no key at all — it bounds where `docs fmt` may **write**. The invariant is therefore a **tree-relative claim** in two variants, a key that carries a path and a write that must stay inside a named tree, and the rule reads *a walk that makes a tree-relative claim refuses symlinks; the ingest path, which makes none, resolves them*. The opposition and its reason are unchanged; only the family was misnamed. **(c) One "two sources" residue survived the v0.4 sweep** in the out-of-line section and is corrected to the git-mediated formulation. **(d) Q3's heading overstated what exists.** *"`log.md` is derived, and it already exists"* reads as though bundles carry the file; they do not, since `assemble` omits it while the log is empty. Retitled to *"the machinery already exists"*, which is the true claim — a pure `render_log`, a typed parameter, and no caller feeding it. |
 | 0.6 | 2026-09-13 | **Third review pass; one claim of mine disproved by measurement, three defects fixed.** **(a) `block` IS reachable for PDF input, and v0.3–v0.5 implied otherwise.** #813 posed it **conditionally** (*"if concealment can never be detected in a PDF"*) and asked for verification; this ADR carried the conditional forward while asserting its antecedent. Checked now: `screen_text` marks a directive `concealed` when it is revealed **only by stripping invisible codepoints** — zero-width characters, bidi controls — and returns `Verdict::Block` on that basis ([[crates/rto-graph/src/screen.rs#screen_text]], guarded by `strip_then_scan_reveals_a_directive_hidden_by_zero_width_characters`). Those codepoints are format-independent and survive PDF extraction. The **presentation** half (`display:none`, `hidden`, split tags) genuinely does not transfer, and neither does the PDF-native vocabulary #813 lists, so the gap is real but narrower: one concealment channel carries over and one does not, and a PDF concealing by the second class reaches at most `quarantine`. The requirement is unchanged; its justification is now accurate. **(b) The absent-source requirement was self-contradictory** — it called a stale authored reference drift and an absent source a "known absence, not an error" in consecutive sentences. Split explicitly: *bytes absent with a manifest entry present* is the ordinary state of a clone that did not fetch the corpus and **must not fail `check`**; *no manifest entry, or a hash that no longer matches* **is** drift. **(c) The v0.3 history row stated the core asymmetry backwards** — "opting in is reversible where opting out is not", inverting the argument the body makes correctly, since committing is the irreversible direction. Corrected in place, the row being unmerged. **(d)** `docs/adr/README.md` indexed every ADR through 0025 and omitted 0026 entirely, so the catalogue never saw this decision; the entry is added at `For Review`. |
 | 0.7 | 2026-09-13 | **Fourth review pass. Three of these are the *same* overreach in successive spellings, which is the finding worth keeping.** **(a)** v0.2 said extraction has *"exactly two sources"*; v0.4 corrected the count but replaced it with *"no non-git filesystem walk anywhere"*; that is also false. [[crates/rto-graph/src/git.rs#Repo]] `untracked_files` **is** a filesystem dirwalk — it is merely rooted at the repository workdir, gitignore-aware, classified against the index, and skipping nested repositories, symlinks and non-regular files. The claim that survives every version of this sentence, and the only one the argument ever needed, is that **every input path is one git can name**: the `HEAD` tree, the index, or that workdir-rooted walk. Nothing can name a path outside the tree, so out-of-tree bytes stay unreachable and #812's blocker holds. Fixed in the body, in the out-of-line section, and inside the v0.4 row that introduced the second spelling. Recorded as a pattern rather than three separate slips: each attempt reached for a *stronger mechanical absolute* than the evidence supported, when the weaker relational claim was sufficient throughout. **(b) The Summary still described the whole design in the present tense**, so a reader meeting the ADR at its first paragraph would take an unbuilt exclusion and an unbuilt projection as current behaviour. It now opens by saying all three decisions are unbuilt, and the reproducibility paragraph no longer says the bundle projects `knowledge/` today. **(c)** ADR-0001's `#[non_exhaustive]` paragraph still read *"three consecutive ADRs"* after v1.7 made it four; fixed there at v1.9, with the v1.3 history row keeping "three" because it records what v1.3 said. **(d)** `docs/adr/README.md` gained its ADR-0026 entry at v0.6, noted here because the catalogue had never listed this ADR at all. |
+| 0.8 | 2026-09-13 | **Records a live defect in `main` that this ADR was arguing from the absence of.** The symlink section said the standard scan refuses symlinks, citing three walks. It does — but the **derived extractor does not**, and that is the family the section used as its example. `sync_worktree` reads each tracked path with plain `std::fs::read` ([[crates/rto-graph/src/sync.rs#sync_worktree]]), which follows a link. Measured: replace a tracked `docs/note.md` with a symlink to a file outside the repository, run a worktree sync, and the out-of-repo bytes are stored as `file:docs/note.md` — precisely the false-key defect the other three walks exist to prevent. **Pre-existing in `main`, not introduced by this decision, and reported rather than fixed because this PR changes no code.** Two consequences for the ADR. The rule is restated as *a walk that makes a tree-relative claim **should** refuse symlinks* — should, not does, with the gap named — because an ADR resting on a guarantee the scan does not give is the same defect class as the present-tense sweep at v0.4. And the ingest path resolving links is **less anomalous than three-refusals-versus-one-resolution implied**: what distinguishes it is that it mints no tree-relative key, not that it is alone in following a link. Also sharpens *"every input path is one git can name"* to *"comes from git's own enumeration of one working tree"*, since the former could be read as "tracked" and untracked-but-not-ignored files are enumerated too. |
