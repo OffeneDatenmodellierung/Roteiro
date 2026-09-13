@@ -171,6 +171,37 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # ## Full history, because this job's tests read it and had been quietly
+          # declining to run for want of it
+          #
+          # The review corpus pins each adjudicated comment to the commit it was
+          # made on, and NINE tests are gated on being able to reconstruct those
+          # commits: three in `crates/rto-graph/tests/review_corpus.rs` and six in
+          # `roteiro`'s `review_llm` module. (Eight of the nine also *fail* in a full
+          # clone today; the ninth returned early on CI with the rest while passing
+          # locally, which is why the gated count is the one to state here.) The action's default is `fetch-depth: 1`, which
+          # leaves one commit and a shallow boundary, so every one of them returned
+          # early — printing a `SKIP:` line that libtest captures and then discards
+          # for a passing test. They were invoked, reported as passed, and asserted
+          # nothing, on every run since they were written.
+          #
+          # That is not a hypothetical cost. Two of the corpus's `reviewed_sha`
+          # values had been force-pushed out of existence in the meantime; the
+          # tests written to catch exactly that fail in any full clone, and `main`
+          # stayed green throughout (#822). A gate that cannot execute is not a
+          # gate, and it reads in a job summary exactly like one that passed.
+          #
+          # The cost was measured, not assumed: the pack is ~11 MiB over ~1,800
+          # commits, so a full fetch is seconds against this job's 12.8-minute mean
+          # (table above).
+          #
+          # Deleting this line does not restore the old silence. On a runner those
+          # tests now FAIL on a shallow clone rather than skipping, with a message
+          # naming this setting — the depth is stated here, and the tests refuse to
+          # be the reason it looks unnecessary. Both halves came in with #822 and
+          # neither is safe to remove alone.
+          fetch-depth: 0
       # Pinned to an exact toolchain, not the action's `stable` ref. rustc
       # 1.98.0 shipped on 2026-08-18, `stable` resolved to it overnight, and
       # three new clippy lints turned `main` red with no commit to blame (#563
@@ -435,6 +466,13 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history; see the `checks` job for what reads it and what the nine
+          # tests gated on it were doing without it. This job is the one whose
+          # `--no-fail-fast` counts are meant to be a measurement rather than a
+          # lower bound, and nine tests reporting as passed while asserting
+          # nothing is the other way to get a number that is not one.
+          fetch-depth: 0
       # Pinned toolchain, `master` ref of the action; see the `checks` job for
       # why, and for what raising it involves. Bumped with the other six, in one
       # commit, never alone — three of them now live in `graph-artifact.yml` and
@@ -576,6 +614,14 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history; see the `checks` job. This job runs `cargo test` five
+          # times over five feature sets, and the corpus tests are in all five:
+          # `review_llm` is declared `#[cfg(any(feature = "serve", feature =
+          # "inference-local-models", test))]`, so `--no-default-features` does not
+          # take it out of the build — turning features off does not turn this
+          # requirement off with them.
+          fetch-depth: 0
       # Pinned toolchain, `master` ref of the action; see the `checks` job for
       # why, and for what raising it involves. Bumped with the other six, in one
       # commit, never alone — three of them now live in `graph-artifact.yml` and
@@ -725,6 +771,14 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # `cargo llvm-cov` runs the whole suite, so this job needs the history
+          # for the same reason `checks` does — and for a second one specific to
+          # it: a test that returns early on a shallow clone still *counts* as
+          # having run, so the coverage figure for the corpus-replay code was
+          # measured with none of it executing (#822). Full history makes the
+          # number describe the code rather than the checkout.
+          fetch-depth: 0
       # Pinned toolchain, `master` ref of the action; see the `checks` job for
       # why, and for what raising it involves.
       #
@@ -841,6 +895,11 @@ jobs:
     # measured durations these bounds are sized against.
     timeout-minutes: 60
     steps:
+      # The one checkout in this file deliberately left shallow, and the reason is
+      # the rule rather than an exception to it: `fetch-depth: 0` is for jobs that
+      # RUN TESTS, because the review-corpus tests read git history (see `checks`).
+      # This job only runs `cargo check`, which reads none, so full history would
+      # buy nothing. If a `cargo test` is ever added here, add the depth with it.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:

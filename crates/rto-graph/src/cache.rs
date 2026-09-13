@@ -51,8 +51,10 @@ pub struct ObjectSweep {
     /// Counted and reported rather than aborting: a sweep that stops at the first
     /// stuck file both reclaims less and says nothing about why.
     pub failed: usize,
-    /// Files under the root that are **not** entries: a `.json.tmp.<pid>-<nanos>`
-    /// from a [`ObjectCache::put`] still in flight, or anything a later format
+    /// Files under the root that are **not** entries: a
+    /// `.json.tmp.<pid>-<nanos>-<seq>` from a [`ObjectCache::put`] still in flight
+    /// (the third field is a process-wide counter, without which two threads
+    /// choose one temp name), or anything a later format
     /// puts here. Never shown to `retain` and never deleted — a sweep that
     /// guesses at a name it does not recognise is a sweep that deletes another
     /// process's half-written work.
@@ -119,16 +121,17 @@ impl ObjectCache {
             fs::create_dir_all(parent)?;
         }
 
-        // Use a unique temp file name to avoid cross-process clobbering.
-        let unique = format!(
-            "{}-{}",
+        // A temp name no concurrent writer can choose — see [`temp_path`] for why
+        // the counter is part of it and what happened before it was.
+        let tmp = temp_path(
+            &path,
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
-                .as_nanos()
+                .as_nanos(),
+            TEMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         );
-        let tmp = path.with_extension(format!("json.tmp.{unique}"));
 
         let bytes = serde_json::to_vec(facts)?;
         fs::write(&tmp, &bytes)?;
@@ -268,6 +271,35 @@ impl ObjectCache {
     }
 }
 
+/// The temp file [`ObjectCache::put`] writes before renaming it into place.
+///
+/// **Three components, and the third is not decoration.** `pid` separates
+/// processes; `now_nanos` separates calls within one — but only as finely as the
+/// platform clock, and `SystemTime::now()` is microsecond-granular on macOS and no
+/// better on some virtualised runners. Two threads of one process putting the
+/// *same* key inside one tick then chose the *same* temp path: the first rename
+/// consumed the file, and the second got `ENOENT` — a failed cache write surfacing
+/// as `CacheError::Io`, not as the miss a derived cache is allowed to have. `seq`
+/// is a process-wide counter, so that collision cannot occur at any clock
+/// resolution.
+///
+/// Found by #822, which made the corpus graph tests actually run on CI: three of
+/// them build graphs concurrently over a cold cache, and that is the first thing
+/// here to put one key from two threads at once. Measured before the counter:
+/// 6 failures in 160,000 concurrent same-key puts locally (~1 in 26,000), and one
+/// `no-default-features` job failure on Linux. After it: none in 480,000.
+///
+/// The name stays a sibling of the entry, so the rename is within one directory
+/// and therefore within one filesystem — which is what makes it atomic.
+fn temp_path(path: &Path, pid: u32, now_nanos: u128, seq: u64) -> PathBuf {
+    path.with_extension(format!("json.tmp.{pid}-{now_nanos}-{seq}"))
+}
+
+/// The `seq` above, one per process. `Relaxed` is enough: nothing is ordered
+/// against it — the only property required is that no two reads return the same
+/// value, which `fetch_add` gives at any ordering.
+static TEMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 #[cfg(test)]
 mod tests {
     use super::ObjectCache;
@@ -285,6 +317,90 @@ mod tests {
             .with_node(Node::new("a", NodeKind::Fn, "a"))
             .with_node(Node::new("b", NodeKind::Fn, "b"))
             .with_edge(Edge::derived("a", "b", EdgeKind::Calls))
+    }
+
+    /// **Two puts of one key inside a single clock tick must not name one file.**
+    ///
+    /// The clock is pinned here rather than raced, because the defect this guards
+    /// is *rare* when raced — 6 failures in 160,000 concurrent puts is a test that
+    /// passes 26,000 times out of 26,001 and proves nothing on the run that
+    /// matters. Equal `now_nanos` is the condition the race produces, so asserting
+    /// on it directly is the same claim without the coin toss. Delete `seq` from
+    /// [`super::temp_path`] and this fails; nothing else in the suite does.
+    #[test]
+    fn two_puts_in_one_clock_tick_cannot_choose_one_temp_file() {
+        let entry = std::path::Path::new("/cache/de/adbeef.json");
+        let first = super::temp_path(entry, 7, 42, 0);
+        let second = super::temp_path(entry, 7, 42, 1);
+        assert_ne!(
+            first, second,
+            "same pid and same clock reading must still give different temp files, \
+             or one thread's rename consumes the other's and the loser gets ENOENT"
+        );
+        // A sibling of the entry, so the rename stays inside one directory and is
+        // therefore atomic. A temp file elsewhere would cross a filesystem and
+        // stop being a rename at all.
+        assert_eq!(first.parent(), entry.parent(), "{first:?}");
+    }
+
+    /// **And the counter must be wired into `put`, not merely available to it.**
+    ///
+    /// The test above holds [`super::temp_path`]'s own property, which a future
+    /// edit could satisfy while passing a constant at the call site — or while
+    /// restoring `{pid}-{nanos}` naming there — and the race would be back with
+    /// both tests green. This one reads the names `put` actually writes.
+    ///
+    /// Deterministic, and deliberately not a concurrency test: the entry path is
+    /// pre-occupied by a **directory**, so each `put`'s rename fails and leaves its
+    /// temp file behind to be inspected. Two puts of one key must leave two files
+    /// whose suffix has three fields and whose *third* field differs — the shape
+    /// catches a reverted name, and the difference catches a constant. Racing two
+    /// threads instead would catch both only about one run in 26,000.
+    #[test]
+    fn put_draws_a_fresh_sequence_value_for_each_temp_file() {
+        let dir = fresh("seq-wiring");
+        let cache = ObjectCache::open(&dir).expect("open");
+        let shard = dir.join("de");
+        std::fs::create_dir_all(shard.join("adbeef.json")).expect("occupy the entry path");
+
+        // The rename cannot replace a directory, so each put fails *after* writing
+        // its temp file. That failure is the instrument, not the subject.
+        assert!(
+            cache.put("deadbeef", &sample()).is_err(),
+            "a put whose destination is a directory must fail, or there is no temp \
+             file left to read"
+        );
+        assert!(cache.put("deadbeef", &sample()).is_err());
+
+        let suffixes: Vec<String> = std::fs::read_dir(&shard)
+            .expect("read the shard")
+            .filter_map(|entry| {
+                let name = entry.ok()?.file_name().to_string_lossy().into_owned();
+                let (_, suffix) = name.split_once(".json.tmp.")?;
+                Some(suffix.to_owned())
+            })
+            .collect();
+        assert_eq!(suffixes.len(), 2, "two puts, two temp files: {suffixes:?}");
+
+        let mut seqs = Vec::new();
+        for suffix in &suffixes {
+            let fields: Vec<&str> = suffix.split('-').collect();
+            assert_eq!(
+                fields.len(),
+                3,
+                "a temp name is `<pid>-<nanos>-<seq>`; {suffix:?} has no sequence \
+                 field, so two threads can choose one name again"
+            );
+            seqs.push(fields[2].to_owned());
+        }
+        assert_ne!(
+            seqs[0], seqs[1],
+            "both puts used sequence {:?}, so the call site is passing a constant \
+             rather than drawing from the counter",
+            seqs[0]
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -76,7 +76,14 @@ pub fn builtin() -> Result<Corpus, CorpusError> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Verdict {
-    /// A genuine defect: accepted, and fixed by a commit.
+    /// A genuine defect: accepted by the maintainer.
+    ///
+    /// Usually fixed by a commit, which [`CorpusRow::fix_commit`] names — but
+    /// acceptance is what the verdict records, and the two can come apart: row
+    /// `3789014471` is accepted and carried as an open decision of its own, with a
+    /// blank `fix_commit` (the marker for that decision lives at the code it is
+    /// about, in `findings.rs`, which is where the debt scan should find one). Reading `real` as "there is a fix commit" is what this
+    /// sentence used to invite, and it is not what the field means.
     Real,
     /// The claim was wrong: refuted in a maintainer reply.
     False,
@@ -220,6 +227,18 @@ pub struct CorpusRow {
     /// how to reconstruct the diff this names, and the integration test
     /// `every_row_reconstructs_a_non_empty_reviewed_diff` holds that recipe to the
     /// data — the prose form of it had already gone wrong for most of the rows.
+    ///
+    /// **Three rows are an admitted exception, and a reader of this type should
+    /// learn it here rather than only from the fixture README.** PR #293's branch
+    /// was force-pushed over the two commits it had been reviewed at, and neither
+    /// object exists in this repository or the remote any more. Rows `3788996405`,
+    /// `3788996424` and `3789014471` therefore name the **surviving rebased
+    /// equivalent** — the commit carrying the same anchor, at the same line, with the
+    /// same defect at it — rather than the literal `original_commit_id`. The evidence
+    /// for each substitution is tabulated in `tests/fixtures/review/README.md`
+    /// (#822). Such a row is still scorable, which a row naming a lost object is
+    /// not; the alternative was deleting real findings because a force push
+    /// inconvenienced them.
     pub reviewed_sha: String,
     /// File the comment is anchored to.
     pub path: String,
@@ -229,9 +248,17 @@ pub struct CorpusRow {
     pub verdict: Verdict,
     /// The kind of defect asserted.
     pub defect_class: DefectClass,
-    /// Short sha of the commit that fixed it, or empty where no single commit is
-    /// attributable (three rows legitimately have none — a blank is honest where a
-    /// plausible-looking guess would corrupt every future score).
+    /// Short sha of the commit that fixed it, or empty where there is no single
+    /// attributable commit — a blank is honest where a plausible-looking guess would
+    /// corrupt every future score.
+    ///
+    /// **Nine rows are blank, and five of them trivially so**: a `false` claim has
+    /// nothing to fix. Among the **four accepted-real** blanks the fixture README
+    /// names the rows in each of two cases: three where the fix landed inside a
+    /// branch rework rather than one commit, and one (`3789014471`) where the
+    /// finding is accepted but **not yet repaired**, carried as an open decision. A
+    /// reader must not take a blank as "not a real defect" — [`Verdict`] is the
+    /// field that says that, and it is the one to read first.
     pub fix_commit: String,
     /// One line stating the defect, or stating why the claim is wrong.
     pub description: String,
@@ -610,7 +637,9 @@ mod tests {
 
     #[test]
     fn a_fix_commit_that_is_not_a_sha_is_refused_but_blank_is_allowed() {
-        // Three rows legitimately carry no fix commit.
+        // Blank is legitimate and load-bearing: nine rows in the shipped corpus
+        // carry no fix commit — the five `false` ones, which have nothing to fix,
+        // and four accepted-real ones the README accounts for individually.
         let ok = Corpus::parse(&row_json(&[("fix_commit", "\"\"")])).expect("blank is allowed");
         assert!(ok.rows()[0].fix_commit.is_empty());
         let err = Corpus::parse(&row_json(&[("fix_commit", "\"landed in a rework\"")]))

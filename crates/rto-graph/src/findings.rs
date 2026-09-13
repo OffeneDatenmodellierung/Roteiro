@@ -1245,7 +1245,10 @@ mod tests {
     /// and `parse ∘ render` is the identity on keys. The gap is between those
     /// two domains, and none of the inputs below is in the image of `render`.
     /// That gap is the known `permissive-constraint` debt of review-corpus row
-    /// `4bed7d81`, and this test does not resolve it.
+    /// `3789014471`, and this test does not resolve it. (That row was cited here
+    /// by its `reviewed_sha` `4bed7d81` until #822, when the commit turned out to
+    /// have been force-pushed away; the row is re-pinned to `fec606e` and is now
+    /// named by its id, which is the field that cannot evaporate.)
     ///
     /// **The decision is deferred to a human — see #798 — and not settled here.**
     /// It is tracked as its own open decision, #798, carved out of #787 so that

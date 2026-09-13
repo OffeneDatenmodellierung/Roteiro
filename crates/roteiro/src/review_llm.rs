@@ -20,8 +20,13 @@
 //! The corpus keys on each comment's `reviewed_sha`, and getting the base wrong
 //! yields a silent zero from either direction: the merged PR head contains the
 //! *fix* commits, and the obvious `merge-base main <sha>` yields an **empty
-//! diff** for 13 of the 15 review commits, because a merged branch is an ancestor
-//! of `main`. [`fork_point`] implements the corrected recipe — find the merge that
+//! diff** for every one of the 15 review commits, because each is an ancestor of
+//! `main`. It used to be all but two, the exceptions being three rows on the two
+//! commits a force-push had removed from the repository; #822 re-pinned them, and
+//! the historical denominator is deliberately not quoted here, because the window
+//! has been 15, then 16, then 15 again and a number in prose beside a moving set is
+//! the drift this module documents elsewhere.
+//! [`fork_point`] implements the corrected recipe — find the merge that
 //! brought the branch in, and diff from its first parent's merge base — and
 //! `every_corpus_commit_reconstructs_a_diff_touching_its_anchor` holds it to every
 //! row. The fixture README states the same rule in prose; the two agree because
@@ -640,7 +645,7 @@ pub struct ReviewSet {
     /// Paths git reported as changed but produced no hunk for — binary blobs,
     /// and pure mode or rename records.
     ///
-    /// **Counted, never quietly dropped.** Six of the corpus's 190 changed paths
+    /// **Counted, never quietly dropped.** Six of the corpus's 182 changed paths
     /// are binary audio fixtures whose whole diff is `Binary files … differ`.
     /// Sending that to a model buys a call's latency and returns noise that lands
     /// in the unadjudicated count, so they are set aside — but a run that reduced
@@ -1066,7 +1071,7 @@ fn record_verdict(
 /// Print what a replay covered — **unadjudicated volume first**.
 ///
 /// The order is the argument. Recall is what a score reports, but 22 adjudicated
-/// rows sit across 190 reviewed files, so the great majority of what a reviewer
+/// rows sit across 176 reviewable files, so the great majority of what a reviewer
 /// says here is something the corpus cannot judge and a human would have to. A
 /// reviewer with excellent recall that also emits a finding on every file is not
 /// one anybody runs, and a report that leads with recall hides that.
@@ -1464,18 +1469,194 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
     }
 
-    /// Whether the git history this test needs is present, printing the reason if
-    /// not — the pattern `dependency_axis.rs` uses for the OSV database. A shallow
-    /// clone is a property of the checkout, never of the code.
-    fn history_available(repo: &Path) -> bool {
+    /// Why a corpus test cannot run here, and what to do about it.
+    ///
+    /// The remedy travels with the reason because one shared remedy was wrong for
+    /// most of them: the old skip told every reader to run `git fetch --unshallow`,
+    /// which does nothing for a checkout that is not a work tree and does not create
+    /// a missing `origin/main`. The three history reasons are mirrored in
+    /// `rto-graph`'s `tests/review_corpus.rs`, which gates the same corpus and must
+    /// be changed with this; the last two are this module's own, because only these
+    /// tests build a graph.
+    #[derive(Debug, Clone, Copy)]
+    enum CannotRun<'a> {
+        NotAWorkTree,
+        Shallow,
+        NoMainRef,
+        /// Carries the error, because the remedy below cites it.
+        NoObjectCache(&'a str),
+        /// Likewise.
+        NoWorktreeGraph(&'a str),
+    }
+
+    impl CannotRun<'_> {
+        fn reason(self) -> String {
+            match self {
+                Self::NotAWorkTree => {
+                    "not a git work tree, or git could not be run here".to_owned()
+                }
+                Self::Shallow => "shallow clone".to_owned(),
+                Self::NoMainRef => "neither origin/main nor main resolves here".to_owned(),
+                // `graph_inputs` can fail at `Repo::discover` as well as at
+                // `ObjectCache::open`, and its message says which — so this names
+                // the pair rather than mislabelling a discovery failure as a cache
+                // one.
+                Self::NoObjectCache(e) => {
+                    format!("the repository or its object cache could not be opened ({e})")
+                }
+                Self::NoWorktreeGraph(e) => {
+                    format!("the working-tree graph could not be assembled ({e})")
+                }
+            }
+        }
+
+        fn remedy(self) -> &'static str {
+            match self {
+                Self::NotAWorkTree => "Run these from a checkout of the repository.",
+                Self::Shallow => "`git fetch --unshallow` runs them.",
+                Self::NoMainRef => {
+                    "Fetch the default branch (`git fetch origin \
+                     main:refs/remotes/origin/main`) — unshallowing alone does not create \
+                     that ref."
+                }
+                Self::NoObjectCache(_) | Self::NoWorktreeGraph(_) => {
+                    "This is a failure rather than a missing precondition, and the \
+                     reason is quoted above: a checkout that cannot build its own graph \
+                     cannot measure a reviewer either."
+                }
+            }
+        }
+    }
+
+    /// This repository's own `repository` URL, which a vendored copy under someone
+    /// else's workspace will not carry — see [`is_repository_checkout`].
+    const REPOSITORY_URL: &str = "https://github.com/OffeneDatenmodellierung/Roteiro";
+
+    /// Whether this is **this repository's** checkout rather than a packaged crate.
+    ///
+    /// **The reason the CI rule below is not simply "never skip".** `roteiro` is
+    /// published, and these tests ship inside the package — a downstream `cargo test`
+    /// on the unpacked crate runs them against a directory that is not this
+    /// repository, usually with `CI=true` set. Failing there would be our defect
+    /// reaching somebody who did nothing wrong, so a package skips even on a runner;
+    /// a real checkout that is missing history does not.
+    ///
+    /// **Two signals, because one is not enough.** The shape follows
+    /// `crates/roteiro/tests/common/mod.rs`, the canonical copy, which reads the
+    /// workspace manifest two levels up — but a crate vendored into *another*
+    /// project sits two levels under *that* project's root, whose manifest may well
+    /// say `[workspace]` too, and this guard would then treat a stranger's
+    /// repository as ours and fail their CI. So the manifest must also name this
+    /// repository. It cannot be imported here — that module serves the integration
+    /// tests, and this is a unit-test module inside the binary — so this is a
+    /// deliberate transcription, kept in step with `rto-graph`'s copy in
+    /// `tests/review_corpus.rs`, whose
+    /// `the_package_exemption_cannot_claim_a_real_checkout` has a twin below.
+    /// **Only `NotFound` means "packaged"**: collapsing every IO error into that
+    /// would turn "cannot read the repository" into "this is not a repository",
+    /// which is the same vacuity one level up.
+    fn is_repository_checkout(repo: &Path) -> bool {
+        let manifest = repo.join("Cargo.toml");
+        match std::fs::read_to_string(&manifest) {
+            Ok(text) => {
+                text.lines().any(|line| line.trim() == "[workspace]")
+                    && text.contains(REPOSITORY_URL)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => panic!(
+                "cannot read {} ({:?}: {e}). Without it a guard cannot tell a packaged \
+                 crate from a repository checkout, and guessing would make it skip in \
+                 silence — which is the failure these guards exist to rule out.",
+                manifest.display(),
+                e.kind(),
+            ),
+        }
+    }
+
+    /// What a skip withheld, for the tests that walk every corpus commit. Named
+    /// rather than written out at each call site, because the message is a claim
+    /// about what did not happen and two copies of a claim drift.
+    const GRAPH_AT_EVERY_CORPUS_COMMIT: &str = "The graph at every corpus commit";
+    /// The same, for the one test that compares the live surface with the replay and
+    /// reconstructs no corpus commit at all — the message used to tell it that
+    /// corpus commits went unreconstructed, which was simply not what it does.
+    const LIVE_VS_REPLAY_COMPARISON: &str = "The live-surface-versus-replay graph comparison";
+
+    /// A skip that can be found in a log, written to **real** stderr — and **never
+    /// taken on a runner**, where every one of these reasons is an environment
+    /// defect rather than a property of the checkout.
+    ///
+    /// `eprintln!` goes through libtest's capture, which discards the output of a
+    /// test that *passes* — so the `SKIP:` lines this used to print were unreadable
+    /// without `--nocapture`, and on CI nobody ever read them. `std::io::stderr()`
+    /// writes to the file descriptor, which the capture does not intercept. What
+    /// went unchecked is part of the message on purpose: a skip that does not say
+    /// how much it withheld reads exactly like a pass, which is how all six tests
+    /// gated on this reported green on every CI run while never reconstructing a
+    /// single commit (#822).
+    ///
+    /// The CI half covers every reason, not only shallowness: a deep checkout with
+    /// no `origin/main`, a `git` that cannot be executed, or a graph that will not
+    /// assemble would each skip its way to green by the identical mechanism.
+    ///
+    /// **A packaged crate is the one exemption**, and it is not a loophole in the
+    /// rule but the boundary of what the rule is about: a published tarball cannot
+    /// contain this repository's history, so failing there would be our defect
+    /// landing on somebody who did nothing wrong. See [`is_repository_checkout`].
+    fn loud_skip_unless_on_ci(test: &str, why: CannotRun<'_>, unchecked: &str) {
+        use std::io::Write;
+
+        let on_ci =
+            std::env::var_os("CI").is_some() || std::env::var_os("GITHUB_ACTIONS").is_some();
+        assert!(
+            !on_ci || !is_repository_checkout(&repo()),
+            "review_llm::tests::{test} cannot run on CI: {}. This is half of the \
+             corpus's gate and must not be skipped in a checkout — \
+             `.github/workflows/ci.yml` checks out with `fetch-depth: 0` in every job \
+             that runs tests, so fix the environment rather than widening this skip, \
+             which is how the corpus replay went unrun on every CI run until #822. {}",
+            why.reason(),
+            why.remedy()
+        );
+        let mut err = std::io::stderr().lock();
+        let _ = writeln!(
+            err,
+            "SKIP: review_llm::tests::{test} — {}. {unchecked} went unchecked. {} In a \
+             repository checkout on CI this is a failure rather than a skip \
+             (`.github/workflows/ci.yml` checks out with `fetch-depth: 0` in every \
+             job that runs tests), so on a runner this line means the crate is \
+             packaged.",
+            why.reason(),
+            why.remedy()
+        );
+        let _ = err.flush();
+    }
+
+    /// Whether the git history this test needs is present.
+    ///
+    /// The skip was modelled on `dependency_axis.rs`'s OSV gate, and for a missing
+    /// database that shape is right: a shallow clone is a property of the checkout,
+    /// never of the code. What made it wrong here is that it was *always* taken on
+    /// CI — every `actions/checkout` in `ci.yml` used the action's default
+    /// `fetch-depth: 1` — so the six tests gated on it were invoked, returned
+    /// immediately, and reported green for their whole existence, including while
+    /// two of the corpus's `reviewed_sha` values no longer existed anywhere (#822).
+    ///
+    /// Returns `false` off a runner, and on one **only for a packaged crate** — in a
+    /// repository checkout a missing precondition panics instead. See
+    /// [`loud_skip_unless_on_ci`], which is where that split lives.
+    fn history_available(repo: &Path, test: &str, unchecked: &str) -> bool {
+        // The **output**, not the exit status: `--is-inside-work-tree` exits 0 in a
+        // bare repository and prints `false`, so a status-only check calls a bare
+        // repo a work tree and then fails later for a reason it cannot explain.
         let ok = std::process::Command::new("git")
             .arg("-C")
             .arg(repo)
             .args(["rev-parse", "--is-inside-work-tree"])
             .output()
-            .is_ok_and(|o| o.status.success());
+            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "true");
         if !ok {
-            eprintln!("SKIP: not a git work tree, cannot reconstruct reviewed diffs");
+            loud_skip_unless_on_ci(test, CannotRun::NotAWorkTree, unchecked);
             return false;
         }
         let shallow = std::process::Command::new("git")
@@ -1485,11 +1666,11 @@ mod tests {
             .output()
             .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "true");
         if shallow {
-            eprintln!("SKIP: shallow clone — run `git fetch --unshallow` to reconstruct");
+            loud_skip_unless_on_ci(test, CannotRun::Shallow, unchecked);
             return false;
         }
         if main_ref(repo).is_err() {
-            eprintln!("SKIP: neither origin/main nor main resolves here");
+            loud_skip_unless_on_ci(test, CannotRun::NoMainRef, unchecked);
             return false;
         }
         true
@@ -1497,11 +1678,46 @@ mod tests {
 
     /// Open this repository and the shared, content-addressed object cache the
     /// per-commit graph builds hit.
-    fn graph_inputs() -> Option<(rto_graph::Repo, rto_graph::ObjectCache)> {
-        let repo = rto_graph::Repo::discover(&repo()).ok()?;
-        let cache =
-            rto_graph::ObjectCache::open(repo.common_dir().join("roteiro").join("objects")).ok()?;
-        Some((repo, cache))
+    /// **Carries its error rather than dropping it.** This used to end in `.ok()?`,
+    /// so a failure to open the repository or its cache arrived at the skip as a
+    /// bare `None` — and the skip then told the reader to "read the error above it",
+    /// which was not there. A diagnostic that promises evidence it discarded is the
+    /// same defect as a skip nobody can see.
+    fn graph_inputs() -> Result<(rto_graph::Repo, rto_graph::ObjectCache), String> {
+        let repo = rto_graph::Repo::discover(&repo())
+            .map_err(|e| format!("cannot discover the repository: {e}"))?;
+        let cache = rto_graph::ObjectCache::open(repo.common_dir().join("roteiro").join("objects"))
+            .map_err(|e| format!("cannot open the object cache: {e}"))?;
+        Ok((repo, cache))
+    }
+
+    /// **The exemption may not switch the rule off** — the twin of
+    /// `rto-graph`'s `the_package_exemption_cannot_claim_a_real_checkout`, because
+    /// this crate carries its own copy of the marker and a copy that drifts would
+    /// let all six gates below skip on CI while the other crate's stayed green.
+    ///
+    /// Only the dangerous direction is asserted: where git reports a work tree, the
+    /// marker must agree that this is a checkout. In a packaged crate it is vacuous
+    /// by construction, which is correct there and is said rather than hidden.
+    #[test]
+    fn the_package_exemption_cannot_claim_a_real_checkout() {
+        let repo = repo();
+        let work_tree = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["rev-parse", "--is-inside-work-tree"])
+            .output()
+            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "true");
+        if work_tree {
+            assert!(
+                is_repository_checkout(&repo),
+                "git reports a work tree at {} but the package marker says this is a \
+                 packaged crate. That combination would let every CI run skip these \
+                 gates silently — which is exactly #822 — so the marker, not this \
+                 assertion, is what needs fixing",
+                repo.display()
+            );
+        }
     }
 
     /// **The graph arm must be built at the reviewed commit, not at `HEAD`.**
@@ -1518,12 +1734,23 @@ mod tests {
     #[test]
     fn the_graph_arm_is_built_at_the_reviewed_commit_not_at_head() {
         let repo_path = repo();
-        if !history_available(&repo_path) {
+        if !history_available(
+            &repo_path,
+            "the_graph_arm_is_built_at_the_reviewed_commit_not_at_head",
+            GRAPH_AT_EVERY_CORPUS_COMMIT,
+        ) {
             return;
         }
-        let Some((repo, cache)) = graph_inputs() else {
-            eprintln!("SKIP: cannot open the repository's object cache");
-            return;
+        let (repo, cache) = match graph_inputs() {
+            Ok(inputs) => inputs,
+            Err(why) => {
+                loud_skip_unless_on_ci(
+                    "the_graph_arm_is_built_at_the_reviewed_commit_not_at_head",
+                    CannotRun::NoObjectCache(&why),
+                    GRAPH_AT_EVERY_CORPUS_COMMIT,
+                );
+                return;
+            }
         };
         for sha in &corpus_shas() {
             let on_disk = std::process::Command::new("git")
@@ -1588,13 +1815,23 @@ mod tests {
     #[test]
     fn the_live_surface_builds_the_same_graph_as_the_replay() {
         let repo_path = repo();
-        if !history_available(&repo_path) {
+        if !history_available(
+            &repo_path,
+            "the_live_surface_builds_the_same_graph_as_the_replay",
+            LIVE_VS_REPLAY_COMPARISON,
+        ) {
             return;
         }
-        let Ok(store) = super::worktree_graph(&repo_path, rto_graph::IngestConfig::default())
-        else {
-            eprintln!("SKIP: the working-tree graph could not be assembled here");
-            return;
+        let store = match super::worktree_graph(&repo_path, rto_graph::IngestConfig::default()) {
+            Ok(store) => store,
+            Err(e) => {
+                loud_skip_unless_on_ci(
+                    "the_live_surface_builds_the_same_graph_as_the_replay",
+                    CannotRun::NoWorktreeGraph(&e.to_string()),
+                    LIVE_VS_REPLAY_COMPARISON,
+                );
+                return;
+            }
         };
         let on_disk = std::fs::read_dir(repo_path.join("docs/adr"))
             .expect("this repository has an ADR directory")
@@ -1649,12 +1886,23 @@ mod tests {
     #[test]
     fn the_graph_arm_supplies_provenance_tagged_context_on_the_corpus() {
         let repo_path = repo();
-        if !history_available(&repo_path) {
+        if !history_available(
+            &repo_path,
+            "the_graph_arm_supplies_provenance_tagged_context_on_the_corpus",
+            GRAPH_AT_EVERY_CORPUS_COMMIT,
+        ) {
             return;
         }
-        let Some((repo, cache)) = graph_inputs() else {
-            eprintln!("SKIP: cannot open the repository's object cache");
-            return;
+        let (repo, cache) = match graph_inputs() {
+            Ok(inputs) => inputs,
+            Err(why) => {
+                loud_skip_unless_on_ci(
+                    "the_graph_arm_supplies_provenance_tagged_context_on_the_corpus",
+                    CannotRun::NoObjectCache(&why),
+                    GRAPH_AT_EVERY_CORPUS_COMMIT,
+                );
+                return;
+            }
         };
         let main = main_ref(&repo_path).expect("checked above");
         let mut files_with_context = 0usize;
@@ -1741,7 +1989,11 @@ mod tests {
     #[test]
     fn every_corpus_commit_reconstructs_a_diff_touching_its_anchor() {
         let repo = repo();
-        if !history_available(&repo) {
+        if !history_available(
+            &repo,
+            "every_corpus_commit_reconstructs_a_diff_touching_its_anchor",
+            "The diff reconstruction at every corpus commit",
+        ) {
             return;
         }
         let main = main_ref(&repo).expect("checked above");
@@ -1787,7 +2039,7 @@ mod tests {
     }
 
     /// **No adjudicated row is anchored to a file the harness sets aside.** Six of
-    /// the corpus's 190 changed paths are binary audio fixtures with no reviewable
+    /// the corpus's 182 changed paths are binary audio fixtures with no reviewable
     /// diff. Skipping them is free only while that stays true — a skip rule that
     /// quietly excluded a file carrying a real defect would raise recall by
     /// shrinking its own denominator, which is the most flattering mistake
@@ -1795,7 +2047,11 @@ mod tests {
     #[test]
     fn nothing_the_harness_skips_carries_an_adjudicated_row() {
         let repo = repo();
-        if !history_available(&repo) {
+        if !history_available(
+            &repo,
+            "nothing_the_harness_skips_carries_an_adjudicated_row",
+            "The unreviewable-path check over every corpus commit",
+        ) {
             return;
         }
         let main = main_ref(&repo).expect("checked above");
@@ -1822,18 +2078,34 @@ mod tests {
     }
 
     /// The measured scale of a replay, asserted so a change to the recipe that
-    /// quietly reviews half the corpus is caught. The budget analysis was computed
-    /// over 197 changed paths on 16 commits, of which **191 are reviewable** —
-    /// both halves are asserted, because a drop in either is a different bug.
+    /// quietly reviews half the corpus is caught. The replay window is **182
+    /// changed paths on 15 commits, of which 176 are reviewable** — both halves
+    /// are asserted, because a drop in either is a different bug.
     ///
     /// These numbers move when the **corpus** gains a commit, which is the guard
     /// working rather than failing: the replay window is the corpus's distinct
     /// `reviewed_sha` values, so adjudicating a comment on a new commit widens
     /// it. #736 took it from 15 commits and 190 paths to 16 and 197.
+    ///
+    /// #822 took it back to 15 and 182, and that is the one direction worth
+    /// explaining, because a *shrinking* window is what this assertion is for.
+    /// Two of those 16 commits were PR #293's pre-force-push shas, which no
+    /// longer exist in the repository or the remote; they are re-pinned to the
+    /// surviving rebased commits `ab3b1bc` and `fec606e`, and `fec606e` was
+    /// already a `reviewed_sha` here — so two review commits collapsed into one
+    /// the window already held, and one commit's worth of changed paths left it.
+    /// The 197/191 pair was honest when #736 measured it and became
+    /// unverifiable, not wrong, when those objects were lost: this assertion has
+    /// never run on CI (every checkout was shallow, so `history_available`
+    /// returned early), so nothing outside a developer's own clone re-checked it.
     #[test]
     fn a_replay_covers_the_measured_number_of_files() {
         let repo = repo();
-        if !history_available(&repo) {
+        if !history_available(
+            &repo,
+            "a_replay_covers_the_measured_number_of_files",
+            "The measured replay window (commits, changed paths, reviewable paths)",
+        ) {
             return;
         }
         let main = main_ref(&repo).expect("checked above");
@@ -1845,8 +2117,8 @@ mod tests {
         }
         assert_eq!(
             (corpus_shas().len(), changed, reviewable),
-            (16, 197, 191),
-            "16 commits, 197 changed paths, 191 with a reviewable diff"
+            (15, 182, 176),
+            "15 commits, 182 changed paths, 176 with a reviewable diff"
         );
     }
 

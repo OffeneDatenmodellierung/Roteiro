@@ -100,8 +100,11 @@ thing a person does is decided entirely by the sentence they have just read.
 
 Automated review is worth having — over twelve PRs in one day, *every* comment
 GitHub Copilot left was adjudicated, and **22 of them were real defects that were
-accepted and fixed**. Not one was caught by CI or by the author's own
-verification, because every one of them *passed*. They were contract-accuracy
+accepted** — 21 of them fixed, and one (`3789014471`, `split_escaped`) accepted
+and carried as an open decision, #798, rather than repaired; the fixture README
+records it. Not
+one was caught by CI or by the author's own verification, because every one of
+them *passed*. They were contract-accuracy
 defects: code that worked but did not mean what it said.
 
 Those adjudications, plus any added since, live in
