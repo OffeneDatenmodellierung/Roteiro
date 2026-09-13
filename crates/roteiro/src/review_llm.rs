@@ -1071,7 +1071,7 @@ fn record_verdict(
 /// Print what a replay covered — **unadjudicated volume first**.
 ///
 /// The order is the argument. Recall is what a score reports, but 22 adjudicated
-/// rows sit across 190 reviewed files, so the great majority of what a reviewer
+/// rows sit across 176 reviewable files, so the great majority of what a reviewer
 /// says here is something the corpus cannot judge and a human would have to. A
 /// reviewer with excellent recall that also emits a finding on every file is not
 /// one anybody runs, and a report that leads with recall hides that.
@@ -1497,8 +1497,12 @@ mod tests {
                 }
                 Self::Shallow => "shallow clone".to_owned(),
                 Self::NoMainRef => "neither origin/main nor main resolves here".to_owned(),
+                // `graph_inputs` can fail at `Repo::discover` as well as at
+                // `ObjectCache::open`, and its message says which — so this names
+                // the pair rather than mislabelling a discovery failure as a cache
+                // one.
                 Self::NoObjectCache(e) => {
-                    format!("the repository's object cache could not be opened ({e})")
+                    format!("the repository or its object cache could not be opened ({e})")
                 }
                 Self::NoWorktreeGraph(e) => {
                     format!("the working-tree graph could not be assembled ({e})")
@@ -1524,7 +1528,11 @@ mod tests {
         }
     }
 
-    /// Whether this is a repository checkout rather than a packaged crate.
+    /// This repository's own `repository` URL, which a vendored copy under someone
+    /// else's workspace will not carry — see [`is_repository_checkout`].
+    const REPOSITORY_URL: &str = "https://github.com/OffeneDatenmodellierung/Roteiro";
+
+    /// Whether this is **this repository's** checkout rather than a packaged crate.
     ///
     /// **The reason the CI rule below is not simply "never skip".** `roteiro` is
     /// published, and these tests ship inside the package — a downstream `cargo test`
@@ -1533,18 +1541,27 @@ mod tests {
     /// reaching somebody who did nothing wrong, so a package skips even on a runner;
     /// a real checkout that is missing history does not.
     ///
-    /// The marker is the workspace manifest, following
-    /// `crates/roteiro/tests/common/mod.rs`, which reasons this out in full and is
-    /// the canonical copy. It cannot be imported here — that module serves the
-    /// integration tests, and this is a unit-test module inside the binary — so this
-    /// is a deliberate fourth transcription of a twelve-line rule, kept identical on
-    /// purpose. **Only `NotFound` means "packaged"**: collapsing every IO error into
-    /// that would turn "cannot read the repository" into "this is not a repository",
+    /// **Two signals, because one is not enough.** The shape follows
+    /// `crates/roteiro/tests/common/mod.rs`, the canonical copy, which reads the
+    /// workspace manifest two levels up — but a crate vendored into *another*
+    /// project sits two levels under *that* project's root, whose manifest may well
+    /// say `[workspace]` too, and this guard would then treat a stranger's
+    /// repository as ours and fail their CI. So the manifest must also name this
+    /// repository. It cannot be imported here — that module serves the integration
+    /// tests, and this is a unit-test module inside the binary — so this is a
+    /// deliberate transcription, kept in step with `rto-graph`'s copy in
+    /// `tests/review_corpus.rs`, whose
+    /// `the_package_exemption_cannot_claim_a_real_checkout` has a twin below.
+    /// **Only `NotFound` means "packaged"**: collapsing every IO error into that
+    /// would turn "cannot read the repository" into "this is not a repository",
     /// which is the same vacuity one level up.
     fn is_repository_checkout(repo: &Path) -> bool {
         let manifest = repo.join("Cargo.toml");
         match std::fs::read_to_string(&manifest) {
-            Ok(text) => text.lines().any(|line| line.trim() == "[workspace]"),
+            Ok(text) => {
+                text.lines().any(|line| line.trim() == "[workspace]")
+                    && text.contains(REPOSITORY_URL)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
             Err(e) => panic!(
                 "cannot read {} ({:?}: {e}). Without it a guard cannot tell a packaged \
@@ -1625,8 +1642,9 @@ mod tests {
     /// immediately, and reported green for their whole existence, including while
     /// two of the corpus's `reviewed_sha` values no longer existed anywhere (#822).
     ///
-    /// Returns `false` only off a runner; on one, a missing precondition panics —
-    /// see [`loud_skip_unless_on_ci`].
+    /// Returns `false` off a runner, and on one **only for a packaged crate** — in a
+    /// repository checkout a missing precondition panics instead. See
+    /// [`loud_skip_unless_on_ci`], which is where that split lives.
     fn history_available(repo: &Path, test: &str, unchecked: &str) -> bool {
         // The **output**, not the exit status: `--is-inside-work-tree` exits 0 in a
         // bare repository and prints `false`, so a status-only check calls a bare
@@ -1671,6 +1689,35 @@ mod tests {
         let cache = rto_graph::ObjectCache::open(repo.common_dir().join("roteiro").join("objects"))
             .map_err(|e| format!("cannot open the object cache: {e}"))?;
         Ok((repo, cache))
+    }
+
+    /// **The exemption may not switch the rule off** — the twin of
+    /// `rto-graph`'s `the_package_exemption_cannot_claim_a_real_checkout`, because
+    /// this crate carries its own copy of the marker and a copy that drifts would
+    /// let all six gates below skip on CI while the other crate's stayed green.
+    ///
+    /// Only the dangerous direction is asserted: where git reports a work tree, the
+    /// marker must agree that this is a checkout. In a packaged crate it is vacuous
+    /// by construction, which is correct there and is said rather than hidden.
+    #[test]
+    fn the_package_exemption_cannot_claim_a_real_checkout() {
+        let repo = repo();
+        let work_tree = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["rev-parse", "--is-inside-work-tree"])
+            .output()
+            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "true");
+        if work_tree {
+            assert!(
+                is_repository_checkout(&repo),
+                "git reports a work tree at {} but the package marker says this is a \
+                 packaged crate. That combination would let every CI run skip these \
+                 gates silently — which is exactly #822 — so the marker, not this \
+                 assertion, is what needs fixing",
+                repo.display()
+            );
+        }
     }
 
     /// **The graph arm must be built at the reviewed commit, not at `HEAD`.**

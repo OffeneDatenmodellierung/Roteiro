@@ -248,15 +248,17 @@ pub struct CorpusRow {
     pub verdict: Verdict,
     /// The kind of defect asserted.
     pub defect_class: DefectClass,
-    /// Short sha of the commit that fixed it, or empty where no single commit is
-    /// attributable (four rows legitimately have none — a blank is honest where a
-    /// plausible-looking guess would corrupt every future score).
+    /// Short sha of the commit that fixed it, or empty where there is no single
+    /// attributable commit — a blank is honest where a plausible-looking guess would
+    /// corrupt every future score.
     ///
-    /// Blank covers two distinct cases, and the fixture README names the rows in
-    /// each: three where the fix landed inside a branch rework, and one
-    /// (`3789014471`) where the finding is accepted but **not yet fixed**, with the
-    /// decision tracked as its own issue. A reader must not take a blank as "not a
-    /// real defect" — `verdict` is the field that says that.
+    /// **Nine rows are blank, and five of them trivially so**: a `false` claim has
+    /// nothing to fix. Among the **four accepted-real** blanks the fixture README
+    /// names the rows in each of two cases: three where the fix landed inside a
+    /// branch rework rather than one commit, and one (`3789014471`) where the
+    /// finding is accepted but **not yet repaired**, carried as an open decision. A
+    /// reader must not take a blank as "not a real defect" — [`Verdict`] is the
+    /// field that says that, and it is the one to read first.
     pub fix_commit: String,
     /// One line stating the defect, or stating why the claim is wrong.
     pub description: String,
@@ -635,7 +637,9 @@ mod tests {
 
     #[test]
     fn a_fix_commit_that_is_not_a_sha_is_refused_but_blank_is_allowed() {
-        // Three rows legitimately carry no fix commit.
+        // Blank is legitimate and load-bearing: nine rows in the shipped corpus
+        // carry no fix commit — the five `false` ones, which have nothing to fix,
+        // and four accepted-real ones the README accounts for individually.
         let ok = Corpus::parse(&row_json(&[("fix_commit", "\"\"")])).expect("blank is allowed");
         assert!(ok.rows()[0].fix_commit.is_empty());
         let err = Corpus::parse(&row_json(&[("fix_commit", "\"landed in a rework\"")]))

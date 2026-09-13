@@ -467,8 +467,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Full history; see the `checks` job for what reads it and what the eight
-          # tests that need it were doing without it. This job is the one whose
+          # Full history; see the `checks` job for what reads it and what the nine
+          # tests gated on it were doing without it. This job is the one whose
           # `--no-fail-fast` counts are meant to be a measurement rather than a
           # lower bound, and nine tests reporting as passed while asserting
           # nothing is the other way to get a number that is not one.

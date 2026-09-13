@@ -40,6 +40,10 @@ fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/review")
 }
 
+/// This repository's own `repository` URL, which a vendored copy under someone
+/// else's workspace will not carry — see [`is_repository_checkout`].
+const REPOSITORY_URL: &str = "https://github.com/OffeneDatenmodellierung/Roteiro";
+
 /// This repository, from the crate whose tests these are.
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -115,7 +119,7 @@ fn on_ci() -> bool {
     std::env::var_os("CI").is_some() || std::env::var_os("GITHUB_ACTIONS").is_some()
 }
 
-/// Whether this is a repository checkout rather than a packaged crate.
+/// Whether this is **this repository's** checkout rather than a packaged crate.
 ///
 /// **The reason the CI rule below is not simply "never skip".** `rto-graph` is
 /// published and this test ships inside the package, so a downstream `cargo test` on
@@ -124,21 +128,25 @@ fn on_ci() -> bool {
 /// who did nothing wrong. A package therefore skips even on a runner; a real
 /// checkout missing its history does not.
 ///
-/// The marker is the workspace manifest, following
-/// `crates/roteiro/tests/common/mod.rs`, which reasons it out in full and is the
-/// canonical copy — not importable from another crate's test binary, so this is a
-/// deliberate transcription kept identical on purpose. **Only `NotFound` means
-/// "packaged"**: collapsing every IO error into that would turn "cannot read the
-/// repository" into "this is not a repository", which is the same vacuity one level
-/// up.
+/// **Two signals, because one is not enough.** The shape follows
+/// `crates/roteiro/tests/common/mod.rs`, the canonical copy, which reads the
+/// workspace manifest two levels up — but a crate vendored into *another* project
+/// sits two levels under *that* project's root, whose manifest may well say
+/// `[workspace]` too, and this guard would then treat a stranger's repository as
+/// ours and fail their CI. So the manifest must also name this repository. **Only
+/// `NotFound` means "packaged"**: collapsing every IO error into that would turn
+/// "cannot read the repository" into "this is not a repository", which is the same
+/// vacuity one level up.
 fn is_repository_checkout() -> bool {
     let manifest = repo_root().join("Cargo.toml");
     match std::fs::read_to_string(&manifest) {
-        Ok(text) => text.lines().any(|line| line.trim() == "[workspace]"),
+        Ok(text) => {
+            text.lines().any(|line| line.trim() == "[workspace]") && text.contains(REPOSITORY_URL)
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
         Err(e) => panic!(
-            "cannot read {} ({:?}: {e}). Without it a guard cannot tell a packaged \
-             crate from a repository checkout, and guessing would make it skip in \
+            "cannot read {} ({:?}: {e}). Without it a guard cannot tell a packaged \\
+             crate from a repository checkout, and guessing would make it skip in \\
              silence — which is the failure this guard exists to rule out.",
             manifest.display(),
             e.kind(),

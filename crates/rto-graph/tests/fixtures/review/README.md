@@ -144,8 +144,10 @@ decisive — but only one that actually compiled the code in question, which is
 narrower than "CI is green" and is spelled out there. Follow that file, not this
 paragraph, when adding rows.
 
-Four rows carry an **empty `fix_commit`**, for two different reasons, and neither
-is "we could not be bothered to look".
+Nine rows carry an **empty `fix_commit`**, and five of those are the `false`
+claims, which have nothing to fix by definition. The **four accepted-real** ones
+are the interesting case, and they are blank for two different reasons, neither of
+which is "we could not be bothered to look".
 
 Three are the PR #299 `vacuous-test` findings (ids `3789173576`, `3789173583`,
 `3789173587`). All three were accepted and fixed, with failure-injection evidence
@@ -360,9 +362,9 @@ pre-doomed — whatever the graph has to add, there is space to put it.
 
 ### What the corpus can judge, and how little of it that is
 
-A replay reviews 184 files. The corpus anchors **22 rows across 22 distinct
+A replay reviews 176 files. The corpus anchors **22 rows across 22 distinct
 `(sha, path)` pairs**, so roughly one file in eight carries anything the corpus can
-adjudicate at all. Everything said about the other ~162 is *unadjudicated* by
+adjudicate at all. Everything said about the other ~154 is *unadjudicated* by
 construction — not wrong, just unjudgeable here.
 
 That ratio, not recall, is what decides whether a reviewer is usable. A reviewer
