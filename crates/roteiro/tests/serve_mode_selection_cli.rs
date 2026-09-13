@@ -908,6 +908,18 @@ fn observe_mode(what: &str, cmd: &'static str, cwd: &Path, home: &IsolatedHome) 
                  `/v1/graph/workspaces` answered {graph_status} — the line and \
                  the router disagree"
             );
+            // The other half of the contract this file's header table states, and
+            // the half that was missing: graph mode serves `/` as the UI. Only
+            // the bundles-only branch asserted its `/` behaviour, so a regression
+            // that redirected graph mode to `{OKF_BASE}` would have satisfied
+            // every cell — the two modes would have become distinguishable only
+            // by a startup string.
+            assert_eq!(
+                (root_status, root_location.as_str()),
+                (200, ""),
+                "{what}: graph mode serves the explorer UI at `/`; a redirect \
+                 there is the bundles-only contract, not this one"
+            );
             // Read back from the router rather than parsed out of the startup
             // line: the line is what the server *said*, this is what it serves.
             (Mode::Graph(workspace_names(&addr)), String::new())
