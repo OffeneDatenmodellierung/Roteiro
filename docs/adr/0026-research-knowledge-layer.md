@@ -206,7 +206,9 @@ deliberately.
 2. `knowledge/` recognised as authored-layer input, with `render okf` projecting
    it into the bundle as its own kind.
 3. The MCP surface narrowed — see below.
-4. `ModelTask::Distil` for the summarisation step.
+4. A `ModelTask::Distil` variant for the summarisation step — **a variant this
+   ADR proposes**; the enum today runs `Embed`, `Draft`, `Chat`, `Review` and the
+   media tasks.
 
 ### The MCP surface narrows, and stays read-only
 
@@ -755,9 +757,14 @@ eight lost content and two lost it entirely. That measurement is over
 **first-party** prose. A third-party markdown file dropped into `raw/` is the
 opposite population, and the carve-out's evidence says nothing about it. So:
 
-- a PDF in `raw/` **loses** a screen it gets today;
-- a markdown file in `raw/` **never had one**, and the reason it never had one
-  does not transfer to foreign content.
+- a PDF in `raw/` **loses** a screen it gets today — *if* the walk sees it at
+  all; under the local default it is untracked and never traversed, so for that
+  case the screen is not lost but was never reached;
+- a markdown file in `raw/` **never had one** either way, and the reason it never
+  had one does not transfer to foreign content.
+
+Both bullets point the same direction: the ingest path is the **first** screen
+these documents meet, not a replacement for one they were getting.
 
 Neither gap is closed by wiring the existing screener up and moving on — but
 **one of #813's worries is discharged by measurement rather than inherited, and
@@ -921,8 +928,9 @@ in the direction v0.1 named as the acceptable one:
   writes `/log.md` beside the indexes — but **conditionally**: the file is
   appended only `if !log.is_empty()`.
 - **Both callers pass `&[]`** ([[crates/roteiro/src/main.rs]], the project and
-  workspace render paths), so **no bundle Roteiro has ever published contains a
-  `log.md` at all.** It is omitted, not emitted empty — a distinction worth
+  workspace render paths), so **neither current render path emits a `log.md` at
+  all.** (Stated of the code as it stands: a source reading cannot establish what
+  every past release did, and no historical audit was run.) It is omitted, not emitted empty — a distinction worth
   keeping, since an absent reserved file is a bundle that never made the claim,
   where an empty one would be a bundle asserting that nothing happened.
 
@@ -936,8 +944,11 @@ bundle is.
 purpose.** ADR-0021 resolves a concept's `verified.at` to the commit that last
 changed that document's own path, *"rather than the render's"* — via
 [[crates/rto-graph/src/git.rs#Repo]] `last_authors` — precisely so the bundle
-carries no `SystemTime::now()`. That `(date, author)` pair, grouped by date and
-rendered newest-first, is `log.md`. **The order must be total, not just
+carries no `SystemTime::now()`. **The date half of that record**, grouped by day
+and rendered newest-first, is `log.md` — the author is deliberately not carried
+into the entry, because `verified.by` already states it per concept and repeating
+it per line would put the same name on every row of a single-maintainer
+repository without adding information. **The order must be total, not just
 newest-first.** [[crates/rto-render/src/okf.rs#render_log]] emits days and
 entries in the order its caller supplies, so "grouped by date" alone leaves ties
 free and two conforming implementations would emit different bundles — which the
