@@ -40,6 +40,29 @@ fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/review")
 }
 
+/// This repository's path, as it appears in a clone's remote URL — the one signal a
+/// vendored copy cannot present, because a consumer's remote is their own. Used by
+/// the two guards below to decide whether they are looking at *this* repository.
+const REPOSITORY_PATH: &str = "OffeneDatenmodellierung/Roteiro";
+
+/// Whether the checkout at `repo_root()` was cloned from this repository.
+///
+/// Independent of everything the guards check: not the manifest (a vendored crate
+/// sits under a consumer's), not the layout (the corpus fixture ships inside the
+/// package, so `consumer/crates/rto-graph/tests/fixtures/…` exists too), and not
+/// the marker itself, which is the thing being held. A fork reports its own path
+/// and so declines to assert, which is the right way for a guard to fail.
+fn cloned_from_this_repository() -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root())
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .is_ok_and(|o| {
+            o.status.success() && String::from_utf8_lossy(&o.stdout).contains(REPOSITORY_PATH)
+        })
+}
+
 /// This workspace manifest's **own** `repository =` line. Matched as a whole line
 /// rather than searched for: a consumer that depends on Roteiro by git URL has that
 /// URL in its manifest too, and `contains` would call their project ours — see
@@ -247,17 +270,20 @@ fn history_or_loud_skip(test: &str, rows: usize) -> bool {
 /// separate the two rules, and the second is the one that does it.
 #[test]
 fn the_manifest_rule_accepts_only_this_repository() {
-    // Read, never `expect`: this test ships inside the published crate, where the
-    // workspace manifest is absent by design. A packaged run checks the three
-    // synthetic cases below — which are the rule — and says nothing about a file it
-    // was never going to have.
-    match std::fs::read_to_string(repo_root().join("Cargo.toml")) {
-        Ok(ours) => assert!(
+    // The live manifest is only checked where the remote says this checkout is ours.
+    // A packaged crate has no manifest there; a crate vendored under a consumer has
+    // *their* manifest there, and asserting on it would fail their `cargo test` for
+    // being correctly packaged. The three synthetic cases below are the rule and run
+    // everywhere.
+    if cloned_from_this_repository() {
+        let ours = std::fs::read_to_string(repo_root().join("Cargo.toml"))
+            .expect("a checkout of this repository has a workspace manifest");
+        assert!(
             manifest_is_ours(&ours),
-            "our own workspace manifest must qualify"
-        ),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => panic!("cannot read our own workspace manifest: {e}"),
+            "our own workspace manifest no longer satisfies the rule — every CI run \
+             would now take the packaged exemption and skip the corpus gates in \
+             silence, so this is the marker's problem, not this assertion's"
+        );
     }
 
     let consumer_depending_on_us = format!(
@@ -316,13 +342,11 @@ fn the_package_exemption_cannot_claim_a_real_checkout() {
         .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "true");
     // A vendored copy inside somebody's repository has a work tree too, and the
     // marker rightly says "packaged" there — asserting on the work tree alone would
-    // fail their `cargo test`, which is the defect this whole exemption exists to
-    // avoid. The second signal is this repository's own layout: the corpus fixture
-    // at its own path, which a consumer's root does not have.
-    let our_layout = repo_root()
-        .join("crates/rto-graph/tests/fixtures/review/review-corpus.jsonl")
-        .exists();
-    if work_tree && our_layout {
+    // fail their `cargo test`, which is the defect this exemption exists to avoid.
+    // The layout is not the second signal either: the corpus fixture ships in the
+    // package, so `consumer/crates/rto-graph/tests/fixtures/…` exists as well. The
+    // remote is what a vendored copy cannot present.
+    if work_tree && cloned_from_this_repository() {
         assert!(
             is_repository_checkout(&repo_root()),
             "git reports a work tree at {} but the package marker says this is a \

@@ -1528,6 +1528,31 @@ mod tests {
         }
     }
 
+    /// This repository's path, as it appears in a clone's remote URL — the one
+    /// signal a vendored copy cannot present, because a consumer's remote is their
+    /// own. Used by the two guards below to decide whether they are looking at
+    /// *this* repository.
+    const REPOSITORY_PATH: &str = "OffeneDatenmodellierung/Roteiro";
+
+    /// Whether the checkout at `repo` was cloned from this repository.
+    ///
+    /// Independent of everything the guards check: not the manifest (a vendored
+    /// crate sits under a consumer's), not the layout (the corpus fixture ships
+    /// inside the package, so `consumer/crates/rto-graph/tests/fixtures/…` exists
+    /// too), and not the marker itself, which is the thing being held. A fork
+    /// reports its own path and so declines to assert, which is the right way for a
+    /// guard to fail. Mirrors `rto-graph`'s copy in `tests/review_corpus.rs`.
+    fn cloned_from_this_repository(repo: &Path) -> bool {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["remote", "get-url", "origin"])
+            .output()
+            .is_ok_and(|o| {
+                o.status.success() && String::from_utf8_lossy(&o.stdout).contains(REPOSITORY_PATH)
+            })
+    }
+
     /// This workspace manifest's **own** `repository =` line. Matched as a whole
     /// line rather than searched for: a consumer that depends on Roteiro by git URL
     /// has that URL in its manifest too, and `contains` would call their project
@@ -1714,17 +1739,20 @@ mod tests {
     /// gates back on the CI of anyone who depends on Roteiro by git URL.
     #[test]
     fn the_manifest_rule_accepts_only_this_repository() {
-        // Read, never `expect`: this module ships inside the published crate, where
-        // the workspace manifest is absent by design. A packaged run checks the
-        // three synthetic cases below — which are the rule — and says nothing about
-        // a file it was never going to have.
-        match std::fs::read_to_string(repo().join("Cargo.toml")) {
-            Ok(ours) => assert!(
+        // The live manifest is only checked where the remote says this checkout is
+        // ours. A packaged crate has no manifest there; a crate vendored under a
+        // consumer has *their* manifest there, and asserting on it would fail their
+        // `cargo test` for being correctly packaged. The three synthetic cases below
+        // are the rule and run everywhere.
+        if cloned_from_this_repository(&repo()) {
+            let ours = std::fs::read_to_string(repo().join("Cargo.toml"))
+                .expect("a checkout of this repository has a workspace manifest");
+            assert!(
                 manifest_is_ours(&ours),
-                "our own workspace manifest must qualify"
-            ),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => panic!("cannot read our own workspace manifest: {e}"),
+                "our own workspace manifest no longer satisfies the rule — every CI \
+                 run would now take the packaged exemption and skip these gates in \
+                 silence, so this is the marker's problem, not this assertion's"
+            );
         }
 
         let url = REPOSITORY_FIELD
@@ -1780,11 +1808,9 @@ mod tests {
             .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "true");
         // Two signals, for the reason `rto-graph`'s twin gives: a vendored copy inside
         // somebody's repository has a work tree too, and the marker rightly says
-        // "packaged" there.
-        let our_layout = repo
-            .join("crates/rto-graph/tests/fixtures/review/review-corpus.jsonl")
-            .exists();
-        if work_tree && our_layout {
+        // "packaged" there. The layout cannot be the second signal — the corpus
+        // fixture ships in the package — so the remote is.
+        if work_tree && cloned_from_this_repository(&repo) {
             assert!(
                 is_repository_checkout(&repo),
                 "git reports a work tree at {} but the package marker says this is a \
