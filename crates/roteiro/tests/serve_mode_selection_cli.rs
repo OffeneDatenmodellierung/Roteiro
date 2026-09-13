@@ -89,6 +89,12 @@ struct Cell {
     bundle: bool,
     /// The mode selected today.
     mode: Mode,
+    /// For a [`Mode::Refuses`] cell, a fragment the diagnostic must contain.
+    ///
+    /// Without it the cell says only "exited non-zero", which any early failure
+    /// satisfies — a bad address, an unreadable config, a panic — so the cell
+    /// would stop pinning *which* refusal this is.
+    refusal: Option<&'static str>,
 }
 
 /// Shorthand for a `Graph` expectation: the workspaces the cell must serve.
@@ -110,6 +116,7 @@ fn graph(names: &[&str]) -> Mode {
 fn explorer_mode_truth_table_without_a_bundle() {
     run_matrix(
         "explorer-modes-nobundle",
+        "explorer",
         &[
             Cell {
                 what: "no config, inside a repo, no bundle → the cwd repo alone",
@@ -118,8 +125,9 @@ fn explorer_mode_truth_table_without_a_bundle() {
                 bundle: false,
                 // Named after the directory, by `explorer_cwd_set` — and this is
                 // the observation that separates the fallback from the
-                // configured cells below.
+                // configured cells below, and from `serve`'s `default`.
                 mode: graph(&["cell0"]),
+                refusal: None,
             },
             Cell {
                 what: "no config, no repo, no bundle → nothing to serve",
@@ -127,6 +135,7 @@ fn explorer_mode_truth_table_without_a_bundle() {
                 repo: false,
                 bundle: false,
                 mode: Mode::Refuses,
+                refusal: Some("Could not find a git repository"),
             },
             Cell {
                 what: "config, inside a repo, no bundle → the configured set (the \
@@ -135,6 +144,7 @@ fn explorer_mode_truth_table_without_a_bundle() {
                 repo: true,
                 bundle: false,
                 mode: graph(&["one", "two"]),
+                refusal: None,
             },
             Cell {
                 what: "config, no repo, no bundle → the configured set; a repo is \
@@ -143,6 +153,7 @@ fn explorer_mode_truth_table_without_a_bundle() {
                 repo: false,
                 bundle: false,
                 mode: graph(&["one", "two"]),
+                refusal: None,
             },
         ],
     );
@@ -168,6 +179,7 @@ fn explorer_mode_truth_table_without_a_bundle() {
 fn explorer_mode_truth_table_with_a_bundle() {
     run_matrix(
         "explorer-modes-bundle",
+        "explorer",
         &[
             Cell {
                 what: "no config, inside a repo, a bundle → still the graph; \
@@ -176,6 +188,7 @@ fn explorer_mode_truth_table_with_a_bundle() {
                 repo: true,
                 bundle: true,
                 mode: graph(&["cell0"]),
+                refusal: None,
             },
             Cell {
                 what: "no config, no repo, a bundle → bundles only (this is what \
@@ -184,6 +197,7 @@ fn explorer_mode_truth_table_with_a_bundle() {
                 repo: false,
                 bundle: true,
                 mode: Mode::BundlesOnly,
+                refusal: None,
             },
             Cell {
                 what: "config, inside a repo, a bundle → the configured set",
@@ -191,6 +205,7 @@ fn explorer_mode_truth_table_with_a_bundle() {
                 repo: true,
                 bundle: true,
                 mode: graph(&["one", "two"]),
+                refusal: None,
             },
             Cell {
                 what: "config, no repo, a bundle → the configured set, NOT bundles \
@@ -199,6 +214,7 @@ fn explorer_mode_truth_table_with_a_bundle() {
                 repo: false,
                 bundle: true,
                 mode: graph(&["one", "two"]),
+                refusal: None,
             },
         ],
     );
@@ -216,6 +232,7 @@ fn explorer_mode_truth_table_with_a_bundle() {
 fn explorer_without_the_viewer_has_no_bundle_fallback() {
     run_matrix(
         "explorer-modes-noviewer",
+        "explorer",
         &[Cell {
             what: "no config, no repo, a bundle, no `okf-viewer` → refuses; there \
                    is no fallback compiled in",
@@ -223,7 +240,71 @@ fn explorer_without_the_viewer_has_no_bundle_fallback() {
             repo: false,
             bundle: true,
             mode: Mode::Refuses,
+            refusal: Some("Could not find a git repository"),
         }],
+    );
+}
+
+/// **The same question asked of `roteiro serve`.**
+///
+/// `serve` and `explorer` decide what to serve in two different functions —
+/// `build_serve_workspaces` and `run_explorer` — and a `--scope` flag will touch
+/// both. The explorer tables above cannot speak for `serve`: its fallback is
+/// guarded differently (`resolved.is_empty() && workspace_roots.is_empty() &&
+/// workspace_name.is_none()`), it names the single-repo workspace `default`
+/// rather than after the directory, and it has no bundles-only mode at all.
+///
+/// No bundle column here, because there is nothing for it to select: `serve`
+/// never reaches `serve_okf_only`. What bundles do to `serve` is a mount, and
+/// that is pinned by `a_project_with_no_known_repository_root_contributes_no_mount`.
+///
+/// These cells run with no model installed (the isolated home has none), so
+/// `run_serve_network` degrades to the same llama-free graph server `explorer`
+/// serves — which is what makes the two comparable at all.
+#[test]
+fn serve_mode_truth_table() {
+    run_matrix(
+        "serve-modes",
+        "serve",
+        &[
+            Cell {
+                what: "no config, inside a repo → the cwd repo alone, hosted as \
+                       `default` (NOT named after the directory, as `explorer` \
+                       names it)",
+                config: false,
+                repo: true,
+                bundle: false,
+                mode: graph(&["default"]),
+                refusal: None,
+            },
+            Cell {
+                what: "no config, no repo → nothing to serve; the single-repo \
+                       fallback needs a git cwd and says so",
+                config: false,
+                repo: false,
+                bundle: false,
+                mode: Mode::Refuses,
+                refusal: Some("Could not find a git repository"),
+            },
+            Cell {
+                what: "config, inside a repo → the configured set; the cwd repo is \
+                       NOT added, exactly as for `explorer`",
+                config: true,
+                repo: true,
+                bundle: false,
+                mode: graph(&["one", "two"]),
+                refusal: None,
+            },
+            Cell {
+                what: "config, no repo → the configured set; `serve` needs no repo \
+                       once config selects one",
+                config: true,
+                repo: false,
+                bundle: false,
+                mode: graph(&["one", "two"]),
+                refusal: None,
+            },
+        ],
     );
 }
 
@@ -712,7 +793,7 @@ fn serve_with_a_workspace_name_and_no_config_cannot_start_at_all() {
 
 /// Run every cell and report **all** mismatches at once: a truth table read one
 /// failure at a time hides how much a refactor moved.
-fn run_matrix(label: &str, cells: &[Cell]) {
+fn run_matrix(label: &str, cmd: &'static str, cells: &[Cell]) {
     let base = scratch_dir(label);
     std::fs::create_dir_all(&base).expect("mkdir matrix base");
     // The configured set, built once and shared: no cell mutates it.
@@ -736,7 +817,19 @@ fn run_matrix(label: &str, cells: &[Cell]) {
         } else {
             &unconfigured
         };
-        let observed = observe_mode(cell.what, &cwd, home);
+        let (observed, stderr) = observe_mode(cell.what, cmd, &cwd, home);
+        if let Some(expected) = cell.refusal
+            && observed == Mode::Refuses
+            && !stderr.contains(expected)
+        {
+            failures.push(format!(
+                "  cell {i}: {}\n    refused, but not with the pinned \
+                 diagnostic\n    expected to contain {expected:?}\n    got: {}",
+                cell.what,
+                stderr.trim()
+            ));
+            continue;
+        }
         if observed != cell.mode {
             failures.push(format!(
                 "  cell {i}: {}\n    config={} repo={} bundle={}\n    \
@@ -748,7 +841,7 @@ fn run_matrix(label: &str, cells: &[Cell]) {
 
     assert!(
         failures.is_empty(),
-        "`roteiro explorer` selected a different server than this table records. \
+        "`roteiro {cmd}` selected a different server than this table records. \
          These are characterisation tests: if the change is intended, move the \
          table and say which cell moved and why.\n{}",
         failures.join("\n")
@@ -768,13 +861,15 @@ fn run_matrix(label: &str, cells: &[Cell]) {
 /// stayed alive — satisfied the refusal cells. A cell that a hang can satisfy
 /// pins nothing, and this file exists to rule exactly that out, so the child is
 /// now required to have **exited** and its status is reported.
-fn observe_mode(what: &str, cwd: &Path, home: &IsolatedHome) -> Mode {
+fn observe_mode(what: &str, cmd: &'static str, cwd: &Path, home: &IsolatedHome) -> (Mode, String) {
     let addr = free_addr();
-    let mut child = spawn(&["explorer", "--addr", &addr], cwd, home);
+    let mut child = spawn(&[cmd, "--addr", &addr], cwd, home);
     let lines = stderr_lines(&mut child);
     let mut server = Server { child, lines };
 
-    let Some(line) = server.wait_for_line(|l| l.contains(" listening on http://")) else {
+    let mut stderr = String::new();
+    let Some(line) = server.wait_for_line(|l| l.contains(" listening on http://"), &mut stderr)
+    else {
         // No startup line. That is a refusal only if the process is gone; a live
         // one is a hang, and saying "refused" about it would be a false green.
         //
@@ -788,7 +883,7 @@ fn observe_mode(what: &str, cwd: &Path, home: &IsolatedHome) -> Mode {
         let status =
             wait_for_exit(&mut server.child, Duration::from_secs(30)).unwrap_or_else(|| {
                 panic!(
-                    "{what}: `roteiro explorer` printed no listening line and was \
+                    "{what}: `roteiro {cmd}` printed no listening line and was \
                      STILL RUNNING 30s later — that is a hang, not a refusal. \
                      Reporting it as `Refuses` would let a startup deadlock \
                      satisfy this cell."
@@ -796,11 +891,12 @@ fn observe_mode(what: &str, cwd: &Path, home: &IsolatedHome) -> Mode {
             });
         assert!(
             !status.success(),
-            "{what}: `roteiro explorer` exited SUCCESSFULLY without ever \
+            "{what}: `roteiro {cmd}` exited SUCCESSFULLY without ever \
              listening ({status:?}). A refusal cell means a non-zero exit, not \
              merely the absence of a server."
         );
-        return Mode::Refuses;
+        stderr.push_str(&stderr_of(&server));
+        return (Mode::Refuses, stderr);
     };
 
     let graph_line = line.contains(&format!("http://{addr}/ (UI)"));
@@ -823,7 +919,7 @@ fn observe_mode(what: &str, cwd: &Path, home: &IsolatedHome) -> Mode {
             );
             // Read back from the router rather than parsed out of the startup
             // line: the line is what the server *said*, this is what it serves.
-            Mode::Graph(workspace_names(&addr))
+            (Mode::Graph(workspace_names(&addr)), String::new())
         }
         (false, true) => {
             assert_eq!(
@@ -838,7 +934,7 @@ fn observe_mode(what: &str, cwd: &Path, home: &IsolatedHome) -> Mode {
                 "{what}: bundles-only redirects `/` to `{OKF_BASE}` specifically; \
                  any other redirect target is a different contract"
             );
-            Mode::BundlesOnly
+            (Mode::BundlesOnly, String::new())
         }
         _ => panic!("{what}: unrecognised startup line — a new mode? got: {line}"),
     }
@@ -1061,12 +1157,20 @@ impl Server {
         Self { child, lines }
     }
 
-    /// Block until a stderr line satisfies `pred`, or the child exits first.
-    fn wait_for_line(&self, pred: impl Fn(&str) -> bool) -> Option<String> {
+    /// Block until a stderr line satisfies `pred`, or the child exits first,
+    /// **keeping every line it read** in `sink`.
+    ///
+    /// The sink is not bookkeeping: the lines this scan discards on its way past
+    /// are the diagnostic, and a caller that then asks "why did it refuse?" finds
+    /// the channel already drained. That produced an empty `got:` in a refusal
+    /// assertion the first time it was asked for.
+    fn wait_for_line(&self, pred: impl Fn(&str) -> bool, sink: &mut String) -> Option<String> {
         let deadline = Instant::now() + Duration::from_secs(60);
         while Instant::now() < deadline {
             match self.lines.recv_timeout(Duration::from_millis(250)) {
                 Ok(line) => {
+                    sink.push_str(&line);
+                    sink.push('\n');
                     if pred(&line) {
                         return Some(line);
                     }
@@ -1082,9 +1186,12 @@ impl Server {
     /// The `listening on` line, plus the address it names — failing loudly if the
     /// server never got there, because every caller's assertions assume it did.
     fn wait_for_listening(&self) -> (String, String) {
+        let mut seen = String::new();
         let line = self
-            .wait_for_line(|l| l.contains(" listening on http://"))
-            .expect("the server never reported a listening address");
+            .wait_for_line(|l| l.contains(" listening on http://"), &mut seen)
+            .unwrap_or_else(|| {
+                panic!("the server never reported a listening address. stderr:\n{seen}")
+            });
         let rest = line
             .split_once(" listening on http://")
             .expect("listening line")
@@ -1117,6 +1224,27 @@ fn spawn(args: &[&str], cwd: &Path, home: &IsolatedHome) -> Child {
     command
         .spawn()
         .unwrap_or_else(|e| panic!("spawn roteiro {args:?}: {e}"))
+}
+
+/// Everything the reader thread still holds, drained until it is gone.
+///
+/// Called once the child has exited, so the sender is already on its way out;
+/// the bound is a backstop, not a timeout anyone should reach.
+fn stderr_of(server: &Server) -> String {
+    let mut out = String::new();
+    let drain_by = Instant::now() + Duration::from_secs(10);
+    loop {
+        match server.lines.recv_timeout(Duration::from_millis(100)) {
+            Ok(line) => {
+                out.push_str(&line);
+                out.push('\n');
+            }
+            Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) if Instant::now() >= drain_by => break,
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+    }
+    out
 }
 
 /// Block until `child` exits, or `grace` elapses — `None` meaning it is still
