@@ -49,19 +49,31 @@ use common::{IsolatedHome, scratch_dir};
 
 const BIN: &str = env!("CARGO_BIN_EXE_roteiro");
 
+/// Where both servers mount the viewer — `main.rs`'s `OKF_BASE`, restated here
+/// because a test binary cannot reach a private const in the bin crate.
+const OKF_BASE: &str = "/okf";
+
 // ---------------------------------------------------------------------------
 // 1. Mode selection: the truth table
 // ---------------------------------------------------------------------------
 
 /// Which server `roteiro explorer` ends up running, as a function of the inputs
 /// that select it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Graph mode carries **which workspaces it served**, because without that the
+/// configured cells and the cwd-fallback cell are the same observation: both
+/// answer `/v1/graph/workspaces` with 200. "The configured set is served and the
+/// cwd repo is not added" is half of what this table claims, and a bare `Graph`
+/// does not assert it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Mode {
-    /// `serve_graph_ui`: the graph explorer, `/v1/graph/*` + the web app.
-    Graph,
+    /// `serve_graph_ui`: the graph explorer, `/v1/graph/*` + the web app, hosting
+    /// exactly these workspaces in this order.
+    Graph(Vec<String>),
     /// `serve_okf_only`: bundles and nothing else, `/` redirecting to `/okf`.
     BundlesOnly,
-    /// Refuses to start.
+    /// Refuses to start — and **exits**. A server that merely never printed a
+    /// startup line is a hang, and `observe_mode` panics rather than reporting it
+    /// here: a refusal cell that a hang can satisfy pins nothing.
     Refuses,
 }
 
@@ -77,6 +89,11 @@ struct Cell {
     bundle: bool,
     /// The mode selected today.
     mode: Mode,
+}
+
+/// Shorthand for a `Graph` expectation: the workspaces the cell must serve.
+fn graph(names: &[&str]) -> Mode {
+    Mode::Graph(names.iter().map(|n| (*n).to_owned()).collect())
 }
 
 /// **The mode-selection truth table, bundle-free half.**
@@ -99,7 +116,10 @@ fn explorer_mode_truth_table_without_a_bundle() {
                 config: false,
                 repo: true,
                 bundle: false,
-                mode: Mode::Graph,
+                // Named after the directory, by `explorer_cwd_set` — and this is
+                // the observation that separates the fallback from the
+                // configured cells below.
+                mode: graph(&["cell0"]),
             },
             Cell {
                 what: "no config, no repo, no bundle → nothing to serve",
@@ -114,7 +134,7 @@ fn explorer_mode_truth_table_without_a_bundle() {
                 config: true,
                 repo: true,
                 bundle: false,
-                mode: Mode::Graph,
+                mode: graph(&["one", "two"]),
             },
             Cell {
                 what: "config, no repo, no bundle → the configured set; a repo is \
@@ -122,7 +142,7 @@ fn explorer_mode_truth_table_without_a_bundle() {
                 config: true,
                 repo: false,
                 bundle: false,
-                mode: Mode::Graph,
+                mode: graph(&["one", "two"]),
             },
         ],
     );
@@ -155,7 +175,7 @@ fn explorer_mode_truth_table_with_a_bundle() {
                 config: false,
                 repo: true,
                 bundle: true,
-                mode: Mode::Graph,
+                mode: graph(&["cell0"]),
             },
             Cell {
                 what: "no config, no repo, a bundle → bundles only (this is what \
@@ -170,7 +190,7 @@ fn explorer_mode_truth_table_with_a_bundle() {
                 config: true,
                 repo: true,
                 bundle: true,
-                mode: Mode::Graph,
+                mode: graph(&["one", "two"]),
             },
             Cell {
                 what: "config, no repo, a bundle → the configured set, NOT bundles \
@@ -178,7 +198,7 @@ fn explorer_mode_truth_table_with_a_bundle() {
                 config: true,
                 repo: false,
                 bundle: true,
-                mode: Mode::Graph,
+                mode: graph(&["one", "two"]),
             },
         ],
     );
@@ -229,7 +249,7 @@ fn a_config_resolving_to_nothing_bails_rather_than_falling_back() {
     make_repo(&cwd);
 
     let home = IsolatedHome::new("explorer-empty-config");
-    write_config(&home, &[("ghost", &ghost)]);
+    write_config(&home, &[("ghost", ghost.as_path())]);
 
     for (cmd, expected) in [
         (
@@ -716,13 +736,40 @@ fn run_matrix(label: &str, cells: &[Cell]) {
 /// Start `roteiro explorer` in `cwd` and classify what it became, by the startup
 /// line **and** the route table — so "it started" can never pass for "it started
 /// in this mode".
+///
+/// # Refusal is an exit, not an absence of output
+///
+/// The first version returned [`Mode::Refuses`] as soon as no startup line
+/// arrived, which meant a server that *hung* — bound nothing, printed nothing,
+/// stayed alive — satisfied the refusal cells. A cell that a hang can satisfy
+/// pins nothing, and this file exists to rule exactly that out, so the child is
+/// now required to have **exited** and its status is reported.
 fn observe_mode(what: &str, cwd: &Path, home: &IsolatedHome) -> Mode {
     let addr = free_addr();
     let mut child = spawn(&["explorer", "--addr", &addr], cwd, home);
     let lines = stderr_lines(&mut child);
-    let server = Server { child, lines };
+    let mut server = Server { child, lines };
 
     let Some(line) = server.wait_for_line(|l| l.contains(" listening on http://")) else {
+        // No startup line. That is a refusal only if the process is gone; a live
+        // one is a hang, and saying "refused" about it would be a false green.
+        let status = server
+            .child
+            .try_wait()
+            .expect("try_wait")
+            .unwrap_or_else(|| {
+                panic!(
+                    "{what}: `roteiro explorer` printed no listening line and is \
+                     STILL RUNNING — that is a hang, not a refusal. Reporting it \
+                     as `Refuses` would let a startup deadlock satisfy this cell."
+                )
+            });
+        assert!(
+            !status.success(),
+            "{what}: `roteiro explorer` exited SUCCESSFULLY without ever \
+             listening ({status:?}). A refusal cell means a non-zero exit, not \
+             merely the absence of a server."
+        );
         return Mode::Refuses;
     };
 
@@ -733,25 +780,33 @@ fn observe_mode(what: &str, cwd: &Path, home: &IsolatedHome) -> Mode {
     // and nothing selected a default, which is two of the cells below. The
     // workspace route answers in every graph-mode cell and exists in no other
     // mode, which is exactly the property a mode probe needs.
-    let graph_route = http_get(&addr, "/v1/graph/workspaces").0 == 200;
-    let root_redirects = http_get(&addr, "/").0 == 307;
+    let (graph_status, _, _) = http_get(&addr, "/v1/graph/workspaces");
+    let (root_status, root_location, _) = http_get(&addr, "/");
 
     match (graph_line, bundles_line) {
         (true, false) => {
-            assert!(
-                graph_route,
+            assert_eq!(
+                graph_status, 200,
                 "{what}: the startup line says graph explorer but \
-                 `/v1/graph/workspaces` does not answer — the line and the router \
-                 disagree"
+                 `/v1/graph/workspaces` answered {graph_status} — the line and \
+                 the router disagree"
             );
-            Mode::Graph
+            // Read back from the router rather than parsed out of the startup
+            // line: the line is what the server *said*, this is what it serves.
+            Mode::Graph(workspace_names(&addr))
         }
         (false, true) => {
-            assert!(
-                !graph_route && root_redirects,
-                "{what}: the startup line says bundles-only but the router still \
-                 serves a graph (`/v1/graph/workspaces` 200: {graph_route}, `/` \
-                 redirects: {root_redirects})"
+            assert_eq!(
+                graph_status, 404,
+                "{what}: the startup line says bundles-only but \
+                 `/v1/graph/workspaces` answered {graph_status} — there is no \
+                 graph in this mode"
+            );
+            assert_eq!(
+                (root_status, root_location.as_str()),
+                (307, OKF_BASE),
+                "{what}: bundles-only redirects `/` to `{OKF_BASE}` specifically; \
+                 any other redirect target is a different contract"
             );
             Mode::BundlesOnly
         }
@@ -789,9 +844,10 @@ impl TwoWorkspaces {
         write_bundle(&alpha.join("okf"));
         write_bundle(&beta.join("okf"));
         let home = IsolatedHome::new(label);
+        let (root_a, root_b) = (base.join("wsA"), base.join("wsB"));
         write_config(
             &home,
-            &[("one", &base.join("wsA")), ("two", &base.join("wsB"))],
+            &[("one", root_a.as_path()), ("two", root_b.as_path())],
         );
         Self {
             base,
@@ -809,13 +865,20 @@ impl Drop for TwoWorkspaces {
 }
 
 /// Write `<home>/config.toml` with one `[[workspaces]]` per `(name, root)`.
-fn write_config(home: &IsolatedHome, workspaces: &[(&str, &PathBuf)]) {
+fn write_config(home: &IsolatedHome, workspaces: &[(&str, &Path)]) {
     use std::fmt::Write as _;
     let mut toml = String::new();
     for (name, root) in workspaces {
+        // **Single quotes.** A TOML *literal* string takes no escapes, and a
+        // path is the one value most likely to contain a backslash: on Windows
+        // `Path::display()` yields `C:\\Users\\…`, and `\\U` inside a basic
+        // (double-quoted) string is an invalid escape, so the config would fail
+        // to parse and every config-backed cell would silently fall back to the
+        // no-config path. The scratch paths here never contain an apostrophe,
+        // which is the only thing a literal string cannot hold.
         let _ = write!(
             toml,
-            "[[workspaces]]\nname = \"{name}\"\nroots = [\"{}\"]\n\n",
+            "[[workspaces]]\nname = '{name}'\nroots = ['{}']\n\n",
             root.display()
         );
     }
