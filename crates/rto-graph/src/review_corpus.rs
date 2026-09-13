@@ -80,8 +80,9 @@ pub enum Verdict {
     ///
     /// Usually fixed by a commit, which [`CorpusRow::fix_commit`] names — but
     /// acceptance is what the verdict records, and the two can come apart: row
-    /// `3789014471` is accepted and **deferred** to its own tracked decision, with a
-    /// blank `fix_commit`. Reading `real` as "there is a fix commit" is what this
+    /// `3789014471` is accepted and carried as an open decision of its own, with a
+    /// blank `fix_commit` (the marker for that decision lives at the code it is
+    /// about, in `findings.rs`, which is where the debt scan should find one). Reading `real` as "there is a fix commit" is what this
     /// sentence used to invite, and it is not what the field means.
     Real,
     /// The claim was wrong: refuted in a maintainer reply.
