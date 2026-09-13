@@ -753,15 +753,21 @@ fn observe_mode(what: &str, cwd: &Path, home: &IsolatedHome) -> Mode {
     let Some(line) = server.wait_for_line(|l| l.contains(" listening on http://")) else {
         // No startup line. That is a refusal only if the process is gone; a live
         // one is a hang, and saying "refused" about it would be a false green.
-        let status = server
-            .child
-            .try_wait()
-            .expect("try_wait")
-            .unwrap_or_else(|| {
+        //
+        // **Waited for, not sampled.** `wait_for_line` returns `None` the moment
+        // stderr *closes*, and a closed pipe is not a reaped process: the child
+        // has written its error and dropped the descriptor, but the exit has not
+        // been collected yet. A single `try_wait` there reads `None` and calls a
+        // perfectly ordinary refusal a hang. That raced green on this developer's
+        // machine and red on CI — twice at the same commit — which is how it was
+        // found.
+        let status =
+            wait_for_exit(&mut server.child, Duration::from_secs(30)).unwrap_or_else(|| {
                 panic!(
-                    "{what}: `roteiro explorer` printed no listening line and is \
-                     STILL RUNNING — that is a hang, not a refusal. Reporting it \
-                     as `Refuses` would let a startup deadlock satisfy this cell."
+                    "{what}: `roteiro explorer` printed no listening line and was \
+                     STILL RUNNING 30s later — that is a hang, not a refusal. \
+                     Reporting it as `Refuses` would let a startup deadlock \
+                     satisfy this cell."
                 )
             });
         assert!(
@@ -1003,6 +1009,26 @@ fn spawn(args: &[&str], cwd: &Path, home: &IsolatedHome) -> Child {
     command
         .spawn()
         .unwrap_or_else(|e| panic!("spawn roteiro {args:?}: {e}"))
+}
+
+/// Block until `child` exits, or `grace` elapses — `None` meaning it is still
+/// running.
+///
+/// Exists because "stderr closed" and "the process exited" are two events and
+/// arrive in that order, so anything that treats the first as the second is a
+/// race. Both callers here need the distinction: one classifies a refusal, the
+/// other asserts one.
+fn wait_for_exit(child: &mut Child, grace: Duration) -> Option<std::process::ExitStatus> {
+    let deadline = Instant::now() + grace;
+    loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            return Some(status);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 /// Pump the child's stderr into a channel on a thread, so a caller can wait for a
