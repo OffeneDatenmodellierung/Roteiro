@@ -343,6 +343,66 @@ mod tests {
         assert_eq!(first.parent(), entry.parent(), "{first:?}");
     }
 
+    /// **And the counter must be wired into `put`, not merely available to it.**
+    ///
+    /// The test above holds [`super::temp_path`]'s own property, which a future
+    /// edit could satisfy while passing a constant at the call site — or while
+    /// restoring `{pid}-{nanos}` naming there — and the race would be back with
+    /// both tests green. This one reads the names `put` actually writes.
+    ///
+    /// Deterministic, and deliberately not a concurrency test: the entry path is
+    /// pre-occupied by a **directory**, so each `put`'s rename fails and leaves its
+    /// temp file behind to be inspected. Two puts of one key must leave two files
+    /// whose suffix has three fields and whose *third* field differs — the shape
+    /// catches a reverted name, and the difference catches a constant. Racing two
+    /// threads instead would catch both only about one run in 26,000.
+    #[test]
+    fn put_draws_a_fresh_sequence_value_for_each_temp_file() {
+        let dir = fresh("seq-wiring");
+        let cache = ObjectCache::open(&dir).expect("open");
+        let shard = dir.join("de");
+        std::fs::create_dir_all(shard.join("adbeef.json")).expect("occupy the entry path");
+
+        // The rename cannot replace a directory, so each put fails *after* writing
+        // its temp file. That failure is the instrument, not the subject.
+        assert!(
+            cache.put("deadbeef", &sample()).is_err(),
+            "a put whose destination is a directory must fail, or there is no temp \
+             file left to read"
+        );
+        assert!(cache.put("deadbeef", &sample()).is_err());
+
+        let suffixes: Vec<String> = std::fs::read_dir(&shard)
+            .expect("read the shard")
+            .filter_map(|entry| {
+                let name = entry.ok()?.file_name().to_string_lossy().into_owned();
+                let (_, suffix) = name.split_once(".json.tmp.")?;
+                Some(suffix.to_owned())
+            })
+            .collect();
+        assert_eq!(suffixes.len(), 2, "two puts, two temp files: {suffixes:?}");
+
+        let mut seqs = Vec::new();
+        for suffix in &suffixes {
+            let fields: Vec<&str> = suffix.split('-').collect();
+            assert_eq!(
+                fields.len(),
+                3,
+                "a temp name is `<pid>-<nanos>-<seq>`; {suffix:?} has no sequence \
+                 field, so two threads can choose one name again"
+            );
+            seqs.push(fields[2].to_owned());
+        }
+        assert_ne!(
+            seqs[0], seqs[1],
+            "both puts used sequence {:?}, so the call site is passing a constant \
+             rather than drawing from the counter",
+            seqs[0]
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn put_get_round_trip_and_miss() {
         let dir = std::env::temp_dir().join(format!("roteiro-cache-{}", std::process::id()));
