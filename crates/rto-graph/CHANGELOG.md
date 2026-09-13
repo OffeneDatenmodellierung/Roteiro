@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.13.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v5.12.1...rto-graph-v5.13.0) - 2026-09-13
+
+### Fixed
+
+- *(test)* the site gate stopped looking at javascript: hrefs
+- *(graph)* private fields, because a birth certificate is not a guarantee
+- *(graph)* a contract the constructor keeps, not one the docs assert
+- *(graph)* the code-span rule stops at the `]`, and four more from review
+- *(graph)* a code span in a destination means there is no link
+- *(graph)* an image is its own kind, and three claims that were too strong
+- *(graph)* the label is what a reader sees, and six more from review
+
+### Other
+
+- Merge pull request #806 from OffeneDatenmodellierung/polly/refs-link-extractor
+- *(graph)* the agreement table compared one link per line
+- *(graph)* one markdown link extractor, and it reads inline links
+- Merge pull request #804 from OffeneDatenmodellierung/polly/i787-caller-count-fix
+- *(findings)* name the fourth test caller correctly, and stop overclaiming
+- *(findings)* the graph is short by two on the test callers; say so
+
 ## [5.12.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v5.12.0...rto-graph-v5.12.1) - 2026-09-12
 
 ### Other

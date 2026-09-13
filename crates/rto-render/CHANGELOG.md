@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.13.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v5.12.1...rto-render-v5.13.0) - 2026-09-13
+
+### Added
+
+- *(refs)* a citable work, and an APA 7 formatter that refuses
+
+### Fixed
+
+- *(refs)* the guard meant to narrow a check reintroduced what it caught
+- *(refs)* a contract nothing enforces is an assumption
+- *(refs)* a percent that introduces nothing is not a URI
+- *(refs)* a link that escapes its attribute, and a day that did not happen
+- *(refs)* what is stored is the identifier, not its URL
+- *(refs)* a list of the bad cannot be finished, so state the good
+- *(refs)* a fragment nobody can see is still part of the name
+- *(refs)* say what a list cannot distinguish, rather than hope
+- *(refs)* case is not identity, and whitespace is not order
+- *(refs)* eight review findings, and one honest fixture
+
+### Other
+
+- Merge pull request #806 from OffeneDatenmodellierung/polly/refs-link-extractor
+
 ## [5.12.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v5.12.0...rto-render-v5.12.1) - 2026-09-12
 
 ### Other

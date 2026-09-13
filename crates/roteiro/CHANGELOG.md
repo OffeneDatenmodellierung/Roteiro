@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.13.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.12.1...roteiro-v5.13.0) - 2026-09-13
+
+### Fixed
+
+- *(test)* the site gate stopped looking at javascript: hrefs
+- *(graph)* private fields, because a birth certificate is not a guarantee
+- *(graph)* a contract the constructor keeps, not one the docs assert
+- *(graph)* the code-span rule stops at the `]`, and four more from review
+- *(graph)* a code span in a destination means there is no link
+- *(graph)* an image is its own kind, and three claims that were too strong
+- *(graph)* the label is what a reader sees, and six more from review
+
+### Other
+
+- *(graph)* one markdown link extractor, and it reads inline links
+
 ## [5.12.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.12.0...roteiro-v5.12.1) - 2026-09-12
 
 ### Other
