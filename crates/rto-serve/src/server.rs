@@ -17,7 +17,8 @@ use axum::routing::{get, post};
 use tokio_stream::StreamExt as _;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
-use crate::engine::{ChatRequest, Engine, EngineError};
+use crate::engine::{ChatRequest, CompletionStats, Engine, EngineError};
+use crate::responses::{Frame, ResponseWriter, ResponsesRequest};
 use crate::tools::{
     ClientToolCall, ToolDef, ToolLoopOutcome, ToolRegistry, chat_with_client_tools,
 };
@@ -184,6 +185,10 @@ fn router(state: Shared) -> Router {
         .route("/v1/models", get(list_models))
         .route("/v1/projects", get(list_projects))
         .route("/v1/chat/completions", post(chat_completions))
+        // OpenAI's Responses wire (#809), unscoped and streaming-only. An
+        // adapter over the same tool loop, not a second one: see
+        // `crate::responses`. The scoped variants are deliberately absent.
+        .route("/v1/responses", post(responses))
         .route("/v1/embeddings", post(embeddings))
         .route("/v1/{project}/models", get(list_models_scoped))
         .route(
@@ -484,18 +489,31 @@ async fn run_chat(state: Shared, body: ChatCompletionRequest, scope: ChatScope) 
     } = normalised;
     // Validate the model up front so the streaming and non-streaming paths agree:
     // an unknown model is a 404 either way, not a 200 SSE that fails mid-stream.
-    if !state.engine.models().iter().any(|m| m.id == req.model) {
-        return error(
-            StatusCode::NOT_FOUND,
-            EngineError::UnknownModel(req.model).to_string(),
-            "invalid_request_error",
-        );
+    if let Some(refusal) = unknown_model(&state, &req.model) {
+        return refusal;
     }
     if stream {
         stream_chat(state, req, scope, client_tools)
     } else {
         chat_json(state, req, scope, client_tools).await
     }
+}
+
+/// The `404` an unrecognised model gets — `None` when the model is served.
+///
+/// Shared by every request-taking surface so that a model this server does not
+/// have is refused the same way on each: the alternative is a new wire arriving
+/// with its own spelling of the same refusal, which is how `/v1` came to have
+/// two content paths in the first place.
+fn unknown_model(state: &AppState, model: &str) -> Option<Response> {
+    if state.engine.models().iter().any(|m| m.id == model) {
+        return None;
+    }
+    Some(error(
+        StatusCode::NOT_FOUND,
+        EngineError::UnknownModel(model.to_owned()).to_string(),
+        "invalid_request_error",
+    ))
 }
 
 /// Non-streaming path: run one blocking completion on a worker thread and return
@@ -698,6 +716,56 @@ enum StreamMsg {
     Failed(String),
 }
 
+/// Stream an **untooled** generation, applying by hand the content rules that a
+/// tooled run inherits from `tools::finish`, and hand each publishable piece to
+/// `on_text`. Blocking.
+///
+/// ## Why this is a function and not a block inside one handler
+///
+/// This is the branch of `/v1` that never reaches `tools::finish`: nothing was
+/// advertised, so the tool loop is not used and `engine.chat_stream` is called
+/// directly. Its own history is the argument for the shape. The `<think>` rule
+/// (#582) and the never-left-the-block refusal (#583) both had to be *ported*
+/// here after being written for the loop, because the loop was not on this path
+/// — and this file's comments said as much: "the one branch of `/v1` that never
+/// reaches `tools::finish`".
+///
+/// Adding a second protocol (`/v1/responses`, #809) would have made that two
+/// branches and the next rule would have to be ported twice. So the branch is
+/// named once and both wires stream through it. What each wire supplies is the
+/// only thing that differs — a `chat.completion.chunk` delta or a
+/// `response.output_text.delta` — and neither may decide what the text *is*.
+///
+/// `StreamFilter` withholds a reasoning block rather than forwarding it, so a
+/// reasoning model costs this path its time-to-first-token and no correctness.
+/// When it held every token there is no answer to publish, so the refusal is the
+/// whole of the assistant's turn rather than a correction appended to half a
+/// reply — the same sentence the non-streaming path produces, from the same
+/// function, because a caller must not have to know which transport it used to
+/// know what happened (#583).
+///
+/// # Errors
+/// Whatever the engine returns; nothing has been published when it does.
+fn stream_untooled(
+    state: &AppState,
+    req: &ChatRequest,
+    on_text: &mut dyn FnMut(String),
+) -> Result<CompletionStats, EngineError> {
+    let mut filter = crate::thinking::StreamFilter::new();
+    let mut on_token = |piece: &str| {
+        if let Some(text) = filter.push(piece) {
+            on_text(text);
+        }
+    };
+    let usage = state.engine.chat_stream(req, &mut on_token)?;
+    match filter.end(usage.finish_reason) {
+        Ok(Some(text)) => on_text(text),
+        Ok(None) => {}
+        Err(why) => on_text(crate::tools::unanswered_refusal(why, req.max_tokens)),
+    }
+    Ok(usage)
+}
+
 /// Streaming path: run generation on a blocking worker that feeds token deltas
 /// over a channel, and surface them as OpenAI `chat.completion.chunk` SSE events
 /// terminated by `data: [DONE]`.
@@ -765,48 +833,17 @@ fn stream_chat(
                 }
             }
         } else {
-            // The untooled, token-incremental path — the one branch of `/v1` that
-            // never reaches `tools::finish`, and so the one place the `<think>`
-            // rule has to be applied by hand rather than inherited.
-            //
-            // It is applied, and that is the decision #582 asked for: the
-            // endpoint answers the same question the same way whether or not the
-            // client asked for a stream. Leaving this raw while the non-streaming
-            // path stripped would have replaced the CLI/HTTP split the issue was
-            // filed on with a streaming/non-streaming one inside the same
-            // endpoint, which is the same defect with a smaller blast radius.
-            //
-            // `StreamFilter` withholds the block instead of forwarding it, so a
-            // reasoning model costs this path its time-to-first-token and no
-            // correctness. See `rto_llama::thinking::StreamFilter`.
-            let mut filter = crate::thinking::StreamFilter::new();
-            let mut on_token = |piece: &str| {
-                if let Some(text) = filter.push(piece) {
-                    let _ = tx.send(StreamMsg::Delta(text));
-                }
+            // The untooled, token-incremental path. Every rule it has to apply
+            // lives in `stream_untooled`, which `/v1/responses` streams through
+            // too — see that function for why it is one function and not two
+            // copies.
+            let mut emit = |text: String| {
+                let _ = tx.send(StreamMsg::Delta(text));
             };
-            match state.engine.chat_stream(&req, &mut on_token) {
-                Ok(usage) => match filter.end(usage.finish_reason) {
-                    Ok(tail) => {
-                        if let Some(text) = tail {
-                            let _ = tx.send(StreamMsg::Delta(text));
-                        }
-                        let _ = tx.send(StreamMsg::Done(usage.finish_reason.as_str()));
-                    }
-                    // Nothing has been sent — the filter held every token — so
-                    // the refusal is the whole of the assistant's turn rather
-                    // than a correction appended to half a reply. Same sentence
-                    // the non-streaming path would have produced, from the same
-                    // function, because a caller must not have to know which
-                    // transport it used to know what happened (#583).
-                    Err(why) => {
-                        let _ = tx.send(StreamMsg::Delta(crate::tools::unanswered_refusal(
-                            why,
-                            req.max_tokens,
-                        )));
-                        let _ = tx.send(StreamMsg::Done(usage.finish_reason.as_str()));
-                    }
-                },
+            match stream_untooled(&state, &req, &mut emit) {
+                Ok(usage) => {
+                    let _ = tx.send(StreamMsg::Done(usage.finish_reason.as_str()));
+                }
                 Err(e) => {
                     let _ = tx.send(StreamMsg::Failed(e.to_string()));
                 }
@@ -834,6 +871,156 @@ fn stream_chat(
     // OpenAI terminates the stream with a literal `data: [DONE]`.
     let done = tokio_stream::once(Ok(Event::default().data("[DONE]")));
     Sse::new(events.chain(done)).into_response()
+}
+
+/// `POST /v1/responses` — OpenAI's Responses wire, streaming-only and unscoped
+/// (#809).
+///
+/// An adapter: [`ResponsesRequest::normalise`] translates the body into the
+/// same [`ChatRequest`] the chat wire produces, and the answer comes back out
+/// of the same tool loop. See [`crate::responses`] for the mapping and for what
+/// is refused.
+async fn responses(State(state): State<Shared>, Json(body): Json<ResponsesRequest>) -> Response {
+    let normalised = match body.normalise(state.limits) {
+        Ok(n) => n,
+        Err(msg) => return error(StatusCode::BAD_REQUEST, msg, "invalid_request_error"),
+    };
+    // Destructured field-by-field for the reason `run_chat` gives: `tool_choice`
+    // and `parallel_tool_calls` are carried and deliberately not enforced, and
+    // naming every field means a future one cannot be added and silently
+    // dropped on this wire while the chat wire grows it.
+    let crate::types::NormalisedChat {
+        request: req,
+        client_tools,
+        tool_choice: _,
+        parallel_tool_calls: _,
+    } = normalised;
+    if let Some(refusal) = unknown_model(&state, &req.model) {
+        return refusal;
+    }
+    // `ChatScope::Default` is the whole of the scoping story here: the
+    // project- and workspace-scoped Responses routes are deferred, and the
+    // seam they will reuse is this argument (ADR-0008), not a second
+    // confinement mechanism.
+    stream_responses(state, req, ChatScope::Default, client_tools)
+}
+
+/// Run one Responses turn and surface it as the typed SSE event sequence.
+///
+/// The same two branches as [`stream_chat`], for the same reasons — a tooled
+/// run resolves the loop and then publishes, an untooled one streams through
+/// [`stream_untooled`] token by token — differing only in which events carry
+/// the result.
+fn stream_responses(
+    state: Shared,
+    req: ChatRequest,
+    scope: ChatScope,
+    client_tools: Vec<ToolDef>,
+) -> Response {
+    let id = format!("resp_{}", next_id());
+    let created = unix_seconds();
+    let model = req.model.clone();
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Frame>();
+    tokio::task::spawn_blocking(move || {
+        let mut writer = ResponseWriter::new(id, model, created);
+        // Not required by the one client this was measured against, and emitted
+        // anyway: it is what OpenAI's own wire opens with, and a client that
+        // reads it learns the response id before the first item. See
+        // `ResponseWriter` for the measurement.
+        let _ = tx.send(writer.created());
+        let use_tools = !client_tools.is_empty() || scope_has_tools(&state, &scope);
+        if use_tools {
+            match complete(&state, &req, &scope, &client_tools) {
+                Ok(outcome) if !outcome.client_tool_calls.is_empty() => {
+                    for call in tool_call_dtos(&outcome.client_tool_calls) {
+                        for frame in writer.function_call(&call) {
+                            let _ = tx.send(frame);
+                        }
+                    }
+                    let _ = tx.send(writer.completed(&usage_of(&outcome)));
+                }
+                Ok(outcome) => {
+                    let usage = usage_of(&outcome);
+                    let text = outcome.completion.content;
+                    for frame in writer.message_start() {
+                        let _ = tx.send(frame);
+                    }
+                    // One delta for the whole answer — the declared divergence
+                    // this path inherits from the tool loop, which has to run to
+                    // completion before any of its output may be published.
+                    let _ = tx.send(writer.text_delta(&text));
+                    for frame in writer.message_done(&text) {
+                        let _ = tx.send(frame);
+                    }
+                    let _ = tx.send(writer.completed(&usage));
+                }
+                Err(e) => {
+                    let _ = tx.send(writer.failed(&e.to_string()));
+                }
+            }
+        } else {
+            let mut text = String::new();
+            let mut started = false;
+            // The item is opened on the first publishable piece rather than up
+            // front, so a generation that fails before saying anything reports
+            // `response.failed` without a half-open item ahead of it.
+            // Scoped so the closure's borrow of `writer` and `text` ends
+            // before the arms below need them back.
+            let result = {
+                let mut emit = |piece: String| {
+                    if !started {
+                        started = true;
+                        for frame in writer.message_start() {
+                            let _ = tx.send(frame);
+                        }
+                    }
+                    text.push_str(&piece);
+                    let _ = tx.send(writer.text_delta(&piece));
+                };
+                stream_untooled(&state, &req, &mut emit)
+            };
+            match result {
+                Ok(usage) => {
+                    if !started {
+                        for frame in writer.message_start() {
+                            let _ = tx.send(frame);
+                        }
+                    }
+                    for frame in writer.message_done(&text) {
+                        let _ = tx.send(frame);
+                    }
+                    let _ = tx.send(writer.completed(&Usage {
+                        prompt_tokens: usage.prompt_tokens,
+                        completion_tokens: usage.completion_tokens,
+                        total_tokens: usage.prompt_tokens + usage.completion_tokens,
+                    }));
+                }
+                Err(e) => {
+                    let _ = tx.send(writer.failed(&e.to_string()));
+                }
+            }
+        }
+    });
+
+    let events = UnboundedReceiverStream::new(rx).map(|(name, data)| {
+        Ok::<Event, std::convert::Infallible>(Event::default().event(name).data(data))
+    });
+    // `response.completed` is the terminal event a Responses client waits for;
+    // `[DONE]` follows it for symmetry with the chat stream and because the
+    // client this was measured against accepts it.
+    let done = tokio_stream::once(Ok(Event::default().data("[DONE]")));
+    Sse::new(events.chain(done)).into_response()
+}
+
+/// The token accounting one tool-loop outcome reports.
+fn usage_of(outcome: &ToolLoopOutcome) -> Usage {
+    let c = &outcome.completion;
+    Usage {
+        prompt_tokens: c.prompt_tokens,
+        completion_tokens: c.completion_tokens,
+        total_tokens: c.prompt_tokens + c.completion_tokens,
+    }
 }
 
 /// The first-chunk delta announcing the assistant role.
@@ -2816,5 +3003,378 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert_eq!(json["choices"][0]["message"]["content"], "HI THERE");
+    }
+
+    // ---------------------------------------------------------------------
+    // `POST /v1/responses` — the Responses wire (#809).
+    // ---------------------------------------------------------------------
+
+    fn responses_body(body: &serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/responses")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    async fn sse_text(resp: axum::response::Response) -> String {
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// Every `data:` payload of a Responses stream, paired with its `type`.
+    fn responses_events(sse: &str) -> Vec<(String, serde_json::Value)> {
+        sse.lines()
+            .filter_map(|l| l.strip_prefix("data: "))
+            .filter(|l| *l != "[DONE]")
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .map(|v| (v["type"].as_str().unwrap_or_default().to_owned(), v))
+            .collect()
+    }
+
+    /// Reassemble the answer a Responses client would have displayed —
+    /// concatenated from the deltas, for the reason [`stream_content`] gives.
+    fn responses_content(sse: &str) -> String {
+        responses_events(sse)
+            .into_iter()
+            .filter(|(t, _)| t == "response.output_text.delta")
+            .filter_map(|(_, v)| v["delta"].as_str().map(str::to_owned))
+            .collect()
+    }
+
+    /// **The guard this surface exists to be held by.**
+    ///
+    /// `/v1` has three content surfaces now — chat non-streaming, chat
+    /// streaming, and Responses — and two of them reach the published-content
+    /// rules by different routes: the tooled paths inherit them from
+    /// `tools::finish`, the untooled streaming path applies them itself in
+    /// `stream_untooled`. That split is how #582's `<think>` rule came to be
+    /// applied in one place and not the other, and it was closed by *porting*
+    /// the rule rather than by removing the split.
+    ///
+    /// So the property is asserted directly: **one generation, three surfaces,
+    /// one answer.** A rule added to `tools::finish` or to `stream_untooled`
+    /// that reaches only some of them fails here rather than shipping.
+    ///
+    /// The fixture is #582's own generation, split across tokens so the tag
+    /// boundaries fall inside pieces and the streaming filter is really doing
+    /// the work.
+    #[tokio::test]
+    async fn all_three_surfaces_answer_a_thinking_model_identically() {
+        let question = serde_json::json!([{"role": "user", "content": "What is 2+2?"}]);
+
+        // 1. Chat, non-streaming.
+        let engine = ReasoningEngine::in_pieces(THINKS_THEN_ANSWERS, 7, FinishReason::Stop);
+        let resp = app(engine)
+            .oneshot(chat_body(&serde_json::json!({
+                "model": "echo", "messages": question,
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let chat_json = body_json(resp).await["choices"][0]["message"]["content"]
+            .as_str()
+            .expect("assistant content")
+            .to_owned();
+
+        // 2. Chat, streaming.
+        let engine = ReasoningEngine::in_pieces(THINKS_THEN_ANSWERS, 7, FinishReason::Stop);
+        let resp = app(engine)
+            .oneshot(chat_body(&serde_json::json!({
+                "model": "echo", "messages": question, "stream": true,
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let chat_stream = stream_content(&sse_text(resp).await);
+
+        // 3. Responses.
+        let engine = ReasoningEngine::in_pieces(THINKS_THEN_ANSWERS, 7, FinishReason::Stop);
+        let resp = app(engine)
+            .oneshot(responses_body(&serde_json::json!({
+                "model": "echo", "stream": true,
+                "input": [{"type": "message", "role": "user",
+                           "content": [{"type": "input_text", "text": "What is 2+2?"}]}],
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let sse = sse_text(resp).await;
+        let responses = responses_content(&sse);
+
+        assert_eq!(
+            chat_json, chat_stream,
+            "chat's two surfaces disagree (#582/#589)"
+        );
+        assert_eq!(
+            chat_json, responses,
+            "the Responses surface answers differently from the chat surfaces"
+        );
+        // Not three empty strings agreeing with each other: the answer is the
+        // answer, and the deliberation is gone from all three.
+        assert_eq!(chat_json, "four");
+        assert!(
+            !sse.contains("Okay, the user"),
+            "the reasoning block reached the Responses wire: {sse}"
+        );
+
+        // The same text also has to be what `response.completed` carries, or a
+        // client that reads the final object rather than the deltas sees
+        // something else again.
+        let completed = responses_events(&sse)
+            .into_iter()
+            .find(|(t, _)| t == "response.completed")
+            .expect("a `response.completed` event")
+            .1;
+        assert_eq!(
+            completed["response"]["output"][0]["content"][0]["text"], "four",
+            "the final response object disagrees with its own deltas"
+        );
+    }
+
+    /// The #583 rule — a generation that never leaves its `<think>` block is a
+    /// refusal, not a short answer — on the third surface too.
+    #[tokio::test]
+    async fn a_responses_turn_that_never_leaves_its_think_block_is_refused() {
+        let engine = ReasoningEngine::in_pieces("<think>still deciding", 4, FinishReason::Length);
+        let resp = app(engine)
+            .oneshot(responses_body(&serde_json::json!({
+                "model": "echo", "stream": true, "input": "What is 2+2?",
+            })))
+            .await
+            .unwrap();
+        let sse = sse_text(resp).await;
+        let answer = responses_content(&sse);
+        assert!(answer.starts_with("Roteiro: "), "a refusal: {answer}");
+        assert!(answer.contains("max_tokens"), "names the budget: {answer}");
+        assert!(
+            !answer.contains("still deciding"),
+            "the deliberation is not returned as a consolation: {answer}"
+        );
+    }
+
+    #[tokio::test]
+    async fn responses_streams_an_untooled_answer_as_a_message_item() {
+        let resp = test_app()
+            .oneshot(responses_body(&serde_json::json!({
+                "model": "echo", "stream": true, "input": "hi there",
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let sse = sse_text(resp).await;
+        let kinds: Vec<String> = responses_events(&sse).into_iter().map(|(t, _)| t).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "response.created",
+                "response.output_item.added",
+                "response.content_part.added",
+                "response.output_text.delta",
+                "response.output_text.delta",
+                "response.output_text.done",
+                "response.content_part.done",
+                "response.output_item.done",
+                "response.completed",
+            ],
+            "{sse}"
+        );
+        // Two deltas for two words: an untooled Responses turn is genuinely
+        // token-incremental, unlike the tooled one.
+        assert_eq!(responses_content(&sse), "HI THERE");
+        assert!(sse.contains("event: response.completed"), "{sse}");
+        assert!(sse.contains("data: [DONE]"), "terminator: {sse}");
+
+        let completed = responses_events(&sse)
+            .into_iter()
+            .find(|(t, _)| t == "response.completed")
+            .expect("a `response.completed` event")
+            .1;
+        assert_eq!(completed["response"]["status"], "completed");
+        assert_eq!(completed["response"]["store"], false);
+        assert_eq!(completed["response"]["usage"]["output_tokens"], 2);
+        assert_eq!(completed["response"]["output"][0]["type"], "message");
+        assert_eq!(
+            completed["response"]["output"][0]["content"][0]["text"],
+            "HI THERE"
+        );
+        // Sequence numbers are what a client orders by; they must not repeat.
+        let seqs: Vec<u64> = responses_events(&sse)
+            .into_iter()
+            .filter_map(|(_, v)| v["sequence_number"].as_u64())
+            .collect();
+        assert_eq!(seqs, (0..seqs.len() as u64).collect::<Vec<_>>(), "{sse}");
+    }
+
+    /// A call against the **client's** tool comes back as a `function_call`
+    /// item with the `call_id` the client will echo as `function_call_output`.
+    #[tokio::test]
+    async fn responses_returns_a_client_tool_call_as_a_function_call_item() {
+        let engine = ReasoningEngine::new(WEATHER_CALL, FinishReason::Stop);
+        let resp = app(engine)
+            .oneshot(responses_body(&serde_json::json!({
+                "model": "echo", "stream": true, "input": "weather in Berlin?",
+                "tools": [{
+                    "type": "function", "name": "get_weather",
+                    "description": "current weather",
+                    "parameters": {"type": "object",
+                                   "properties": {"city": {"type": "string"}}},
+                }],
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let sse = sse_text(resp).await;
+        let events = responses_events(&sse);
+        let kinds: Vec<&str> = events.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "response.created",
+                "response.output_item.added",
+                "response.function_call_arguments.delta",
+                "response.function_call_arguments.done",
+                "response.output_item.done",
+                "response.completed",
+            ],
+            "{sse}"
+        );
+        let item = &events
+            .iter()
+            .find(|(t, _)| t == "response.output_item.done")
+            .expect("a done item")
+            .1["item"];
+        assert_eq!(item["type"], "function_call");
+        assert_eq!(item["name"], "get_weather");
+        assert_eq!(item["arguments"], "{\"city\":\"Berlin\"}");
+        let call_id = item["call_id"].as_str().expect("a call_id");
+        assert!(!call_id.is_empty(), "a call_id the client can echo back");
+        // The raw `<tool_call>` markup is never published as text (#489), on
+        // this wire as on the others.
+        assert!(!sse.contains("<tool_call>"), "markup leaked: {sse}");
+        assert!(responses_content(&sse).is_empty(), "no prose beside a call");
+    }
+
+    /// The turn after the one above: the client's result comes back as a
+    /// `function_call_output` item, and the model sees the transcript it wrote.
+    #[tokio::test]
+    async fn a_responses_tool_result_reaches_the_model_as_a_tool_response_turn() {
+        let engine = ReasoningEngine::new("It is 20C.", FinishReason::Stop);
+        let served: std::sync::Arc<dyn Engine> = std::sync::Arc::clone(&engine) as _;
+        let resp = app(served)
+            .oneshot(responses_body(&serde_json::json!({
+                "model": "echo", "stream": true,
+                "input": [
+                    {"type": "message", "role": "user", "content": "weather in Berlin?"},
+                    {"type": "function_call", "call_id": "call_9", "name": "get_weather",
+                     "arguments": "{\"city\":\"Berlin\"}"},
+                    {"type": "function_call_output", "call_id": "call_9", "output": "20C"},
+                ],
+                "tools": [{"type": "function", "name": "get_weather",
+                           "parameters": {"type": "object"}}],
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        // Drain the stream first: it closes when the blocking worker drops its
+        // sender, so consuming it is what makes the generation have happened.
+        let sse = sse_text(resp).await;
+        assert!(sse.contains("response.completed"), "{sse}");
+        let seen = engine.seen.lock().unwrap();
+        let turns: Vec<(String, String)> = seen
+            .last()
+            .expect("one generation")
+            .iter()
+            .map(|m| (m.role.clone(), m.content.clone()))
+            .collect();
+        // The system turn the tool loop injects comes first; after it, the
+        // conversation the client sent, rendered in-band.
+        assert!(
+            turns
+                .iter()
+                .any(|(role, content)| role == "assistant" && content == WEATHER_CALL),
+            "the assistant's own call is replayed verbatim: {turns:?}"
+        );
+        assert!(
+            turns
+                .iter()
+                .any(|(role, content)| role == "user"
+                    && content == "<tool_response>20C</tool_response>"),
+            "the client's result reaches the model as a `<tool_response>` user turn: {turns:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn responses_refuses_a_non_streaming_request_by_name() {
+        let resp = test_app()
+            .oneshot(responses_body(&serde_json::json!({
+                "model": "echo", "input": "hi",
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let msg = body_json(resp).await["error"]["message"]
+            .as_str()
+            .expect("an error message")
+            .to_owned();
+        assert!(msg.starts_with("`stream` must be `true`"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn responses_refuses_an_unsupported_input_item_by_name() {
+        let resp = test_app()
+            .oneshot(responses_body(&serde_json::json!({
+                "model": "echo", "stream": true,
+                "input": [{"type": "reasoning", "id": "rs_1", "summary": []}],
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let msg = body_json(resp).await["error"]["message"]
+            .as_str()
+            .expect("an error message")
+            .to_owned();
+        assert!(msg.contains("`reasoning`"), "names the item type: {msg}");
+    }
+
+    /// An unknown model is a `404` before a byte of stream, exactly as it is on
+    /// the chat wire — not a `200` SSE that fails half-way.
+    #[tokio::test]
+    async fn responses_unknown_model_is_404_not_a_stream() {
+        let resp = test_app()
+            .oneshot(responses_body(&serde_json::json!({
+                "model": "nope", "stream": true, "input": "hi",
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            body_json(resp).await["error"]["type"],
+            "invalid_request_error"
+        );
+    }
+
+    /// Scope parity is deferred, and deferred means **absent**, not
+    /// half-present: a client that points at a scoped Responses URL is told so
+    /// by the router rather than being quietly served the unscoped answer.
+    #[tokio::test]
+    async fn the_scoped_responses_routes_are_not_served() {
+        for uri in ["/v1/demo/responses", "/v1/workspaces/ws/responses"] {
+            let resp = test_app()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            "{\"model\":\"echo\",\"stream\":true,\"input\":\"hi\"}",
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{uri}");
+        }
     }
 }

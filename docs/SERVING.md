@@ -8,7 +8,10 @@ site-order: 21
 
 `POST /v1/chat/completions` is OpenAI's path, and a path sets an expectation. This
 page is the expectation stated in advance, so that the gaps are documented rather
-than discovered on the wire.
+than discovered on the wire. Since #809 there is a second OpenAI path,
+`POST /v1/responses`, adapted onto the first; it has [its own section
+below](#responses-api) and everything else on this page
+applies to it unchanged.
 
 Roteiro serves your installed GGUF models over an OpenAI-compatible `/v1`
 endpoint, bound to loopback (ADR-0006). It is enabled by building with the
@@ -63,6 +66,7 @@ started in.
 | `/v1/{project}/chat/completions` | one project |
 | `/v1/workspaces/{ws}/chat/completions` | a workspace |
 | `/v1/models`, `/v1/embeddings`, `/v1/projects` | — |
+| `/v1/responses` | the server's own repository — **the only scope it has**; there are no scoped Responses routes |
 
 ## Declared divergences from OpenAI
 
@@ -84,6 +88,9 @@ than a surprise.
 | a tool whose `type` is not `"function"` | **400** | `function` is the only kind in OpenAI's envelope; coercing a `retrieval` tool into one would tell the client it was understood |
 | a model's `<think>` reasoning block | **stripped** — never in `content`, streamed or not | the rule every other Roteiro consumer already applied. Not offered as `reasoning_content` either — see below |
 | a generation that never leaves its `<think>` block | **refused** in the assistant slot, prefixed `Roteiro: ` | there is no answer in it; the deliberation is not returned as a consolation |
+| `POST /v1/responses` | **supported** | streaming-only and unscoped; an adapter over this same tool loop rather than a second implementation — see [its section below](#responses-api) |
+| `response.output_text.delta` on a Responses turn that used tools | **fires exactly once, carrying the whole answer** | the tool loop runs several generations and nothing it produces may be published until it has finished, so there is no token-incremental text to stream. The same non-incrementality the chat wire's tooled stream already has; an untooled Responses turn *is* token-incremental, through the same code the chat stream uses |
+| a `reasoning` item on a Responses response | **never emitted** | the `<think>` block is stripped on every Roteiro surface, so there is no deliberation left to put in one. A request's `reasoning` parameter is dropped for the same reason |
 | an answer that merely *mentions* `<think>` or `</think>` | **untouched** | a block is text that *opened* with `<think>`. Ask this endpoint what the tags mean and the reply quotes them; treating a quoted tag as a block would truncate a correct answer with `finish_reason: "stop"` still saying nothing was cut |
 
 **A model's reasoning never reaches you, and that is a decision.**
@@ -266,6 +273,116 @@ the one you asked and give you no way to tell.
 This is about Roteiro's own graph tools. A tool **you** supplied is unaffected in
 either direction — Roteiro never executes one (see above), so it never inspects
 its arguments, and the call comes back to you exactly as the model wrote it.
+
+## The Responses API (`POST /v1/responses`) {#responses-api}
+
+OpenAI has a second wire, and some clients now speak only that one: `codex-cli`
+0.147 **removed** Chat Completions support — `wire_api = "chat"` is no longer
+accepted — so for that family this path is not a convenience, it is the only one.
+
+It is served here as an **adapter**, not a second implementation. A Responses
+request is translated into the request the chat path builds, run through the same
+tool loop, and rendered back out as Responses events. Everything above about
+modes, about tools you supplied, about `<think>` blocks and about refusals is
+therefore true of this path too, because it is the same code deciding it.
+
+The surface is deliberately small, and what is missing is **refused by name**
+rather than ignored.
+
+| surface | status | why |
+|---|---|---|
+| `stream: true` | **supported** | the typed SSE event sequence, terminated by `response.completed` and then `data: [DONE]` |
+| `stream: false`, or omitted | **400** | `stream` must be `true`: this endpoint serves the Responses API as a typed SSE event stream only, so a non-streaming request would have no body shape to return. Send `stream: true` and read `response.completed`, whose `response.output` carries exactly what a non-streaming body would have. |
+| `input` as a bare string, or as items of type `message`, `function_call`, `function_call_output` | **supported** | mapped onto the chat wire's turns — see below |
+| any other `input` item type — `reasoning`, `web_search_call`, `item_reference`, … | **400** | the item is named in the message. Dropping it silently would leave the model answering from a conversation it was never shown, and a replayed `reasoning` item is the likeliest case |
+| a message content part other than `input_text` / `output_text` | **400** | an image or a file you believed was read would otherwise produce a confident answer about content the model never saw |
+| a message `role` other than `system` / `developer` / `user` / `assistant` | **400** | `developer` is mapped to `system`; an unrecognised role would be rendered *literally* into the prompt by the chat template, arriving as text rather than as a turn |
+| `instructions` | **supported** | mapped to a leading `system` turn |
+| a hosted tool — `web_search`, `code_interpreter`, … | **dropped** | Roteiro executes no hosted tool and never advertises one to the model, so the model cannot call it and no answer can be falsely attributed to it. **This diverges from the chat wire**, where a tool whose `type` is not `function` is a `400`: there, `tools` is function-only by construction and a `retrieval` entry is a mistake; here a hosted tool is a normal part of every request from a real client, and refusing it would fail every turn over a tool that was never going to be used |
+| `/v1/{project}/responses`, `/v1/workspaces/{ws}/responses` | **404** | scope parity is not built. A scoped Responses client should point at `/v1/{project}/chat/completions` for now; the seam these will reuse is the same `ChatScope` the chat routes already pass, not a second confinement mechanism (ADR-0008) |
+
+### A tool round trip, and why it is byte-identical to the chat one
+
+Responses models a tool call as typed items where Chat Completions puts
+`tool_calls` on a message. Both are translated into the **in-band** protocol the
+served models actually speak, by the same function:
+
+| Responses item | becomes | reaches the model as |
+|---|---|---|
+| `{"type": "function_call", "call_id": …, "name": …, "arguments": …}` | an `assistant` turn carrying one `tool_calls` entry | `<tool_call>{"name":…,"arguments":…}</tool_call>` |
+| `{"type": "function_call_output", "call_id": …, "output": …}` | a `role: "tool"` turn | a `user` turn wrapped in `<tool_response>…</tool_response>` |
+
+This is not a parallel rendering that happens to agree. The adapter builds the
+chat structures and hands them to the *same* normalisation the chat wire uses, so
+there is one implementation of the byte format and a test asserts the two wires
+produce identical prompt turns for the same conversation. A second copy would
+have drifted, and the symptom would have been a multi-turn tool conversation
+degrading at turn three with nothing on the wire to say so.
+
+One inherited detail worth knowing: the keys inside `arguments` come back
+**sorted**, because the rendering re-parses the `arguments` string into a JSON
+object. That is true of the chat wire already; the adapter inherits it rather
+than introducing it.
+
+### The event sequence, and which parts a client actually needs
+
+`response.created` → `response.output_item.added` →
+(`response.output_text.delta` | `response.function_call_arguments.delta`) →
+`response.output_item.done` → `response.completed`, then `data: [DONE]`.
+
+Which of those are load-bearing was **measured**, by serving each event set from
+a mock and running a real tool-using turn of `codex-cli` 0.147.0 against it,
+rather than by reading a schema or grepping a binary for string literals — a
+literal that is absent from a packed binary is not a literal the client does not
+need.
+
+| omitted | what happened |
+|---|---|
+| `response.created` | the turn completed normally — it is **not** required |
+| `response.output_item.added` | `OutputTextDelta without active item`, then the turn completed |
+| `response.output_text.delta` | the turn completed — deltas are optional |
+| `response.output_item.done` | **the turn produced nothing**: the tool call was never dispatched |
+| `response.completed` | **`stream disconnected before completion`**, then five reconnection attempts |
+
+So the load-bearing pair is `response.output_item.done` and `response.completed`.
+The full sequence is emitted anyway: it is what OpenAI's own wire carries, and a
+client that reads the optional events gets a live stream instead of a silent wait.
+
+### Every Responses request parameter
+
+Read the four status words exactly as the chat table above defines them. This
+table is shorter than that one on purpose: the chat table is exhaustive over a
+frozen wire, and this one covers the parameters a Responses client actually
+sends. A key in no row here is passed through untouched, exactly as an unknown
+chat key is.
+
+| parameter | status | what happens |
+|---|---|---|
+| `background` | **400** | `background` is not supported: there is no job store behind this endpoint, so a background response would be started and then never be retrievable by the id you were given. Send `stream: true` and read the events as they arrive; a loopback server has nothing to gain by deferring the work. |
+| `include` | **dropped** | asks for optional output fields — encrypted reasoning, log probabilities — that this endpoint never produces; the items simply do not appear |
+| `input` | **supported** | the conversation, including `function_call` and `function_call_output` items |
+| `instructions` | **supported** | the system prompt; mapped to a leading `system` turn |
+| `max_output_tokens` | **supported** | the generation budget, and the input that sizes the context window for the request |
+| `max_tool_calls` | **400** | `max_tool_calls` is not supported: the tool loop's own round budget is what bounds it, so a lower cap would not be applied and the model could call tools more times than you allowed. There is no per-request tool-call cap on this endpoint; the server-side budget is fixed at build time. |
+| `metadata` | **dropped** | free-form labels for OpenAI's dashboard; never read, never echoed |
+| `model` | **supported** | the model id to run; must be one of `/v1/models` |
+| `parallel_tool_calls` | **accepted, not enforced** | at most one call is parsed per turn today, so a turn never carries more than one regardless |
+| `previous_response_id` | **400** | `previous_response_id` is not supported: nothing is stored here, so the turns that id names are not on the server and the model would answer having never seen them. Send the whole conversation in `input` each turn — every prior `message`, `function_call` and `function_call_output` — which is what a stateless endpoint needs. |
+| `prompt` | **400** | `prompt` is not supported: a stored prompt template lives in OpenAI's dashboard and cannot be resolved from here, so the instructions you believe were applied were not. Send the template's resolved text as `instructions`. |
+| `prompt_cache_key` | **dropped** | a cache-bucketing hint for OpenAI's prompt cache; nothing about the response depends on it |
+| `reasoning` | **dropped** | a model's `<think>` block is stripped on every Roteiro surface and no `reasoning` item is ever emitted, so neither the effort nor the summary setting has anything to act on — see the divergence table above |
+| `safety_identifier` | **dropped** | an end-user label for OpenAI's abuse tooling; a loopback server has no such tooling and the response is identical either way |
+| `service_tier` | **dropped** | selects OpenAI's processing tier for latency and billing; there is one tier here and the output is unaffected |
+| `store` | **dropped** | asks OpenAI to retain the response; Roteiro stores nothing and sends nothing anywhere, and the echoed value is always `false` |
+| `stream` | **supported** | the typed SSE event sequence; **`true` is the only value served** and `false` is a `400` — see the divergence table above |
+| `temperature` | **supported** | the one sampling control this endpoint honours; `0` (or omitted) is greedy |
+| `text` | **400** | `text` is not supported: there is no grammar-constrained sampling on this endpoint, so a `json_schema` format would return prose that need not parse and a verbosity setting would not change the length. Ask for the shape and the length you want in the prompt, and parse defensively. |
+| `tool_choice` | **accepted, not enforced** | forcing a named function is grammar-constrained sampling, which lands with the grammar work; half-implementing it would tell a client it was honoured |
+| `tools` | **supported** | `function` tools are advertised to the model and their calls returned, never run — bounded at 128 entries / 32 KiB. A hosted tool (`web_search`, `code_interpreter`, …) is dropped rather than refused; see the divergence table above |
+| `top_logprobs` | **400** | `top_logprobs` is not supported: no log probabilities are computed, so no alternatives come back at any position. This endpoint returns no log probabilities, and there is no flag that turns them on. |
+| `top_p` | **400** | `top_p` is not supported: nucleus sampling is not wired to the sampler, so the sampling you configured is not the sampling that ran. `temperature` is the one sampling control this endpoint honours. |
+| `truncation` | **dropped** | nothing is dropped from the middle of a conversation either way; an input larger than the context window is an error rather than a silent trim |
+| `user` | **dropped** | an end-user label for OpenAI's abuse tooling; a loopback server has no such tooling and the response is identical either way |
 
 ## Why the `tools` array is bounded
 

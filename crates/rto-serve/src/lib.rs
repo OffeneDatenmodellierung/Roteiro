@@ -14,6 +14,7 @@
 // the compile-time assertion that keeps them honest about it (#556).
 pub mod budget;
 pub mod openai_params;
+pub mod responses;
 pub mod server;
 pub mod tools;
 pub mod types;
@@ -41,6 +42,9 @@ pub use budget::{
     worst_case_tokens,
 };
 pub use openai_params::{Forward, Mention, OPENAI_CHAT_PARAMS, Param, Support, check_declared};
+// The Responses wire (#809): an adapter over the chat path, re-exported on the
+// same terms as the chat declaration beside it.
+pub use responses::{RESPONSES_PARAMS, ResponseWriter, ResponsesInput, ResponsesRequest};
 pub use rto_llama::{
     ChatRequest, Completion, CompletionStats, Engine, EngineError, FinishReason, Message, ModelInfo,
 };
