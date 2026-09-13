@@ -1528,9 +1528,12 @@ mod tests {
         }
     }
 
-    /// This repository's own `repository` URL, which a vendored copy under someone
-    /// else's workspace will not carry — see [`is_repository_checkout`].
-    const REPOSITORY_URL: &str = "https://github.com/OffeneDatenmodellierung/Roteiro";
+    /// This workspace manifest's **own** `repository =` line. Matched as a whole
+    /// line rather than searched for: a consumer that depends on Roteiro by git URL
+    /// has that URL in its manifest too, and `contains` would call their project
+    /// ours — see [`is_repository_checkout`].
+    const REPOSITORY_FIELD: &str =
+        "repository = \"https://github.com/OffeneDatenmodellierung/Roteiro\"";
 
     /// Whether this is **this repository's** checkout rather than a packaged crate.
     ///
@@ -1560,7 +1563,7 @@ mod tests {
         match std::fs::read_to_string(&manifest) {
             Ok(text) => {
                 text.lines().any(|line| line.trim() == "[workspace]")
-                    && text.contains(REPOSITORY_URL)
+                    && text.lines().any(|line| line.trim() == REPOSITORY_FIELD)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
             Err(e) => panic!(
@@ -1696,9 +1699,12 @@ mod tests {
     /// this crate carries its own copy of the marker and a copy that drifts would
     /// let all six gates below skip on CI while the other crate's stayed green.
     ///
-    /// Only the dangerous direction is asserted: where git reports a work tree, the
-    /// marker must agree that this is a checkout. In a packaged crate it is vacuous
-    /// by construction, which is correct there and is said rather than hidden.
+    /// Only the dangerous direction is asserted, and only where two signals
+    /// independent of the marker agree that this is our checkout: git reports a work
+    /// tree **and** the corpus fixture sits at its own path. Either alone is not
+    /// enough — a vendored copy inside somebody else's repository has a work tree.
+    /// In a packaged crate it is vacuous by construction, which is correct there and
+    /// is said rather than hidden.
     #[test]
     fn the_package_exemption_cannot_claim_a_real_checkout() {
         let repo = repo();
@@ -1708,7 +1714,13 @@ mod tests {
             .args(["rev-parse", "--is-inside-work-tree"])
             .output()
             .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "true");
-        if work_tree {
+        // Two signals, for the reason `rto-graph`'s twin gives: a vendored copy inside
+        // somebody's repository has a work tree too, and the marker rightly says
+        // "packaged" there.
+        let our_layout = repo
+            .join("crates/rto-graph/tests/fixtures/review/review-corpus.jsonl")
+            .exists();
+        if work_tree && our_layout {
             assert!(
                 is_repository_checkout(&repo),
                 "git reports a work tree at {} but the package marker says this is a \

@@ -40,9 +40,12 @@ fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/review")
 }
 
-/// This repository's own `repository` URL, which a vendored copy under someone
-/// else's workspace will not carry — see [`is_repository_checkout`].
-const REPOSITORY_URL: &str = "https://github.com/OffeneDatenmodellierung/Roteiro";
+/// This workspace manifest's **own** `repository =` line. Matched as a whole line
+/// rather than searched for: a consumer that depends on Roteiro by git URL has that
+/// URL in its manifest too, and `contains` would call their project ours — see
+/// [`is_repository_checkout`].
+const REPOSITORY_FIELD: &str =
+    "repository = \"https://github.com/OffeneDatenmodellierung/Roteiro\"";
 
 /// This repository, from the crate whose tests these are.
 fn repo_root() -> PathBuf {
@@ -141,7 +144,8 @@ fn is_repository_checkout() -> bool {
     let manifest = repo_root().join("Cargo.toml");
     match std::fs::read_to_string(&manifest) {
         Ok(text) => {
-            text.lines().any(|line| line.trim() == "[workspace]") && text.contains(REPOSITORY_URL)
+            text.lines().any(|line| line.trim() == "[workspace]")
+                && text.lines().any(|line| line.trim() == REPOSITORY_FIELD)
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
         Err(e) => panic!(
@@ -156,7 +160,7 @@ fn is_repository_checkout() -> bool {
 
 /// Take a skip — loudly off a runner, **never on one**.
 ///
-/// # Why no precondition is forgiven on CI
+/// # Which preconditions are forgiven on CI, and which are not
 ///
 /// `reviewed_shas_resolve_in_this_repository` named this loophole in its own
 /// comment — *"or a typo'd sha would skip its way to green"* — and then fell
@@ -228,13 +232,15 @@ fn history_or_loud_skip(test: &str, rows: usize) -> bool {
 /// one thing that can make a CI run skip these gates, so a marker that read `false`
 /// in a real checkout would restore #822 in full and say nothing.
 ///
-/// Only the dangerous direction is asserted: where git reports a work tree, the
-/// marker must agree that this is a checkout. The converse — a manifest with no git
-/// (an unpacked zip of the repository) — is deliberately not failed here, because
-/// off a runner that is a legitimate way to read the code, and on one the gates
-/// themselves already refuse it. In a packaged crate this test is vacuous by
-/// construction, which is the correct behaviour there and is said rather than
-/// hidden.
+/// Only the dangerous direction is asserted, and only where two signals independent
+/// of the marker agree that this is our checkout: git reports a work tree **and**
+/// the corpus fixture sits at its own path. Either alone is not enough — a vendored
+/// copy inside somebody else's repository has a work tree, and an unpacked zip of
+/// this repository has the layout but no git. The converse direction (a manifest
+/// with no git) is deliberately not failed here: off a runner that is a legitimate
+/// way to read the code, and on one the gates themselves already refuse it. In a
+/// packaged crate this test is vacuous by construction, which is correct there and
+/// is said rather than hidden.
 #[test]
 fn the_package_exemption_cannot_claim_a_real_checkout() {
     // Reads the output for the same reason the gate does: a bare repository exits 0
@@ -246,7 +252,15 @@ fn the_package_exemption_cannot_claim_a_real_checkout() {
         .args(["rev-parse", "--is-inside-work-tree"])
         .output()
         .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "true");
-    if work_tree {
+    // A vendored copy inside somebody's repository has a work tree too, and the
+    // marker rightly says "packaged" there — asserting on the work tree alone would
+    // fail their `cargo test`, which is the defect this whole exemption exists to
+    // avoid. The second signal is this repository's own layout: the corpus fixture
+    // at its own path, which a consumer's root does not have.
+    let our_layout = repo_root()
+        .join("crates/rto-graph/tests/fixtures/review/review-corpus.jsonl")
+        .exists();
+    if work_tree && our_layout {
         assert!(
             is_repository_checkout(),
             "git reports a work tree at {} but the package marker says this is a \
