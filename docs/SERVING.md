@@ -297,7 +297,7 @@ rather than ignored.
 |---|---|---|
 | `stream: true` | **supported** | the typed SSE event sequence, terminated by `response.completed` — or `response.incomplete` — and then `data: [DONE]` |
 | a generation cut short by `max_output_tokens` | **`response.incomplete`, not `response.completed`** | with `status: "incomplete"` and `incomplete_details.reason: "max_output_tokens"`, and the same verdict on the item. This is what the chat wire's `finish_reason: "length"` says on this wire; the text produced so far is still delivered, truncated rather than lost |
-| `stream: false`, or omitted | **400** | `stream` must be `true`: this endpoint serves the Responses API as a typed SSE event stream only, so a non-streaming request would have no body shape to return. Send `stream: true` and read `response.completed`, whose `response.output` carries exactly what a non-streaming body would have. |
+| `stream: false`, or omitted | **400** | `stream` must be `true`: this endpoint serves the Responses API as a typed SSE event stream only, so a non-streaming request would have no body shape to return. Send `stream: true` and read the terminal event — `response.completed`, or `response.incomplete` when the generation reached `max_output_tokens` — whose `response.output` carries exactly what a non-streaming body would have. Both are a delivered answer: `response.incomplete` is a truncated response rather than a dropped connection, so retrying it will truncate again. |
 | `input` as a bare string, or as items of type `message`, `function_call`, `function_call_output` | **supported** | mapped onto the chat wire's turns — see below |
 | any other `input` item type — `reasoning`, `web_search_call`, `item_reference`, … | **400** | the item is named in the message. Dropping it silently would leave the model answering from a conversation it was never shown, and a replayed `reasoning` item is the likeliest case |
 | a content part other than `input_text` / `output_text`, in a message **or** in a `function_call_output` | **400** | an image or a file you believed was read would otherwise produce a confident answer about content the model never saw |
@@ -385,7 +385,12 @@ need.
 | `response.output_item.done` | **the turn produced nothing**: the tool call was never dispatched |
 | `response.completed` | **`stream disconnected before completion`**, then five reconnection attempts |
 
-So the load-bearing pair is `response.output_item.done` and `response.completed`.
+So the load-bearing pair is `response.output_item.done` and the terminal event.
+**Wait for either terminal event, not for `response.completed` alone** — a turn
+that reaches `max_output_tokens` ends on `response.incomplete`, and a client
+waiting only for `completed` would read the closed stream as a disconnect and
+retry a turn that was in fact delivered.
+
 The full sequence is emitted anyway: it is what OpenAI's own wire carries, and a
 client that reads the optional events gets a live stream instead of a silent wait.
 

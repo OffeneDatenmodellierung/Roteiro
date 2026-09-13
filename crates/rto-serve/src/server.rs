@@ -1039,7 +1039,8 @@ fn stream_responses(
     let events = UnboundedReceiverStream::new(rx).map(|(name, data)| {
         Ok::<Event, std::convert::Infallible>(Event::default().event(name).data(data))
     });
-    // `response.completed` is the terminal event a Responses client waits for;
+    // The terminal event — `response.completed`, or `response.incomplete` for a
+    // turn the token budget cut short — is what a Responses client waits for;
     // `[DONE]` follows it for symmetry with the chat stream and because the
     // client this was measured against accepts it.
     let done = tokio_stream::once(Ok(Event::default().data("[DONE]")));

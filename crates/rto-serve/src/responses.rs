@@ -134,7 +134,17 @@ pub enum ResponsesInput {
 ///
 /// Stated as a constant because it is the one divergence a Responses client is
 /// most likely to meet, and `docs/SERVING.md` quotes it verbatim.
-pub const STREAM_ONLY: &str = "`stream` must be `true`: this endpoint serves the Responses API as a typed SSE event stream only, so a non-streaming request would have no body shape to return. Send `stream: true` and read `response.completed`, whose `response.output` carries exactly what a non-streaming body would have.";
+///
+/// **It names both terminal events, and that is not tidiness.** An earlier
+/// wording said "read `response.completed`", which is an instruction that is
+/// wrong in a case this server itself produces: a turn that reaches
+/// `max_output_tokens` ends on `response.incomplete` (see
+/// [`ResponseWriter::finish`]). A client following the old sentence would wait
+/// for an event that never arrives, read the closed stream as a dropped
+/// connection, and retry — turning a delivered truncated answer into a loop
+/// that truncates again every time. So the refusal names both, and says
+/// outright that the truncated one is an answer rather than a failure.
+pub const STREAM_ONLY: &str = "`stream` must be `true`: this endpoint serves the Responses API as a typed SSE event stream only, so a non-streaming request would have no body shape to return. Send `stream: true` and read the terminal event — `response.completed`, or `response.incomplete` when the generation reached `max_output_tokens` — whose `response.output` carries exactly what a non-streaming body would have. Both are a delivered answer: `response.incomplete` is a truncated response rather than a dropped connection, so retrying it will truncate again.";
 
 /// Every parameter of OpenAI's `POST /v1/responses` request body this endpoint
 /// has an answer for, and what it does with each.
@@ -550,7 +560,16 @@ fn message_text(content: Option<&Value>) -> Result<String, String> {
         Value::Array(parts) => {
             let mut text = String::new();
             for part in parts {
-                let kind = part.get("type").and_then(Value::as_str).unwrap_or("");
+                // The displayed name is captured **before** validation, so the
+                // refusal can say what it refused. `unwrap_or("")` printed
+                // ``a content part of type `` `` for a part whose `type` was
+                // missing or not a string — a refusal that names nothing, which
+                // is the one thing this surface promises never to do.
+                let (kind, named) = match part.get("type") {
+                    Some(Value::String(k)) => (k.as_str(), k.clone()),
+                    None => ("", "<missing>".to_owned()),
+                    Some(other) => ("", other.to_string()),
+                };
                 if !matches!(kind, "input_text" | "output_text") {
                     // "content part", not "message content part": this helper
                     // also reads a `function_call_output`'s `output`, and naming
@@ -558,7 +577,7 @@ fn message_text(content: Option<&Value>) -> Result<String, String> {
                     // — which `docs/REVIEW_CHECKLIST.md` counts against a
                     // refusal, not merely against its prose.
                     return Err(format!(
-                        "a content part of type `{kind}` is not supported on this \
+                        "a content part of type `{named}` is not supported on this \
                          endpoint: only `input_text` and `output_text` parts are read, so \
                          anything else would be silently absent from what the model saw. \
                          Send the part's information as text."
@@ -801,12 +820,15 @@ fn tool_spec(tool: &Value) -> Result<Vec<ToolSpec>, String> {
 /// one of them deserialised and walked, and meet no limit at all. Raised twice
 /// in review of #825, once per half.
 ///
-/// **Measured on the raw JSON**, which is what the request actually made the
-/// server hold, rather than on the `name`/`description`/`schema` sum the chat
-/// path takes over surviving tools. The two differ by an entry's punctuation,
-/// so this fires marginally earlier; against the client this was built for
-/// there is room to spare — `codex-cli` 0.147.0's ten tools serialise to 18,448
-/// bytes, 56% of the 32 KiB default.
+/// **Measured on the raw JSON of the whole array**, brackets and commas
+/// included, which is what the request actually made the server hold — rather
+/// than on the `name`/`description`/`schema` sum the chat path takes over
+/// surviving tools. Summing the entries alone under-counted by one separator
+/// per entry, so an array could sit above `max_client_tool_bytes` and be
+/// reported as compliant; a bound that can be exceeded while it says otherwise
+/// is not a bound. Against the client this was built for there is room to
+/// spare — `codex-cli` 0.147.0's ten tools serialise to 17,919 bytes as an
+/// array, 55% of the 32 KiB default.
 ///
 /// # Errors
 /// A message naming the bound that was crossed and what the count or size was.
@@ -820,16 +842,25 @@ fn bound_declared_tools(declared: &[Value], limits: Limits) -> Result<(), String
             crate::types::MAX_CLIENT_TOOLS
         ));
     }
-    let bytes: usize = declared
-        .iter()
-        .map(|t| serde_json::to_string(t).map_or(0, |s| s.len()))
-        .sum();
+    // Refused rather than waved through if the array somehow will not serialise:
+    // it arrived as JSON so this cannot fail in practice, and a `0` on failure
+    // would be a bound that opens under exactly the input it exists to stop.
+    let bytes = serde_json::to_string(declared)
+        .map(|s| s.len())
+        .map_err(|e| {
+            format!(
+                "the `tools` array could not be measured against this endpoint's size \
+             bound ({e}), so it is refused rather than served unbounded. Send a \
+             smaller or simpler `tools` array."
+            )
+        })?;
     if bytes > limits.max_client_tool_bytes {
         return Err(format!(
             "the `tools` array is {bytes} bytes, over the {} byte limit. The bound \
-             measures every entry as sent, including hosted ones this endpoint \
-             drops, because the cost is paid on the way in. Send fewer tools, or \
-             shorten the longest descriptions and schemas.",
+             measures the array exactly as sent — every entry, including hosted \
+             ones this endpoint drops, and the punctuation between them — because \
+             the cost is paid on the way in. Send fewer tools, or shorten the \
+             longest descriptions and schemas.",
             limits.max_client_tool_bytes
         ));
     }
@@ -1009,8 +1040,9 @@ pub type Frame = (&'static str, String);
 /// | `response.output_item.done` | **turn produced nothing**: the tool call was never dispatched |
 /// | `response.completed` | **`stream closed before response.completed`**, then five retries |
 ///
-/// So the load-bearing pair is `output_item.done` and `completed`. This writer
-/// emits the full sequence anyway — `created`, the `added`/`delta`/`done`
+/// So the load-bearing pair is `output_item.done` and the terminal event —
+/// `response.completed`, or `response.incomplete` for a turn the token budget
+/// cut short ([`Self::finish`]). This writer emits the full sequence anyway — `created`, the `added`/`delta`/`done`
 /// triplet and `completed` — because the full sequence is what OpenAI's own
 /// wire carries and a client that reads the optional events gets a live stream
 /// rather than a silent wait.
@@ -1465,6 +1497,105 @@ mod tests {
         assert!(msg.contains("response.completed"), "{msg}");
     }
 
+    /// **A refusal that cannot say what it refused is the failure this surface
+    /// exists to avoid**, and a missing or non-string part `type` was producing
+    /// exactly that — a sentence whose quoted type name was the empty string.
+    #[test]
+    fn a_malformed_content_part_type_is_still_named() {
+        let missing = chat_of(base(&json!([{
+            "type": "message", "role": "user", "content": [{"text": "hi"}],
+        }])))
+        .expect_err("a refusal");
+        assert!(
+            missing.contains("`<missing>`"),
+            "an absent `type` is named as absent: {missing}"
+        );
+
+        let non_string = chat_of(base(&json!([{
+            "type": "message", "role": "user", "content": [{"type": 7, "text": "hi"}],
+        }])))
+        .expect_err("a refusal");
+        assert!(
+            non_string.contains("`7`"),
+            "a non-string `type` is quoted back: {non_string}"
+        );
+
+        // Not vacuous: neither message may contain the empty-backticks shape the
+        // old `unwrap_or("")` produced.
+        for msg in [&missing, &non_string] {
+            assert!(!msg.contains("type `` "), "a nameless refusal: {msg}");
+        }
+    }
+
+    /// The bound must measure what the request actually sent, punctuation
+    /// included. Summing entries alone under-counted by one separator each, so
+    /// an array could sit above the limit and be reported as compliant.
+    #[test]
+    fn the_tools_bound_counts_the_array_not_just_its_entries() {
+        // Sized so the entries alone land under the limit and the serialised
+        // array lands over it — the exact gap the separators used to open.
+        let limits = Limits {
+            max_client_tool_bytes: 1_000,
+        };
+        let limit = limits.max_client_tool_bytes;
+        let entry = |pad: usize| json!({"type": "web_search", "note": "z".repeat(pad)});
+        // One ASCII byte of padding is one byte of JSON, so the sum can be
+        // steered onto the limit exactly and the array must then overshoot it by
+        // its own punctuation — which is the whole of the defect.
+        let pad = 60;
+        let each = serde_json::to_string(&entry(pad)).unwrap().len();
+        let count = limit / each;
+        let mut tools: Vec<serde_json::Value> = (0..count).map(|_| entry(pad)).collect();
+        let short: usize = tools
+            .iter()
+            .map(|t| serde_json::to_string(t).unwrap().len())
+            .sum();
+        *tools.last_mut().expect("at least one tool") = entry(pad + (limit - short));
+
+        let sum: usize = tools
+            .iter()
+            .map(|t| serde_json::to_string(t).unwrap().len())
+            .sum();
+        let array = serde_json::to_string(&tools).unwrap().len();
+        assert!(
+            sum <= limits.max_client_tool_bytes && array > limits.max_client_tool_bytes,
+            "the fixture must sit in the gap: sum {sum}, array {array}, limit {}",
+            limits.max_client_tool_bytes
+        );
+
+        let msg = serde_json::from_value::<ResponsesRequest>(json!({
+            "model": "echo", "stream": true, "input": "hi", "tools": tools,
+        }))
+        .expect("a well-formed body")
+        .into_chat(limits)
+        .expect_err("a refusal");
+        assert!(msg.contains("over the 1000 byte limit"), "{msg}");
+        assert!(
+            msg.contains(&format!("{array} bytes")),
+            "the message reports the array's real size: {msg}"
+        );
+    }
+
+    /// The `stream: false` refusal must not send a client to wait for an event
+    /// that a valid turn need not emit. Naming only `response.completed` was an
+    /// instruction that is wrong whenever a generation hits `max_output_tokens`
+    /// — the client waits, reads the closed stream as a disconnect, and retries
+    /// a turn that was in fact delivered.
+    #[test]
+    fn the_streaming_refusal_names_both_terminal_events() {
+        let msg = chat_of(json!({"model": "echo", "input": "hi"})).expect_err("a refusal");
+        assert!(msg.contains("response.completed"), "{msg}");
+        assert!(
+            msg.contains("response.incomplete"),
+            "the truncated terminal event is named too: {msg}"
+        );
+        assert!(
+            msg.contains("truncated response rather than a dropped connection"),
+            "and the retry loop is pre-empted in words: {msg}"
+        );
+        assert_eq!(msg, super::STREAM_ONLY);
+    }
+
     #[test]
     fn an_unsupported_item_type_is_refused_by_name() {
         let msg = chat_of(base(&json!([
@@ -1717,9 +1848,13 @@ mod tests {
 
     /// Retention is stateful, not bookkeeping: `store: true` asks for a response
     /// to be kept and addressable, and nothing here keeps anything, so the id
-    /// the caller was handed would address nothing. `false` — the default, and
-    /// what this endpoint does — is inert, which is what the one measured client
-    /// sends.
+    /// the caller was handed would address nothing.
+    ///
+    /// `false` is inert — **not because it is OpenAI's default**, which could
+    /// not be verified offline and which `docs/SERVING.md` records as unverified,
+    /// but because it is a decision this endpoint honours: the caller asked for
+    /// nothing to be retained and nothing is retained. It is also what the one
+    /// measured client sends. See [`RESPONSES_PARAMS`]'s `store` row.
     #[test]
     fn store_true_is_refused_and_store_false_is_not() {
         let msg = chat_of(json!({"model": "echo", "stream": true, "input": "hi",
@@ -1887,6 +2022,27 @@ mod tests {
                 None => assert!(!p.note.is_empty(), "`{}` explains nothing", p.name),
             }
         }
+    }
+
+    /// [`STREAM_ONLY`] is quoted verbatim by `docs/SERVING.md`, so the two are
+    /// compared rather than trusted to stay in step.
+    ///
+    /// This is the refusal a Responses client is likeliest to meet, and the one
+    /// whose wording has already been wrong once in a way that would have made a
+    /// client retry a delivered answer. A copy in a published page that drifts
+    /// from the sentence the server actually sends is that defect with an extra
+    /// place to hide.
+    #[test]
+    fn the_published_streaming_refusal_is_the_one_the_server_sends() {
+        let doc = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/SERVING.md"),
+        )
+        .expect("docs/SERVING.md");
+        assert!(
+            doc.contains(super::STREAM_ONLY),
+            "docs/SERVING.md no longer quotes `STREAM_ONLY` verbatim; copy the \
+             constant into the `stream: false` row of the Responses divergence table"
+        );
     }
 
     /// `docs/SERVING.md` publishes this table, so the document and the code are
