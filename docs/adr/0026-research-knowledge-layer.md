@@ -464,19 +464,27 @@ readers of committed blobs**, and `raw/` must be excluded from both:
    `added_since_head` on the worktree), and `authored_docs_from` then classifies
    what it finds **by content, not by location**.
 
-The second reader has **three doors**, and a committed markdown file under `raw/`
-— which #812 explicitly permits — can walk through any of them:
+**Every branch of that classifier is a door, and the count is deliberately not
+given here.** `authored_docs_from` is an `if`/`else if` chain over the file's
+*text* — ADR declaration, site-page declaration, blueprint shape, and a final
+`else` that scans whatever is left for `@rto:` annotations and convention
+violations. A committed markdown file under `raw/` — which #812 explicitly
+permits — reaches one of those arms by construction, because the chain is total:
+there is no arm that declines a file.
 
-| door | rule | consequence for a `raw/` file |
-|---|---|---|
-| `type: adr` | `crate::adr::declares_adr(&text)` matches **anywhere**, deliberately: *"a document that declares `type: adr` has said otherwise, wherever it sits and whatever it is called"* | a third party's paper is parsed as **one of our ADRs** |
-| `site-page:` | `crate::site::is_site_page(&text)` | it is published to the docs site |
-| **everything else** | the `else` arm scans **every remaining file** for `@rto:` annotations | it contributes authored edges into our code |
+Enumerating them was tried and got the number wrong four times running, which is
+the argument for not enumerating. **What the decision rests on is the property,
+not the list: the authored classifier matches by *content*, not by *location*.**
+Read [[crates/rto-spec/src/layer.rs#authored_docs_from]] for the current set; any
+branch added there is a new door, and an exclusion written against a list would
+silently fail to cover it.
 
-The first is the sharpest: that path rule is a good one — it is what lets a
-repository keep its decisions somewhere other than `docs/adr/` — and it is
-exactly what makes an ingested third-party document dangerous, because the
-document decides its own class. This is the same hazard the three symlink
+The ADR arm is the sharpest illustration. That rule is a good one — it is what
+lets a repository keep its decisions somewhere other than `docs/adr/`, and the
+code says so: *"a document that declares `type: adr` has said otherwise, wherever
+it sits and whatever it is called"* — and it is exactly what makes an ingested
+third-party document dangerous, because **the document decides its own class**.
+A paper carrying `type: adr` in its frontmatter is parsed as one of ours. This is the same hazard the three symlink
 refusals exist to prevent — *out-of-repo content behind a repo-relative-looking
 claim* — arriving through content classification rather than through a link.
 
@@ -547,11 +555,18 @@ deliberately read the **committed** source — *"a shareable snapshot, whose who
 value is being reproducible from a commit"*
 ([[crates/roteiro/src/main.rs]]) — and on that path a committed symlink is
 **skipped by the tree walk entirely**, so there is nothing to read and no node to
-carry it. Out-of-tree bytes therefore cannot enter a **published bundle**, which is
-the property #812's blocker rests on. What they can enter is a local worktree
-preview and its `search` results, which is a smaller and different claim than
-a blanket "unreachable everywhere" would claim, and is stated here rather than
-glossed.
+carry it. **A symlink therefore contributes nothing to the derived and authored
+layers a bundle is rendered from**, which is the property #812's blocker rests
+on. What it can reach is a local worktree preview and its `search` results.
+
+Stated that narrowly on purpose: it is a claim about the **symlink case on the
+committed path**, not about everything a bundle can contain. `build_graph`
+re-applies persisted Graphify / lat / OKF import layers after rebuilding those
+two ([[crates/roteiro/src/main.rs]] `store.reapply_imports()`), and `render okf`
+renders the resulting concepts — so a general "no out-of-tree content can enter a
+published bundle" would reach past what this reading establishes, and past what
+the import layers, which live in the store rather than the commit, would
+support.
 
 **`.gitignore` does not un-graph a file git already tracks — it is inert over
 tracked paths.** The *"an ignored file is in neither"* reading quoted a code comment
