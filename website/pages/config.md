@@ -48,6 +48,7 @@ limit          = 50                      <span class="c"># max pairs reported</s
 
 [serve]                                  <span class="c"># the network server (roteiro serve): /v1 + graph API + UI</span>
 addr   = "127.0.0.1:8017"               <span class="c"># bind address/port (CLI --addr overrides)</span>
+scope  = "all"                           <span class="c"># what to serve: here (default) | all | workspace &lt;NAME&gt; | bundle &lt;PATH&gt;</span>
 models = ["qwen3-0.6b"]                 <span class="c"># which installed models to expose (default: all)</span>
 tools  = true                            <span class="c"># expose graph tools to the model</span>
 tls_cert = "/etc/roteiro/tls/fullchain.pem"  <span class="c"># in-process HTTPS (with tls_key); omit both for plain HTTP</span>

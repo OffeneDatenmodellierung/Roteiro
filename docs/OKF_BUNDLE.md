@@ -371,7 +371,12 @@ of them.
 Serving one is a separate decision. The viewer (`okf-viewer` feature, ADR-0022)
 is reached through `roteiro explorer` or `roteiro serve` at `/okf`, and
 `roteiro explorer` run inside a bundle directory serves that bundle even where
-there is no repository. Its `/f/` route types a file from a
+there is no repository. Since ADR-0022 v1.4 it is also reachable **from
+anywhere**, including from inside a repository, as `--scope bundle <PATH>` on
+either server — one bundle, no graph and no explorer app beside it. That closed
+the hole the working-directory entry left: `explorer` discovers a repository
+before it looks for a bundle, so standing in one made the bundle mode
+unreachable. Its `/f/` route types a file from a
 closed allow-list under a `default-src 'none'; sandbox` policy with `nosniff`, and
 now sets **`Content-Disposition: attachment`** for anything outside the image
 allow-list. A bundle does not get to choose how its bytes are presented, any more

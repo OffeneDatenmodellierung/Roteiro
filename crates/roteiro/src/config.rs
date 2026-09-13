@@ -1217,6 +1217,9 @@ impl MediaConfig {
 fn serve_overlaid(user: &ServeConfig, over: &ServeConfig) -> ServeConfig {
     ServeConfig {
         addr: over.addr.clone().or(user.addr.clone()),
+        // Ordinary precedence — a value, not a capability (ADR-0007 v1.4): it
+        // chooses what a server serves, and reaches none of the five clauses.
+        scope: over.scope.clone().or(user.scope.clone()),
         models: over.models.clone().or(user.models.clone()),
         tools: over.tools.or(user.tools),
         memory_budget_mb: over.memory_budget_mb.or(user.memory_budget_mb),
@@ -1273,6 +1276,36 @@ pub const DEFAULT_MAX_CLIENT_TOOL_BYTES: usize = 32 * 1024;
 pub struct ServeConfig {
     /// Bind address for `roteiro serve --models` (default `127.0.0.1:8017`).
     pub addr: Option<String>,
+    /// What `roteiro serve` / `roteiro explorer` serve, when no `--scope` is
+    /// passed (issue #810). The same grammar as the flag, written as one string:
+    /// `"here"`, `"all"`, `"workspace <NAME>"` or `"bundle <PATH>"`.
+    ///
+    /// # Why a config key and not only a flag
+    ///
+    /// `--scope here` is the default, and `here` is the current directory's
+    /// repository. **A service manager has no useful current directory**: a unit
+    /// file starts its process in `/` or in `$HOME`, where `here` resolves to
+    /// nothing and the server refuses to start. Without this key the new default
+    /// would break exactly the deployments that cannot pass a flag — the ones
+    /// whose invocation is a file somebody wrote once — so the key is part of
+    /// the same decision rather than a convenience bolted on after it.
+    ///
+    /// Parsed where it is used rather than here, into `main`'s `ServeScope`:
+    /// this table is compiled into every build and the scopes are not (a
+    /// `--no-default-features` build has no server to scope), so a type here
+    /// would have to be `cfg`-gated while the key must always **parse** — a
+    /// config shared with a fuller build is never rejected by a leaner one
+    /// (ADR-0007's forward-compatibility rule). An unparseable value is a named
+    /// startup error quoting the key, never a silent fall-back to the default.
+    ///
+    /// **A value, not a capability, under ADR-0007 v1.4**, and covered by that
+    /// ADR's existing `[serve]` row rather than needing one of its own: it
+    /// decides *what is served* over a port the server binds anyway. It sends
+    /// nothing off the machine, runs no repository-supplied code, writes
+    /// nothing, and a wider scope opens graphs the process could already open —
+    /// so it reaches none of the five clauses, and ordinary
+    /// CLI > project > user > default precedence applies.
+    pub scope: Option<String>,
     /// Restrict which installed generative models to serve (default: all
     /// installed generative models).
     pub models: Option<Vec<String>>,
