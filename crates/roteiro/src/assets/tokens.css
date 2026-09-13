@@ -1,0 +1,191 @@
+/* Roteiro's app palette — the ONE token master (ADR-0022 v1.3).
+ *
+ * Every in-app web surface is themed from this file and from nothing else:
+ *
+ *   - the workspace hub and the project graph view  (assets/index.html, spliced
+ *     into the shell's inline <style> by `explorer_app::SHELL_HTML`);
+ *   - the OKF viewer                                (assets/okf-viewer.css,
+ *     prepended by `okf_viewer::STYLE`);
+ *   - the `links --matrix --html` export            (`overview::render_html`).
+ *
+ * It is a plain `.css` file under the crate directory, so `include_str!` reaches
+ * it from all three and `cargo package` still ships a crate that compiles. That
+ * is the constraint that used to force the viewer to keep a hand-copied byte
+ * duplicate of `website/public/style.css`; the copy is gone, and the viewer now
+ * reads this file like everything else. The public docs site at
+ * `website/public/style.css` is deliberately NOT a consumer: it is a separate
+ * artefact with its own lifecycle, and coupling a published site to an app
+ * binary's assets would be the drift risk running the other way.
+ *
+ * TWO MODES, ONE IDENTITY. Light is the baseline on `:root`. Dark is the same
+ * semantic names with mode-appropriate values, applied either by the reader's OS
+ * preference or by an explicit `data-theme="dark"` on an ancestor — the project
+ * graph view uses the second, because a graph canvas reads better dark whatever
+ * the OS says. There is no second palette anywhere; a surface that "is dark" is
+ * this palette in its dark mode.
+ *
+ * Every raw colour appears exactly ONCE per mode. Retune a value here and it
+ * reaches the chrome, the matrix, the viewer AND the cytoscape graphs, which
+ * read these properties through `getComputedStyle` rather than hard-coding hex.
+ *
+ * The dark mapping is written twice — once under `prefers-color-scheme`, once
+ * under `[data-theme="dark"]` — because a media query cannot be folded into a
+ * selector list. That is the only duplication in this file, and
+ * `dark_modes_agree` in `explorer_app.rs` asserts the two stay identical.
+ */
+
+:root {
+  /* The UA's own surfaces — checkboxes, scrollbars, the default canvas, form
+     control text — are not ours to paint, and they do not read custom
+     properties. `color-scheme` is the one thing that tells them which mode they
+     are in, and without it a checkbox stays light-drawn on a dark panel.
+     `light dark` lets the UA follow the OS; the explicit dark scopes below
+     pin it, because the project graph view is dark regardless. */
+  color-scheme: light dark;
+
+  /* Type. One voice across the app: the OKF viewer used to ship a serif
+     document face, which read as a different product rather than a different
+     page. */
+  --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* Surfaces, from furthest back to nearest front. */
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --tint: #f1f5f9;
+  --field: #ffffff;
+  --code-bg: #f1f5f9;
+  --canvas: #eef1f6;
+
+  /* Text, three steps. --sub is the least: labels, disabled, footers. */
+  --fg: #1a1f2e;
+  --fg-strong: #0b0f19;
+  --muted: #6b7280;
+  --sub: #9199a6;
+  --on-fill: #ffffff;
+
+  /* Rules and edges. */
+  --line: #e5e7eb;
+  --line-strong: #d1d5db;
+
+  /* Interaction. */
+  --accent: #4f46e5;
+  --shadow: 0 1px 2px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.1);
+
+  /* The workspace hub — the one project the others deploy from. */
+  --hub: #eef2ff;
+  --hub-line: #c7d2fe;
+
+  /* Provenance (ADR-0009's "colour: provenance"). Each role gets a stroke
+     colour, a fill and a border so a chip, a swatch, a table cell and a graph
+     node can all say the same thing without inventing a shade. */
+  --authored: #c99a2e;
+  --authored-soft: #fdf6e3;
+  --authored-line: #d1d5db;
+  --inferred: #64748b;
+  --inferred-soft: #f1f5f9;
+  --inferred-line: #d1d5db;
+  --derived: #4f46e5;
+  --derived-soft: #eef2ff;
+  --derived-line: #d1d5db;
+
+  /* State. --drift is a fact about the graph, --err is a failure of ours, and
+     they stay separate names even where they share a value. */
+  --drift: #dc2626;
+  --drift-soft: #fef2f2;
+  --drift-line: #fca5a5;
+  --err: #dc2626;
+  --ok: #065f46;
+  --ok-soft: #ecfdf5;
+  --ok-line: #9ec7ae;
+  --warn: #b45309;
+  --warn-soft: #fff7ed;
+  --warn-tint: #f5e6c8;
+  --warn-line: #fed7aa;
+  --match: #d97706;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --tint: #21262d;
+    --field: #0d1117;
+    --code-bg: #0d1117;
+    --canvas: #12171f;
+    --fg: #e6edf3;
+    --fg-strong: #ffffff;
+    --muted: #8b949e;
+    --sub: #6e7681;
+    --on-fill: #0d1117;
+    --line: #30363d;
+    --line-strong: #3d444d;
+    --accent: #7c8cff;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 1px 3px rgba(0, 0, 0, 0.3);
+    --hub: #1c2333;
+    --hub-line: #2f3a5c;
+    --authored: #e0b64d;
+    --authored-soft: #3b2f10;
+    --authored-line: #5c4a13;
+    --inferred: #3fb6a8;
+    --inferred-soft: #12302c;
+    --inferred-line: #1f5750;
+    --derived: #6ea8fe;
+    --derived-soft: #12233b;
+    --derived-line: #274b7a;
+    --drift: #f85149;
+    --drift-soft: #2d1618;
+    --drift-line: #5c2b2b;
+    --err: #ff7b72;
+    --ok: #7ee2b8;
+    --ok-soft: #10281f;
+    --ok-line: #2b6a4a;
+    --warn: #e0b64d;
+    --warn-soft: #2a2010;
+    --warn-tint: #3b2f10;
+    --warn-line: #5c4a13;
+    --match: #f0c000;
+  }
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0d1117;
+  --panel: #161b22;
+  --tint: #21262d;
+  --field: #0d1117;
+  --code-bg: #0d1117;
+  --canvas: #12171f;
+  --fg: #e6edf3;
+  --fg-strong: #ffffff;
+  --muted: #8b949e;
+  --sub: #6e7681;
+  --on-fill: #0d1117;
+  --line: #30363d;
+  --line-strong: #3d444d;
+  --accent: #7c8cff;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 1px 3px rgba(0, 0, 0, 0.3);
+  --hub: #1c2333;
+  --hub-line: #2f3a5c;
+  --authored: #e0b64d;
+  --authored-soft: #3b2f10;
+  --authored-line: #5c4a13;
+  --inferred: #3fb6a8;
+  --inferred-soft: #12302c;
+  --inferred-line: #1f5750;
+  --derived: #6ea8fe;
+  --derived-soft: #12233b;
+  --derived-line: #274b7a;
+  --drift: #f85149;
+  --drift-soft: #2d1618;
+  --drift-line: #5c2b2b;
+  --err: #ff7b72;
+  --ok: #7ee2b8;
+  --ok-soft: #10281f;
+  --ok-line: #2b6a4a;
+  --warn: #e0b64d;
+  --warn-soft: #2a2010;
+  --warn-tint: #3b2f10;
+  --warn-line: #5c4a13;
+  --match: #f0c000;
+}

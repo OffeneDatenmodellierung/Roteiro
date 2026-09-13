@@ -28,6 +28,25 @@
 
 (function () {
   const $ = (sel) => document.querySelector(sel);
+
+  // -- the palette -----------------------------------------------------------
+  // There are NO colours in this file. `assets/tokens.css` is the app's ONE
+  // token master — light and dark, shared with the OKF viewer and the
+  // `links --matrix --html` export — and cytoscape cannot read a CSS custom
+  // property itself, so we resolve them here and hand it the computed values.
+  //
+  // Resolved from the ELEMENT the graph lives in, never from `:root`: custom
+  // properties inherit, so a subtree that forces a mode (the project graph view
+  // carries `data-theme="dark"`, because a graph canvas reads better dark
+  // whatever the OS prefers) hands back that mode's values without this file
+  // knowing which mode it is in, or that modes exist.
+  //
+  // Values are read at style-build time, so `restyleGraphs` below re-reads them
+  // when the OS preference flips under a live graph.
+  const theme = (host) => {
+    const cs = getComputedStyle(host || document.documentElement);
+    return (name) => cs.getPropertyValue(`--${name}`).trim();
+  };
   const el = (tag, attrs, ...kids) => {
     const node = document.createElement(tag);
     if (attrs) {
@@ -462,6 +481,71 @@
 
   // -- topology (cytoscape) --------------------------------------------------
 
+  // The workspace topology's cytoscape stylesheet, resolved against `host`'s
+  // computed palette. Extracted from the graph constructor so `restyleGraphs`
+  // can rebuild it against a changed mode without re-laying-out the graph.
+  function workspaceGraphStyle(host) {
+    const t = theme(host);
+    return [
+      {
+        selector: "node",
+        style: {
+          shape: "round-rectangle",
+          "background-color": t("panel"),
+          "border-width": 1.5,
+          "border-color": t("line-strong"),
+          width: "label",
+          height: "label",
+          padding: "10px",
+          label: (n) => `${n.data("label")}\n${n.data("sub")}`,
+          "text-wrap": "wrap",
+          "text-valign": "center",
+          "text-halign": "center",
+          "font-size": 12,
+          "font-weight": 600,
+          color: t("fg"),
+          "text-margin-y": 0,
+        },
+      },
+      {
+        selector: 'node[role = "hub"]',
+        style: {
+          "background-color": t("hub"),
+          "border-color": t("hub-line"),
+          "border-width": 2,
+          "font-size": 14,
+        },
+      },
+      {
+        selector: "node[drift > 0]",
+        style: { "border-color": t("drift"), "border-width": 2 },
+      },
+      {
+        selector: "edge",
+        style: {
+          width: 2,
+          "curve-style": "straight",
+          "line-color": t("inferred"),
+          "target-arrow-color": t("inferred"),
+          "target-arrow-shape": "triangle",
+          "arrow-scale": 0.9,
+        },
+      },
+      {
+        selector: 'edge[prov = "authored"]',
+        style: { "line-color": t("authored"), "target-arrow-color": t("authored"), width: 3 },
+      },
+      {
+        selector: ".faded",
+        style: { opacity: 0.25 },
+      },
+      {
+        selector: ".trace",
+        style: { "border-color": t("accent"), "line-color": t("accent") },
+      },
+    ];
+  }
+
   function renderTopology(topology) {
     const host = $("#topology");
     if (state.cy) {
@@ -549,14 +633,7 @@
       container: host,
       elements,
       wheelSensitivity: 0.2,
-      style: [
-        {
-          selector: "node",
-          style: {
-            shape: "round-rectangle",
-            "background-color": "#ffffff",
-            "border-width": 1.5,
-            "border-color": "#d1d5db",
+      style: workspaceGraphStyle(host),
             width: "label",
             height: "label",
             padding: "10px",
@@ -564,49 +641,6 @@
             "text-wrap": "wrap",
             "text-valign": "center",
             "text-halign": "center",
-            "font-size": 12,
-            "font-weight": 600,
-            color: "#1a1f2e",
-            "text-margin-y": 0,
-          },
-        },
-        {
-          selector: 'node[role = "hub"]',
-          style: {
-            "background-color": "#eef2ff",
-            "border-color": "#c7d2fe",
-            "border-width": 2,
-            "font-size": 14,
-          },
-        },
-        {
-          selector: "node[drift > 0]",
-          style: { "border-color": "#dc2626", "border-width": 2 },
-        },
-        {
-          selector: "edge",
-          style: {
-            width: 2,
-            "curve-style": "straight",
-            "line-color": "#64748b",
-            "target-arrow-color": "#64748b",
-            "target-arrow-shape": "triangle",
-            "arrow-scale": 0.9,
-          },
-        },
-        {
-          selector: 'edge[prov = "authored"]',
-          style: { "line-color": "#c99a2e", "target-arrow-color": "#c99a2e", width: 3 },
-        },
-        {
-          selector: ".faded",
-          style: { opacity: 0.25 },
-        },
-        {
-          selector: ".trace",
-          style: { "border-color": "#4f46e5", "line-color": "#4f46e5" },
-        },
-      ],
       layout: {
         name: "concentric",
         concentric: (n) => (n.data("role") === "hub" ? 2 : 1),
@@ -644,7 +678,7 @@
 
   function highlightSpoke(name) {
     document.querySelectorAll("table.matrix .spoke-col").forEach((th) => {
-      th.style.background = th.dataset.spoke === name ? "#fdf6e3" : "";
+      th.style.background = th.dataset.spoke === name ? "var(--authored-soft)" : "";
     });
   }
 
@@ -811,11 +845,11 @@
         class: "explain",
         html:
           "<strong>How the links are made.</strong> " +
-          '<i style="color:#64748b">Inferred</i> — a deploy key matched to an app key by ' +
+          '<i style="color:var(--inferred)">Inferred</i> — a deploy key matched to an app key by ' +
           "name/content similarity, confidence-scored. " +
-          '<i style="color:#c99a2e">Authored</i> — a link declared in the deploy repo that ' +
+          '<i style="color:var(--authored)">Authored</i> — a link declared in the deploy repo that ' +
           "must not silently drift. " +
-          '<i style="color:#dc2626">Drift</i> — a deploy key with no app counterpart at all.',
+          '<i style="color:var(--drift)">Drift</i> — a deploy key with no app counterpart at all.',
       })
     );
   }
@@ -1002,21 +1036,27 @@
   // Project graph view (drill-in) — PR 5
   // ==========================================================================
 
-  // Node/edge colour by provenance (the legend's "colour: provenance").
-  const PROV_COLOR = {
-    derived: "#6ea8fe",
-    authored: "#e0b64d",
-    inferred: "#3fb6a8",
-  };
+  // Node/edge colour by provenance (the legend's "colour: provenance"), resolved
+  // from the palette rather than spelled out here.
+  const provColor = (t) => ({
+    derived: t("derived"),
+    authored: t("authored"),
+    inferred: t("inferred"),
+  });
 
   // Cross-repo link colours (PR 6): a spoke's config→app-key edges are DASHED and
   // coloured GOLD when authored, SLATE when inferred; a link whose target the app
   // no longer defines is DRIFT — a RED dashed edge to a `?` node.
-  const LINK_COLOR = {
-    authored: "#e0b64d", // gold
-    inferred: "#8b95a3", // slate
-    drift: "#f85149", // red
-  };
+  //
+  // `inferred` is the NEUTRAL `--muted`, not `--inferred`: these edges say
+  // "matched, not declared" about a cross-repo link, which is a different claim
+  // from a node's inferred provenance, and the legend has always drawn them as
+  // slate against the provenance teal. Two roles, two tokens.
+  const linkColor = (t) => ({
+    authored: t("authored"),
+    inferred: t("muted"),
+    drift: t("drift"),
+  });
 
   // Stash the drilled-into project's cross-repo links and index them per-edge (for
   // styling) and per-node (for the detail chips) — see the `state` comment. Keyed
@@ -1079,25 +1119,38 @@
 
   // -- view show / hide ------------------------------------------------------
 
+  // The project view is dark whatever the OS prefers, and `<html>` is told so
+  // rather than `<body>`: the element itself already carries `data-theme="dark"`
+  // (see index.html), but the OVERSCROLL area is painted from the root, and the
+  // root is outside it. This used to be a hand-kept `background: #0d1117` on
+  // `body.on-project` that had to stay in step with `#view-project`'s `--bg` by
+  // hand — one literal, in a file that now has none. Both the element and the
+  // root name the same mode of the same master, so there is nothing to keep in
+  // step.
+  const setDark = (on) => {
+    if (on) document.documentElement.dataset.theme = "dark";
+    else delete document.documentElement.dataset.theme;
+  };
+
   function showSelectView() {
     $("#view-project").hidden = true;
     $("#view-workspace").hidden = true;
     $("#view-select").hidden = false;
-    document.body.classList.remove("on-project");
+    setDark(false);
   }
 
   function showProjectView() {
     $("#view-select").hidden = true;
     $("#view-workspace").hidden = true;
     $("#view-project").hidden = false;
-    document.body.classList.add("on-project");
+    setDark(true);
   }
 
   function showWorkspaceView() {
     $("#view-select").hidden = true;
     $("#view-project").hidden = true;
     $("#view-workspace").hidden = false;
-    document.body.classList.remove("on-project");
+    setDark(false);
     // Free the (potentially ~1,300-node) project graph when backing out. Also
     // drop the cached RAW graph (`pGraph`, kept only so the "hide tooling config"
     // toggle can re-render without a refetch) so it can be GC'd off-view.
@@ -1139,6 +1192,167 @@
       };
     }
     return { name: "grid" };
+  }
+
+  // The project graph's cytoscape stylesheet, resolved against `host`'s computed
+  // palette. `#view-project` carries `data-theme="dark"`, so `theme()` hands back
+  // the master's DARK values here whatever the OS prefers — the canvas is this
+  // palette in its dark mode, not a palette of its own.
+  function projectGraphStyle(host, bigGraph) {
+    const t = theme(host);
+    const prov = provColor(t);
+    const link = linkColor(t);
+    const edgeBase = bigGraph
+      ? {
+          width: 1,
+          "line-color": t("line"),
+          "curve-style": "haystack",
+          "haystack-radius": 0,
+          opacity: 0.55,
+        }
+      : {
+          width: 1.2,
+          "line-color": t("line"),
+          "curve-style": "straight",
+          "target-arrow-shape": "triangle",
+          "target-arrow-color": t("line"),
+          "arrow-scale": 0.7,
+          opacity: 0.85,
+        };
+    return [
+      {
+        selector: "node",
+        style: {
+          "background-color": (n) => prov[n.data("prov")] || t("muted"),
+          width: 14,
+          height: 14,
+          "border-width": 0,
+          label: bigGraph ? "" : "data(label)",
+          "font-size": 7,
+          color: t("fg"),
+          "text-valign": "bottom",
+          "text-halign": "center",
+          "text-margin-y": 2,
+          "min-zoomed-font-size": 7,
+        },
+      },
+      { selector: "edge", style: edgeBase },
+      {
+        selector: 'edge[prov = "authored"]',
+        style: { "line-color": t("authored"), "target-arrow-color": t("authored") },
+      },
+      {
+        selector: 'edge[prov = "inferred"]',
+        style: { "line-color": t("inferred"), "target-arrow-color": t("inferred") },
+      },
+      // -- cross-repo links (PR 6) — placed after the generic edge/node rules so
+      //    the dashed link styling wins for the config→app-key edges/targets.
+      {
+        selector: 'node[role = "appkey"]',
+        style: {
+          shape: "round-rectangle",
+          "background-color": t("panel"),
+          "background-opacity": 0.95,
+          "border-width": 1.5,
+          "border-style": "dashed",
+          "border-color": link.inferred,
+          width: "label",
+          height: "label",
+          padding: "6px",
+          label: "data(label)",
+          "font-size": 8,
+          color: t("fg"),
+          "text-valign": "center",
+          "text-halign": "center",
+          "text-margin-y": 0,
+          "min-zoomed-font-size": 0,
+        },
+      },
+      {
+        selector: 'node[role = "appkey"][linkprov = "authored"]',
+        style: { "border-color": link.authored },
+      },
+      {
+        selector: 'node[role = "appkey"][drift = 1]',
+        style: {
+          shape: "ellipse",
+          "border-color": link.drift,
+          color: link.drift,
+          "font-size": 13,
+          "font-weight": 700,
+          padding: "8px",
+        },
+      },
+      {
+        selector: "edge[link = 1]",
+        style: {
+          "curve-style": "straight",
+          "line-style": "dashed",
+          "line-color": link.inferred,
+          "target-arrow-color": link.inferred,
+          "target-arrow-shape": "triangle",
+          "arrow-scale": 0.7,
+          width: 1.5,
+          opacity: 0.95,
+        },
+      },
+      {
+        selector: 'edge[link = 1][linkprov = "authored"]',
+        style: {
+          "line-color": link.authored,
+          "target-arrow-color": link.authored,
+        },
+      },
+      {
+        selector: "edge[link = 1][drift = 1]",
+        style: {
+          "line-color": link.drift,
+          "target-arrow-color": link.drift,
+          width: 2,
+        },
+      },
+      {
+        selector: "node:selected",
+        style: {
+          "border-width": 3,
+          "border-color": t("fg-strong"),
+          label: "data(label)",
+          "font-size": 9,
+          "z-index": 30,
+        },
+      },
+      { selector: "node.nb", style: { label: "data(label)", "z-index": 20 } },
+      {
+        selector: "node.match",
+        style: {
+          "border-width": 3,
+          "border-color": t("match"),
+          label: "data(label)",
+          "font-size": 9,
+          "z-index": 25,
+        },
+      },
+      { selector: ".dim", style: { opacity: 0.12, "text-opacity": 0 } },
+      {
+        selector: "edge.trace",
+        style: { "line-color": t("accent"), width: 2, opacity: 1 },
+      },
+    ];
+  }
+
+  // Re-read the palette under a live graph when the OS flips light/dark.
+  // cytoscape holds resolved colours, not custom properties, so without this the
+  // chrome would change mode and the canvas would not. The project view forces
+  // dark and is unaffected by the flip; it is restyled anyway rather than
+  // special-cased, because "which surfaces are mode-locked" is the stylesheet's
+  // business and not this listener's.
+  function restyleGraphs() {
+    if (state.cy) state.cy.style(workspaceGraphStyle($("#topology")));
+    if (state.pcy) state.pcy.style(projectGraphStyle($("#p-graph"), state.pBig));
+  }
+  const darkMedia = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)");
+  if (darkMedia && darkMedia.addEventListener) {
+    darkMedia.addEventListener("change", restyleGraphs);
   }
 
   function renderProjectGraph(graph) {
@@ -1216,23 +1430,7 @@
     // Above this size, labels are hidden by default (drawn only on hover/select/
     // match) so a hub project stays legible and renders responsively.
     const bigGraph = count > 200;
-    const edgeBase = bigGraph
-      ? {
-          width: 1,
-          "line-color": "#30363d",
-          "curve-style": "haystack",
-          "haystack-radius": 0,
-          opacity: 0.55,
-        }
-      : {
-          width: 1.2,
-          "line-color": "#30363d",
-          "curve-style": "straight",
-          "target-arrow-shape": "triangle",
-          "target-arrow-color": "#30363d",
-          "arrow-scale": 0.7,
-          opacity: 0.85,
-        };
+    state.pBig = bigGraph;
 
     const cy = cytoscape({
       container: host,
@@ -1241,125 +1439,7 @@
       // A zoom ceiling/floor keeps a large graph navigable rather than lost.
       minZoom: 0.05,
       maxZoom: 3,
-      style: [
-        {
-          selector: "node",
-          style: {
-            "background-color": (n) => PROV_COLOR[n.data("prov")] || "#8b949e",
-            width: 14,
-            height: 14,
-            "border-width": 0,
-            label: bigGraph ? "" : "data(label)",
-            "font-size": 7,
-            color: "#c9d1d9",
-            "text-valign": "bottom",
-            "text-halign": "center",
-            "text-margin-y": 2,
-            "min-zoomed-font-size": 7,
-          },
-        },
-        { selector: "edge", style: edgeBase },
-        {
-          selector: 'edge[prov = "authored"]',
-          style: { "line-color": "#e0b64d", "target-arrow-color": "#e0b64d" },
-        },
-        {
-          selector: 'edge[prov = "inferred"]',
-          style: { "line-color": "#3fb6a8", "target-arrow-color": "#3fb6a8" },
-        },
-        // -- cross-repo links (PR 6) — placed after the generic edge/node rules so
-        //    the dashed link styling wins for the config→app-key edges/targets.
-        {
-          selector: 'node[role = "appkey"]',
-          style: {
-            shape: "round-rectangle",
-            "background-color": "#161b22",
-            "background-opacity": 0.95,
-            "border-width": 1.5,
-            "border-style": "dashed",
-            "border-color": LINK_COLOR.inferred,
-            width: "label",
-            height: "label",
-            padding: "6px",
-            label: "data(label)",
-            "font-size": 8,
-            color: "#c9d1d9",
-            "text-valign": "center",
-            "text-halign": "center",
-            "text-margin-y": 0,
-            "min-zoomed-font-size": 0,
-          },
-        },
-        {
-          selector: 'node[role = "appkey"][linkprov = "authored"]',
-          style: { "border-color": LINK_COLOR.authored },
-        },
-        {
-          selector: 'node[role = "appkey"][drift = 1]',
-          style: {
-            shape: "ellipse",
-            "border-color": LINK_COLOR.drift,
-            color: LINK_COLOR.drift,
-            "font-size": 13,
-            "font-weight": 700,
-            padding: "8px",
-          },
-        },
-        {
-          selector: "edge[link = 1]",
-          style: {
-            "curve-style": "straight",
-            "line-style": "dashed",
-            "line-color": LINK_COLOR.inferred,
-            "target-arrow-color": LINK_COLOR.inferred,
-            "target-arrow-shape": "triangle",
-            "arrow-scale": 0.7,
-            width: 1.5,
-            opacity: 0.95,
-          },
-        },
-        {
-          selector: 'edge[link = 1][linkprov = "authored"]',
-          style: {
-            "line-color": LINK_COLOR.authored,
-            "target-arrow-color": LINK_COLOR.authored,
-          },
-        },
-        {
-          selector: "edge[link = 1][drift = 1]",
-          style: {
-            "line-color": LINK_COLOR.drift,
-            "target-arrow-color": LINK_COLOR.drift,
-            width: 2,
-          },
-        },
-        {
-          selector: "node:selected",
-          style: {
-            "border-width": 3,
-            "border-color": "#ffffff",
-            label: "data(label)",
-            "font-size": 9,
-            "z-index": 30,
-          },
-        },
-        { selector: "node.nb", style: { label: "data(label)", "z-index": 20 } },
-        {
-          selector: "node.match",
-          style: {
-            "border-width": 3,
-            "border-color": "#f0c000",
-            label: "data(label)",
-            "font-size": 9,
-            "z-index": 25,
-          },
-        },
-        { selector: ".dim", style: { opacity: 0.12, "text-opacity": 0 } },
-        {
-          selector: "edge.trace",
-          style: { "line-color": "#7c8cff", width: 2, opacity: 1 },
-        },
-      ],
+      style: projectGraphStyle(host, bigGraph),
       layout: chooseLayout(count),
     });
 

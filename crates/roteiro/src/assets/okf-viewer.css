@@ -1,28 +1,31 @@
-/* The OKF viewer's theme (ADR-0022).
+/* The OKF viewer's own rules (ADR-0022 v1.3).
  *
- * The first rule is the site's palette, copied verbatim from
- * `website/public/style.css`. It is a copy rather than an `include_str!` because
- * `roteiro` publishes to crates.io and `cargo package` takes only files under the
- * crate directory — a build-time include reaching out of it would ship a crate
- * that does not compile.
+ * There is no palette here. `okf_viewer::STYLE` prepends `assets/tokens.css` —
+ * Roteiro's ONE token master, shared with the explorer shell and the
+ * `links --matrix --html` export — and everything below names a token rather
+ * than a colour. The served stylesheet is still a single same-origin file, so
+ * the viewer keeps working with no network and no external asset.
  *
- * A copy can drift, so it is asserted: `the_viewer_shares_the_sites_palette` in
- * `okf_viewer.rs` reads both files and fails if the `:root` line differs. That is
- * the same trade the vendored upstream fixtures make — pin the bytes, and let a
- * test rather than a habit keep them equal.
+ * v1.2 and earlier, this file opened with a byte-copy of
+ * `website/public/style.css`'s `:root`, pinned by a test. That made the viewer
+ * look like the docs site and unlike the application it ships inside — and the
+ * copy took the site's LIGHT palette without its dark block, so the viewer was
+ * cream-only while the thing it claimed to share had two modes. Both are gone:
+ * the viewer is the app, in whichever mode the reader is in.
  *
- * Everything below the palette is the viewer's own. It deliberately does not copy
- * the site's layout rules: this is an application with a sidebar, not a document,
- * and duplicating 105 lines to reuse eight colours would be the drift risk
- * without the benefit. */
-:root { --ink:#1a2733; --accent:#0e6e8c; --paper:#f7f5f0; --line:#d8d2c4; --sub:#6b7684; --tint:#ece8df; --card:#fbfaf6; --muted:#3d4b57; }
+ * `the_viewer_is_themed_by_the_app_token_master` in `okf_viewer.rs` keeps it
+ * honest — it fails on a colour literal here, and on a `var(--x)` the master
+ * does not declare.
+ *
+ * It still deliberately does not copy the site's LAYOUT rules: this is an
+ * application with a sidebar, not a document. */
 
 * { box-sizing: border-box; }
 
 body {
-  font-family: Georgia, 'Times New Roman', serif;
-  color: var(--ink);
-  background: var(--paper);
+  font-family: var(--font);
+  color: var(--fg);
+  background: var(--bg);
   margin: 0;
   line-height: 1.6;
 }
@@ -47,7 +50,7 @@ header {
   top: 0;
 }
 header .name { font-weight: bold; }
-header .root { color: var(--sub); font-size: .85rem; font-family: ui-monospace, monospace; }
+header .root { color: var(--sub); font-size: .85rem; font-family: var(--font-mono); }
 header nav { margin-left: auto; display: flex; gap: 1rem; }
 
 main { display: flex; gap: 2rem; max-width: 72rem; margin: 0 auto; padding: 1.5rem 1.2rem 4rem; }
@@ -59,16 +62,16 @@ aside li { padding: .18rem 0; overflow-wrap: anywhere; }
 aside .group { color: var(--sub); font-size: .78rem; text-transform: uppercase; letter-spacing: .06em; margin: 1rem 0 .3rem; }
 
 .counts { display: flex; gap: .5rem; flex-wrap: wrap; margin: 0 0 1rem; padding: 0; list-style: none; }
-.counts li { background: var(--card); border: 1px solid var(--line); border-radius: .3rem; padding: .35rem .6rem; font-size: .85rem; }
+.counts li { background: var(--panel); border: 1px solid var(--line); border-radius: .3rem; padding: .35rem .6rem; font-size: .85rem; }
 .counts .n { font-weight: bold; }
 
 /* §5.3's three tiers, and §5.4's lifecycle. Colour is never the only signal —
    each pill carries its word — because a reader who cannot distinguish the hues
    still has to be able to read the tier. */
 .tier { font-size: .72rem; border-radius: .8rem; padding: .1rem .5rem; border: 1px solid var(--line); white-space: nowrap; }
-.tier-human-reviewed { background: #dcefe4; border-color: #9ec7ae; }
+.tier-human-reviewed { background: var(--ok-soft); border-color: var(--ok-line); color: var(--ok); }
 .tier-machine-confirmed { background: var(--tint); }
-.tier-unverified { background: var(--card); color: var(--sub); }
+.tier-unverified { background: var(--panel); color: var(--sub); }
 .status-deprecated { text-decoration: line-through; color: var(--sub); }
 
 /* The screener said something about this document. Loud on purpose: ADR-0021
@@ -76,21 +79,21 @@ aside .group { color: var(--sub); font-size: .78rem; text-transform: uppercase; 
    instructions, and a viewer that knew and did not say would be worse than one
    that never looked. */
 .screened {
-  background: #fdf3e3;
-  border: 1px solid #d8b978;
-  border-left: .3rem solid #d8b978;
+  background: var(--warn-soft);
+  border: 1px solid var(--warn-line);
+  border-left: .3rem solid var(--warn-line);
   border-radius: .3rem;
   padding: .7rem .9rem;
   margin: 0 0 1.2rem;
   font-size: .9rem;
 }
-.screened code { background: #f5e6c8; padding: 0 .25rem; border-radius: .2rem; }
+.screened code { background: var(--warn-tint); padding: 0 .25rem; border-radius: .2rem; }
 
 article h1 { margin-top: 0; }
 article table { border-collapse: collapse; }
 article th, article td { border: 1px solid var(--line); padding: .3rem .6rem; text-align: left; }
-article pre { background: var(--card); border: 1px solid var(--line); border-radius: .3rem; padding: .8rem; overflow-x: auto; }
-article code { font-family: ui-monospace, monospace; font-size: .9em; }
+article pre { background: var(--code-bg); border: 1px solid var(--line); border-radius: .3rem; padding: .8rem; overflow-x: auto; }
+article code { font-family: var(--font-mono); font-size: .9em; }
 article blockquote { border-left: .2rem solid var(--line); margin-left: 0; padding-left: 1rem; color: var(--muted); }
 article img { max-width: 100%; }
 
@@ -100,7 +103,7 @@ article img { max-width: 100%; }
 .rel ul { margin: 0 0 1rem; padding-left: 1.2rem; }
 .rel .absent { color: var(--sub); }
 
-#graph { width: 100%; height: 78vh; border: 1px solid var(--line); border-radius: .3rem; background: var(--card); }
+#graph { width: 100%; height: 78vh; border: 1px solid var(--line); border-radius: .3rem; background: var(--canvas); }
 
 footer { border-top: 1px solid var(--line); color: var(--sub); font-size: .8rem; padding: 1rem 1.2rem; text-align: center; }
 

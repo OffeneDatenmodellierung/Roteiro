@@ -563,7 +563,26 @@ pub fn router(root: PathBuf, base: &str, nav: Nav) -> Router {
         .with_state(state)
 }
 
-const STYLE: &str = include_str!("assets/okf-viewer.css");
+/// The viewer's own rules — layout, tiers, the screener banner. It declares no
+/// palette: every colour in it names a token from [`crate::theme::TOKENS`].
+const VIEWER_CSS: &str = include_str!("assets/okf-viewer.css");
+
+/// The served stylesheet: the app's ONE token master, then the viewer's rules.
+///
+/// Concatenated once rather than per request. Still a single same-origin file,
+/// so the viewer keeps working with no network and no external asset — the
+/// tokens ride in it rather than being fetched from anywhere.
+///
+/// Until v1.2 this file opened with a byte-copy of `website/public/style.css`,
+/// because `include_str!` cannot reach out of the crate directory without
+/// `cargo package` shipping a crate that does not compile. That constraint has
+/// not changed; what changed is where the palette lives. It is now
+/// `crates/roteiro/src/assets/tokens.css` — inside the crate, reachable by the
+/// explorer shell and the matrix export too — so the copy is gone and the
+/// viewer reads the same master as the rest of the application.
+static STYLE: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| format!("{}{VIEWER_CSS}", crate::theme::TOKENS));
+
 /// The same vendored build the explorer uses (ADR-0010) — one copy in the
 /// binary, and no fetch from a CDN.
 const CYTOSCAPE: &str = include_str!("assets/cytoscape.min.js");
@@ -1347,7 +1366,7 @@ async fn stylesheet() -> Response {
             (header::CONTENT_SECURITY_POLICY, CSP),
             (header::CACHE_CONTROL, CACHE_ASSET),
         ],
-        STYLE,
+        STYLE.as_str(),
     )
         .into_response()
 }
@@ -1371,36 +1390,61 @@ async fn cytoscape() -> Response {
 mod tests {
     use super::*;
 
-    /// The palette is copied from the site, so it is asserted rather than
-    /// remembered.
+    /// The viewer is themed by the app's ONE token master, and by nothing else.
     ///
-    /// `include_str!` would be the obvious way to have one copy, and it cannot be
-    /// used: `roteiro` publishes to crates.io and `cargo package` takes only
-    /// files under the crate directory, so a build-time include reaching up to
-    /// `website/` would ship a crate that does not compile. A copy plus a test is
-    /// the same trade the vendored OKF fixtures make.
+    /// **This is the re-aimed `the_viewer_shares_the_sites_palette`.** That test
+    /// pinned the viewer's `:root` line byte-for-byte against
+    /// `website/public/style.css`, because the palette was a hand-copy of the
+    /// docs site's. The copy is gone — the viewer now reads
+    /// `assets/tokens.css` like the explorer shell and the matrix export — so
+    /// the assertion it made is obsolete. The protection it gave is not: the
+    /// viewer silently drifting from its palette source is exactly what this
+    /// still catches, only the source has moved.
+    ///
+    /// Three claims, each of which fails independently:
+    ///
+    /// 1. the served stylesheet carries the master verbatim, so a reformat or a
+    ///    partial copy of it here is caught;
+    /// 2. the viewer's own rules declare **no palette** — no `:root`, no colour
+    ///    literal — so a hex sneaking back in is caught even though it would
+    ///    render perfectly;
+    /// 3. every `var(--x)` the viewer names is declared by the master, so
+    ///    renaming or dropping a token upstream fails here rather than
+    ///    resolving to nothing at computed-value time and falling back to
+    ///    inherited/initial — the silent failure mode #512 records.
+    ///
+    /// Claim 3 is the one that makes this guard falsifiable by construction:
+    /// change one token name in `assets/tokens.css` and this test goes red.
     #[test]
-    fn the_viewer_shares_the_sites_palette() {
-        let site =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../website/public/style.css");
-        let Ok(site_css) = std::fs::read_to_string(&site) else {
-            // Not a repository checkout (a packaged crate has no `website/`), so
-            // there is nothing to compare against. Returning is right here and
-            // would not be in a repo — see the assertion below.
-            return;
-        };
-        let palette = |css: &str| {
-            css.lines()
-                .find(|l| l.trim_start().starts_with(":root") && l.contains("--ink"))
-                .map(|l| l.trim().to_owned())
-        };
-        let theirs = palette(&site_css).expect("the site declares a palette");
-        let ours = palette(STYLE).expect("the viewer declares a palette");
-        assert_eq!(
-            ours, theirs,
-            "the viewer's palette has drifted from the site's. Copy \
-             `website/public/style.css`'s `:root` line into \
-             `crates/roteiro/src/assets/okf-viewer.css`."
+    fn the_viewer_is_themed_by_the_app_token_master() {
+        assert!(
+            STYLE.starts_with(crate::theme::TOKENS),
+            "the served stylesheet must open with `assets/tokens.css` verbatim"
+        );
+
+        // (1) No palette of its own. A `:root` block here would shadow or
+        // duplicate the master; a hex literal would bypass it entirely. Scanned
+        // with comments stripped — this file's own header names the palette it
+        // replaced, and prose must not be able to fail a guard.
+        let own = crate::theme::without_comments(VIEWER_CSS);
+        assert!(
+            !own.contains(":root"),
+            "`okf-viewer.css` declares a `:root` block — the palette belongs in \
+             `assets/tokens.css`, which every in-app surface reads"
+        );
+        let literals = crate::theme::hex_literals(VIEWER_CSS);
+        assert!(
+            literals.is_empty(),
+            "`okf-viewer.css` hard-codes colours {literals:?} — name a token from \
+             `assets/tokens.css` instead, or add one there if the role is new"
+        );
+
+        // (2) Every token it names exists upstream.
+        let dangling = crate::theme::dangling_tokens(VIEWER_CSS);
+        assert!(
+            dangling.is_empty(),
+            "the viewer names {dangling:?}, which `assets/tokens.css` does not \
+             declare — they resolve to nothing and fall back to inherited/initial"
         );
     }
 
@@ -2410,7 +2454,7 @@ mod tests {
         let (status, css, _) = get_mounted(&app, "/okf/okf-viewer.css").await;
         assert_eq!(status, StatusCode::OK);
         assert!(
-            css.contains("--ink"),
+            css.contains("--bg"),
             "the chooser's stylesheet is the viewer's"
         );
     }
@@ -2515,7 +2559,7 @@ mod tests {
         let app = host().merge(mounts_router("/okf", mounts, None));
         let (status, css, _) = get_mounted(&app, "/okf/okf-viewer.css").await;
         assert_eq!(status, StatusCode::OK);
-        assert!(css.contains("--ink"), "not the stylesheet: {css:.80}");
+        assert!(css.contains("--bg"), "not the stylesheet: {css:.80}");
         let (status, body, _) = get_mounted(&app, "/okf/okf-viewer.css-2").await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("Alpha"), "{body}");

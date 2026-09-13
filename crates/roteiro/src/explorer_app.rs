@@ -2,10 +2,12 @@
 //! same-origin UI mounted alongside the read-only `/v1/graph/*` data API by the
 //! llama-free `roteiro explorer` server (`crate::main::run_explorer`).
 //!
-//! Three static assets, all committed to the repo and embedded at compile time
-//! with `include_str!` — no npm, no build step, no external fetch:
+//! Static assets, all committed to the repo and embedded at compile time with
+//! `include_str!` — no npm, no build step, no external fetch:
 //!
-//! - `GET /` (and `/explorer`) → the HTML shell;
+//! - `GET /` (and `/explorer`) → the HTML shell, with the app's ONE token master
+//!   ([`crate::theme`]) spliced into its inline `<style>`, so the palette
+//!   arrives in the same round-trip as the markup that uses it;
 //! - `GET /app.js` → our hand-written, dependency-free ES app;
 //! - `GET /vendor/cytoscape.min.js` → the **vendored** cytoscape.js UMD bundle
 //!   (the one client-side dependency; see ADR-0010 for why a real graph library
@@ -24,10 +26,30 @@ use axum::http::header;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 
-/// The HTML shell: the workspace view (switcher, stat tiles, legend, topology +
-/// matrix panels) and the project drill-in view (dark graph canvas + right-hand
-/// hotspots/node/ask panels). References `/app.js` and `/vendor/cytoscape.min.js`.
-const SHELL_HTML: &str = include_str!("assets/index.html");
+/// The HTML shell *before* the palette is spliced in: the workspace view
+/// (switcher, stat tiles, legend, topology + matrix panels) and the project
+/// drill-in view (dark graph canvas + right-hand hotspots/node/ask panels).
+/// References `/app.js` and `/vendor/cytoscape.min.js`.
+const SHELL_TEMPLATE: &str = include_str!("assets/index.html");
+
+/// Where [`crate::theme::TOKENS`] goes in [`SHELL_TEMPLATE`].
+///
+/// A marker rather than a `<link>`: the shell must stay one self-contained
+/// document — a second round-trip for the palette would paint the app unstyled
+/// first — and the same master has to be inlinable for the `links --matrix
+/// --html` export, which has no server at all.
+const TOKENS_MARKER: &str = "/* @tokens */";
+
+/// The served HTML shell: [`SHELL_TEMPLATE`] with the app's ONE token master
+/// spliced into its inline `<style>`.
+///
+/// Built once, on first request. `str::replace` is silent when the needle is
+/// absent — it would serve a shell with no palette at all, and every rule in it
+/// would fall back to inherited/initial and render *plausibly wrong* rather than
+/// erroring, which is precisely the #512 failure mode. So
+/// `the_shell_splices_in_the_token_master` asserts the marker was really there.
+static SHELL_HTML: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| SHELL_TEMPLATE.replace(TOKENS_MARKER, crate::theme::TOKENS));
 
 /// Our hand-written ES app: fetches `/v1/graph/*`, renders the workspace view
 /// (tiles/topology/matrix) and the hash-routed project graph view (nodes coloured
@@ -61,10 +83,13 @@ const CACHE_JS: &str = "public, max-age=3600";
 /// stateful `/v1/graph/*` router the explorer server builds.
 pub fn router() -> Router {
     Router::new()
-        .route("/", get(|| async { asset(HTML, CACHE_HTML, SHELL_HTML) }))
+        .route(
+            "/",
+            get(|| async { asset(HTML, CACHE_HTML, SHELL_HTML.as_str()) }),
+        )
         .route(
             "/explorer",
-            get(|| async { asset(HTML, CACHE_HTML, SHELL_HTML) }),
+            get(|| async { asset(HTML, CACHE_HTML, SHELL_HTML.as_str()) }),
         )
         .route("/app.js", get(|| async { asset(JS, CACHE_JS, APP_JS) }))
         .route(
@@ -619,41 +644,162 @@ mod tests {
         assert!(body.contains("cytoscape"), "it is the cytoscape library");
     }
 
-    /// The shell's `<style>` block, with its custom-property declarations grouped
-    /// by the selector that owns them (`:root`, `#view-project`, …).
-    fn palette_scopes(body: &str) -> BTreeMap<String, BTreeSet<String>> {
-        let style = body
-            .split_once("<style>")
-            .and_then(|(_, rest)| rest.split_once("</style>"))
-            .map(|(css, _)| css)
-            .expect("the shell ships one inline <style> block");
-        let mut scopes: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for block in style.split('}') {
-            let Some((selector, decls)) = block.rsplit_once('{') else {
-                continue;
-            };
-            // Take the selector's last non-blank line so a preceding comment
-            // block isn't swept up with it.
-            let selector = selector
-                .lines()
-                .rfind(|l| !l.trim().is_empty())
-                .unwrap_or_default()
-                .trim()
-                .to_owned();
-            for name in decls
-                .lines()
-                .filter_map(|l| l.trim().strip_prefix("--"))
-                .filter_map(|l| l.split_once(':'))
-                .map(|(name, _)| format!("--{}", name.trim()))
-            {
-                scopes.entry(selector.clone()).or_default().insert(name);
+    /// Every custom property a stylesheet declares, as `scope -> name -> value`.
+    ///
+    /// Scopes are **nesting-aware**: the key is the enclosing at-rules and the
+    /// selector joined, so `@media (prefers-color-scheme: dark)`'s `:root` is a
+    /// scope of its own rather than folded into the bare `:root`. That
+    /// distinction is the whole point since the palette gained a dark mode — a
+    /// dark-only token would otherwise look like a `:root` token to rule (2)
+    /// below, which is exactly the hole that rule exists to close.
+    fn css_scopes(css: &str) -> BTreeMap<String, BTreeMap<String, String>> {
+        let css = crate::theme::without_comments(css);
+        let mut scopes: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+        let mut stack: Vec<String> = Vec::new();
+        let mut buf = String::new();
+        for ch in css.chars() {
+            match ch {
+                '{' => {
+                    // The prelude's last non-blank line, so a preceding rule's
+                    // trailing whitespace isn't swept up with the selector.
+                    let prelude = buf
+                        .lines()
+                        .rfind(|l| !l.trim().is_empty())
+                        .unwrap_or_default()
+                        .trim()
+                        .to_owned();
+                    stack.push(prelude);
+                    buf.clear();
+                }
+                '}' => {
+                    if !stack.is_empty() {
+                        let key = stack.join(" ");
+                        for (name, value) in buf
+                            .split(';')
+                            .map(str::trim)
+                            .filter_map(|d| d.strip_prefix("--"))
+                            .filter_map(|d| d.split_once(':'))
+                        {
+                            scopes
+                                .entry(key.clone())
+                                .or_default()
+                                .insert(format!("--{}", name.trim()), value.trim().to_owned());
+                        }
+                        stack.pop();
+                    }
+                    buf.clear();
+                }
+                _ => buf.push(ch),
             }
         }
         scopes
     }
 
-    /// #512: the explorer's two views must address ONE set of colour names whose
-    /// *values* change per view, never two parallel sets of names.
+    /// The one inline `<style>` block of a served shell.
+    fn style_block(body: &str) -> &str {
+        body.split_once("<style>")
+            .and_then(|(_, rest)| rest.split_once("</style>"))
+            .map(|(css, _)| css)
+            .expect("the shell ships one inline <style> block")
+    }
+
+    /// The shell's `<style>` block, with its custom-property NAMES grouped by the
+    /// scope that owns them (`:root`, `#view-project`, `[data-theme="dark"]`, …).
+    fn palette_scopes(body: &str) -> BTreeMap<String, BTreeSet<String>> {
+        css_scopes(style_block(body))
+            .into_iter()
+            .map(|(scope, decls)| (scope, decls.into_keys().collect()))
+            .collect()
+    }
+
+    /// The shell really is themed by the app's ONE token master.
+    ///
+    /// `str::replace` is silent when the needle is absent, so a renamed or
+    /// deleted marker would serve a shell with **no palette at all** — and
+    /// because an undefined custom property is invalid at computed-value time
+    /// rather than an error, the app would render plausibly wrong instead of
+    /// failing. This is the assertion that makes the splice load-bearing.
+    #[tokio::test]
+    async fn the_shell_splices_in_the_token_master() {
+        let (status, _ct, _cache, body) = get("/").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains(crate::theme::TOKENS),
+            "the served shell does not carry `assets/tokens.css` verbatim — has \
+             `{TOKENS_MARKER}` been renamed or reformatted in `index.html`?"
+        );
+        assert!(
+            !body.contains(TOKENS_MARKER),
+            "the marker survived into the served shell, so nothing was spliced"
+        );
+    }
+
+    /// The shell declares no colour of its own — it only names tokens.
+    ///
+    /// Scanned against `SHELL_TEMPLATE` (pre-splice), so the master's own values
+    /// are not what is being looked at: this is about the ~1,200 lines of rules
+    /// *around* it. Both halves fail independently — a hex literal renders fine
+    /// and silently forks the identity, while a `var()` naming a token the master
+    /// dropped renders plausibly wrong and errors nowhere.
+    #[test]
+    fn the_shell_declares_no_colour_of_its_own() {
+        let literals = crate::theme::hex_literals(style_block(SHELL_TEMPLATE));
+        assert!(
+            literals.is_empty(),
+            "`index.html` hard-codes colours {literals:?} — name a token from \
+             `assets/tokens.css` instead, or add one there if the role is new"
+        );
+        let dangling = crate::theme::dangling_tokens(SHELL_TEMPLATE);
+        assert!(
+            dangling.is_empty(),
+            "the shell names {dangling:?}, which `assets/tokens.css` does not \
+             declare — they resolve to nothing and fall back to inherited/initial"
+        );
+    }
+
+    /// The master's two dark mappings say the same thing.
+    ///
+    /// Dark is written twice — once under `prefers-color-scheme`, once under
+    /// `[data-theme="dark"]` for the project graph view, which is dark whatever
+    /// the OS prefers — because a media query cannot be folded into a selector
+    /// list. That is the only duplication in `tokens.css`, and it is the one
+    /// place the "one identity" claim could quietly stop being true: the two
+    /// blocks drifting would give the app two dark palettes again.
+    #[test]
+    fn dark_modes_agree() {
+        let scopes = css_scopes(crate::theme::TOKENS);
+        let media = scopes
+            .get("@media (prefers-color-scheme: dark) :root")
+            .expect("`tokens.css` answers `prefers-color-scheme: dark`");
+        let attr = scopes
+            .get("[data-theme=\"dark\"]")
+            .expect("`tokens.css` answers an explicit `data-theme=\"dark\"`");
+        assert_eq!(
+            media, attr,
+            "the two dark mappings in `assets/tokens.css` have drifted — a \
+             surface that forces dark would render a different palette from one \
+             that inherits it from the OS"
+        );
+        let light = scopes.get(":root").expect("`tokens.css` declares light");
+        let missing: Vec<&String> = media.keys().filter(|k| !light.contains_key(*k)).collect();
+        assert!(
+            missing.is_empty(),
+            "dark declares {missing:?}, which light has no value for"
+        );
+    }
+
+    /// #512: the explorer's surfaces must address ONE set of colour names whose
+    /// *values* change per mode, never two parallel sets of names.
+    ///
+    /// The shape this guards has moved once. #512 fixed two *views* with two
+    /// namespaces (`--*` on `:root`, `--p*` under `#view-project`) by giving
+    /// them one set of names re-declared per view. The palette is now one master
+    /// (`assets/tokens.css`) re-declared per **mode** — light on `:root`, dark
+    /// under `prefers-color-scheme` and under `data-theme="dark"`, which is what
+    /// the project graph view carries. `#view-project` declares nothing at all
+    /// any more. The assertions are unchanged and now cover a case they could
+    /// not before: `css_scopes` is nesting-aware, so a token declared only
+    /// inside the dark media query no longer reads as a `:root` token.
     ///
     /// The old shape kept a `--p*` set scoped to `#view-project` alongside the
     /// `--*` set on `:root`, so any component reused across the views needed a
