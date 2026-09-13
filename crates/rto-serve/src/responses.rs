@@ -452,24 +452,51 @@ pub fn check_declared(extra: &BTreeMap<String, Value>) -> Result<(), String> {
     Ok(())
 }
 
-/// Read one `input` item's `type`, defaulting to `"message"`.
+/// Read one `input` item's `type`, defaulting to `"message"` when it is
+/// **absent**.
 ///
 /// Responses' `EasyInputMessage` may omit `type` entirely, so an item with a
 /// `role` and no `type` is a message rather than a malformed item.
-fn item_type(item: &Value) -> &str {
-    item.get("type")
-        .and_then(Value::as_str)
-        .unwrap_or("message")
+///
+/// A `type` that is *present* and not a string is a different thing and is
+/// refused. Defaulting it would let `{"type": 123, "role": "user"}` be answered
+/// as an ordinary message while every unsupported item type is documented as a
+/// `400` — a malformed item admitted by the same fallback that exists for a
+/// well-formed one that simply left the key out.
+///
+/// # Errors
+/// A message naming the non-string value.
+fn item_type(item: &Value) -> Result<&str, String> {
+    match item.get("type") {
+        None => Ok("message"),
+        Some(Value::String(kind)) => Ok(kind),
+        Some(other) => Err(format!(
+            "an `input` item's `type` must be a string, and this one is `{other}`. \
+             Omit `type` for an ordinary message, or send one of `message`, \
+             `function_call` or `function_call_output`."
+        )),
+    }
 }
 
 /// Pull a required string field off an item, naming the item type in the
 /// refusal so the caller knows which of its items is wrong.
+///
+/// The second sentence is per-field rather than one sentence for all of them.
+/// `docs/REVIEW_CHECKLIST.md` asks a refusal to say why, and "it is what
+/// correlates the call with its result" is true of `call_id` and false of
+/// `name`, `arguments` and `role` — a reason that is wrong for three fields out
+/// of four is worse than none, because a caller who reads it looks in the wrong
+/// place.
 fn required_str<'a>(item: &'a Value, field: &str, kind: &str) -> Result<&'a str, String> {
     item.get(field).and_then(Value::as_str).ok_or_else(|| {
-        format!(
-            "an `input` item of type `{kind}` must carry a string `{field}`. \
-             Send `{field}` on every `{kind}` item; it is what correlates the call with its result."
-        )
+        let why = match field {
+            "call_id" => "it is what correlates the call with its result",
+            "name" => "it is the tool the model asked for, and nothing else in the item names one",
+            "arguments" => "it is the call's arguments, as a JSON string — an object is not accepted here, on either wire",
+            "role" => "it is who is speaking, and the prompt cannot be assembled without it",
+            _ => "the item cannot be read without it",
+        };
+        format!("an `input` item of type `{kind}` must carry a string `{field}`: {why}.")
     })
 }
 
@@ -480,11 +507,22 @@ fn required_str<'a>(item: &'a Value, field: &str, kind: &str) -> Result<&'a str,
 /// would otherwise produce a confident answer about content the model never
 /// saw.
 fn message_text(content: Option<&Value>) -> Result<String, String> {
-    let Some(content) = content else {
-        return Ok(String::new());
+    // Absent or `null` is refused rather than read as an empty turn. A message
+    // item's `content` is required on this wire, so a missing one is malformed
+    // input — and answering it would delete a turn from the conversation the
+    // model is reasoning over while still returning a `200`. An *explicitly*
+    // empty string or array is a different thing: the caller said "no text",
+    // and that is served.
+    let Some(content @ (Value::String(_) | Value::Array(_))) = content else {
+        return Err(
+            "a `message` item must carry `content`: a string, or an array of \
+             `input_text` / `output_text` parts. An absent or null `content` \
+             would silently drop this turn from the conversation the model \
+             answers from; send an empty string if the turn really is empty."
+                .to_owned(),
+        );
     };
     match content {
-        Value::Null => Ok(String::new()),
         Value::String(s) => Ok(s.clone()),
         Value::Array(parts) => {
             let mut text = String::new();
@@ -517,6 +555,7 @@ fn message_text(content: Option<&Value>) -> Result<String, String> {
             }
             Ok(text)
         }
+        // Unreachable: the binding above admits only the two shapes.
         other => Err(format!(
             "a message's `content` must be a string or an array of content parts, \
              and this one is `{other}`. Send the turn's text as a string."
@@ -573,10 +612,20 @@ fn map_role(role: &str) -> Result<String, String> {
 /// function-only by construction, so a `retrieval` entry is a mistake rather
 /// than a normal part of the protocol.
 fn tool_spec(tool: &Value) -> Result<Option<ToolSpec>, String> {
-    let kind = tool
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or("function");
+    // Absent means `function` — some clients omit it — but a present non-string
+    // is malformed, and coercing it would advertise `{"type": 123, "name": "x"}`
+    // to the model as a function tool, slipping past both the hosted/function
+    // split here and the chat wire's refusal of an unknown tool kind.
+    let kind = match tool.get("type") {
+        None => "function",
+        Some(Value::String(kind)) => kind,
+        Some(other) => {
+            return Err(format!(
+                "a tool's `type` must be a string, and this one is `{other}`. \
+                 Send `\"type\": \"function\"` for a tool you will execute."
+            ));
+        }
+    };
     if kind != "function" {
         return Ok(None);
     }
@@ -597,6 +646,52 @@ fn tool_spec(tool: &Value) -> Result<Option<ToolSpec>, String> {
     }))
 }
 
+/// Bound the `tools` array **as the caller sent it**, before hosted entries are
+/// filtered out.
+///
+/// Both halves of the chat wire's bound, applied one step earlier. Filtering
+/// first would leave the dropped entries unbounded in *both* directions: the
+/// count never reaches [`crate::types::MAX_CLIENT_TOOLS`], and the bytes never
+/// reach `client_tools_from`'s `max_client_tool_bytes` — so a request could
+/// carry 128 `web_search` entries with multi-megabyte descriptions, have every
+/// one of them deserialised and walked, and meet no limit at all. Raised twice
+/// in review of #825, once per half.
+///
+/// **Measured on the raw JSON**, which is what the request actually made the
+/// server hold, rather than on the `name`/`description`/`schema` sum the chat
+/// path takes over surviving tools. The two differ by an entry's punctuation,
+/// so this fires marginally earlier; against the client this was built for
+/// there is room to spare — `codex-cli` 0.147.0's ten tools serialise to 18,448
+/// bytes, 56% of the 32 KiB default.
+///
+/// # Errors
+/// A message naming the bound that was crossed and what the count or size was.
+fn bound_declared_tools(declared: &[Value], limits: Limits) -> Result<(), String> {
+    if declared.len() > crate::types::MAX_CLIENT_TOOLS {
+        return Err(format!(
+            "too many tools: {} (max {}). The bound counts every entry of `tools`, \
+             including hosted ones this endpoint drops — it caps what one request \
+             may make the server read, not what the model ends up being shown.",
+            declared.len(),
+            crate::types::MAX_CLIENT_TOOLS
+        ));
+    }
+    let bytes: usize = declared
+        .iter()
+        .map(|t| serde_json::to_string(t).map_or(0, |s| s.len()))
+        .sum();
+    if bytes > limits.max_client_tool_bytes {
+        return Err(format!(
+            "the `tools` array is {bytes} bytes, over the {} byte limit. The bound \
+             measures every entry as sent, including hosted ones this endpoint \
+             drops, because the cost is paid on the way in. Send fewer tools, or \
+             shorten the longest descriptions and schemas.",
+            limits.max_client_tool_bytes
+        ));
+    }
+    Ok(())
+}
+
 impl ResponsesRequest {
     /// Translate into the chat request this server already serves, then
     /// normalise it.
@@ -609,7 +704,7 @@ impl ResponsesRequest {
     /// # Errors
     /// A human-readable `400` message naming the parameter, item type, content
     /// part or role that was refused.
-    pub fn into_chat(self) -> Result<ChatCompletionRequest, String> {
+    pub fn into_chat(self, limits: Limits) -> Result<ChatCompletionRequest, String> {
         check_declared(&self.extra)?;
         if self.stream != Some(true) {
             return Err(STREAM_ONLY.to_owned());
@@ -647,22 +742,7 @@ impl ResponsesRequest {
             );
         }
         let declared = self.tools.unwrap_or_default();
-        // Bounded on what the **caller sent**, before hosted tools are filtered
-        // out. Filtering first would apply the bound only to the `function`
-        // entries and leave the count of dropped ones unbounded — a request
-        // could hand this loop an arbitrarily long array and have every entry
-        // deserialised and walked, which is exactly the request-side allocation
-        // the chat wire's cap exists to refuse. Raised in review of #825.
-        if declared.len() > crate::types::MAX_CLIENT_TOOLS {
-            return Err(format!(
-                "too many tools: {} (max {}). The bound counts every entry of \
-                 `tools`, including hosted ones this endpoint drops — it is a \
-                 cap on what one request may make the server read, not on what \
-                 the model ends up being shown.",
-                declared.len(),
-                crate::types::MAX_CLIENT_TOOLS
-            ));
-        }
+        bound_declared_tools(&declared, limits)?;
         let mut tools = Vec::new();
         for tool in declared {
             if let Some(spec) = tool_spec(&tool)? {
@@ -693,7 +773,7 @@ impl ResponsesRequest {
     /// # Errors
     /// As [`Self::into_chat`], plus anything `normalise` refuses.
     pub fn normalise(self, limits: Limits) -> Result<NormalisedChat, String> {
-        self.into_chat()?.normalise(limits)
+        self.into_chat(limits)?.normalise(limits)
     }
 }
 
@@ -714,7 +794,7 @@ impl ResponsesRequest {
 /// than refusing: the client would believe the model had been shown its own
 /// prior deliberation.
 fn input_item(item: &Value) -> Result<RequestMessage, String> {
-    match item_type(item) {
+    match item_type(item)? {
         "message" => {
             let role = map_role(required_str(item, "role", "message")?)?;
             let text = message_text(item.get("content"))?;
@@ -1073,7 +1153,7 @@ mod tests {
     fn chat_of(body: serde_json::Value) -> Result<crate::types::ChatCompletionRequest, String> {
         serde_json::from_value::<ResponsesRequest>(body)
             .map_err(|e| e.to_string())?
-            .into_chat()
+            .into_chat(Limits::default())
     }
 
     /// The rendered prompt turns, `(role, content)`, after `normalise`.
@@ -1408,6 +1488,89 @@ mod tests {
         chat_of(json!({"model": "echo", "stream": true, "input": "hi",
                        "tools": at_limit}))
         .expect("the limit itself is served");
+    }
+
+    /// `type` absent means `message` — some clients omit it — but a `type` that
+    /// is present and not a string is malformed, and coercing it would admit an
+    /// item while every unsupported *type* is refused.
+    #[test]
+    fn a_non_string_item_type_is_refused_rather_than_defaulted() {
+        let msg = chat_of(base(
+            &json!([{"type": 123, "role": "user", "content": "hi"}]),
+        ))
+        .expect_err("a refusal");
+        assert!(msg.contains("must be a string"), "{msg}");
+    }
+
+    /// The same fallback on the tool side would advertise
+    /// `{"type": 123, "name": "x"}` to the model as a function tool, past both
+    /// the hosted/function split and the chat wire's refusal of an unknown kind.
+    #[test]
+    fn a_non_string_tool_type_is_refused_rather_than_defaulted() {
+        let msg = chat_of(json!({"model": "echo", "stream": true, "input": "hi",
+                                 "tools": [{"type": 123, "name": "x"}]}))
+        .expect_err("a refusal");
+        assert!(msg.contains("must be a string"), "{msg}");
+    }
+
+    /// A `message` item with no `content` was read as an empty turn, which
+    /// deletes it from the conversation the model answers from while still
+    /// returning a `200`. An *explicitly* empty string is a different thing and
+    /// is served.
+    #[test]
+    fn a_message_without_content_is_refused_but_an_empty_string_is_served() {
+        for absent in [
+            json!({"role": "user"}),
+            json!({"role": "user", "content": null}),
+        ] {
+            let msg = chat_of(base(&json!([absent]))).expect_err("a refusal");
+            assert!(msg.contains("must carry `content`"), "{msg}");
+        }
+        assert_eq!(
+            turns(base(&json!([{"role": "user", "content": ""}]))),
+            vec![("user".to_owned(), String::new())]
+        );
+    }
+
+    /// The byte half of the tool bound, on the array **as sent**. Filtering
+    /// hosted entries out first left them unmeasured, so 128 of them carrying
+    /// multi-megabyte descriptions met no limit at all.
+    #[test]
+    fn an_oversized_tools_array_is_refused_even_when_every_entry_is_hosted() {
+        let fat: Vec<serde_json::Value> = (0..8)
+            .map(|_| json!({"type": "web_search", "note": "z".repeat(8 * 1024)}))
+            .collect();
+        let req: ResponsesRequest = serde_json::from_value(json!({
+            "model": "echo", "stream": true, "input": "hi", "tools": fat,
+        }))
+        .expect("a well-formed body");
+        let msg = req.into_chat(Limits::default()).expect_err("a refusal");
+        assert!(msg.contains("over the 32768 byte limit"), "{msg}");
+    }
+
+    /// A refusal that names a field must say why *that* field is needed. One
+    /// sentence for all of them read "it is what correlates the call with its
+    /// result", which is true of `call_id` and false of the other three.
+    #[test]
+    fn a_missing_field_refusal_explains_that_field_and_not_another() {
+        let name = chat_of(base(&json!([
+            {"type": "function_call", "call_id": "c", "arguments": "{}"},
+        ])))
+        .expect_err("a refusal");
+        assert!(name.contains("`name`"), "{name}");
+        assert!(
+            !name.contains("correlates"),
+            "`name` does not correlate anything: {name}"
+        );
+
+        let call_id = chat_of(base(&json!([
+            {"type": "function_call_output", "output": "x"},
+        ])))
+        .expect_err("a refusal");
+        assert!(
+            call_id.contains("correlates the call with its result"),
+            "{call_id}"
+        );
     }
 
     #[test]

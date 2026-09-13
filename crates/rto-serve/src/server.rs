@@ -17,7 +17,7 @@ use axum::routing::{get, post};
 use tokio_stream::StreamExt as _;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
-use crate::engine::{ChatRequest, CompletionStats, Engine, EngineError};
+use crate::engine::{ChatRequest, CompletionStats, Engine, EngineError, FinishReason};
 use crate::responses::{Frame, ResponseWriter, ResponsesRequest};
 use crate::tools::{
     ClientToolCall, ToolDef, ToolLoopOutcome, ToolRegistry, chat_with_client_tools,
@@ -881,6 +881,16 @@ fn stream_chat(
 /// of the same tool loop. See [`crate::responses`] for the mapping and for what
 /// is refused.
 async fn responses(State(state): State<Shared>, Json(body): Json<ResponsesRequest>) -> Response {
+    // Read before `body` is consumed. **Whether the caller sent tools decides
+    // the mode, not whether any of them survived translation** — the published
+    // rule is that a `tools` array puts this endpoint in general mode and the
+    // graph tools are not injected. A request carrying only hosted tools
+    // (`codex-cli` sends `web_search` on every turn) filters down to an empty
+    // client list, and keying the decision on that list would have put such a
+    // request back into Ask mode: graph tools advertised and executed for a
+    // client that asked for the opposite, plus the ~3,100 tokens of schemas
+    // that behaviour exists to spare it. Raised in review of #825.
+    let declared_tools = body.tools.as_ref().is_some_and(|t| !t.is_empty());
     let normalised = match body.normalise(state.limits) {
         Ok(n) => n,
         Err(msg) => return error(StatusCode::BAD_REQUEST, msg, "invalid_request_error"),
@@ -902,7 +912,7 @@ async fn responses(State(state): State<Shared>, Json(body): Json<ResponsesReques
     // project- and workspace-scoped Responses routes are deferred, and the
     // seam they will reuse is this argument (ADR-0008), not a second
     // confinement mechanism.
-    stream_responses(state, req, ChatScope::Default, client_tools)
+    stream_responses(state, req, ChatScope::Default, client_tools, declared_tools)
 }
 
 /// Run one Responses turn and surface it as the typed SSE event sequence.
@@ -916,6 +926,7 @@ fn stream_responses(
     req: ChatRequest,
     scope: ChatScope,
     client_tools: Vec<ToolDef>,
+    declared_tools: bool,
 ) -> Response {
     let id = format!("resp_{}", next_id());
     let created = unix_seconds();
@@ -929,17 +940,34 @@ fn stream_responses(
         // reads it learns the response id before the first item. See
         // `ResponseWriter` for the measurement.
         let _ = tx.send(writer.created());
-        let use_tools = !client_tools.is_empty() || scope_has_tools(&state, &scope);
+        // The graph tools are consulted only when the caller declared none of
+        // its own — see `responses` for why this asks `declared_tools` rather
+        // than looking at what survived. A hosted-only request therefore takes
+        // the untooled branch: nothing is advertised, which is what general
+        // mode means when none of the declared tools can be served, and the
+        // answer streams token by token as a bonus.
+        let use_tools =
+            !client_tools.is_empty() || (!declared_tools && scope_has_tools(&state, &scope));
         if use_tools {
             match complete(&state, &req, &scope, &client_tools) {
                 Ok(outcome) if !outcome.client_tool_calls.is_empty() => {
-                    let finish = outcome.completion.finish_reason;
+                    // `FinishReason::Stop` regardless of what the engine
+                    // reported, and deliberately. The loop returns calls only
+                    // through `Ending::ClientCalls`, which the markup reader
+                    // reaches only for a call that arrived **intact** — one cut
+                    // by the token cap becomes `Ending::Unfinished` and is
+                    // refused, never returned. So a turn that gets here carries
+                    // a complete, executable call, and `response.incomplete`
+                    // would tell the client its call was truncated when it was
+                    // not, and stop it running one it could have run. This is
+                    // the same override the chat wire makes when it reports
+                    // `finish_reason: "tool_calls"` over `length`.
                     for call in tool_call_dtos(&outcome.client_tool_calls) {
                         for frame in writer.function_call(&call) {
                             let _ = tx.send(frame);
                         }
                     }
-                    let _ = tx.send(writer.finish(&usage_of(&outcome), finish));
+                    let _ = tx.send(writer.finish(&usage_of(&outcome), FinishReason::Stop));
                 }
                 Ok(outcome) => {
                     let usage = usage_of(&outcome);
@@ -3353,6 +3381,114 @@ mod tests {
         assert_eq!(terminal["output"][0]["status"], "incomplete");
         // And the text produced so far is still delivered — truncated, not lost.
         assert_eq!(responses_content(&sse), "a long answer that ran");
+    }
+
+    /// **A `tools` array of only hosted tools is still a `tools` array.**
+    ///
+    /// The published rule is that sending `tools` puts this endpoint in general
+    /// mode and the graph tools are *not* injected. Hosted entries
+    /// (`web_search`, which `codex-cli` sends on every turn) are dropped by the
+    /// adapter, so keying the mode on the surviving client list put such a
+    /// request back into Ask mode — graph tools advertised and executed for a
+    /// client that asked for the opposite, plus the ~3,100 tokens of schemas
+    /// that behaviour exists to spare it. Raised in review of #825.
+    #[tokio::test]
+    async fn a_hosted_only_tools_array_does_not_turn_the_graph_tools_back_on() {
+        let engine = ScriptedServeEngine::new(&["I cannot search the web."]);
+        let router = app_with_tools(engine.clone(), std::sync::Arc::new(PanicRegistry));
+        let resp = router
+            .oneshot(responses_body(&serde_json::json!({
+                "model": "echo", "stream": true, "input": "what is the news?",
+                "tools": [{"type": "web_search", "external_web_access": true}],
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let sse = sse_text(resp).await;
+        assert!(sse.contains("response.completed"), "{sse}");
+
+        let prompt = engine.first_system_prompt();
+        assert!(
+            !prompt.contains("graph_only_tool"),
+            "a client that sent `tools` does not also get Roteiro's, even when \
+             every tool it sent was one this endpoint drops: {prompt}"
+        );
+    }
+
+    /// The Ask path must keep working: no `tools` key at all still gets the
+    /// graph tools. Without this the fix above could be "suppress always", which
+    /// would pass the test above and delete Ask mode from this wire.
+    #[tokio::test]
+    async fn a_responses_request_with_no_tools_still_gets_the_graph_tools() {
+        struct GraphOnly;
+        impl crate::tools::ToolRegistry for GraphOnly {
+            fn tools(&self) -> Vec<crate::tools::ToolDef> {
+                vec![crate::tools::ToolDef {
+                    name: "graph_only_tool".to_owned(),
+                    description: "a graph tool".to_owned(),
+                    parameters: serde_json::json!({"type": "object"}),
+                }]
+            }
+            fn call(&self, _n: &str, _a: &serde_json::Value) -> Result<String, String> {
+                Ok("the graph said so".to_owned())
+            }
+        }
+        let engine = ScriptedServeEngine::new(&[
+            "<tool_call>{\"name\":\"graph_only_tool\",\"arguments\":{}}</tool_call>",
+            "the graph said so",
+        ]);
+        let router = app_with_tools(engine.clone(), std::sync::Arc::new(GraphOnly));
+        let resp = router
+            .oneshot(responses_body(&serde_json::json!({
+                "model": "echo", "stream": true, "input": "why?",
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let sse = sse_text(resp).await;
+        assert_eq!(responses_content(&sse), "the graph said so");
+        assert!(
+            engine.first_system_prompt().contains("graph_only_tool"),
+            "Ask mode on this wire still advertises the graph tools"
+        );
+    }
+
+    /// A client tool call is **complete by construction**, whatever the engine
+    /// reported: the loop returns calls only through `Ending::ClientCalls`, and
+    /// a call cut by the token cap becomes `Ending::Unfinished` and is refused
+    /// instead. So this turn must terminate on `response.completed` — the same
+    /// override the chat wire makes when it reports `finish_reason: "tool_calls"`
+    /// over `length`. Reporting `response.incomplete` would tell the client its
+    /// call was truncated and stop it running one it could have run.
+    #[tokio::test]
+    async fn a_client_tool_call_completes_even_when_the_engine_reports_length() {
+        let engine = ReasoningEngine::new(WEATHER_CALL, FinishReason::Length);
+        let resp = app(engine)
+            .oneshot(responses_body(&serde_json::json!({
+                "model": "echo", "stream": true, "input": "weather in Berlin?",
+                "max_output_tokens": 8,
+                "tools": [{"type": "function", "name": "get_weather",
+                           "parameters": {"type": "object"}}],
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let sse = sse_text(resp).await;
+        let events = responses_events(&sse);
+        let kinds: Vec<&str> = events.iter().map(|(t, _)| t.as_str()).collect();
+        assert!(kinds.contains(&"response.completed"), "{sse}");
+        assert!(
+            !kinds.contains(&"response.incomplete"),
+            "an intact call must not be reported as truncated: {sse}"
+        );
+        let item = &events
+            .iter()
+            .find(|(t, _)| t == "response.output_item.done")
+            .expect("a done item")
+            .1["item"];
+        assert_eq!(item["type"], "function_call");
+        assert_eq!(item["status"], "completed");
+        assert_eq!(item["name"], "get_weather");
     }
 
     #[tokio::test]
