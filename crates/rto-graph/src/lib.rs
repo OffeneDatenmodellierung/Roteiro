@@ -74,6 +74,13 @@ mod query;
 // crate the eventual extraction layer lives in, and the one `rto-render` depends
 // on, so both ends can name the type. What a *citation style* requires of such a
 // record is a different question and lives with the renderer.
+// Which repository paths the scan reads, and how much of each it mines
+// (ADR-0007 `[paths]`, ADR-0026 step 1, issue #840). In *this* crate because it
+// is the one crate both readers of repository bytes depend on: derived
+// extraction is here, and `rto_spec`'s authored classifier depends on this
+// crate. A rule that lived beside one of them would be a rule the other could
+// not consult, which is exactly the two-scan gap it exists to close.
+pub mod paths;
 pub mod reference;
 // Stage 35 — the adjudicated review corpus, and the two pure decisions made over
 // it. In *this* crate for the same reason `model_choice` is: `gix` is pinned here
@@ -177,6 +184,7 @@ pub use models::{
 pub use okf_consent::{
     ConsentState, OkfConsent, OkfDecision, screen_fingerprint, screen_regressed,
 };
+pub use paths::{PathClass, PathPolicy, glob_match};
 pub use provenance::Provenance;
 pub use query::{
     ConfigSecretItem, ConfigSecretReport, CouplingItem, CouplingOrder, CouplingReport,

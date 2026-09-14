@@ -12,6 +12,7 @@
 //! *edges* are resolved later, at assembly time, once every file's symbols are
 //! known (see [`crate::sync`]) — a single blob cannot resolve cross-file calls.
 
+use crate::paths::{PathClass, PathPolicy};
 use crate::{Edge, EdgeKind, FactSet, Node, NodeKind, Provenance, Span};
 
 /// Version of the extraction *output* (node/edge shape and captured `meta`).
@@ -166,13 +167,51 @@ pub trait Extractor {
     fn env_tag(&self) -> u64 {
         media_env_tag()
     }
+
+    /// Whether `sync` should read this path's bytes at all.
+    ///
+    /// `false` for a [`PathClass::Excluded`] path, so an excluded corpus is not
+    /// pulled out of the object database only to be discarded — which for the
+    /// `raw/` case ADR-0026 step 1 describes is gigabytes of PDFs, and is also
+    /// the difference between "the scan does not read this" and "the scan reads
+    /// this and throws it away".
+    ///
+    /// It is an *optimisation with a safe failure direction*, not a second copy
+    /// of the rule: an implementation that wrongly returns `true` still gets an
+    /// empty fact set out of [`Extractor::extract`], because both answers come
+    /// from the one [`PathPolicy`]. The default admits everything, so an
+    /// implementation that ignores it behaves exactly as before.
+    fn reads(&self, path: &str) -> bool {
+        let _ = path;
+        true
+    }
 }
 
-/// Runtime ingestion toggles (ADR-0007 `[ingest]`). Every toggle defaults to
-/// **on**, and a toggle only gates content *within a build that supports it* —
-/// turning `pdf` on cannot extract PDF text in a binary built without the
-/// `pdf-text` feature, but turning it off suppresses that content in a binary
-/// that has it.
+/// What `roteiro sync` ingests: **which paths** it reads (ADR-0007 `[paths]`),
+/// and **which content classes** it extracts within them (ADR-0007 `[ingest]`).
+///
+/// Every toggle defaults to **on**, and a toggle only gates content *within a
+/// build that supports it* — turning `pdf` on cannot extract PDF text in a
+/// binary built without the `pdf-text` feature, but turning it off suppresses
+/// that content in a binary that has it.
+///
+/// # Why the path policy travels here
+///
+/// [`Self::paths`] answers a different question from the toggles — *which files*
+/// rather than *how much of a file* — and it is carried in the same value
+/// deliberately. This struct already reaches every entry point that reads
+/// repository bytes, and [`crate::paths`] is a rule that is only correct if
+/// **every** such reader consults it: an exclusion honoured by extraction and
+/// not by the authored classifier leaves a committed markdown file under an
+/// excluded path still able to be parsed as one of our ADRs (issue #817). A
+/// reader that has the ingestion configuration therefore cannot fail to have the
+/// path policy too, and adding a reader does not mean remembering to thread a
+/// second parameter to it.
+///
+/// It is a borrow rather than an owned list so this stays [`Copy`], which is
+/// what lets it keep travelling by value through the call graph it already
+/// travels through. [`PathPolicy::empty`] is `'static`, so `default()` needs no
+/// caller-supplied storage.
 ///
 /// The five toggles split into two groups, and the split is the ADR-0015
 /// boundary:
@@ -188,7 +227,10 @@ pub trait Extractor {
 // representation (a state enum or bitflags would obscure, not clarify).
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct IngestConfig {
+pub struct IngestConfig<'a> {
+    /// Which repository paths are read at all, and how much of each is mined —
+    /// ADR-0007 `[paths]`. Empty by default, which is exactly today's behaviour.
+    pub paths: &'a PathPolicy,
     /// Embed the UTF-8 body of prose files (Markdown, plain text).
     pub prose: bool,
     /// Extract text from PDF documents (needs the `pdf-text` feature).
@@ -204,9 +246,10 @@ pub struct IngestConfig {
     pub audio: bool,
 }
 
-impl Default for IngestConfig {
+impl Default for IngestConfig<'_> {
     fn default() -> Self {
         Self {
+            paths: PathPolicy::empty(),
             prose: true,
             pdf: true,
             ocr: true,
@@ -216,7 +259,38 @@ impl Default for IngestConfig {
     }
 }
 
-impl IngestConfig {
+impl<'a> IngestConfig<'a> {
+    /// The same content toggles over a **different** path policy.
+    ///
+    /// Exists for the one shape a borrowed policy makes awkward: a `'static`
+    /// callback (the sync-on-access hook a `serve` workspace installs) cannot
+    /// capture a value borrowing from `main`'s stack, so it owns a clone of the
+    /// policy and rebinds the toggles onto it per call. Rebinding rather than
+    /// reconstructing field-by-field keeps the toggles in one place, so a sixth
+    /// toggle does not have to be remembered here.
+    ///
+    /// `paths` shares the receiver's lifetime, which costs the caller nothing:
+    /// `&'a PathPolicy` is covariant, so a longer-lived value — the `'static`
+    /// default, most often — shortens to fit.
+    #[must_use]
+    pub fn with_paths(self, paths: &'a PathPolicy) -> Self {
+        Self {
+            paths,
+            prose: self.prose,
+            pdf: self.pdf,
+            ocr: self.ocr,
+            vision: self.vision,
+            audio: self.audio,
+        }
+    }
+
+    /// How `path` is read — the shared answer both this crate's extraction and
+    /// `rto_spec`'s authored classifier act on. See [`crate::paths`].
+    #[must_use]
+    pub fn class(&self, path: &str) -> PathClass {
+        self.paths.classify(path)
+    }
+
     /// A cache-key contribution that is **`0` when every extraction toggle is
     /// on** (the default), so the common case leaves existing cache keys
     /// untouched. Each disabled toggle sets a distinct bit, so turning content
@@ -245,33 +319,53 @@ impl IngestConfig {
 /// falling back to a plain file node when no language is registered. After the
 /// language extractor runs, `crate::markers` appends any intent-debt markers
 /// (intent-debt markers) found in the blob. Carries the runtime
-/// [`IngestConfig`] applied to content extraction.
+/// [`IngestConfig`] applied to content extraction — which includes the
+/// [`PathPolicy`] deciding whether this path is extracted at all.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct Registry {
-    /// Which blob content to extract for embedding.
-    pub ingest: IngestConfig,
+pub struct Registry<'a> {
+    /// Which paths to read, and which blob content to extract for embedding.
+    pub ingest: IngestConfig<'a>,
 }
 
-impl Registry {
-    /// A registry with the given ingestion toggles.
+impl<'a> Registry<'a> {
+    /// A registry with the given ingestion configuration.
     #[must_use]
-    pub fn new(ingest: IngestConfig) -> Self {
+    pub fn new(ingest: IngestConfig<'a>) -> Self {
         Self { ingest }
     }
 }
 
-impl Extractor for Registry {
+impl Extractor for Registry<'_> {
     fn extract(&self, path: &str, blob_id: &str, bytes: &[u8]) -> FactSet {
         let mut facts = extract_facts(path, blob_id, bytes, self.ingest);
-        crate::markers::augment(&mut facts, path, blob_id, bytes);
+        // The marker scan is *mining*: it derives a claim about intent from what
+        // the bytes say. An opaque path yields its identity and nothing else, so
+        // it is not scanned — which is what stops a paper title in a committed
+        // corpus manifest becoming an intent-debt finding (issue #838), without
+        // this change deciding anything about how markers classify data files.
+        if self.ingest.class(path).mines() {
+            crate::markers::augment(&mut facts, path, blob_id, bytes);
+        }
         facts
+    }
+
+    fn reads(&self, path: &str) -> bool {
+        self.ingest.class(path).reads()
     }
 
     fn env_tag(&self) -> u64 {
         let media = media_env_tag();
-        let disabled = self.ingest.disabled_bits();
+        // The path policy changes what an *unchanged* blob extracts to, so it
+        // belongs in the extraction identity for exactly the reason the toggles
+        // do: without it, declaring `manifest/**` opaque would serve the
+        // previously-mined `config_key` nodes straight back out of the cache and
+        // `sync` would report itself up to date over a graph still holding
+        // everything the declaration was written to remove. `0` for an empty
+        // policy, so declaring nothing keeps every existing key.
+        let disabled = self.ingest.disabled_bits() ^ self.ingest.paths.fingerprint();
         if disabled == 0 {
-            // All-on default: preserve existing cache keys exactly.
+            // All-on default with nothing declared: preserve existing cache keys
+            // exactly.
             media
         } else {
             // FNV-1a fold of both components — deterministic and stable. As with
@@ -296,6 +390,24 @@ impl Extractor for Registry {
 /// extractors: pick the language extractor by extension, applying `ingest` to
 /// content extraction.
 fn extract_facts(path: &str, blob_id: &str, bytes: &[u8], ingest: IngestConfig) -> FactSet {
+    // **Before every miner below**, because the question "may this path be
+    // mined at all?" is answered once, here, rather than by each branch
+    // remembering to ask (ADR-0007 `[paths]`, issue #840). The config branch in
+    // particular is why the check has to sit above the dispatch rather than
+    // inside it: it is the *first* arm, and it is the one that shreds a data
+    // manifest into one `config_key` node per JSON leaf (issue #839).
+    match ingest.class(path) {
+        PathClass::Extract => {}
+        // No node at all. `sync` will already have declined to read the bytes
+        // (`Extractor::reads`); returning an empty set is what makes the same
+        // decision hold for any caller that reached here anyway.
+        PathClass::Excluded => return FactSet::new(),
+        // Identity without content: the file exists, at this path, with this
+        // blob id and this size — and nothing is derived from what it says.
+        PathClass::Opaque => {
+            return FactSet::new().with_node(opaque_file_node(path, blob_id, bytes));
+        }
+    }
     // Config files (TOML / JSON / .env) get config-key nodes rather than a plain
     // file node, so their keys are first-class graph nodes (ADR-0009).
     if crate::config_keys::is_config_path(path) {
@@ -406,6 +518,51 @@ fn file_node(
         span: Some(Span::new(0, end)),
         provenance: Provenance::Derived,
         meta,
+    }
+}
+
+/// The `file` node for a path a repository has declared **opaque** (ADR-0007
+/// `[paths] opaque`): identity, and nothing derived from what the bytes say.
+///
+/// # What it deliberately keeps
+///
+/// Path, name, blob id and the byte and line counts. Those are facts about the
+/// *file*, not claims read out of its contents, and they are what issue #812
+/// needs: a corpus manifest must be committed in every storage mode so that a
+/// missing `raw/` is **detectable rather than silent**, which requires the
+/// manifest to be *in the graph* — findable by `search`, present in `export` —
+/// while nothing inside it is mined.
+///
+/// # What it deliberately drops
+///
+/// No `meta.content`: an opaque path's body is never captured, so a manifest
+/// does not bring the titles and abstracts of every document it lists into the
+/// embedding surface. No language dispatch, no config keys, no image or audio
+/// facts, and — gated by the caller — no marker scan.
+///
+/// `meta.scan` records the class, because a body that is absent by declaration
+/// should be a fact somebody can find rather than an absence they have to infer.
+/// That is the same rule `meta.screen` follows one function above.
+fn opaque_file_node(path: &str, blob_id: &str, bytes: &[u8]) -> Node {
+    let name = path.rsplit('/').next().unwrap_or(path).to_owned();
+    let lines = bytes
+        .iter()
+        .fold(0usize, |n, &b| n + usize::from(b == b'\n'));
+    let end = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
+    Node {
+        key: file_key(path),
+        kind: NodeKind::File,
+        name,
+        path: Some(path.to_owned()),
+        lang: None,
+        blob_hash: Some(blob_id.to_owned()),
+        span: Some(Span::new(0, end)),
+        provenance: Provenance::Derived,
+        meta: serde_json::json!({
+            "bytes": bytes.len(),
+            "lines": lines,
+            "scan": PathClass::Opaque.as_str(),
+        }),
     }
 }
 
@@ -2392,6 +2549,93 @@ fn extend(scope: &[Scope], seg: &str, key: Option<String>) -> Vec<Scope> {
 mod tests {
     use super::{Extractor, FileNodeExtractor, Registry, RustExtractor};
     use crate::{EdgeKind, Node, NodeKind};
+
+    /// The dispatch-level proof, with the real defect in the fixture: a `.json`
+    /// manifest is mined into `config_key` nodes (#839) and its English prose is
+    /// scanned for markers (#838) — until the repository declares it opaque.
+    #[test]
+    fn an_opaque_path_yields_a_file_node_and_nothing_else() {
+        const MANIFEST: &[u8] = br#"{"papers": {"a": {"title": "Long-Term Follow-Up of X"}}}"#;
+        let path = "manifest/papers.json";
+
+        // The defect, present.
+        let open = Registry::new(crate::IngestConfig::default()).extract(path, "b1", MANIFEST);
+        assert!(
+            open.nodes.iter().any(|n| n.key.starts_with("cfgkey:")),
+            "the manifest is mined as configuration today: {:?}",
+            open.nodes.iter().map(|n| &n.key).collect::<Vec<_>>()
+        );
+        assert!(
+            open.nodes.iter().any(|n| n.kind == NodeKind::Marker),
+            "and its prose fabricates a marker today"
+        );
+
+        let policy = crate::PathPolicy::new(Vec::new(), vec!["manifest/**".to_owned()]);
+        let ingest = crate::IngestConfig::default().with_paths(&policy);
+        let facts = Registry::new(ingest).extract(path, "b1", MANIFEST);
+
+        assert_eq!(facts.nodes.len(), 1, "exactly one node: {:?}", facts.nodes);
+        assert!(facts.edges.is_empty(), "and no edges");
+        let node = &facts.nodes[0];
+        assert_eq!(node.key, "file:manifest/papers.json");
+        assert_eq!(node.kind, NodeKind::File);
+        assert_eq!(node.blob_hash.as_deref(), Some("b1"), "identity is kept");
+        assert_eq!(node.meta["scan"], "opaque");
+        assert!(node.meta["content"].is_null(), "no content capture");
+        assert_eq!(node.meta["bytes"], MANIFEST.len());
+    }
+
+    /// `exclude` produces nothing at all — and says so twice, because `sync`
+    /// asks `reads` before it reads the bytes and `extract` must give the same
+    /// answer to any caller that got the bytes anyway.
+    #[test]
+    fn an_excluded_path_yields_no_facts_and_is_not_read() {
+        let policy = crate::PathPolicy::new(vec!["raw/**".to_owned()], Vec::new());
+        let ingest = crate::IngestConfig::default().with_paths(&policy);
+        let reg = Registry::new(ingest);
+
+        let facts = reg.extract("raw/paper.md", "b1", b"# Title\n\nprose\n");
+        assert!(facts.nodes.is_empty() && facts.edges.is_empty(), "{facts:?}");
+        assert!(!reg.reads("raw/paper.md"), "sync must not even read it");
+        assert!(reg.reads("src/lib.rs"), "and must read everything else");
+    }
+
+    /// The negative: a path the policy does not name extracts to exactly the
+    /// same facts it did before the policy existed.
+    #[test]
+    fn a_path_the_policy_does_not_name_extracts_identically() {
+        const SRC: &[u8] = b"// TODO: wire this up\npub struct Thing;\n";
+        let before = Registry::new(crate::IngestConfig::default()).extract("src/lib.rs", "b", SRC);
+
+        let policy = crate::PathPolicy::new(
+            vec!["raw/**".to_owned()],
+            vec!["manifest/**".to_owned()],
+        );
+        let ingest = crate::IngestConfig::default().with_paths(&policy);
+        let after = Registry::new(ingest).extract("src/lib.rs", "b", SRC);
+
+        assert_eq!(before, after, "an unnamed path is untouched by a declaration");
+        assert!(before.nodes.iter().any(|n| n.kind == NodeKind::Marker));
+    }
+
+    /// The extraction identity must move with the policy, or the cache serves
+    /// the facts the declaration was written to remove.
+    #[test]
+    fn the_path_policy_changes_the_extraction_identity() {
+        let none = Registry::new(crate::IngestConfig::default()).env_tag();
+        let excl = crate::PathPolicy::new(vec!["raw/**".to_owned()], Vec::new());
+        let opaq = crate::PathPolicy::new(Vec::new(), vec!["raw/**".to_owned()]);
+        let tag = |p: &crate::PathPolicy| {
+            Registry::new(crate::IngestConfig::default().with_paths(p)).env_tag()
+        };
+        assert_ne!(tag(&excl), none, "declaring something must move the tag");
+        assert_ne!(tag(&excl), tag(&opaq), "and the two lists differ");
+        assert_eq!(
+            tag(&crate::PathPolicy::default()),
+            none,
+            "declaring nothing must leave every existing cache key alone"
+        );
+    }
 
     #[test]
     fn file_node_extractor_is_deterministic_and_tagged() {

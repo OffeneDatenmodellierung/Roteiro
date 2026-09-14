@@ -258,6 +258,15 @@ fn try_incremental(
     let mut extracted = 0usize;
     let mut cached = 0usize;
     for blob in &diff.changed {
+        // The same exclusion the full path applies in `extract_blobs`. Asked
+        // here as well because this loop reaches `Extractor::extract` by its own
+        // route: a rule consulted on one of two paths into extraction is the
+        // defect this mechanism exists to prevent, one scope smaller. `touched`
+        // above is deliberately *not* filtered — leaving an excluded path in it
+        // drops any stale nodes it still has, and nothing re-adds them.
+        if !extractor.reads(&blob.path) {
+            continue;
+        }
         let key = cache_key(&blob.path, &blob.oid, env_tag);
         let facts = if let Some(facts) = cache.get(&key)? {
             cached += 1;
@@ -386,6 +395,13 @@ pub fn sync_worktree(
         // the blob total (they are genuinely new blobs, not edits of existing ones).
         let head_paths: BTreeSet<&str> = committed.blobs.iter().map(|b| b.path.as_str()).collect();
         for path in repo.added_since_head(&head_paths)? {
+            // A new file under an excluded path is excluded too — otherwise
+            // dropping a corpus into `raw/` would put it in the graph until the
+            // moment it was committed, which is the inverse of what the
+            // declaration says.
+            if !extractor.reads(&path) {
+                continue;
+            }
             match std::fs::read(workdir.join(&path)) {
                 Ok(bytes) => {
                     let woid = repo.blob_oid(&bytes)?;
@@ -591,6 +607,15 @@ fn extract_blobs(
     extractor: &dyn Extractor,
     blobs: Vec<crate::BlobRef>,
 ) -> Result<Committed, SyncError> {
+    // A path the repository has excluded (ADR-0007 `[paths] exclude`) is dropped
+    // here, before its bytes are read — so an excluded corpus costs nothing, and
+    // so `Committed::blobs` (which `sync_worktree` overlays onto and counts from)
+    // never carries one either. `Extractor::extract` would return an empty fact
+    // set for it regardless; this is the same answer given earlier and cheaper.
+    let blobs: Vec<crate::BlobRef> = blobs
+        .into_iter()
+        .filter(|b| extractor.reads(&b.path))
+        .collect();
     let mut by_path = BTreeMap::new();
     let mut extracted = 0usize;
     let mut cached = 0usize;

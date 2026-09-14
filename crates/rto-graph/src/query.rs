@@ -12,6 +12,7 @@
 //! mixed-provenance results — the "one query surface" from ADR-0001 — with every
 //! edge carrying its `provenance`.
 
+use crate::paths::glob_match;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde::Serialize;
@@ -848,48 +849,11 @@ pub fn config_secrets(store: &Store, limit: usize) -> Result<ConfigSecretReport,
     })
 }
 
-/// Match a slash-separated `path` against a glob `pattern`, anchored end-to-end.
-/// `?` matches one non-`/` character, `*` matches any run within a single path
-/// segment, and `**` matches zero or more whole segments. Used for config
-/// `[debt] ignore` patterns (e.g. `vendor/**`, `**/generated/*`).
-#[must_use]
-fn glob_match(pattern: &str, path: &str) -> bool {
-    let pat: Vec<&str> = pattern.split('/').collect();
-    let seg: Vec<&str> = path.split('/').collect();
-    match_segments(&pat, &seg)
-}
-
-/// Anchored match of glob segments `pat` against path segments `seg`, with `**`
-/// consuming zero or more segments.
-fn match_segments(pat: &[&str], seg: &[&str]) -> bool {
-    match pat.first() {
-        None => seg.is_empty(),
-        Some(&"**") => (0..=seg.len()).any(|i| match_segments(&pat[1..], &seg[i..])),
-        Some(token) => {
-            !seg.is_empty() && match_token(token, seg[0]) && match_segments(&pat[1..], &seg[1..])
-        }
-    }
-}
-
-/// Match a single path segment `s` against a `pattern` token containing `*`
-/// (any run, no `/`) and `?` (one char, no `/`).
-fn match_token(pattern: &str, s: &str) -> bool {
-    let pat: Vec<char> = pattern.chars().collect();
-    let chars: Vec<char> = s.chars().collect();
-    match_token_chars(&pat, &chars)
-}
-
-/// Recursive char-slice matcher backing [`match_token`].
-fn match_token_chars(pat: &[char], chars: &[char]) -> bool {
-    match pat.first() {
-        None => chars.is_empty(),
-        Some('*') => (0..=chars.len()).any(|i| match_token_chars(&pat[1..], &chars[i..])),
-        Some('?') => !chars.is_empty() && match_token_chars(&pat[1..], &chars[1..]),
-        Some(&ch) => {
-            !chars.is_empty() && chars[0] == ch && match_token_chars(&pat[1..], &chars[1..])
-        }
-    }
-}
+// `glob_match` — the matcher `[debt] ignore` filters with — now lives in
+// [`crate::paths`], imported at the top of this file. `[paths]` exclusion needs
+// the identical semantics, and a user writing `vendor/**` in either place is
+// entitled to have it mean one thing. The tests below stay: they pin what this
+// *consumer* requires of it, which is not the same claim as the matcher's own.
 
 /// How a [`CouplingReport`]'s items are ranked. The three orders answer three
 /// different questions, which a single undirected degree cannot tell apart.

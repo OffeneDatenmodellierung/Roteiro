@@ -406,11 +406,20 @@ fn worktree_graph(
     let mut store = rto_graph::Store::open_in_memory()?;
     let registry = rto_graph::Registry::new(ingest);
     rto_graph::sync_worktree(&mut store, &graph_repo, &cache, &registry)?;
-    crate::apply_authored_layer(&mut store, graph_repo.walk_blobs()?, &|blob| {
-        Ok(graph_repo
-            .workdir()
-            .and_then(|w| std::fs::read(w.join(&blob.path)).ok()))
-    })?;
+    // `walk_blobs` rather than `authored_blobs` — this caller wants the whole
+    // tree from disk — so the `[paths]` policy is supplied explicitly here. That
+    // is the case `authored_docs_from` re-checks for: a blob list built outside
+    // `rto-spec` cannot have been filtered by it.
+    crate::apply_authored_layer(
+        &mut store,
+        graph_repo.walk_blobs()?,
+        &|blob| {
+            Ok(graph_repo
+                .workdir()
+                .and_then(|w| std::fs::read(w.join(&blob.path)).ok()))
+        },
+        ingest.paths,
+    )?;
     Ok(store)
 }
 

@@ -146,7 +146,11 @@ impl ToolCheck {
 /// Everything that can go wrong *outside* the store — no repository, no `HEAD`,
 /// an unreadable tree, a stale graph — is a `not-run` document rather than an
 /// error, because those are answers the caller must be able to read.
-pub fn tool_check(store: &Store, root: Option<&Path>) -> Result<ToolCheck, rto_graph::StoreError> {
+pub fn tool_check(
+    store: &Store,
+    root: Option<&Path>,
+    paths: &rto_graph::PathPolicy,
+) -> Result<ToolCheck, rto_graph::StoreError> {
     let Some(root) = root else {
         return Ok(ToolCheck::not_run(
             "this project has no repository on disk to read the authored layer from \
@@ -190,7 +194,7 @@ pub fn tool_check(store: &Store, root: Option<&Path>) -> Result<ToolCheck, rto_g
         }
     }
 
-    let layer = match authored_layer(&repo, GraphSource::Committed) {
+    let layer = match authored_layer(&repo, GraphSource::Committed, paths) {
         Ok(layer) => layer,
         Err(e) => {
             return Ok(ToolCheck::not_run(format!(
@@ -300,7 +304,7 @@ mod tests {
         );
         let store = synced(&derived(), &tree);
 
-        let out = tool_check(&store, Some(&dir)).expect("tool_check");
+        let out = tool_check(&store, Some(&dir), rto_graph::PathPolicy::empty()).expect("tool_check");
         assert_eq!(out.gate, Gate::Pass, "{out:?}");
         let report = out.report.expect("a check that ran has a report");
         assert_eq!(report.adrs, 1);
@@ -326,7 +330,7 @@ mod tests {
         );
         let store = synced(&derived(), &tree);
 
-        let out = tool_check(&store, Some(&dir)).expect("tool_check");
+        let out = tool_check(&store, Some(&dir), rto_graph::PathPolicy::empty()).expect("tool_check");
         assert_eq!(out.gate, Gate::Fail, "{out:?}");
         let report = out.report.expect("report");
         assert_eq!(report.violations.len(), 1, "{:?}", report.violations);
@@ -360,7 +364,7 @@ mod tests {
             store.all_edges().unwrap(),
         );
 
-        let out = tool_check(&store, Some(&dir)).expect("tool_check");
+        let out = tool_check(&store, Some(&dir), rto_graph::PathPolicy::empty()).expect("tool_check");
         assert_eq!(out.gate, Gate::Pass);
         assert_eq!(store.node_count().unwrap(), before.0, "nodes changed");
         assert_eq!(store.edge_count().unwrap(), before.1, "edges changed");
@@ -387,7 +391,7 @@ mod tests {
         );
         let store = synced(&derived(), "0000000000000000000000000000000000000000");
 
-        let out = tool_check(&store, Some(&dir)).expect("tool_check");
+        let out = tool_check(&store, Some(&dir), rto_graph::PathPolicy::empty()).expect("tool_check");
         assert_eq!(out.gate, Gate::NotRun, "{out:?}");
         assert!(out.report.is_none(), "a not-run check has no report");
         let reason = out.not_run_reason.expect("reason");
@@ -403,7 +407,7 @@ mod tests {
     #[test]
     fn a_project_with_no_repository_reports_not_run_and_no_report() {
         let store = Store::open_in_memory().expect("store");
-        let out = tool_check(&store, None).expect("tool_check");
+        let out = tool_check(&store, None, rto_graph::PathPolicy::empty()).expect("tool_check");
         assert_eq!(out.gate, Gate::NotRun);
         assert!(out.report.is_none(), "a not-run check has no report");
         assert!(
@@ -424,7 +428,7 @@ mod tests {
         repo_with(&dir, &[("src/store.rs", "pub struct Store;\n")]);
         let store = Store::open_in_memory().expect("store");
 
-        let out = tool_check(&store, Some(&dir)).expect("tool_check");
+        let out = tool_check(&store, Some(&dir), rto_graph::PathPolicy::empty()).expect("tool_check");
         assert_eq!(out.gate, Gate::NotRun, "{out:?}");
         assert!(
             out.not_run_reason

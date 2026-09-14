@@ -2316,9 +2316,17 @@ fn main() -> anyhow::Result<()> {
     // `[telemetry] file` / `--log-file` / `--log` enables it. The returned guard
     // flushes the non-blocking file writer on exit, so it is held for all of `main`.
     let _log_guard = telemetry::init(&cli.log.overrides(), &cfg.effective.telemetry)?;
+    // The `[paths]` policy — which repository paths are read at all, and how
+    // much of each is mined (issue #840, ADR-0026 step 1). Resolved once and
+    // owned here for the whole of `main`, because every reader of repository
+    // bytes borrows *this* one: an exclusion honoured by one reader and not
+    // another is the failure this mechanism exists to prevent.
+    let path_policy = cfg.effective.paths.policy();
     // Resolve the ingestion toggles once; every command that (re)builds the graph
     // extracts with the same set so they share one cache, never thrashing it.
-    let ingest = cfg.effective.ingest.resolve();
+    // The path policy travels inside it, so a command that has the ingestion
+    // configuration has the exclusion rule too.
+    let ingest = cfg.effective.ingest.resolve(&path_policy);
     // The pre-generation gate's thresholds (`[media]`), resolved once alongside
     // the ingestion toggles — the two answer adjacent questions about media:
     // *may* this run generate at all, and *should* it bother for this blob.
@@ -2955,6 +2963,7 @@ fn print_config_sections(loaded: &config::Loaded) {
     print_lint_section(loaded);
     print_security_section(loaded);
     print_debt_section(loaded);
+    print_paths_section(loaded);
     print_telemetry_section(e, p, u);
     print_workspace_section(loaded);
 }
@@ -4026,6 +4035,47 @@ fn print_debt_section(loaded: &config::Loaded) {
     }
 }
 
+/// Print the `[paths]` exclusion lists, per-pattern provenance and all.
+///
+/// Beside [`print_debt_section`] because a reader comparing the two is the
+/// point: they look alike and do different things, and the line that says which
+/// is the one worth reading. A `[debt] ignore` pattern mutes a report; a
+/// `[paths]` pattern decides whether a node exists — which `roteiro export`
+/// publishes and `search` can find.
+fn print_paths_section(loaded: &config::Loaded) {
+    println!("[paths]");
+    println!(
+        "  model_store = {:?}  ({})",
+        loaded.effective.paths.model_store,
+        provenance(
+            loaded.project.paths.model_store.is_some(),
+            loaded.user.paths.model_store.is_some()
+        )
+    );
+    for list in [config::PathList::Exclude, config::PathList::Opaque] {
+        let sources = loaded.path_pattern_sources(list);
+        let key = list.key();
+        if sources.is_empty() {
+            println!("  {key} = []  (default — nothing is excluded unless declared)");
+            continue;
+        }
+        println!(
+            "  {key} = ({} pattern(s), merged across layers)",
+            sources.len()
+        );
+        for (pattern, layer) in sources {
+            println!("    {pattern:?}  ({layer})");
+        }
+    }
+    if loaded.effective.paths.exclude.is_some() || loaded.effective.paths.opaque.is_some() {
+        println!(
+            "  ** these remove nodes from the graph rather than filtering a \
+             report: an excluded path has no node at all, an opaque one has only \
+             its identity, and neither reaches `roteiro export`"
+        );
+    }
+}
+
 /// Print the `[telemetry]` config section (ADR-0011), with each value's
 /// provenance. Split out of [`print_config_sections`] to keep it under the line
 /// budget.
@@ -4570,13 +4620,14 @@ fn apply_authored_layer(
     store: &mut rto_graph::Store,
     blobs: Vec<rto_graph::BlobRef>,
     read: &dyn Fn(&rto_graph::BlobRef) -> anyhow::Result<Option<Vec<u8>>>,
+    paths: &rto_graph::PathPolicy,
 ) -> anyhow::Result<rto_spec::CheckReport> {
     // `authored_docs_from` rather than `authored_layer_from`: the latter is the
     // former with the site pages thrown away, and the whole point of the website
     // becoming a document class is that `check` sees it. `run_layer` is the same
     // pairing on the writing side — one call over every class, so a new one
     // cannot be added to the parser and forgotten here.
-    let docs = rto_spec::authored_docs_from(blobs, read)?;
+    let docs = rto_spec::authored_docs_from(blobs, read, paths)?;
     let mut report = rto_spec::run_layer(store, &docs)?;
     report.violations.extend(docs.layer.malformed);
     // House-style conventions, from the same read of the same blobs (#438).
@@ -4615,9 +4666,12 @@ fn build_graph_at_rev(
 ) -> anyhow::Result<()> {
     let registry = rto_graph::Registry::new(ingest);
     rto_graph::sync_tree(store, repo, cache, &registry, rev)?;
-    apply_authored_layer(store, repo.blobs_at(rev)?, &|blob| {
-        Ok(Some(repo.read_blob(&blob.oid)?))
-    })?;
+    apply_authored_layer(
+        store,
+        repo.blobs_at(rev)?,
+        &|blob| Ok(Some(repo.read_blob(&blob.oid)?)),
+        ingest.paths,
+    )?;
     Ok(())
 }
 
@@ -4661,9 +4715,12 @@ fn build_graph(
     // two rules and cannot go through `apply_authored_layer`: that one ends in
     // `rto_spec::run`, which writes. So the shared code is the half *below* the
     // write, and there is still exactly one copy of each rule.
-    let report = apply_authored_layer(store, rto_spec::authored_blobs(repo, source)?, &|blob| {
-        Ok(repo.read_source(blob, source)?)
-    })?;
+    let report = apply_authored_layer(
+        store,
+        rto_spec::authored_blobs(repo, source, ingest.paths)?,
+        &|blob| Ok(repo.read_source(blob, source)?),
+        ingest.paths,
+    )?;
 
     // Re-apply any persisted import layers (Graphify, lat.md, …) on top of the
     // freshly-rebuilt derived + authored graph, so imported knowledge is durable
@@ -4835,7 +4892,7 @@ fn run_review(
     if let Some(resolved) = resolved.as_ref() {
         warn_about_stale_base(resolved);
     }
-    let changed = if let Some(resolved) = resolved.as_ref() {
+    let mut changed = if let Some(resolved) = resolved.as_ref() {
         repo.changed_between(&resolved.commit)?
     } else {
         // Working-tree review: tracked edits/deletes, plus brand-new files as
@@ -4870,6 +4927,14 @@ fn run_review(
         changed.dedup_by(|a, b| a.path == b.path);
         changed
     };
+    // Both branches above walk git for themselves, so both are asked here: a
+    // path the repository declared not-source is not reviewed. `review`'s
+    // graph-grounded sections — per-file debt, the symbols a change touches —
+    // are read out of a store that deliberately holds nothing for it, so keeping
+    // it in the change set would put a row in the report whose every graph
+    // column is empty *by design* and reads as "nothing here" rather than "not
+    // looked at". Excluding it says which it is.
+    changed.retain(|f| ingest.class(&f.path).mines());
     // The repository's own `[debt] ignore`, on the same footing as `debt`,
     // `check` and the graph API: `review`'s per-file `debt` is that same
     // inventory scoped to the change, so it must be scoped by the same list
@@ -6056,6 +6121,12 @@ fn run_import_lat(ingest: rto_graph::IngestConfig, path: &str, json: bool) -> an
     // the rest of the import (and pruned on re-import).
     let mut backlinks = Vec::new();
     for blob in repo.walk_blobs()? {
+        // A fourth independent walk of `HEAD`, scanning source text for `@lat:`
+        // references — mining, by any reading of the word — so it asks the path
+        // policy like the other three.
+        if !ingest.class(&blob.path).mines() {
+            continue;
+        }
         let bytes = repo.read_blob(&blob.oid)?;
         let text = String::from_utf8_lossy(&bytes);
         backlinks.extend(rto_spec::scan_lat_annotations(&blob.path, &text));
@@ -7505,7 +7576,7 @@ fn build_scaffold(
         // for the markdown alone, both finding the same 22 ADRs — a third of a
         // second off a command that otherwise takes about a second.
         let source = rto_graph::GraphSource::Worktree;
-        let markdown: Vec<_> = rto_spec::authored_blobs(&repo, source)?
+        let markdown: Vec<_> = rto_spec::authored_blobs(&repo, source, ingest.paths)?
             .into_iter()
             // The **same** predicate the classifier uses, not an approximation
             // of it: `ends_with(".md")` was narrower, so a `README.MD` would
@@ -7518,7 +7589,11 @@ fn build_scaffold(
                     .is_some_and(|e| e.eq_ignore_ascii_case("md"))
             })
             .collect();
-        let docs = rto_spec::authored_docs_from(markdown, &|blob| repo.read_source(blob, source))?;
+        let docs = rto_spec::authored_docs_from(
+            markdown,
+            &|blob| repo.read_source(blob, source),
+            ingest.paths,
+        )?;
         let home = rto_spec::adr_home(&docs.layer.docs);
         let adr_id = home.next_id.clone();
         // On stderr, and always — not folded into the label, which is printed
@@ -8413,10 +8488,11 @@ fn run_media(
             json,
         } => run_media_build(
             media_options(ingest, gate, audio, vision, force)?,
+            ingest.paths,
             blob.as_deref(),
             json,
         ),
-        MediaAction::Status { json } => run_media_status(json),
+        MediaAction::Status { json } => run_media_status(ingest.paths, json),
         MediaAction::Clear { producer, json } => run_media_clear(producer.as_deref(), json),
     }
 }
@@ -8486,13 +8562,14 @@ fn media_options(
 /// side of the call.
 fn run_media_build(
     opts: rto_graph::MediaBuildOptions,
+    paths: &rto_graph::PathPolicy,
     blob: Option<&str>,
     json: bool,
 ) -> anyhow::Result<()> {
     let (repo, mut store, _cache) = open_graph()?;
     // Resolved before any model is loaded, so a build with nothing to do costs
     // nothing — and a build this binary cannot perform says so immediately.
-    let mut blobs = rto_graph::media_blobs(&repo)?;
+    let mut blobs = rto_graph::media_blobs(&repo, paths)?;
     if let Some(wanted) = blob {
         blobs.retain(|b| b.blob_id == wanted);
         if blobs.is_empty() {
@@ -8536,9 +8613,9 @@ fn run_media_build(
 }
 
 /// Report what the media store holds, and what this binary could add to it.
-fn run_media_status(json: bool) -> anyhow::Result<()> {
+fn run_media_status(paths: &rto_graph::PathPolicy, json: bool) -> anyhow::Result<()> {
     let (repo, store, _cache) = open_graph()?;
-    let blobs = rto_graph::media_blobs(&repo)?;
+    let blobs = rto_graph::media_blobs(&repo, paths)?;
     let status = rto_graph::media_status(&store, &blobs)?;
     if json {
         emit_json(&status)?;
@@ -10433,7 +10510,7 @@ struct InferReady {
 struct PinnedHub<'a> {
     rev: Option<&'a str>,
     auto: bool,
-    ingest: rto_graph::IngestConfig,
+    ingest: rto_graph::IngestConfig<'a>,
 }
 
 /// The cross-repo inference inputs shared by `--infer` and `--matrix`: which repo
@@ -15236,8 +15313,15 @@ fn build_serve_workspaces(
     let paths = resolved_repo_paths(&effective, &[])?;
     let mut ws = rto_graph::Workspace::from_repo_paths(&paths)?;
     if sync_on_access {
+        // The hook outlives this function, so it cannot borrow `main`'s path
+        // policy: it owns a clone and rebinds the toggles onto it per call. The
+        // policy applied is this **server's**, which is the same rule the
+        // ingestion toggles beside it have always followed — unlike `debt`, a
+        // sync-on-access hook has no project config loaded at the point it runs.
+        let toggles = ingest.with_paths(rto_graph::PathPolicy::empty());
+        let owned_paths = ingest.paths.clone();
         ws = ws.with_on_open(Arc::new(move |db: &std::path::Path| {
-            sync_project_graph(db, ingest).map_err(|e| e.to_string())
+            sync_project_graph(db, toggles.with_paths(&owned_paths)).map_err(|e| e.to_string())
         }));
     }
     let flat = Arc::new(ws);
@@ -17582,8 +17666,15 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
                     .workspace
                     .project_root(project)
                     .map_err(|e| e.to_string())?;
+                // And that project's own `[paths]` policy, for the same reason:
+                // the authored layer this reads is classified by content, so a
+                // path the repository excluded must be excluded here too or the
+                // tool reports drift against files the graph deliberately does
+                // not hold.
+                let paths =
+                    config::path_policy_for(&self.workspace, project).map_err(|e| e.to_string())?;
                 self.run(project, |store| {
-                    rto_spec::tool_check(store, root.as_deref())
+                    rto_spec::tool_check(store, root.as_deref(), &paths)
                 })
             }
             "debt" => {
@@ -17681,7 +17772,7 @@ fn run_render(
              (it renders a workspace as one bundle, nested by member); the docs \
              site is per-repository"
         ),
-        Some(rto_render::Target::DocsSite) => render_docs(out),
+        Some(rto_render::Target::DocsSite) => render_docs(ingest.paths, out),
         Some(rto_render::Target::OkfBundle) => match workspace_name {
             Some(name) => render_okf_workspace(cfg, name, out),
             None => render_okf(ingest, out, debt_ignore),
@@ -17748,13 +17839,26 @@ struct SiteSources {
 fn discover_site_sources(
     repo: &rto_graph::Repo,
     root: &std::path::Path,
+    paths: &rto_graph::PathPolicy,
 ) -> anyhow::Result<SiteSources> {
+    // Repo-relative, so a filesystem walk can ask the same path policy the git
+    // walks do. These two walks read directories by name rather than scanning
+    // the tree, which is why they are easy to overlook — and exactly why they
+    // are asked: "excluded" must not mean "excluded unless some reader reaches
+    // the file another way".
+    let admits = |p: &std::path::Path| {
+        p.strip_prefix(root)
+            .ok()
+            .and_then(|rel| rel.to_str())
+            .is_none_or(|rel| paths.classify(&rel.replace('\\', "/")).mines())
+    };
     // Each ADR (skip the directory README), in a deterministic order.
     let mut adrs: Vec<_> = std::fs::read_dir(root.join("docs/adr"))?
         .filter_map(Result::ok)
         .map(|e| e.path())
         .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("md"))
         .filter(|p| doc_file_name(p) != "README.md")
+        .filter(|p| admits(p))
         .collect();
     adrs.sort();
 
@@ -17773,6 +17877,7 @@ fn discover_site_sources(
             .map(|e| e.path())
             .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("md"))
             .filter(|p| doc_file_name(p) != "README.md")
+            .filter(|p| admits(p))
             .collect();
         bps.sort();
         blueprints.append(&mut bps);
@@ -17784,7 +17889,7 @@ fn discover_site_sources(
     // everything else here reads the working tree from disk, and a preview that
     // rendered `HEAD` while claiming to render your edits would be the
     // two-layers-disagreeing bug of issue #330 with a public URL on it.
-    let pages = rto_spec::authored_docs(repo, GraphSource::Worktree)?.site;
+    let pages = rto_spec::authored_docs(repo, GraphSource::Worktree, paths)?.site;
 
     // What the site serves each source document as. A slug is URL-safe by
     // construction, so a page's published name need not resemble its file name —
@@ -17857,7 +17962,7 @@ fn discover_site_sources(
 /// Render the documentation site: copy static assets, then render each ADR, the
 /// lifetime docs and every published site page into `<out>` (default
 /// `website/dist`).
-fn render_docs(out: Option<String>) -> anyhow::Result<()> {
+fn render_docs(paths: &rto_graph::PathPolicy, out: Option<String>) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let repo = rto_graph::Repo::discover(&cwd)?;
     let root = repo
@@ -17865,7 +17970,7 @@ fn render_docs(out: Option<String>) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("cannot render docs in a bare repository"))?;
     let out = out.map_or_else(|| root.join("website/dist"), std::path::PathBuf::from);
 
-    let src = discover_site_sources(&repo, root)?;
+    let src = discover_site_sources(&repo, root, paths)?;
 
     if out.exists() {
         std::fs::remove_dir_all(&out)?;
@@ -18024,7 +18129,11 @@ fn render_okf_workspace(
                 root.display()
             )
         })?;
-        let ingest = member_cfg.effective.ingest.resolve();
+        // Each member's *own* `[paths]` policy: an exclusion is a statement a
+        // repository makes about itself, so a workspace render must not apply
+        // the hub's declaration to a spoke, nor the spoke's to the hub.
+        let member_paths = member_cfg.effective.paths.policy();
+        let ingest = member_cfg.effective.ingest.resolve(&member_paths);
 
         let (repo, mut store, cache) = open_graph_at(&root)?;
         build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
@@ -18119,6 +18228,14 @@ fn okf_bodies(
     let mut wanted: Vec<rto_graph::BlobRef> = Vec::new();
     if ingest.prose || !adr_paths.is_empty() {
         for blob in repo.walk_blobs()? {
+            // Its own walk of `HEAD`, so its own question to the path policy.
+            // Publishing an excluded or opaque file's body into the bundle would
+            // put through `render` exactly what the declaration removed from the
+            // store — which is the `[debt] ignore` failure (#840) with a
+            // different surface on it.
+            if !ingest.class(&blob.path).mines() {
+                continue;
+            }
             if adr_paths.contains(&blob.path) || (ingest.prose && rto_graph::is_prose(&blob.path)) {
                 wanted.push(blob);
             }
