@@ -202,6 +202,88 @@ fn node<'a>(artifact: &'a serde_json::Value, key: &str) -> Option<&'a serde_json
 
 const DECLARED: &str = "[paths]\nexclude = [\"raw/**\"]\nopaque = [\"manifest/**\"]\n";
 
+/// **The declaration must survive the extraction cache.**
+///
+/// Extraction is cached by `(path, blob id, env)`, and nothing about the *blob*
+/// changes when a repository adds a `[paths]` line — the file is byte-identical
+/// and its git oid is the same. So unless the policy is part of `env`, the
+/// second `sync` is a cache hit and serves back precisely the `config_key` nodes
+/// and the fabricated marker the declaration was written to remove, while
+/// reporting itself up to date. The graph would then disagree with the
+/// configuration with nothing to indicate why — a *silent* wrong answer, which is
+/// the failure class this repository keeps closing.
+///
+/// This is the test that makes `PathPolicy::fingerprint`'s presence in
+/// `Extractor::env_tag` a guarantee rather than an argument. It runs both
+/// directions: declaring must drop the mined nodes, and **un**-declaring must
+/// bring them back, because a one-way check passes just as happily against an
+/// extractor that has stopped caching at all.
+#[test]
+fn declaring_a_path_invalidates_the_extraction_cache_that_holds_its_old_facts() {
+    let dir = fixture("cache", None);
+
+    // First sync populates the content-addressed cache with the mined facts.
+    let before = export(&dir);
+    let mined: Vec<String> = nodes(&before)
+        .into_iter()
+        .filter(|(key, _, _)| key.starts_with("cfgkey:manifest/papers.json#"))
+        .map(|(key, _, _)| key)
+        .collect();
+    assert!(
+        !mined.is_empty(),
+        "the first run must mine the manifest, or the cache has nothing stale to serve"
+    );
+    assert!(
+        nodes(&before)
+            .iter()
+            .any(|(_, kind, path)| kind == "marker" && path.starts_with("manifest/")),
+        "and must fabricate the marker"
+    );
+
+    // Declare it opaque. The blob is untouched: same bytes, same git oid, so the
+    // cache key moves only if the policy is part of the extraction identity.
+    write(&dir, "roteiro.toml", DECLARED);
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "declare"]);
+    let after = export(&dir);
+    assert!(
+        nodes(&after)
+            .iter()
+            .all(|(key, _, _)| !key.starts_with("cfgkey:manifest/")),
+        "a cache hit here would serve back the very nodes the declaration removes: {:?}",
+        keys_under(&after, "manifest/")
+    );
+    assert!(
+        nodes(&after)
+            .iter()
+            .all(|(_, kind, path)| !(kind == "marker" && path.starts_with("manifest/"))),
+        "and the marker with them"
+    );
+    assert!(
+        node(&after, "file:manifest/papers.json").is_some(),
+        "while the opaque file node itself is still there"
+    );
+
+    // And back again: withdrawing the declaration must restore what it removed,
+    // which a merely-broken cache would also appear to do — so this direction is
+    // what distinguishes "the key moved" from "nothing is cached any more".
+    write(&dir, "roteiro.toml", "[paths]\nexclude = [\"raw/**\"]\n");
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "withdraw"]);
+    let restored = export(&dir);
+    let again: Vec<String> = nodes(&restored)
+        .into_iter()
+        .filter(|(key, _, _)| key.starts_with("cfgkey:manifest/papers.json#"))
+        .map(|(key, _, _)| key)
+        .collect();
+    assert_eq!(
+        again, mined,
+        "withdrawing the declaration restores exactly what it removed"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// **The baseline.** Everything the declaration removes is present without it —
 /// asserted first, and in one place, because every other test in this file is
 /// worthless if the fixture does not actually reproduce the defects.

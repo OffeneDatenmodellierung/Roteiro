@@ -259,7 +259,7 @@ impl Default for IngestConfig<'_> {
     }
 }
 
-impl<'a> IngestConfig<'a> {
+impl IngestConfig<'_> {
     /// The same content toggles over a **different** path policy.
     ///
     /// Exists for the one shape a borrowed policy makes awkward: a `'static`
@@ -269,12 +269,28 @@ impl<'a> IngestConfig<'a> {
     /// reconstructing field-by-field keeps the toggles in one place, so a sixth
     /// toggle does not have to be remembered here.
     ///
-    /// `paths` shares the receiver's lifetime, which costs the caller nothing:
-    /// `&'a PathPolicy` is covariant, so a longer-lived value — the `'static`
-    /// default, most often — shortens to fit.
+    /// # The result's lifetime is the **argument's**, not the receiver's
+    ///
+    /// `'b` is independent of `'a` deliberately, and tying them together is a
+    /// compile error one feature flag away. The caller this exists for holds a
+    /// short-lived `IngestConfig` and needs a `'static` one to move into a
+    /// callback: `ingest.with_paths(PathPolicy::empty())` must yield
+    /// `IngestConfig<'static>`, which it can only do if the result follows the
+    /// `'static` argument rather than the borrowed receiver. Unified, the result
+    /// takes the receiver's shorter lifetime, the callback stops being `'static`,
+    /// and `roteiro serve` no longer builds — which is exactly what happened
+    /// (PR #850: green on the default feature set, red on MSRV and on
+    /// `--no-default-features --features mcp`, where this code is compiled).
     #[must_use]
-    pub fn with_paths(self, paths: &'a PathPolicy) -> Self {
-        Self {
+    #[allow(
+        clippy::elidable_lifetime_names,
+        reason = "`'b` cannot be elided: `self` already contributes `'a`, so \
+                  there are two input lifetimes and no `&self` receiver for \
+                  elision to follow — and unifying them to silence the lint is \
+                  the defect described above, not a tidy-up"
+    )]
+    pub fn with_paths<'b>(self, paths: &'b PathPolicy) -> IngestConfig<'b> {
+        IngestConfig {
             paths,
             prose: self.prose,
             pdf: self.pdf,
