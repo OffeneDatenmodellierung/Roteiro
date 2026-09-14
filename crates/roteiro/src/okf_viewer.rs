@@ -720,6 +720,24 @@ fn header_for(nav: &Nav) -> String {
         return out;
     };
     let up = escape(explorer);
+    // **These labels are a third copy, and that is a decision.** `← Workspace`,
+    // `Roteiro`, `Workspace` and the two separators are also stated in
+    // `assets/index.html`'s project bar and again in `app.js`'s `renderCrumbs`,
+    // which replaces that markup at runtime — so the shell already held two
+    // copies before this surface existed.
+    //
+    // There is no one definition to derive from: the shell's are HTML text and
+    // JavaScript string literals, this one is Rust, and the viewer cannot read
+    // either at request time without templating a static asset it does not own.
+    // Sharing them would mean splicing labels into `index.html` the way the
+    // token master is spliced into its `<style>` — a change to the explorer, for
+    // wording, which is a bigger blast radius than the drift it prevents.
+    //
+    // So they are duplicated **and pinned**:
+    // `the_mounted_headers_wording_matches_the_shells` fails if any of the three
+    // drifts from the others. Without it the shell could be reworded and this
+    // header would follow silently, with every class-and-rule guard still green
+    // — which is the failure this module has already met three times in CSS.
     let mut out = format!(
         "<a class=\"p-back\" href=\"{up}\">← Workspace</a>\
          <nav class=\"p-crumbs\" aria-label=\"Breadcrumb\">\
@@ -2932,6 +2950,148 @@ mod tests {
             "the mounted header emits {stray:?}, which is neither the shell's nor \
              declared as the viewer's own"
         );
+    }
+
+    /// Every label the mounted header shares with the explorer shell's project
+    /// bar, and the class that carries it.
+    ///
+    /// This list is the single place the agreement is *stated*; the three copies
+    /// that must agree with it live in `header_for`, in `assets/index.html` and
+    /// in `assets/app.js`.
+    const SHARED_LABELS: &[(&str, &str)] = &[
+        ("p-back", "← Workspace"),
+        ("p-crumb-root", "Roteiro"),
+        ("p-crumb-link", "Workspace"),
+        ("p-sep", "·"),
+        ("p-sep", "▸"),
+    ];
+
+    /// The mounted header says the same **words** as the shell, not merely the
+    /// same class names.
+    ///
+    /// **`the_mounted_header_wears_the_shells_own_chrome` compares classes and
+    /// rules, and `a_control_the_shell_draws_as_a_button_is_not_left_underlined`
+    /// compares declarations — neither reads a single character of wording.** So
+    /// the shell could rename `← Workspace` to `← Back`, or `Roteiro` to the
+    /// product's next name, and this viewer would keep saying the old thing with
+    /// every existing guard green. That is the drift shape this repository keeps
+    /// paying for: #806 consolidated five markdown-link scanners, and #787's
+    /// sibling bug was a fix that reached one walker and not the other.
+    ///
+    /// The labels are deliberately duplicated rather than derived — see the note
+    /// in `header_for` for why there is no one definition to derive from — so
+    /// this is the test that makes the duplication safe rather than merely
+    /// admitted.
+    ///
+    /// The `app.js` half is a containment check on the quoted literal, which is
+    /// weaker than the markup halves: it catches a rename, which is the drift
+    /// that matters, but not a label moved to a different control.
+    ///
+    /// It scans **code only**, via [`js_code`]. The first version searched the
+    /// whole file and was vacuous: `app.js` names `"← Workspace"` in a comment at
+    /// the top as well as in `renderCrumbs`, so renaming the one that renders
+    /// left the guard green. Proved by doing exactly that.
+    #[test]
+    fn the_mounted_headers_wording_matches_the_shells() {
+        const SHELL: &str = include_str!("assets/index.html");
+        const SHELL_JS: &str = include_str!("assets/app.js");
+
+        let header = header_for(&Nav {
+            bundle: Some("/okf/one".to_owned()),
+            bundles: Some("/okf".to_owned()),
+            explorer: Some("/".to_owned()),
+            label: Some("Acme/widgets".to_owned()),
+        });
+
+        for (class, label) in SHARED_LABELS {
+            assert!(
+                text_of(&header, class).iter().any(|t| t == label),
+                "the mounted header no longer says `{label}` in `.{class}` — it says \
+                 {:?}. The shell's project bar does, and a reader moving between the \
+                 two surfaces must not be told two different words for one control",
+                text_of(&header, class)
+            );
+            assert!(
+                text_of(SHELL, class).iter().any(|t| t == label),
+                "`assets/index.html` no longer says `{label}` in `.{class}` — it says \
+                 {:?}. Either the shell was reworded and this header must follow, or \
+                 the pairing in `SHARED_LABELS` is stale",
+                text_of(SHELL, class)
+            );
+            assert!(
+                js_code(SHELL_JS).contains(&format!("\"{label}\"")),
+                "`assets/app.js` no longer carries the literal `{label}` in code, and \
+                 it is what actually renders the shell's breadcrumb — `renderCrumbs` \
+                 replaces `index.html`'s markup. The viewer is now quoting wording \
+                 the reader never sees"
+            );
+        }
+    }
+
+    /// `js` with its comments blanked out, so a scan reads code and not prose.
+    ///
+    /// Tracks string, template and regex-free literal state rather than matching
+    /// `//` anywhere, because `app.js` contains `https://` inside strings and a
+    /// naive stripper would eat the rest of those lines — including, on one of
+    /// them, a label this test is looking for.
+    fn js_code(js: &str) -> String {
+        let (mut out, mut chars) = (String::with_capacity(js.len()), js.chars().peekable());
+        let mut quote: Option<char> = None;
+        while let Some(c) = chars.next() {
+            if let Some(q) = quote {
+                out.push(c);
+                if c == '\\' {
+                    if let Some(n) = chars.next() {
+                        out.push(n);
+                    }
+                } else if c == q {
+                    quote = None;
+                }
+                continue;
+            }
+            match (c, chars.peek()) {
+                ('/', Some('/')) => {
+                    for n in chars.by_ref() {
+                        if n == '\n' {
+                            out.push('\n');
+                            break;
+                        }
+                    }
+                }
+                ('/', Some('*')) => {
+                    chars.next();
+                    let mut prev = ' ';
+                    for n in chars.by_ref() {
+                        if prev == '*' && n == '/' {
+                            break;
+                        }
+                        prev = n;
+                    }
+                }
+                _ => {
+                    if matches!(c, '"' | '\'' | '`') {
+                        quote = Some(c);
+                    }
+                    out.push(c);
+                }
+            }
+        }
+        out
+    }
+
+    /// The text content of every element in `html` whose `class` is exactly
+    /// `class`.
+    fn text_of(html: &str, class: &str) -> Vec<String> {
+        let needle = format!("class=\"{class}\"");
+        html.match_indices(&needle)
+            .filter_map(|(i, _)| {
+                let rest = &html[i..];
+                let open = rest.find('>')? + 1;
+                let close = rest[open..].find('<')?;
+                Some(rest[open..open + close].trim().to_owned())
+            })
+            .filter(|t| !t.is_empty())
+            .collect()
     }
 
     /// A control the shell draws as a `<button>` and this viewer draws as an
