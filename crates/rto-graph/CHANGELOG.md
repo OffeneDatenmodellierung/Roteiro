@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- *(workspace)* `scan_root` and `discover_repos_under` take a `Worktrees` argument
+  (`Skip` — the new default behaviour — or `Include`), and `RootScan` gains a
+  `worktrees` field listing the linked worktrees a scan walked past. Passing it is
+  required rather than defaulted, so each caller states its answer at the call: a
+  shared rule read in several places is how #806's five markdown-link scanners and
+  #787's two walkers came apart.
+- *(workspace)* `ResolvedWorkspace` gains `include_worktrees`, carrying one
+  workspace group's discovery rule ([#837](https://github.com/OffeneDatenmodellierung/Roteiro/issues/837)).
+
+### Added
+
+- *(workspace)* `is_linked_worktree` — whether a directory is a second checkout
+  made by `git worktree add`, decided by `gix::discover::is_git`'s repository
+  classification rather than by the directory's name. A submodule is not a worktree
+  and is unaffected.
+
 ## [5.15.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v5.15.0...rto-graph-v5.15.1) - 2026-09-16
 
 ### Fixed
