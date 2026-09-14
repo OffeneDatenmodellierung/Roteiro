@@ -712,8 +712,15 @@ enum StreamMsg {
     /// Generation finished cleanly with this wire reason (`stop` | `length` |
     /// `tool_calls`).
     Done(&'static str),
-    /// Generation failed part-way; carry the message for a final error event.
-    Failed(String),
+    /// Generation failed part-way; carry the message **and its kind** for a
+    /// final error event. The kind because the status code is already spent by
+    /// the time a stream can fail — see [`error_kind`].
+    Failed {
+        /// What went wrong, as the caller should read it.
+        message: String,
+        /// The OpenAI error `type`, from [`error_kind`].
+        kind: &'static str,
+    },
 }
 
 /// Stream an **untooled** generation, applying by hand the content rules that a
@@ -829,7 +836,10 @@ fn stream_chat(
                     let _ = tx.send(StreamMsg::Done(reason));
                 }
                 Err(e) => {
-                    let _ = tx.send(StreamMsg::Failed(e.to_string()));
+                    let _ = tx.send(StreamMsg::Failed {
+                        message: e.to_string(),
+                        kind: error_kind(&e),
+                    });
                 }
             }
         } else {
@@ -845,7 +855,10 @@ fn stream_chat(
                     let _ = tx.send(StreamMsg::Done(usage.finish_reason.as_str()));
                 }
                 Err(e) => {
-                    let _ = tx.send(StreamMsg::Failed(e.to_string()));
+                    let _ = tx.send(StreamMsg::Failed {
+                        message: e.to_string(),
+                        kind: error_kind(&e),
+                    });
                 }
             }
         }
@@ -861,8 +874,8 @@ fn stream_chat(
             StreamMsg::Done(reason) => {
                 chunk_json(&id, created, &model, Delta::default(), Some(reason))
             }
-            StreamMsg::Failed(message) => {
-                serde_json::to_string(&ErrorResponse::new(message, "inference_error"))
+            StreamMsg::Failed { message, kind } => {
+                serde_json::to_string(&ErrorResponse::new(message, kind))
                     .unwrap_or_else(|_| "{\"error\":{\"message\":\"stream failed\"}}".to_owned())
             }
         };
@@ -986,7 +999,7 @@ fn stream_responses(
                     let _ = tx.send(writer.finish(&usage, finish));
                 }
                 Err(e) => {
-                    let _ = tx.send(writer.failed(&e.to_string()));
+                    let _ = tx.send(writer.failed(&e.to_string(), error_kind(&e)));
                 }
             }
         } else {
@@ -1030,7 +1043,7 @@ fn stream_responses(
                     ));
                 }
                 Err(e) => {
-                    let _ = tx.send(writer.failed(&e.to_string()));
+                    let _ = tx.send(writer.failed(&e.to_string(), error_kind(&e)));
                 }
             }
         }
@@ -1197,6 +1210,34 @@ fn build_response(model: &str, outcome: &ToolLoopOutcome) -> ChatCompletionRespo
 /// Build an OpenAI-shaped error response with the given status.
 fn error(status: StatusCode, message: impl Into<String>, r#type: &'static str) -> Response {
     (status, Json(ErrorResponse::new(message, r#type))).into_response()
+}
+
+/// The OpenAI error `type` an [`EngineError`] carries — the streaming
+/// counterpart of the status code the JSON handlers choose (issue #848).
+///
+/// A stream has already sent `200` and its first event by the time generation
+/// can fail, so the status code is spent and the `type` is the only place left
+/// to say *whose* fault this was. It was the literal `"inference_error"` at
+/// every one of those sites, which is a guess that happened to be right while
+/// the only streaming failure was a broken decode. It stopped being right when
+/// [`EngineError::InvalidRequest`] gained a way to arise from a chat template's
+/// own refusal of the conversation: a client told `inference_error` retries, and
+/// a client told `invalid_request_error` reads the message and fixes its
+/// request.
+///
+/// The strings are the ones the non-streaming handlers already pass to
+/// [`error`], deliberately — two spellings of one refusal is the thing this
+/// server has been bitten by before.
+///
+/// Exhaustive on purpose: [`EngineError`] is not `#[non_exhaustive]`, so a new
+/// variant should stop compiling here and be classified rather than default into
+/// somebody's 500.
+const fn error_kind(e: &EngineError) -> &'static str {
+    match e {
+        EngineError::UnknownModel(_) | EngineError::InvalidRequest(_) => "invalid_request_error",
+        EngineError::Unsupported(_) => "not_implemented",
+        EngineError::Inference(_) => "inference_error",
+    }
 }
 
 /// Seconds since the Unix epoch (0 if the clock is before the epoch).
@@ -3075,6 +3116,128 @@ mod tests {
             .filter(|(t, _)| t == "response.output_text.delta")
             .filter_map(|(_, v)| v["delta"].as_str().map(str::to_owned))
             .collect()
+    }
+
+    /// An engine whose only answer is the failure it was built with.
+    ///
+    /// Two of these are needed and they must differ only in the `EngineError`
+    /// variant, because the claim under test is precisely that the variant is
+    /// what decides the reported `code`.
+    struct FailingEngine(fn() -> EngineError);
+    impl Engine for FailingEngine {
+        fn models(&self) -> Vec<ModelInfo> {
+            vec![ModelInfo {
+                id: "echo".to_owned(),
+            }]
+        }
+        fn chat_stream(
+            &self,
+            _req: &ChatRequest,
+            _on_token: &mut dyn FnMut(&str),
+        ) -> Result<CompletionStats, EngineError> {
+            Err((self.0)())
+        }
+    }
+
+    /// The `error.code` a Responses stream reports follows the failure's kind —
+    /// and a chat template's refusal is the caller's, not the server's (#848).
+    ///
+    /// A `/v1/responses` request is streaming-only, so the `200` and the first
+    /// event are already sent before generation can fail. There is no status
+    /// code left to carry the distinction, and this envelope said
+    /// `inference_error` for every failure whatsoever — which is what a client
+    /// retries on. #848's real turn is exactly this: `qwen3.8-27b`'s own template
+    /// refuses a second `system` message, which cannot be fixed by retrying and
+    /// can be fixed by reading.
+    ///
+    /// Both halves asserted together. `invalid_request_error` alone would pass
+    /// just as well if the code were hard-wired to the *other* constant, and the
+    /// bug being fixed was a hard-wired constant.
+    #[tokio::test]
+    async fn a_responses_stream_reports_a_refusal_as_the_callers_error() {
+        let refused = app(std::sync::Arc::new(FailingEngine(|| {
+            EngineError::InvalidRequest("System message must be at the beginning.".to_owned())
+        })));
+        let resp = refused
+            .oneshot(responses_body(&serde_json::json!({
+                "model": "echo", "stream": true,
+                "input": [{"type": "message", "role": "user",
+                           "content": [{"type": "input_text", "text": "hi"}]}],
+            })))
+            .await
+            .unwrap();
+        // Still a `200` with a well-formed terminal event: a client waiting for
+        // `response.completed` must not be left holding an open stream.
+        assert_eq!(resp.status(), StatusCode::OK);
+        let sse = sse_text(resp).await;
+        let (_, failed) = responses_events(&sse)
+            .into_iter()
+            .find(|(t, _)| t == "response.failed")
+            .expect("a refused turn must still terminate the stream");
+        assert_eq!(failed["response"]["error"]["code"], "invalid_request_error");
+        assert_eq!(
+            failed["response"]["error"]["message"], "System message must be at the beginning.",
+            "the refusal's own words must reach the client: {sse}"
+        );
+
+        // The other half: a genuine server failure is still the server's.
+        let broken = app(std::sync::Arc::new(FailingEngine(|| {
+            EngineError::Inference("decode aborted".to_owned())
+        })));
+        let resp = broken
+            .oneshot(responses_body(&serde_json::json!({
+                "model": "echo", "stream": true,
+                "input": [{"type": "message", "role": "user",
+                           "content": [{"type": "input_text", "text": "hi"}]}],
+            })))
+            .await
+            .unwrap();
+        let sse = sse_text(resp).await;
+        let (_, failed) = responses_events(&sse)
+            .into_iter()
+            .find(|(t, _)| t == "response.failed")
+            .expect("a failed turn must still terminate the stream");
+        assert_eq!(failed["response"]["error"]["code"], "inference_error");
+    }
+
+    /// The same split on the **chat** streaming wire, which has its own error
+    /// frame and had its own hard-wired `inference_error`.
+    ///
+    /// Two streaming surfaces reach this decision by different routes — one
+    /// through `StreamMsg::Failed`, one through `responses::Envelope::failed` —
+    /// and that is the split which has already let a rule reach one and not the
+    /// other on this server. Asserting it once would leave the other free.
+    #[tokio::test]
+    async fn a_chat_stream_reports_a_refusal_as_the_callers_error() {
+        for (make, expected) in [
+            (
+                (|| EngineError::InvalidRequest("Unexpected message role.".to_owned()))
+                    as fn() -> EngineError,
+                "invalid_request_error",
+            ),
+            (
+                || EngineError::Inference("decode aborted".to_owned()),
+                "inference_error",
+            ),
+        ] {
+            let resp = app(std::sync::Arc::new(FailingEngine(make)))
+                .oneshot(chat_body(&serde_json::json!({
+                    "model": "echo",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "stream": true,
+                })))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let sse = sse_text(resp).await;
+            let frame = sse
+                .lines()
+                .filter_map(|l| l.strip_prefix("data: "))
+                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                .find(|v| v.get("error").is_some())
+                .expect("a failed stream must carry an error frame");
+            assert_eq!(frame["error"]["type"], expected, "{sse}");
+        }
     }
 
     /// **The guard this surface exists to be held by.**

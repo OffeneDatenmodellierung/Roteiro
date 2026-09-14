@@ -416,3 +416,54 @@ fn absent_tools_render_as_an_empty_list_not_none() {
         "absent tools reached the template as: {out}"
     );
 }
+
+/// The real failure from issue #848, against the real template that produced it.
+///
+/// `qwen3.8-27b` calls `raise_exception` in nine places, and this is the one a
+/// `codex` turn reached: a second `system` message, because `rto-serve` pushes
+/// its grounding turn in front of a conversation whose first turn is already the
+/// client's `instructions`. Unregistered, the error was
+/// `unknown function: raise_exception is unknown (in <string>:106)` — line 106 of
+/// this very fixture, and the one thing it could not tell you was what line 106
+/// says.
+///
+/// The conversation here is that shape and no other, so this test *is* the
+/// reproduction: the fixture carries the difference rather than merely
+/// exercising the feature. A hand-written template asserting the same thing
+/// would pass against a renderer that still could not serve this model.
+///
+/// The expected sentence is quoted from the fixture, so a registry bump that
+/// rewords it fails here loudly rather than reporting the old words.
+#[test]
+fn qwen38_rejects_a_late_system_message_in_its_own_words() {
+    let (_, src) = templates()
+        .into_iter()
+        .find(|(name, _)| name == "qwen3.8-27b")
+        .expect("qwen3.8-27b is vendored");
+    let two_system_turns = vec![
+        serde_json::json!({"role": "system", "content": "You answer from the graph."}),
+        serde_json::json!({"role": "system", "content": "Be terse."}),
+        serde_json::json!({"role": "user", "content": "Which ADR governs cross-repo links?"}),
+    ];
+    let e = rto_llama::chat_template::render(&src, &two_system_turns, None, true)
+        .expect_err("the template refuses this shape");
+    assert!(
+        matches!(
+            &e,
+            rto_llama::chat_template::TemplateError::Rejected(m)
+                if m == "System message must be at the beginning."
+        ),
+        "the template's own refusal must arrive intact, but got: {e:?}"
+    );
+
+    // The control, and the reason this is not merely "qwen3.8-27b errors": the
+    // *same* template and the *same* turns, with the system message where the
+    // model was trained to find it, render.
+    let one_system_turn = vec![
+        serde_json::json!({"role": "system", "content": "You answer from the graph."}),
+        serde_json::json!({"role": "user", "content": "Which ADR governs cross-repo links?"}),
+    ];
+    let out = rto_llama::chat_template::render(&src, &one_system_turn, None, true)
+        .expect("the supported shape still renders");
+    assert!(out.contains("Which ADR governs cross-repo links?"), "{out}");
+}
