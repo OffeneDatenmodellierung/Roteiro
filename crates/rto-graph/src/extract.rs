@@ -2595,7 +2595,10 @@ mod tests {
         let reg = Registry::new(ingest);
 
         let facts = reg.extract("raw/paper.md", "b1", b"# Title\n\nprose\n");
-        assert!(facts.nodes.is_empty() && facts.edges.is_empty(), "{facts:?}");
+        assert!(
+            facts.nodes.is_empty() && facts.edges.is_empty(),
+            "{facts:?}"
+        );
         assert!(!reg.reads("raw/paper.md"), "sync must not even read it");
         assert!(reg.reads("src/lib.rs"), "and must read everything else");
     }
@@ -2607,14 +2610,15 @@ mod tests {
         const SRC: &[u8] = b"// TODO: wire this up\npub struct Thing;\n";
         let before = Registry::new(crate::IngestConfig::default()).extract("src/lib.rs", "b", SRC);
 
-        let policy = crate::PathPolicy::new(
-            vec!["raw/**".to_owned()],
-            vec!["manifest/**".to_owned()],
-        );
+        let policy =
+            crate::PathPolicy::new(vec!["raw/**".to_owned()], vec!["manifest/**".to_owned()]);
         let ingest = crate::IngestConfig::default().with_paths(&policy);
         let after = Registry::new(ingest).extract("src/lib.rs", "b", SRC);
 
-        assert_eq!(before, after, "an unnamed path is untouched by a declaration");
+        assert_eq!(
+            before, after,
+            "an unnamed path is untouched by a declaration"
+        );
         assert!(before.nodes.iter().any(|n| n.kind == NodeKind::Marker));
     }
 

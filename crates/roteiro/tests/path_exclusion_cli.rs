@@ -376,7 +376,9 @@ fn a_path_the_policy_does_not_name_is_extracted_exactly_as_before() {
         let mut kept: Vec<_> = nodes(artifact)
             .into_iter()
             .filter(|(_, _, path)| {
-                !path.starts_with("raw/") && !path.starts_with("manifest/") && path != "roteiro.toml"
+                !path.starts_with("raw/")
+                    && !path.starts_with("manifest/")
+                    && path != "roteiro.toml"
             })
             .collect();
         kept.sort();

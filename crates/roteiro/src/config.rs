@@ -1909,10 +1909,7 @@ impl Config {
                     self.paths.exclude.as_deref(),
                     over.paths.exclude.as_deref(),
                 ),
-                opaque: merge_patterns(
-                    self.paths.opaque.as_deref(),
-                    over.paths.opaque.as_deref(),
-                ),
+                opaque: merge_patterns(self.paths.opaque.as_deref(), over.paths.opaque.as_deref()),
             },
             telemetry: self.telemetry.overlaid_with(&over.telemetry),
             workspace: WorkspaceConfig {
@@ -2858,8 +2855,11 @@ mod tests {
         let user = dir.join("config.toml");
         let project = dir.join("roteiro.toml");
 
-        std::fs::write(&user, "[paths]\nexclude = [\"~private/**\"]\nopaque = [\"data/**\"]\n")
-            .expect("user");
+        std::fs::write(
+            &user,
+            "[paths]\nexclude = [\"~private/**\"]\nopaque = [\"data/**\"]\n",
+        )
+        .expect("user");
         std::fs::write(&project, "[paths]\nexclude = [\"raw/**\"]\n").expect("project");
         let loaded = load_from(Some(user.clone()), Some(project.clone())).expect("load");
 
@@ -2897,7 +2897,10 @@ mod tests {
             policy.classify("data/rows.json"),
             rto_graph::PathClass::Opaque
         );
-        assert_eq!(policy.classify("src/main.rs"), rto_graph::PathClass::Extract);
+        assert_eq!(
+            policy.classify("src/main.rs"),
+            rto_graph::PathClass::Extract
+        );
 
         // Nothing declared anywhere resolves to the empty policy, which is
         // today's behaviour and costs no extraction-cache key.

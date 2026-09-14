@@ -304,7 +304,8 @@ mod tests {
         );
         let store = synced(&derived(), &tree);
 
-        let out = tool_check(&store, Some(&dir), rto_graph::PathPolicy::empty()).expect("tool_check");
+        let out =
+            tool_check(&store, Some(&dir), rto_graph::PathPolicy::empty()).expect("tool_check");
         assert_eq!(out.gate, Gate::Pass, "{out:?}");
         let report = out.report.expect("a check that ran has a report");
         assert_eq!(report.adrs, 1);
@@ -330,7 +331,8 @@ mod tests {
         );
         let store = synced(&derived(), &tree);
 
-        let out = tool_check(&store, Some(&dir), rto_graph::PathPolicy::empty()).expect("tool_check");
+        let out =
+            tool_check(&store, Some(&dir), rto_graph::PathPolicy::empty()).expect("tool_check");
         assert_eq!(out.gate, Gate::Fail, "{out:?}");
         let report = out.report.expect("report");
         assert_eq!(report.violations.len(), 1, "{:?}", report.violations);
@@ -364,7 +366,8 @@ mod tests {
             store.all_edges().unwrap(),
         );
 
-        let out = tool_check(&store, Some(&dir), rto_graph::PathPolicy::empty()).expect("tool_check");
+        let out =
+            tool_check(&store, Some(&dir), rto_graph::PathPolicy::empty()).expect("tool_check");
         assert_eq!(out.gate, Gate::Pass);
         assert_eq!(store.node_count().unwrap(), before.0, "nodes changed");
         assert_eq!(store.edge_count().unwrap(), before.1, "edges changed");
@@ -391,7 +394,8 @@ mod tests {
         );
         let store = synced(&derived(), "0000000000000000000000000000000000000000");
 
-        let out = tool_check(&store, Some(&dir), rto_graph::PathPolicy::empty()).expect("tool_check");
+        let out =
+            tool_check(&store, Some(&dir), rto_graph::PathPolicy::empty()).expect("tool_check");
         assert_eq!(out.gate, Gate::NotRun, "{out:?}");
         assert!(out.report.is_none(), "a not-run check has no report");
         let reason = out.not_run_reason.expect("reason");
@@ -428,7 +432,8 @@ mod tests {
         repo_with(&dir, &[("src/store.rs", "pub struct Store;\n")]);
         let store = Store::open_in_memory().expect("store");
 
-        let out = tool_check(&store, Some(&dir), rto_graph::PathPolicy::empty()).expect("tool_check");
+        let out =
+            tool_check(&store, Some(&dir), rto_graph::PathPolicy::empty()).expect("tool_check");
         assert_eq!(out.gate, Gate::NotRun, "{out:?}");
         assert!(
             out.not_run_reason

@@ -104,10 +104,7 @@ pub fn authored_blobs(
 }
 
 /// The tree walk itself, before [`authored_blobs`] applies the path policy.
-fn authored_blobs_unfiltered(
-    repo: &Repo,
-    source: GraphSource,
-) -> Result<Vec<BlobRef>, GitError> {
+fn authored_blobs_unfiltered(repo: &Repo, source: GraphSource) -> Result<Vec<BlobRef>, GitError> {
     match source {
         GraphSource::Index => repo.index_files(),
         GraphSource::Committed => repo.walk_blobs(),
@@ -359,7 +356,10 @@ mod tests {
     }
 
     /// As [`classify`], under an explicit path policy.
-    fn classify_under(files: &[(&str, &str)], paths: &rto_graph::PathPolicy) -> super::AuthoredDocs {
+    fn classify_under(
+        files: &[(&str, &str)],
+        paths: &rto_graph::PathPolicy,
+    ) -> super::AuthoredDocs {
         let blobs: Vec<BlobRef> = files
             .iter()
             .map(|(path, _)| BlobRef {
@@ -402,10 +402,8 @@ mod tests {
         let open = classify(files);
         assert_eq!(open.layer.docs.len(), 3, "all three parse as ADRs today");
 
-        let policy = rto_graph::PathPolicy::new(
-            vec!["raw/**".to_owned()],
-            vec!["manifest/**".to_owned()],
-        );
+        let policy =
+            rto_graph::PathPolicy::new(vec!["raw/**".to_owned()], vec!["manifest/**".to_owned()]);
         let guarded = classify_under(files, &policy);
         let paths: Vec<&str> = guarded.layer.docs.iter().map(|d| d.path.as_str()).collect();
         assert_eq!(
@@ -424,7 +422,10 @@ mod tests {
         let files = &[
             ("raw/notes.txt", "// @rto:0001 a claim about our decision\n"),
             ("manifest/notes.txt", "// @rto:0001 another claim\n"),
-            ("src/lib.rs", "// @rto:0001 our own annotation\npub struct Thing;\n"),
+            (
+                "src/lib.rs",
+                "// @rto:0001 our own annotation\npub struct Thing;\n",
+            ),
         ];
         let open = classify(files);
         assert_eq!(
@@ -433,10 +434,8 @@ mod tests {
             "all three annotate today, or this test proves nothing"
         );
 
-        let policy = rto_graph::PathPolicy::new(
-            vec!["raw/**".to_owned()],
-            vec!["manifest/**".to_owned()],
-        );
+        let policy =
+            rto_graph::PathPolicy::new(vec!["raw/**".to_owned()], vec!["manifest/**".to_owned()]);
         let guarded = classify_under(files, &policy);
         let paths: Vec<&str> = guarded
             .layer
@@ -658,15 +657,14 @@ mod tests {
             path: files[0].0.to_owned(),
             oid: String::new(),
         }];
-        let layer =
-            super::authored_layer_from(
-                blobs,
-                &|_: &BlobRef| -> Result<Option<Vec<u8>>, ()> {
-                    Ok(Some(files[0].1.as_bytes().to_vec()))
-                },
-                rto_graph::PathPolicy::empty(),
-            )
-            .expect("classify");
+        let layer = super::authored_layer_from(
+            blobs,
+            &|_: &BlobRef| -> Result<Option<Vec<u8>>, ()> {
+                Ok(Some(files[0].1.as_bytes().to_vec()))
+            },
+            rto_graph::PathPolicy::empty(),
+        )
+        .expect("classify");
         assert!(layer.docs.is_empty());
         assert!(layer.blueprints.is_empty());
         assert!(
