@@ -2598,7 +2598,7 @@ mod tests {
         }
     }
 
-    // ---- the header's two forms (ADR-0022 v1.4) --------------------------
+    // ---- the header's two forms (ADR-0022 v1.5) --------------------------
     //
     // The viewer has been mounted in the same binary, on the same port, beside
     // the explorer since v1.2, and its header said so nowhere: it printed the
@@ -2932,6 +2932,89 @@ mod tests {
             "the mounted header emits {stray:?}, which is neither the shell's nor \
              declared as the viewer's own"
         );
+    }
+
+    /// A control the shell draws as a `<button>` and this viewer draws as an
+    /// `<a>` must neutralise what a user-agent gives an anchor and does not give
+    /// a button.
+    ///
+    /// **`the_mounted_header_wears_the_shells_own_chrome` cannot see this, and
+    /// that is why it exists separately.** Sharing a class name makes the two
+    /// surfaces share a *rule*; it does not make them share an *element*, and the
+    /// shell's crumb controls are `<button>` (`assets/index.html`) while these
+    /// pages are rendered by the server and must navigate. Every appearance the
+    /// shell gets from the button's own defaults therefore has to be restated
+    /// here — and the defaults are invisible, so nothing points at the omission.
+    ///
+    /// `text-decoration` is the one that bites. The viewer's stylesheet sets only
+    /// `a { color: … }`, so an anchor keeps the UA's underline at rest; the
+    /// `:hover` underline the shell uses to say "this is a link" then resolves to
+    /// the same value and tells the reader nothing. Copilot caught exactly that
+    /// on `.p-crumb-link` in review of this change, after `.p-back` had been
+    /// given `text-decoration: none` for this very reason and the second control
+    /// was missed.
+    #[test]
+    fn a_control_the_shell_draws_as_a_button_is_not_left_underlined() {
+        const SHELL: &str = include_str!("assets/index.html");
+        let header = header_for(&Nav {
+            bundle: Some("/okf/one".to_owned()),
+            bundles: Some("/okf".to_owned()),
+            explorer: Some("/".to_owned()),
+            label: Some("Acme/widgets".to_owned()),
+        });
+
+        let anchored = anchor_classes(&header);
+        assert!(
+            anchored.contains(&"p-back") && anchored.contains(&"p-crumb-link"),
+            "both crumb controls should be anchors here: {anchored:?}"
+        );
+        for class in anchored {
+            // Only the shared ones: a class the shell does not style is the
+            // viewer's own and owes the shell's appearance nothing.
+            if !SHELL.contains(&format!(".{class} {{")) {
+                continue;
+            }
+            // The asymmetry has to be real, not assumed — if the shell ever
+            // renders this control as an anchor too, the premise is gone.
+            assert!(
+                SHELL.contains(&format!("<button id=\"{class}\" class=\"{class}\""))
+                    || SHELL.contains(&format!("class=\"{class}\" type=\"button\"")),
+                "`{class}` is no longer a `<button>` in the shell — re-derive what \
+                 this test compensates for before relaxing it"
+            );
+            let rule = resting_rule(class)
+                .unwrap_or_else(|| panic!("the viewer styles `.{class}` nowhere"));
+            assert!(
+                rule.contains("text-decoration"),
+                "`.{class}` is an `<a>` here and a `<button>` in the shell, and its \
+                 resting rule states no `text-decoration` — so the UA underlines it \
+                 and the `:hover` underline stops meaning anything. Rule: {rule}"
+            );
+        }
+    }
+
+    /// The class names carried by `<a>` elements in `html`.
+    fn anchor_classes(html: &str) -> Vec<&str> {
+        html.match_indices("<a ")
+            .filter_map(|(i, _)| {
+                let rest = &html[i..];
+                let end = rest.find('>')?;
+                let tag = &rest[..end];
+                let at = tag.find("class=\"")? + "class=\"".len();
+                let close = tag[at..].find('"')?;
+                Some(&tag[at..at + close])
+            })
+            .flat_map(str::split_whitespace)
+            .collect()
+    }
+
+    /// The viewer's `header .{class} { … }` rule body, excluding `:hover` and any
+    /// other pseudo-class — the declarations that apply when nothing is happening.
+    fn resting_rule(class: &str) -> Option<&'static str> {
+        let head = format!("header .{class} {{");
+        let at = VIEWER_CSS.find(&head)? + head.len();
+        let end = VIEWER_CSS[at..].find('}')?;
+        Some(&VIEWER_CSS[at..at + end])
     }
 
     /// Every `class="…"` value in `html`, split into individual class names.

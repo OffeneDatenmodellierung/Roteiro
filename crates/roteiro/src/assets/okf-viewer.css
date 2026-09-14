@@ -68,9 +68,16 @@ header nav.here, header nav.up { margin-left: auto; display: flex; gap: 1rem; }
    so `the_mounted_header_wears_the_shells_own_chrome` in `okf_viewer.rs` pins
    every class here against the shell's copy.
 
-   `.p-back` is an `<a>` here and a `<button>` there: these pages are rendered by
-   the server and navigate, while the shell is a single page that does not. That
-   is why `text-decoration` and `display` are stated — a button carries neither. */
+   `.p-back` and `.p-crumb-link` are `<a>` here and `<button>` there: these pages
+   are rendered by the server and navigate, while the shell is a single page that
+   does not. The shell's controls are not underlined because a **button** is not,
+   not because any rule says so — so that appearance does not survive the change
+   of element and each anchor has to state `text-decoration: none` itself. Missing
+   it does not merely look wrong: the `:hover` underline below is the affordance
+   that says "this crumb is a link", and against a permanently-underlined resting
+   state it resolves to the same value and shows the reader nothing. `display` is
+   stated on `.p-back` for the same class of reason — a button carries it, an
+   anchor does not. */
 header .p-back {
   font: inherit;
   font-size: .82rem;
@@ -86,7 +93,7 @@ header .p-back {
 header .p-back:hover { border-color: var(--accent); color: var(--fg-strong); }
 header .p-crumbs { display: flex; align-items: center; gap: .4rem; font-size: .85rem; color: var(--muted); }
 header .p-crumb-root { font-weight: 650; color: var(--fg); }
-header .p-crumb-link { font: inherit; background: transparent; border: 0; color: var(--accent); cursor: pointer; padding: 0; }
+header .p-crumb-link { font: inherit; background: transparent; border: 0; color: var(--accent); cursor: pointer; padding: 0; text-decoration: none; }
 header .p-crumb-link:hover { text-decoration: underline; }
 header .p-crumb-current { color: var(--fg); font-weight: 600; }
 header .p-sep { color: var(--muted); }
