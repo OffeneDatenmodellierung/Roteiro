@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.14.2](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.14.1...roteiro-v5.14.2) - 2026-09-14
+
+### Other
+
+- *(deps)* bump yaml-rust2 from 0.12.0 to 0.13.0
+
 ## [5.14.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.14.0...roteiro-v5.14.1) - 2026-09-13
 
 ### Fixed
