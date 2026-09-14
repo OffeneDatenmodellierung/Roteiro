@@ -45,13 +45,56 @@ header {
   padding: .7rem 1.2rem;
   display: flex;
   gap: 1.2rem;
-  align-items: baseline;
+  /* `center`, not `baseline`: the mounted form's `← Workspace` is a bordered
+     box and a baseline would hang it below the trail beside it. */
+  align-items: center;
   position: sticky;
   top: 0;
 }
 header .name { font-weight: bold; }
+/* Standalone only (`serve_okf_only`): the bundle directory's own name, where
+   v1.0 through v1.3 printed the absolute path it was loaded from. Monospaced
+   because it is still a directory name and reads as one. */
 header .root { color: var(--sub); font-size: .85rem; font-family: var(--font-mono); }
-header nav { margin-left: auto; display: flex; gap: 1rem; }
+/* Scoped to the two lateral navs by class, because the breadcrumb is a `<nav>`
+   too and `margin-left: auto` would push the trail to the far edge. */
+header nav.here, header nav.up { margin-left: auto; display: flex; gap: 1rem; }
+
+/* The mounted header's chrome, lifted from the explorer shell's project bar in
+   `assets/index.html` rather than restated: same class names, same rules, same
+   tokens. A reader moving between the two surfaces sees one control, not two
+   that resemble each other. The rules are duplicated because the files are —
+   `index.html` carries its CSS inline and `include_str!` cannot reach into it —
+   so `the_mounted_header_wears_the_shells_own_chrome` in `okf_viewer.rs` pins
+   every class here against the shell's copy.
+
+   `.p-back` is an `<a>` here and a `<button>` there: these pages are rendered by
+   the server and navigate, while the shell is a single page that does not. That
+   is why `text-decoration` and `display` are stated — a button carries neither. */
+header .p-back {
+  font: inherit;
+  font-size: .82rem;
+  cursor: pointer;
+  background: transparent;
+  color: var(--fg);
+  text-decoration: none;
+  display: inline-block;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  padding: .3rem .6rem;
+}
+header .p-back:hover { border-color: var(--accent); color: var(--fg-strong); }
+header .p-crumbs { display: flex; align-items: center; gap: .4rem; font-size: .85rem; color: var(--muted); }
+header .p-crumb-root { font-weight: 650; color: var(--fg); }
+header .p-crumb-link { font: inherit; background: transparent; border: 0; color: var(--accent); cursor: pointer; padding: 0; }
+header .p-crumb-link:hover { text-decoration: underline; }
+header .p-crumb-current { color: var(--fg); font-weight: 600; }
+header .p-sep { color: var(--muted); }
+/* A trail step that is not a link, which the shell never has to draw: its
+   breadcrumb links every crumb but the last, while a lone mounted bundle has an
+   `OKF` step whose chooser would redirect straight back to it. Styled as the
+   trail's resting text so it cannot be mistaken for something clickable. */
+header .p-crumb-step { color: var(--muted); }
 
 main { display: flex; gap: 2rem; max-width: 72rem; margin: 0 auto; padding: 1.5rem 1.2rem 4rem; }
 aside { flex: 0 0 18rem; }
