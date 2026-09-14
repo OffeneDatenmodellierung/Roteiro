@@ -4130,6 +4130,17 @@ fn print_workspace_section(loaded: &config::Loaded) {
         e.workspace.repos,
         provenance(p.workspace.repos.is_some(), u.workspace.repos.is_some())
     );
+    // Reported like its `roots`/`repos` siblings and for the same reason: a key
+    // that silently changes how many projects are hosted, and that `roteiro
+    // config` does not mention, is the shape of defect #837 is about.
+    println!(
+        "  include_worktrees = {}  ({})",
+        e.workspace.include_worktrees.unwrap_or(false),
+        provenance(
+            p.workspace.include_worktrees.is_some(),
+            u.workspace.include_worktrees.is_some()
+        )
+    );
     print_named_workspaces_section(e, p, u);
     print_standalone_section(e, p, u);
     print_resolved_workspaces_section(loaded);
@@ -4171,6 +4182,17 @@ fn print_standalone_section(e: &config::Config, p: &config::Config, u: &config::
         "  repos = {:?}  ({})",
         e.standalone.repos,
         provenance(p.standalone.repos.is_some(), u.standalone.repos.is_some())
+    );
+    // Reported like its `roots`/`repos` siblings and for the same reason: a key
+    // that silently changes how many projects are hosted, and that `roteiro
+    // config` does not mention, is the shape of defect #837 is about.
+    println!(
+        "  include_worktrees = {}  ({})",
+        e.standalone.include_worktrees.unwrap_or(false),
+        provenance(
+            p.standalone.include_worktrees.is_some(),
+            u.standalone.include_worktrees.is_some()
+        )
     );
 }
 
@@ -9858,7 +9880,7 @@ fn workspace_containing_cwd<'a>(
     resolved.iter().find(|rw| {
         // A broken root must not break selection: skip a root that won't read.
         let in_root = rw.roots.iter().any(|root| {
-            rto_graph::discover_repos_under(std::path::Path::new(root))
+            rto_graph::discover_repos_under(std::path::Path::new(root), worktrees_of(rw))
                 .is_ok_and(|repos| repos.iter().any(|r| is_cwd(r)))
         });
         in_root
@@ -9916,7 +9938,10 @@ fn links_scope_paths(
                 .map(String::as_str)
                 .chain(cli_roots.iter().map(String::as_str))
             {
-                paths.extend(rto_graph::discover_repos_under(std::path::Path::new(root))?);
+                paths.extend(rto_graph::discover_repos_under(
+                    std::path::Path::new(root),
+                    worktrees_of(rw),
+                )?);
             }
             for repo in &rw.repos {
                 paths.insert(std::path::PathBuf::from(repo));
@@ -15396,21 +15421,48 @@ fn configured_workspace_names(cfg: &config::Config) -> Vec<String> {
 ///
 /// Silent when a root skipped nothing, so an ordinary sibling-checkouts layout —
 /// the case the shallow rule is for — says nothing extra.
+///
+/// Since #837 a root also reports the **linked git worktrees** it walked past, in
+/// this same sentence. That is the whole remedy the issue asks for: the behaviour
+/// being replaced hosted a worktree as a peer project silently, and a skip that was
+/// equally silent would only move the silence rather than remove it.
 #[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
 fn scanned_roots_note(effective: &[rto_graph::ResolvedWorkspace]) -> Vec<String> {
     scanned_roots(effective)
         .into_iter()
-        .filter(|scan| !scan.skipped.is_empty())
+        .filter(|scan| !scan.skipped.is_empty() || !scan.worktrees.is_empty())
         .map(|scan| {
+            // One clause per *reason* a directory was walked past, because the two
+            // have different remedies: a no-`.git` subdirectory may want a deeper
+            // root, a worktree wants `include_worktrees` or nothing at all. Joined
+            // rather than nested so a root that trips only one reason reads as one
+            // plain sentence, exactly as it did before worktrees were a case.
+            let mut clauses: Vec<String> = Vec::new();
+            if !scan.skipped.is_empty() {
+                clauses.push(format!(
+                    "{} {} skipped for holding no `.git` (any repo nested inside \
+                     those is NOT hosted)",
+                    scan.skipped.len(),
+                    plural(scan.skipped.len(), "subdirectory", "subdirectories"),
+                ));
+            }
+            if !scan.worktrees.is_empty() {
+                clauses.push(format!(
+                    "{} {} skipped for being a linked git worktree — a second \
+                     checkout of a repository, not a project (set \
+                     `include_worktrees = true` on this workspace to host {})",
+                    scan.worktrees.len(),
+                    plural(scan.worktrees.len(), "subdirectory", "subdirectories"),
+                    plural(scan.worktrees.len(), "it", "them"),
+                ));
+            }
             format!(
                 "  note: {} scanned one level deep (not recursive) — {} {} hosted, \
-                 {} {} skipped for holding no `.git`; any repo nested inside those \
-                 is NOT hosted",
+                 {}",
                 scan.root.display(),
                 scan.repos.len(),
                 plural(scan.repos.len(), "repo", "repos"),
-                scan.skipped.len(),
-                plural(scan.skipped.len(), "subdirectory", "subdirectories"),
+                clauses.join(", "),
             )
         })
         .collect()
@@ -15477,11 +15529,17 @@ fn scanned_roots(effective: &[rto_graph::ResolvedWorkspace]) -> Vec<rto_graph::R
     let mut seen = std::collections::BTreeSet::new();
     effective
         .iter()
-        .flat_map(|ws| ws.roots.iter())
-        .filter_map(|root| {
+        .flat_map(|ws| {
+            let worktrees = worktrees_of(ws);
+            ws.roots.iter().map(move |root| (root, worktrees))
+        })
+        // Keyed on the **pair**, not the path: two groups may name one root and
+        // disagree about worktrees, and reporting only the first would describe a
+        // scan that did not happen for the second.
+        .filter_map(|(root, worktrees)| {
             let path = config::expand_tilde(root);
-            seen.insert(path.clone())
-                .then(|| rto_graph::scan_root(&path).ok())
+            seen.insert((path.clone(), worktrees))
+                .then(|| rto_graph::scan_root(&path, worktrees).ok())
                 .flatten()
         })
         .collect()
@@ -15513,6 +15571,23 @@ struct ServeWorkspaces {
 /// Not feature-gated: `roteiro config` resolves each workspace's membership
 /// through this same function (issue #499), so what `config` *reports* and what
 /// `serve` *hosts* are the one computation and cannot drift.
+/// A resolved group's `roots` discovery rule, as [`rto_graph::discover_repos_under`]
+/// wants it.
+///
+/// One function rather than the `if` at each of the call sites, so that "which
+/// groups host worktrees" has exactly one answer in this binary. The reason the
+/// parameter is threaded at all rather than read from config at the bottom is that
+/// the rule is per-group and the scanner is shared: #806 and #787 are both this
+/// repository discovering that one rule read in several places becomes several
+/// rules.
+fn worktrees_of(ws: &rto_graph::ResolvedWorkspace) -> rto_graph::Worktrees {
+    if ws.include_worktrees {
+        rto_graph::Worktrees::Include
+    } else {
+        rto_graph::Worktrees::Skip
+    }
+}
+
 fn resolved_repo_paths(
     resolved: &[rto_graph::ResolvedWorkspace],
     cli_roots: &[String],
@@ -15528,13 +15603,22 @@ fn resolved_repo_paths(
         }
     };
     for root in cli_roots {
-        for repo in rto_graph::discover_repos_under(std::path::Path::new(root))? {
+        // A bare `--workspace <ROOT>` with no group to inherit from takes the
+        // default. `fold_cli_roots` folds these same roots into the `default`
+        // group, which carries `[workspace] include_worktrees`; this loop runs
+        // where no such fold has happened, so `Skip` is the same answer that
+        // group would have given for an undeclared key.
+        for repo in
+            rto_graph::discover_repos_under(std::path::Path::new(root), rto_graph::Worktrees::Skip)?
+        {
             push(repo, &mut out);
         }
     }
     for rw in resolved {
         for root in &rw.roots {
-            for repo in rto_graph::discover_repos_under(std::path::Path::new(root))? {
+            for repo in
+                rto_graph::discover_repos_under(std::path::Path::new(root), worktrees_of(rw))?
+            {
                 push(repo, &mut out);
             }
         }
@@ -15569,6 +15653,12 @@ fn fold_cli_roots(
             roots: cli_roots.to_vec(),
             repos: Vec::new(),
             linked: true,
+            // No `[workspace]` table existed to declare the key, so this group
+            // takes the same answer an undeclared one gets. Folding into an
+            // existing `default` (the arm above) instead *inherits* that group's
+            // declaration, which is the point: a CLI root joins a workspace
+            // rather than becoming a fourth place to configure discovery.
+            include_worktrees: false,
         }),
     }
     resolved
@@ -15583,6 +15673,15 @@ fn collect_workspace_repo_paths(
     cli_roots: &[String],
 ) -> anyhow::Result<Vec<std::path::PathBuf>> {
     let mut repo_paths: Vec<std::path::PathBuf> = Vec::new();
+    // One rule for both sources. A `--workspace <ROOT>` root is additive to this
+    // very table — `fold_cli_roots` unions it into the same `default` group — so it
+    // is scanned under the table's own `include_worktrees` rather than under a
+    // fourth, CLI-only spelling of the same decision.
+    let worktrees = if ws_cfg.include_worktrees.unwrap_or(false) {
+        rto_graph::Worktrees::Include
+    } else {
+        rto_graph::Worktrees::Skip
+    };
     let roots = cli_roots
         .iter()
         .map(String::as_str)
@@ -15591,9 +15690,10 @@ fn collect_workspace_repo_paths(
     // never receives a literal `~`, matching the new multi-workspace path
     // (`Config::resolved_workspaces`).
     for root in roots {
-        repo_paths.extend(rto_graph::discover_repos_under(&config::expand_tilde(
-            root,
-        ))?);
+        repo_paths.extend(rto_graph::discover_repos_under(
+            &config::expand_tilde(root),
+            worktrees,
+        )?);
     }
     for repo in ws_cfg.repos.iter().flatten() {
         repo_paths.push(config::expand_tilde(repo).into_owned());
@@ -18575,7 +18675,10 @@ fn workspace_member_paths(
     let chosen = select_resolved_workspace(&resolved, workspace_name)?;
     let mut paths: BTreeSet<std::path::PathBuf> = BTreeSet::new();
     for root in &chosen.roots {
-        paths.extend(rto_graph::discover_repos_under(std::path::Path::new(root))?);
+        paths.extend(rto_graph::discover_repos_under(
+            std::path::Path::new(root),
+            worktrees_of(chosen),
+        )?);
     }
     for repo in &chosen.repos {
         paths.insert(std::path::PathBuf::from(repo));
@@ -20976,12 +21079,14 @@ mod cli_routing {
                 roots: vec![],
                 repos: vec!["/repos/api".to_owned()],
                 linked: true,
+                include_worktrees: false,
             },
             rto_graph::ResolvedWorkspace {
                 name: "tools".to_owned(),
                 roots: vec![],
                 repos: vec!["/repos/cli".to_owned()],
                 linked: true,
+                include_worktrees: false,
             },
         ];
         let err = crate::select_resolved_workspace(&resolved, "platfrom")
@@ -23079,6 +23184,7 @@ mod serve_workspace_paths_tests {
             roots: vec!["/cfg".to_owned()],
             repos: vec!["/cfg/extra".to_owned()],
             linked: true,
+            include_worktrees: false,
         }];
         let folded = fold_cli_roots(existing, &["/cli".to_owned()]);
         assert_eq!(folded.len(), 1, "no duplicate `default` group");
@@ -23095,6 +23201,7 @@ mod serve_workspace_paths_tests {
             roots: vec!["/api".to_owned()],
             repos: Vec::new(),
             linked: true,
+            include_worktrees: false,
         }];
         let folded = fold_cli_roots(named.clone(), &[]);
         assert_eq!(folded, named);
@@ -23121,12 +23228,14 @@ mod serve_workspace_paths_tests {
                 // `alpha` is also discovered under `scan` → must appear once.
                 repos: vec![alpha.clone()],
                 linked: true,
+                include_worktrees: false,
             },
             ResolvedWorkspace {
                 name: "gamma".to_owned(),
                 roots: Vec::new(),
                 repos: vec![base.join("solo/gamma").to_string_lossy().into_owned()],
                 linked: false,
+                include_worktrees: false,
             },
         ];
         // A `--workspace <ROOT>` that re-scans the same `solo` dir must not double it.
@@ -23208,6 +23317,7 @@ mod sighup_reload_tests {
             workspace: crate::config::WorkspaceConfig {
                 roots: Some(vec![root.to_string_lossy().into_owned()]),
                 repos: None,
+                include_worktrees: None,
             },
             ..crate::config::Config::default()
         };
@@ -23311,6 +23421,7 @@ mod sighup_reload_tests {
             workspace: crate::config::WorkspaceConfig {
                 roots: Some(vec![root.to_string_lossy().into_owned()]),
                 repos: None,
+                include_worktrees: None,
             },
             ..crate::config::Config::default()
         };
@@ -23359,6 +23470,7 @@ mod sighup_reload_tests {
             workspace: crate::config::WorkspaceConfig {
                 roots: Some(vec![root.to_string_lossy().into_owned()]),
                 repos: None,
+                include_worktrees: None,
             },
             ..crate::config::Config::default()
         };
@@ -23403,6 +23515,7 @@ mod sighup_reload_tests {
             roots: Some(vec![base.join(root).to_string_lossy().into_owned()]),
             repos: None,
             includes: None,
+            include_worktrees: None,
         };
         let cfg = crate::config::Config {
             workspaces: vec![named("one", "wsA"), named("two", "wsB")],
@@ -23445,7 +23558,7 @@ mod sighup_reload_tests {
 
 #[cfg(test)]
 mod workspace_tests {
-    use rto_graph::discover_repos_under;
+    use rto_graph::{Worktrees, discover_repos_under};
 
     #[test]
     fn discovers_the_root_and_immediate_repo_subdirs_only() {
@@ -23455,14 +23568,14 @@ mod workspace_tests {
         for sub in ["alpha/.git", "beta/.git", "notarepo", "beta/deep/.git"] {
             std::fs::create_dir_all(base.join(sub)).expect("mkdir");
         }
-        let found = discover_repos_under(&base).expect("scan");
+        let found = discover_repos_under(&base, Worktrees::Skip).expect("scan");
         // The root itself is not a repo here; `alpha` and `beta` are, in sorted
         // order; `notarepo` is skipped and the scan is shallow (no `beta/deep`).
         assert_eq!(found, vec![base.join("alpha"), base.join("beta")]);
 
         // When the root itself is a repo, it is included first.
         std::fs::create_dir_all(base.join(".git")).expect("mkdir root .git");
-        let found = discover_repos_under(&base).expect("scan");
+        let found = discover_repos_under(&base, Worktrees::Skip).expect("scan");
         assert_eq!(
             found,
             vec![base.clone(), base.join("alpha"), base.join("beta")]
@@ -23815,5 +23928,288 @@ mod limit_contract_tests {
                 path.join(" ")
             );
         }
+    }
+}
+
+/// **A `roots` scan skips linked git worktrees; an explicit `repos` entry is
+/// honoured** (issue #837) — at the config seam, where the two are one
+/// computation.
+///
+/// `tests/worktree_discovery.rs` in `rto-graph` pins the scan itself. This pins
+/// what a *config* does with it, which is a separate question and the one the
+/// decision turns on: `roots` is discovery, and discovering a second checkout of
+/// a repository is not a discovery, while naming one in `repos` is a deliberate
+/// act that must keep working. Those two sentences are the decision; if they are
+/// not both asserted, half of it is unguarded.
+///
+/// Every worktree here is made by `git worktree add`. A hand-written `.git` file
+/// holding a `gitdir:` line would test the shape this implementation looks for
+/// rather than the thing git produces.
+#[cfg(test)]
+mod worktree_discovery_tests {
+    use super::{config, resolved_repo_paths};
+    use std::path::{Path, PathBuf};
+
+    /// Run `git` in `dir` with the identity and signing settings a fixture needs
+    /// and a developer's global config cannot be trusted to leave alone.
+    fn git(dir: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args([
+                "-c",
+                "init.defaultBranch=main",
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "user.name=T",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} in {}", dir.display());
+    }
+
+    /// A git repo at `dir` with one commit, so `git worktree add` has a HEAD.
+    fn repo(dir: &Path) -> PathBuf {
+        std::fs::create_dir_all(dir).expect("mkdir");
+        git(dir, &["init", "-q"]);
+        std::fs::write(dir.join("README.md"), "# fixture\n").expect("write");
+        git(dir, &["add", "-A"]);
+        git(dir, &["commit", "-q", "-m", "seed"]);
+        dir.to_path_buf()
+    }
+
+    /// A root holding `plain`, a `checkout` worktree of it, and `other`, plus a
+    /// private base directory for the test. The worktree's name says nothing
+    /// about what it is, because the `-wt-` convention that made #837 visible is
+    /// one machine's habit and must not be what this depends on.
+    fn fixture(tag: &str) -> (PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!("rto-wtcfg-{}-{tag}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        let root = base.join("ws");
+        std::fs::create_dir_all(&root).expect("mkdir root");
+        let main = repo(&root.join("plain"));
+        git(
+            &main,
+            &["worktree", "add", "-q", "../checkout", "-b", "side"],
+        );
+        repo(&root.join("other"));
+        (base, root)
+    }
+
+    /// Project names, which is the form the defect was reported in: `serve`
+    /// listing one repository three times under three names.
+    fn hosted(paths: &[PathBuf]) -> Vec<String> {
+        let mut names: Vec<String> = paths
+            .iter()
+            .filter_map(|p| Some(p.file_name()?.to_string_lossy().into_owned()))
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The default: the worktree is gone, and **both** ordinary repositories are
+    /// still hosted. The second half is not decoration — a skip that skips too
+    /// much passes a test that only checks the first.
+    #[test]
+    fn a_roots_entry_no_longer_hosts_a_worktree_found_beneath_it() {
+        let (base, root) = fixture("roots");
+        let cfg = config::Config {
+            workspace: config::WorkspaceConfig {
+                roots: Some(vec![root.to_string_lossy().into_owned()]),
+                repos: None,
+                include_worktrees: None,
+            },
+            ..config::Config::default()
+        };
+        let resolved = cfg.resolved_workspaces().expect("resolve");
+        let paths = resolved_repo_paths(&resolved, &[]).expect("paths");
+        assert_eq!(
+            hosted(&paths),
+            vec!["other".to_owned(), "plain".to_owned()],
+            "a `roots` scan hosted a worktree, or stopped hosting a real repo"
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// **The escape hatch.** A worktree named directly in `repos` is a deliberate
+    /// operator act and is hosted, with no opt-in needed — an explicit path is
+    /// never discovered, so the rule that governs discovery never sees it. Part
+    /// of the decision, not an implementation detail: without this the opt-in has
+    /// no answer for the one-off case.
+    #[test]
+    fn an_explicit_repos_entry_still_hosts_a_worktree() {
+        let (base, root) = fixture("repos");
+        let cfg = config::Config {
+            workspace: config::WorkspaceConfig {
+                roots: Some(vec![root.to_string_lossy().into_owned()]),
+                repos: Some(vec![root.join("checkout").to_string_lossy().into_owned()]),
+                include_worktrees: None,
+            },
+            ..config::Config::default()
+        };
+        let resolved = cfg.resolved_workspaces().expect("resolve");
+        let paths = resolved_repo_paths(&resolved, &[]).expect("paths");
+        assert_eq!(
+            hosted(&paths),
+            vec![
+                "checkout".to_owned(),
+                "other".to_owned(),
+                "plain".to_owned()
+            ],
+            "an explicit `repos` entry naming a worktree stopped being honoured"
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// The opt-in, in the spelling the config uses: one key beside `roots`.
+    #[test]
+    fn include_worktrees_restores_the_old_behaviour_for_that_workspace_only() {
+        let (base, root) = fixture("optin");
+        let root_s = root.to_string_lossy().into_owned();
+        let cfg = config::Config {
+            workspaces: vec![
+                config::NamedWorkspace {
+                    name: "opted-in".to_owned(),
+                    roots: Some(vec![root_s.clone()]),
+                    include_worktrees: Some(true),
+                    ..config::NamedWorkspace::default()
+                },
+                config::NamedWorkspace {
+                    name: "default-rule".to_owned(),
+                    roots: Some(vec![root_s]),
+                    ..config::NamedWorkspace::default()
+                },
+            ],
+            ..config::Config::default()
+        };
+        let resolved = cfg.resolved_workspaces().expect("resolve");
+        let by_name = |name: &str| {
+            let one: Vec<_> = resolved
+                .iter()
+                .filter(|r| r.name == name)
+                .cloned()
+                .collect();
+            hosted(&resolved_repo_paths(&one, &[]).expect("paths"))
+        };
+        assert_eq!(
+            by_name("opted-in"),
+            vec![
+                "checkout".to_owned(),
+                "other".to_owned(),
+                "plain".to_owned()
+            ]
+        );
+        // And the key is the **group's**, not the process's: the second workspace
+        // names the very same root and still skips. That is what lets it compose
+        // with `--scope` — a chosen group carries its own discovery rule, so
+        // there is nothing for the two selections to disagree about.
+        assert_eq!(
+            by_name("default-rule"),
+            vec!["other".to_owned(), "plain".to_owned()]
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// `[standalone]` reaches the scanner through `standalone_repo_paths`, which
+    /// is a **different** call site from the `roots` path above and resolves its
+    /// roots to concrete `repos` before any `ResolvedWorkspace` exists. A fix that
+    /// landed on one and not the other is the failure mode this repository has
+    /// twice: #806's five markdown-link scanners, #787's two walkers.
+    #[test]
+    fn a_standalone_root_skips_worktrees_and_honours_its_own_opt_in() {
+        let (base, root) = fixture("standalone");
+        let root_s = root.to_string_lossy().into_owned();
+        let names = |include: Option<bool>| {
+            let cfg = config::Config {
+                standalone: config::WorkspaceConfig {
+                    roots: Some(vec![root_s.clone()]),
+                    repos: None,
+                    include_worktrees: include,
+                },
+                ..config::Config::default()
+            };
+            let mut n: Vec<String> = cfg
+                .resolved_workspaces()
+                .expect("resolve")
+                .into_iter()
+                .map(|r| r.name)
+                .collect();
+            n.sort();
+            n
+        };
+        assert_eq!(
+            names(None),
+            vec!["other".to_owned(), "plain".to_owned()],
+            "a `[standalone]` root hosted a worktree as its own project"
+        );
+        assert_eq!(
+            names(Some(true)),
+            vec![
+                "checkout".to_owned(),
+                "other".to_owned(),
+                "plain".to_owned()
+            ],
+            "`[standalone] include_worktrees` did not reach the scan"
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// **The skip is announced.** The reason #837 exists is that the behaviour it
+    /// replaces was silent; a silent skip would move the silence rather than
+    /// remove it, so the sentence is asserted in full rather than by a `contains`
+    /// on one word.
+    #[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+    #[test]
+    fn the_startup_note_says_how_many_worktrees_it_walked_past() {
+        let (base, root) = fixture("note");
+        std::fs::create_dir_all(root.join("notarepo")).expect("mkdir");
+        let cfg = config::Config {
+            workspace: config::WorkspaceConfig {
+                roots: Some(vec![root.to_string_lossy().into_owned()]),
+                repos: None,
+                include_worktrees: None,
+            },
+            ..config::Config::default()
+        };
+        let resolved = cfg.resolved_workspaces().expect("resolve");
+        let notes = super::scanned_roots_note(&resolved);
+        assert_eq!(
+            notes,
+            vec![format!(
+                "  note: {} scanned one level deep (not recursive) — 2 repos \
+                 hosted, 1 subdirectory skipped for holding no `.git` (any repo \
+                 nested inside those is NOT hosted), 1 subdirectory skipped for \
+                 being a linked git worktree — a second checkout of a repository, \
+                 not a project (set `include_worktrees = true` on this workspace \
+                 to host it)",
+                root.display()
+            )]
+        );
+
+        // Under the opt-in there is nothing to say about worktrees, and the
+        // no-`.git` half of the sentence is unchanged — the two clauses are
+        // independent, which is why they are separate clauses.
+        let cfg = config::Config {
+            workspace: config::WorkspaceConfig {
+                roots: Some(vec![root.to_string_lossy().into_owned()]),
+                repos: None,
+                include_worktrees: Some(true),
+            },
+            ..config::Config::default()
+        };
+        let resolved = cfg.resolved_workspaces().expect("resolve");
+        assert_eq!(
+            super::scanned_roots_note(&resolved),
+            vec![format!(
+                "  note: {} scanned one level deep (not recursive) — 3 repos \
+                 hosted, 1 subdirectory skipped for holding no `.git` (any repo \
+                 nested inside those is NOT hosted)",
+                root.display()
+            )]
+        );
+        std::fs::remove_dir_all(&base).ok();
     }
 }

@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- *(workspace)* **A `roots` scan no longer hosts linked git worktrees.** A second
+  checkout made by `git worktree add` — whose `.git` is a file pointing into the
+  main checkout — is not an independent project, and hosting it presented one
+  repository as several peers at several revisions: coupling, hotspot and debt
+  figures counted the same symbols once per checkout, cross-repo drift was computed
+  between two branches of one repo, and a workspace-scoped question could retrieve
+  one file at three revisions as three independent sources
+  ([#837](https://github.com/OffeneDatenmodellierung/Roteiro/issues/837)).
+
+  **This is a behaviour change to a shipped default, not a pure bug fix: an
+  unchanged config will host fewer projects.** On the installation that prompted
+  the issue, the `stream-sync` workspace goes from 23 hosted projects to 21. The
+  detection is structural — `gix`'s repository classification, never the directory's
+  name — so it applies to a worktree called anything at all.
+
+  **Migration, if you want one hosted.** `repos = ["…/my-worktree"]` names it
+  directly and still works unchanged: an explicit path is never *discovered*, so the
+  rule does not reach it. `include_worktrees = true` sets the rule for one
+  workspace's roots, beside `roots` in `[workspace]`, in any `[[workspaces]]` entry
+  and in `[standalone]`. Either way, `roteiro serve`, `roteiro mcp` and the explorer
+  now report how many subdirectories each root walked past for being a worktree, in
+  the same startup sentence that already reported the ones holding no `.git` — the
+  skip is never silent, which was half the complaint.
+
+  A worktree whose **main** checkout lies outside every root is skipped too, and is
+  therefore no longer graphed at all. That is deliberate: a scan cannot tell "its
+  main checkout is elsewhere in your config" from "its main checkout is on another
+  disk", and both escape hatches above cover it.
+
+### Added
+
+- *(config)* `include_worktrees` — a per-workspace opt-in that hosts the linked git
+  worktrees that workspace's `roots` find. Accepted in `[workspace]`, in each
+  `[[workspaces]]` entry and in `[standalone]`. A property of the group rather than
+  of the process, so two workspaces may name one root and answer differently, and so
+  it composes with `--scope`: choosing a workspace carries its discovery rule with
+  it.
+
 ## [5.14.3](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.14.2...roteiro-v5.14.3) - 2026-09-15
 
 ### Other

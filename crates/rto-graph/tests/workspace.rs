@@ -238,6 +238,7 @@ fn workspace_set_from_resolved_partitions_linked_and_standalone() {
             roots: vec![base.join("linked").to_string_lossy().into_owned()],
             repos: Vec::new(),
             linked: true,
+            include_worktrees: false,
         },
         ResolvedWorkspace {
             name: "tools".to_owned(),
@@ -249,6 +250,7 @@ fn workspace_set_from_resolved_partitions_linked_and_standalone() {
                     .into_owned(),
             ],
             linked: false,
+            include_worktrees: false,
         },
     ];
     let set = WorkspaceSet::from_resolved(resolved).expect("build set");
@@ -326,6 +328,7 @@ fn workspace_set_reload_picks_up_repos_and_keeps_surviving_handles() {
         roots: vec![root.to_string_lossy().into_owned()],
         repos: Vec::new(),
         linked: true,
+        include_worktrees: false,
     };
     let resolved = vec![group("prod", &root)];
     let set = WorkspaceSet::from_resolved(resolved.clone()).expect("build set");
@@ -401,12 +404,14 @@ fn workspace_set_from_resolved_skips_empty_groups() {
             roots: vec![base.join("barren").to_string_lossy().into_owned()],
             repos: Vec::new(),
             linked: true,
+            include_worktrees: false,
         },
         ResolvedWorkspace {
             name: "real".to_owned(),
             roots: Vec::new(),
             repos: vec![base.join("real").to_string_lossy().into_owned()],
             linked: false,
+            include_worktrees: false,
         },
     ];
     let set = WorkspaceSet::from_resolved(resolved).expect("build set");
@@ -441,6 +446,7 @@ fn from_resolved_splits_a_standalone_group_into_single_repo_workspaces() {
             base.join("two").to_string_lossy().into_owned(),
         ],
         linked: false,
+        include_worktrees: false,
     }];
     let set = WorkspaceSet::from_resolved(resolved).expect("build set");
 

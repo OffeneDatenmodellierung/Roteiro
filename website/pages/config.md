@@ -65,6 +65,7 @@ tools = ["query", "quality"]             <span class="c"># restrict the advertis
 [workspace]                              <span class="c"># host many repos from one server (ADR-0008)</span>
 roots = ["~/code"]                       <span class="c"># scanned ONE LEVEL deep — each immediate child that is a repo</span>
 repos = []                               <span class="c"># …or list explicit repo paths (any depth)</span>
+include_worktrees = false                <span class="c"># host linked git worktrees a root finds (default false)</span>
 
 &#91;&#91;workspaces&#93;&#93;                          <span class="c"># several named workspaces (a hub + its spokes)</span>
 name  = "payments"                      <span class="c"># select with --workspace-name, or by cwd</span>
@@ -105,6 +106,27 @@ itself if it is one — never recursively. A repo at <code>~/code/&lt;org&gt;/&l
 <em>not</em> found: name each <code>&lt;org&gt;</code> directory as its own root, or list the repos
 explicitly. <code>roteiro serve</code> and <code>roteiro mcp</code> print what each root offered
 beside the project count, so a near-empty workspace says why.</div>
+
+<div class="note"><strong>A <code>roots</code> scan walks past git worktrees.</strong> A
+linked worktree — a second checkout made by <code>git worktree add</code>, whose <code>.git</code>
+is a file pointing into the main checkout — is not an independent project, and hosting it presents
+one repository as several peers at several revisions: coupling, hotspot and debt figures count its
+symbols once per checkout, and a workspace-scoped question can retrieve one file on three branches
+as three independent sources. <code>roteiro serve</code>, <code>roteiro mcp</code> and the explorer
+say how many each root walked past, beside the project count.
+
+<p>Two ways to host one anyway. <code>repos = ["…/my-worktree"]</code> names it directly and always
+works — an explicit path is never <em>discovered</em>, so the rule does not apply to it; that is the
+one-off case. <code>include_worktrees = true</code> sets the rule for one workspace's roots, for a
+directory that holds a pool of them on purpose. The key sits beside <code>roots</code> in
+<code>[workspace]</code>, in any <code>&#91;&#91;workspaces&#93;&#93;</code> entry and in
+<code>[standalone]</code>, and belongs to that group alone — two workspaces may name the same root
+and answer differently.</p>
+
+<p>A worktree whose main checkout is outside every root is skipped too. Nothing else in the scan
+holds that content, so this is the one case where the rule drops something that used to be graphed;
+the note names it and either escape hatch restores it. See
+<a href="https://github.com/OffeneDatenmodellierung/Roteiro/issues/837">issue #837</a>.</p></div>
 
 <div class="note"><strong>Many workspaces, one install.</strong> A lone <code>[workspace]</code> is the default workspace; add <code>&#91;&#91;workspaces&#93;&#93;</code> for several named hub-and-spoke groups and <code>[standalone]</code> for repos that stand alone. <code>roteiro links</code>, <code>roteiro serve</code>, <code>roteiro mcp</code> and the <a href="modes.html#explorer">explorer</a> pick one with <code>--workspace-name</code> (or the workspace containing your current directory).</div>
 
