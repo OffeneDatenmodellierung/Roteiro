@@ -20,6 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- *(git)* `Repo::linked_worktree_of` — the main checkout a linked worktree belongs
+  to, or `None` for an ordinary clone, via gix's `Kind::LinkedWorkTree` and
+  `main_repo()`. Deliberately not `git_dir() != common_dir()`: gix reports the
+  common dir as the `commondir` file records it, relative and unresolved, so that
+  route yields `<main>/.git/worktrees/<name>/../..`.
+- *(git)* `Repo::head_branch` — the short branch name `HEAD` points at, resolved in
+  *this* repository's git dir, which in a linked worktree is
+  `<main>/.git/worktrees/<name>/HEAD` rather than the common dir's.
 - *(workspace)* `is_linked_worktree` — whether a directory is a second checkout
   made by `git worktree add`, decided by `gix::discover::is_git`'s repository
   classification rather than by the directory's name. A submodule is not a worktree

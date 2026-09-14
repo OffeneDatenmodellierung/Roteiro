@@ -123,6 +123,14 @@ directory that holds a pool of them on purpose. The key sits beside <code>roots<
 <code>[standalone]</code>, and belongs to that group alone — two workspaces may name the same root
 and answer differently.</p>
 
+<p><strong>Standing inside a worktree is different.</strong> Skipping applies to
+<em>discovery</em>, not to selection: <code>cd &lt;worktree&gt; &amp;&amp; roteiro serve</code>
+serves that worktree, scoped to it alone and on its own branch, because being there is as
+explicit an act as naming it. The startup line says so, and names the repository the worktree
+belongs to and the branch it is checked out on — a worktree presented as though it were the
+repository is the same silent misrepresentation, from the other side. Sibling repositories beside
+the worktree are not picked up: <code>--scope here</code> means this checkout.</p>
+
 <p>A worktree whose main checkout is outside every root is skipped too. Nothing else in the scan
 holds that content, so this is the one case where the rule drops something that used to be graphed;
 the note names it and either escape hatch restores it. See
