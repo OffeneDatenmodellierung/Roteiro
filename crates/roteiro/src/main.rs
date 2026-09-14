@@ -15273,6 +15273,14 @@ fn build_serve_workspaces(
             Err(e) => return Err(e),
         };
         build_graph(&repo, &mut store, &cache, ingest, GraphSource::Committed)?;
+        // Standing in a worktree is an explicit act and is served (issue #837's
+        // amendment: skipping applies to *discovery*, not to selection) — but it
+        // must not be served *silently*. Presenting a worktree as though it were
+        // the repository is the same misrepresentation the discovery half of #837
+        // exists to remove, arrived at from the other side.
+        if let Some(note) = worktree_scope_note(cmd, &repo) {
+            eprintln!("{note}");
+        }
         let name = repo
             .workdir()
             .and_then(std::path::Path::file_name)
@@ -15466,6 +15474,44 @@ fn scanned_roots_note(effective: &[rto_graph::ResolvedWorkspace]) -> Vec<String>
             )
         })
         .collect()
+}
+
+/// What a `--scope here` start says when "here" turns out to be a **linked git
+/// worktree** — `None` for an ordinary clone, which is the overwhelming case and
+/// says nothing extra.
+///
+/// # Why this is not optional
+///
+/// Issue #837's amendment makes standing inside a worktree an explicit selection,
+/// so the server hosts it. The project name it is hosted under is the worktree
+/// *directory's* name, and nothing else on screen distinguishes that from a clone
+/// of a repository that happens to share it. Two facts make the difference
+/// visible, and both are named here because either alone is misleading: **which
+/// repository** this is a second checkout of, and **which branch** it is on — a
+/// graph of `side` presented as the repository is exactly the false assertion the
+/// discovery half of this issue removes.
+///
+/// The branch comes from [`rto_graph::Repo::head_branch`], which reads *this*
+/// repository's `HEAD` (`<main>/.git/worktrees/<name>/HEAD`) rather than the
+/// common dir's. Reading the common dir would name the main checkout's branch
+/// beside the worktree's content, which is a worse sentence than saying nothing.
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+fn worktree_scope_note(cmd: &str, repo: &rto_graph::Repo) -> Option<String> {
+    let main = repo.linked_worktree_of()?;
+    let here = repo.workdir().map_or_else(
+        || repo.git_dir().display().to_string(),
+        |w| w.display().to_string(),
+    );
+    let at = repo.head_branch().map_or_else(
+        || "at a detached HEAD".to_owned(),
+        |b| format!("on branch `{b}`"),
+    );
+    Some(format!(
+        "roteiro {cmd}: {here} is a linked git WORKTREE of {}, {at} — hosting this \
+         checkout at this branch's revision, and NOT {}",
+        main.display(),
+        main.display(),
+    ))
 }
 
 /// `one`/`many` chosen by `n`. A local helper so notes read as English rather

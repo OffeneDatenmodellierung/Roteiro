@@ -158,6 +158,60 @@ impl Repo {
         self.inner.workdir()
     }
 
+    /// When this repository is a **linked git worktree**, the main checkout it
+    /// belongs to; `None` for an ordinary clone.
+    ///
+    /// The runtime counterpart of [`crate::is_linked_worktree`], which answers the
+    /// same question about a directory nobody has opened yet. This one answers it
+    /// about the repository actually in hand, through `gix`'s own classification
+    /// (`Kind::LinkedWorkTree`). No `.git` file is parsed and no directory name is
+    /// consulted.
+    ///
+    /// # Why not `git_dir() != common_dir()`
+    ///
+    /// Because that comparison is true but the *path* it hands back is not usable.
+    /// `gix` reports the common dir as the worktree's `commondir` file records it,
+    /// which git writes **relative** and gix leaves unresolved: a real checkout
+    /// yields `<main>/.git/worktrees/<name>/../..`. Taking `.parent()` of that
+    /// returns `…/worktrees/<name>/..`, and `file_name()` is `".."` rather than
+    /// `.git`, so a note built from it names a directory nobody typed and reads as
+    /// a bug in the tool. The first version of this method did exactly that, and
+    /// the assertion in
+    /// `tests/worktree_discovery.rs::a_worktree_and_its_main_checkout_share_a_cache_without_sharing_a_graph`
+    /// is what caught it — a `contains` check on the note had passed, because the
+    /// unresolved path still has the right prefix.
+    ///
+    /// `main_repo()` opens the main repository instead and reports *its* workdir,
+    /// so the path is the one that repository actually has. A worktree of a **bare**
+    /// repository has no workdir, and its git dir is then the most specific true
+    /// thing to name.
+    #[must_use]
+    pub fn linked_worktree_of(&self) -> Option<std::path::PathBuf> {
+        if self.inner.kind() != gix::repository::Kind::LinkedWorkTree {
+            return None;
+        }
+        let main = self.inner.main_repo().ok()?;
+        Some(
+            main.workdir()
+                .unwrap_or_else(|| main.git_dir())
+                .to_path_buf(),
+        )
+    }
+
+    /// The short name of the branch `HEAD` points at (`main`, `feat/x`), or `None`
+    /// at a detached `HEAD`.
+    ///
+    /// Read through `gix`'s `head_name`, which resolves `HEAD` in **this**
+    /// repository's git dir. That is the whole point in a linked worktree: its
+    /// `HEAD` lives in `<main>/.git/worktrees/<name>/HEAD`, not in `<main>/.git/HEAD`,
+    /// so a caller naming the branch a served graph was built from must ask the
+    /// repository it actually opened rather than the common dir.
+    #[must_use]
+    pub fn head_branch(&self) -> Option<String> {
+        let name = self.inner.head_name().ok().flatten()?;
+        Some(name.shorten().to_string())
+    }
+
     /// The hex git blob object id that `bytes` would have, without writing
     /// anything. Used to detect whether a working-copy file differs from the
     /// committed blob (same content ⇒ same id).
