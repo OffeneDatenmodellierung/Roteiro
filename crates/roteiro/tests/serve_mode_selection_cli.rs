@@ -2359,3 +2359,205 @@ fn unescape(s: &str) -> String {
     }
     out
 }
+
+// ---------------------------------------------------------------------------
+// 6. `--scope here` inside a linked git worktree (issue #837, amendment)
+// ---------------------------------------------------------------------------
+
+/// **Standing inside a worktree serves that worktree's own branch, and says so.**
+///
+/// Issue #837 skips worktrees during *discovery*; its amendment says selection is
+/// the opposite case — being in one is as explicit an act as naming it in
+/// `repos`, so `cd <worktree> && roteiro serve` serves it, scoped to it alone.
+///
+/// # Why the fixture carries a file on each branch
+///
+/// The risk is not that nothing is served, it is that the **wrong tree** is. A
+/// worktree's `HEAD` lives in `<main>/.git/worktrees/<name>/HEAD`, not in
+/// `<main>/.git/HEAD`, and there are two ways to be silently wrong: resolve
+/// through the *common* dir and serve the main repository's refs, or walk the
+/// worktree's files while reading `HEAD` blobs from the common dir and serve a
+/// mixture. Both produce a running server with a plausible project name, so a test
+/// that asserts "a graph was produced" cannot tell them from the correct case.
+///
+/// Two files can. `only_on_side.rs` exists on the worktree's branch and not on
+/// `main`; `only_on_main.rs` exists on `main` and not on the worktree's branch.
+/// Asserting the first is **present** and the second **absent** fails under either
+/// failure mode, and under a naive "serve the main checkout instead" as well.
+///
+/// The path being read here is the one the served graph is actually built from:
+/// `build_serve_workspaces`'s single-repo branch calls `open_graph()` →
+/// `Repo::discover(cwd)` → `repo.git_dir().join("roteiro")` for the store, and
+/// `build_graph(…, GraphSource::Committed)` reads that repository's `HEAD` tree.
+///
+/// # Deliberately two tests over one fixture
+///
+/// The announcement and the served content are asserted **separately**, because
+/// an assertion that runs first aborts the ones after it: with both in one test,
+/// a fault that left the note correct and the tree wrong was never reached by the
+/// tree assertions, and they read as coverage while proving nothing. Splitting
+/// them is what makes each one fail under a fault of its own and only then.
+fn worktree_fixture(label: &str) -> (Scratch, IsolatedHome, PathBuf) {
+    let fx = Scratch::new(label);
+    let home = IsolatedHome::new(label);
+    let main = fx.join("plain");
+
+    // `main`: a shared file and one that only this branch has.
+    make_repo(&main);
+    std::fs::write(main.join("shared.rs"), "pub fn shared() {}\n").expect("write");
+    std::fs::write(main.join("only_on_main.rs"), "pub fn only_on_main() {}\n").expect("write");
+    git(&main, &["add", "-A"]);
+    git(&main, &["commit", "-qm", "main-side files"]);
+
+    // The worktree, on its own branch, diverging: the main-only file is removed
+    // and a side-only one added. Its directory name says nothing about being a
+    // worktree — the `-wt-` habit is one machine's, not a rule.
+    let checkout = fx.join("checkout");
+    git(
+        &main,
+        &["worktree", "add", "-q", utf8_arg(&checkout), "-b", "side"],
+    );
+    std::fs::remove_file(checkout.join("only_on_main.rs")).expect("rm");
+    std::fs::write(
+        checkout.join("only_on_side.rs"),
+        "pub fn only_on_side() {}\n",
+    )
+    .expect("write");
+    git(&checkout, &["add", "-A"]);
+    git(&checkout, &["commit", "-qm", "side-only files"]);
+
+    // A sibling repository beside the worktree under the same parent. `here`
+    // means *this checkout*, so it must not be picked up — the worktree is
+    // served alone, exactly as a lone repository would be.
+    make_repo(&fx.join("neighbour"));
+
+    (fx, home, checkout)
+}
+
+/// The announcement half: a worktree served as though it were the repository is
+/// the same silent misrepresentation #837 removes, arrived at from the other
+/// side. Also pins that `here` means *this checkout* and not its siblings.
+#[test]
+fn scope_here_inside_a_worktree_announces_the_worktree_its_repo_and_its_branch() {
+    let (fx, home, checkout) = worktree_fixture("scope-here-wt-note");
+    let main = fx.join("plain");
+
+    let addr = free_addr();
+    let server = Server::spawn(
+        &["serve", "--scope", "here", "--addr", &addr],
+        &checkout,
+        &home,
+    );
+    let mut stderr = String::new();
+    server
+        .wait_for_line(|l| l.contains(" listening on http://"), &mut stderr)
+        .unwrap_or_else(|| panic!("no listening line; stderr:\n{stderr}"));
+
+    // The announcement: a worktree presented as though it were the repository is
+    // the same silent misrepresentation #837 exists to remove, from the other
+    // side. All three facts, because any two of them still mislead.
+    for expected in [
+        "linked git WORKTREE",
+        // Which repository it is a second checkout OF.
+        &main.display().to_string(),
+        // And which branch, since that is what makes the content what it is.
+        "on branch `side`",
+    ] {
+        assert!(
+            stderr.contains(expected),
+            "`--scope here` inside a worktree must announce {expected:?}; \
+             stderr:\n{stderr}"
+        );
+    }
+    // Named as a path that exists. `gix` reports a worktree's common dir as its
+    // `commondir` file records it — `<main>/.git/worktrees/<name>/../..` — and a
+    // note built from that still *contains* the main checkout's path, so the
+    // `contains` assertions above passed against it. They are not enough on their
+    // own, and this is what makes them so.
+    let note = stderr
+        .lines()
+        .find(|l| l.contains("linked git WORKTREE"))
+        .unwrap_or_default();
+    assert!(
+        !note.contains(".."),
+        "the worktree note names the repository with unresolved `..` \
+         components, which is not a path anyone typed: {note}"
+    );
+
+    // Served alone: the sibling repository next door is not hosted.
+    let (status, _, projects) = http_get(&addr, "/v1/graph/projects");
+    assert_eq!(status, 200, "{projects}");
+    assert!(
+        !projects.contains("neighbour"),
+        "`--scope here` in a worktree picked up a sibling repository — `here` \
+         means this checkout: {projects}"
+    );
+    assert!(
+        projects.contains("checkout"),
+        "the worktree itself was not hosted: {projects}"
+    );
+}
+
+/// The decisive half: the graph holds the **worktree's** committed tree, and not
+/// the main repository's. Separate from the announcement above so that a fault
+/// breaking only this is not hidden behind an earlier assertion.
+#[test]
+fn scope_here_inside_a_worktree_serves_that_worktrees_own_tree() {
+    let (_fx, home, checkout) = worktree_fixture("scope-here-wt-tree");
+
+    let addr = free_addr();
+    let server = Server::spawn(
+        &["serve", "--scope", "here", "--addr", &addr],
+        &checkout,
+        &home,
+    );
+    let mut stderr = String::new();
+    server
+        .wait_for_line(|l| l.contains(" listening on http://"), &mut stderr)
+        .unwrap_or_else(|| panic!("no listening line; stderr:\n{stderr}"));
+
+    let (status, _, nodes) = http_get(&addr, "/v1/graph/checkout/nodes?limit=1000");
+    assert_eq!(status, 200, "{nodes}");
+    assert!(
+        nodes.contains("only_on_side"),
+        "the served graph is missing a file that exists ONLY on the worktree's \
+         branch — its `HEAD` was resolved somewhere other than \
+         `<main>/.git/worktrees/<name>/HEAD`:\n{nodes}"
+    );
+    assert!(
+        !nodes.contains("only_on_main"),
+        "the served graph contains a file that exists ONLY on the MAIN \
+         repository's branch — the worktree is being served as, or mixed with, \
+         its main checkout:\n{nodes}"
+    );
+    // The shared file is present under both readings, so it proves nothing on its
+    // own — asserted only so that a fixture which silently produced an empty
+    // graph could not satisfy the `!contains` above.
+    assert!(
+        nodes.contains("shared"),
+        "no shared file in the graph either, so the two assertions above passed \
+         on an EMPTY graph rather than on a correct one:\n{nodes}"
+    );
+}
+
+/// An ordinary clone says nothing about worktrees. The announcement is a
+/// property of the case it names, and one that fired everywhere would be noise
+/// people learn to skip — by which time it is not doing its job.
+#[test]
+fn scope_here_in_an_ordinary_repository_announces_no_worktree() {
+    let fx = Scratch::new("scope-here-plain");
+    let home = IsolatedHome::new("scope-here-plain");
+    let repo = fx.join("plain");
+    make_repo(&repo);
+
+    let addr = free_addr();
+    let server = Server::spawn(&["serve", "--scope", "here", "--addr", &addr], &repo, &home);
+    let mut stderr = String::new();
+    server
+        .wait_for_line(|l| l.contains(" listening on http://"), &mut stderr)
+        .unwrap_or_else(|| panic!("no listening line; stderr:\n{stderr}"));
+    assert!(
+        !stderr.to_lowercase().contains("worktree"),
+        "an ordinary repository must not be described as a worktree:\n{stderr}"
+    );
+}

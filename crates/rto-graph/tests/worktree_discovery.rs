@@ -249,3 +249,139 @@ fn a_submodule_is_not_a_worktree_and_stays_hosted() {
     );
     assert!(scan.worktrees.is_empty(), "{:?}", scan.worktrees);
 }
+
+/// **Verifying, rather than assuming, that a worktree and its main checkout
+/// cannot contaminate each other** — the open case the #837 amendment names.
+///
+/// Two mechanisms are shared between a worktree and its main checkout and two
+/// are not, and the amendment is right that "the paths differ, so it is probably
+/// fine" is a reason to check:
+///
+/// * The **graph store** is per-worktree: `<git dir>/roteiro/graph.db`, and a
+///   worktree's git dir is `<main>/.git/worktrees/<name>`. Two stores, asserted
+///   below by path.
+/// * The **object cache** is deliberately shared, under the *common* git dir, and
+///   keyed on `(blob oid, path, extractor version, env)` (`sync::cache_key`). A
+///   collision would need two different extraction results at one `(path, oid)`
+///   — impossible, because the oid *is* the content. Sharing is the benefit, so
+///   this asserts the hit rather than merely tolerating it.
+///
+/// The fixture diverges the two branches so leakage would be visible: each side
+/// carries a file the other does not. A test using identical trees could not tell
+/// "correctly separate" from "one graph serving both".
+#[test]
+fn a_worktree_and_its_main_checkout_share_a_cache_without_sharing_a_graph() {
+    use rto_graph::{FileNodeExtractor, ObjectCache, Repo, Store, sync};
+
+    let base = base("cachesep");
+    let main = repo_with_a_commit(&base.join("plain"));
+    std::fs::write(main.join("shared.txt"), "same on both\n").expect("write");
+    std::fs::write(main.join("only_on_main.txt"), "main\n").expect("write");
+    git(&main, &["add", "-A"]);
+    git(&main, &["commit", "-q", "-m", "main files"]);
+
+    let checkout = base.join("checkout");
+    git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            checkout.to_str().expect("utf-8"),
+            "-b",
+            "side",
+        ],
+    );
+    std::fs::remove_file(checkout.join("only_on_main.txt")).expect("rm");
+    std::fs::write(checkout.join("only_on_side.txt"), "side\n").expect("write");
+    git(&checkout, &["add", "-A"]);
+    git(&checkout, &["commit", "-q", "-m", "side files"]);
+
+    let main_repo = Repo::discover(&main).expect("discover main");
+    let wt_repo = Repo::discover(&checkout).expect("discover worktree");
+
+    // The identities this all rests on, stated rather than implied.
+    assert_eq!(main_repo.git_dir(), main_repo.common_dir());
+    assert_ne!(
+        wt_repo.git_dir(),
+        wt_repo.common_dir(),
+        "a linked worktree's git dir must differ from its common dir"
+    );
+    // Canonicalised: `gix` reports a worktree's common dir as its `commondir`
+    // file records it — relative and unresolved (`…/worktrees/<name>/../..`) —
+    // so comparing the raw strings would fail on a path that is in fact the same
+    // directory. That unresolved form is exactly why `linked_worktree_of` goes
+    // through `main_repo()` rather than through this path.
+    let canon = |p: &Path| std::fs::canonicalize(p).expect("canonicalize");
+    assert_eq!(canon(wt_repo.common_dir()), canon(main_repo.git_dir()));
+    assert_eq!(
+        wt_repo.linked_worktree_of().map(|p| canon(&p)),
+        Some(canon(&main)),
+        "the main checkout must be named as a path that exists, with no `..` \
+         components left in it"
+    );
+    assert!(
+        !wt_repo
+            .linked_worktree_of()
+            .expect("worktree")
+            .to_string_lossy()
+            .contains(".."),
+        "the reported main checkout still carries unresolved `..` components, \
+         which would be shown to a user as the repository's location"
+    );
+    assert_eq!(wt_repo.head_branch().as_deref(), Some("side"));
+    assert_eq!(main_repo.head_branch().as_deref(), Some("main"));
+    assert_eq!(main_repo.linked_worktree_of(), None);
+
+    // Separate graph stores, by path — this is what `open_graph_at` derives.
+    let main_db = main_repo.git_dir().join("roteiro").join("graph.db");
+    let wt_db = wt_repo.git_dir().join("roteiro").join("graph.db");
+    assert_ne!(main_db, wt_db, "the two checkouts share a graph store");
+
+    // One cache, under the common git dir, for both.
+    let cache_root = main_repo.common_dir().join("roteiro").join("objects");
+    assert_eq!(
+        canon(wt_repo.common_dir()).join("roteiro").join("objects"),
+        canon(main_repo.common_dir())
+            .join("roteiro")
+            .join("objects"),
+    );
+    let cache = ObjectCache::open(&cache_root).expect("cache");
+    let ex = FileNodeExtractor;
+
+    let mut main_store = Store::open_in_memory().expect("main store");
+    let main_report = sync(&mut main_store, &main_repo, &cache, &ex).expect("sync main");
+    let mut wt_store = Store::open_in_memory().expect("worktree store");
+    let wt_report = sync(&mut wt_store, &wt_repo, &cache, &ex).expect("sync worktree");
+
+    // The benefit: the file both branches share is a cache **hit** on the second
+    // sync, so the shared cache is doing its job across the two checkouts.
+    assert!(
+        wt_report.blobs_cached > 0,
+        "nothing was reused from the shared cache, so the two checkouts are \
+         paying twice for identical blobs: {wt_report:?} after {main_report:?}"
+    );
+
+    // The risk: and yet nothing leaked. Each graph holds its own branch's file
+    // and not the other's.
+    let has = |store: &Store, name: &str| {
+        store
+            .get_node(&format!("file:{name}"))
+            .expect("get_node")
+            .is_some()
+    };
+    assert!(has(&main_store, "only_on_main.txt"));
+    assert!(
+        !has(&main_store, "only_on_side.txt"),
+        "the main checkout's graph picked up the worktree's branch"
+    );
+    assert!(has(&wt_store, "only_on_side.txt"));
+    assert!(
+        !has(&wt_store, "only_on_main.txt"),
+        "the worktree's graph picked up the main checkout's branch — a shared \
+         cache must not become a shared graph"
+    );
+    // Both hold the shared file, so the two `!has` assertions above were made
+    // against populated graphs rather than empty ones.
+    assert!(has(&main_store, "shared.txt") && has(&wt_store, "shared.txt"));
+}
