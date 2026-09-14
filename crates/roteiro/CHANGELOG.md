@@ -40,6 +40,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- *(serve)* **`--scope here` inside a linked worktree serves that worktree**, scoped
+  to it alone and on its own branch — skipping applies to *discovery*, not to
+  selection, so `cd <worktree> && roteiro serve` composes with the `here` default
+  from #832 and simply works. The startup line announces it, naming the repository
+  the worktree belongs to and the branch it is on. Sibling repositories beside the
+  worktree are not picked up: `here` means this checkout. The worktree's graph is
+  built from **its own** `HEAD` (`<main>/.git/worktrees/<name>/HEAD`) into its own
+  per-worktree store, sharing only the content-addressed object cache with the main
+  checkout, which cannot mix them: that cache is keyed on
+  `(blob oid, path, extractor version, env)`, and one `(path, oid)` is one content.
 - *(config)* `include_worktrees` — a per-workspace opt-in that hosts the linked git
   worktrees that workspace's `roots` find. Accepted in `[workspace]`, in each
   `[[workspaces]]` entry and in `[standalone]`. A property of the group rather than
