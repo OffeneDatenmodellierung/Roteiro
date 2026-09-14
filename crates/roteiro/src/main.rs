@@ -13868,6 +13868,14 @@ fn serve_graph_ui(
 fn explorer_cwd_set() -> anyhow::Result<rto_graph::WorkspaceSet> {
     let cwd = std::env::current_dir()?;
     let repo = rto_graph::Repo::discover(&cwd)?;
+    // The same announcement `serve`/`mcp` make from `build_serve_workspaces`'s
+    // solo branch. `explorer` implements `--scope here` through **this** function
+    // and never calls that one, so the note has to be made here too — a fix that
+    // lands in one of two unshared paths is the shape of #806 and #787, and this
+    // pair is two hundred lines apart in one file.
+    if let Some(note) = worktree_scope_note("explorer", &repo) {
+        eprintln!("{note}");
+    }
     let workdir = repo.workdir().unwrap_or(&cwd);
     let name = workdir
         .file_name()

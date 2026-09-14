@@ -2437,21 +2437,33 @@ fn worktree_fixture(label: &str) -> (Scratch, IsolatedHome, PathBuf) {
 /// The announcement half: a worktree served as though it were the repository is
 /// the same silent misrepresentation #837 removes, arrived at from the other
 /// side. Also pins that `here` means *this checkout* and not its siblings.
+///
+/// # Both surfaces, because they do not share the code
+///
+/// `serve` and `mcp` reach the single-repo path through
+/// `build_serve_workspaces`; `explorer` has its own, `explorer_cwd_set`, two
+/// hundred lines away in the same file and calling none of it. The first version
+/// of this announcement landed only in the first of them and this test did not
+/// notice, because it only ran `serve`. Both are driven here for the same reason
+/// #806 consolidated five markdown-link scanners: the failure mode is a fix that
+/// lands in one of two unshared implementations of one behaviour.
 #[test]
 fn scope_here_inside_a_worktree_announces_the_worktree_its_repo_and_its_branch() {
-    let (fx, home, checkout) = worktree_fixture("scope-here-wt-note");
+    for cmd in ["serve", "explorer"] {
+        scope_here_worktree_announcement(cmd);
+    }
+}
+
+fn scope_here_worktree_announcement(cmd: &str) {
+    let (fx, home, checkout) = worktree_fixture(&format!("scope-here-wt-note-{cmd}"));
     let main = fx.join("plain");
 
     let addr = free_addr();
-    let server = Server::spawn(
-        &["serve", "--scope", "here", "--addr", &addr],
-        &checkout,
-        &home,
-    );
+    let server = Server::spawn(&[cmd, "--scope", "here", "--addr", &addr], &checkout, &home);
     let mut stderr = String::new();
     server
         .wait_for_line(|l| l.contains(" listening on http://"), &mut stderr)
-        .unwrap_or_else(|| panic!("no listening line; stderr:\n{stderr}"));
+        .unwrap_or_else(|| panic!("{cmd}: no listening line; stderr:\n{stderr}"));
 
     // The announcement: a worktree presented as though it were the repository is
     // the same silent misrepresentation #837 exists to remove, from the other
@@ -2465,8 +2477,8 @@ fn scope_here_inside_a_worktree_announces_the_worktree_its_repo_and_its_branch()
     ] {
         assert!(
             stderr.contains(expected),
-            "`--scope here` inside a worktree must announce {expected:?}; \
-             stderr:\n{stderr}"
+            "`roteiro {cmd} --scope here` inside a worktree must announce \
+             {expected:?}; stderr:\n{stderr}"
         );
     }
     // Named as a path that exists. `gix` reports a worktree's common dir as its
@@ -2545,19 +2557,22 @@ fn scope_here_inside_a_worktree_serves_that_worktrees_own_tree() {
 /// people learn to skip — by which time it is not doing its job.
 #[test]
 fn scope_here_in_an_ordinary_repository_announces_no_worktree() {
-    let fx = Scratch::new("scope-here-plain");
-    let home = IsolatedHome::new("scope-here-plain");
-    let repo = fx.join("plain");
-    make_repo(&repo);
+    for cmd in ["serve", "explorer"] {
+        let fx = Scratch::new(&format!("scope-here-plain-{cmd}"));
+        let home = IsolatedHome::new(&format!("scope-here-plain-{cmd}"));
+        let repo = fx.join("plain");
+        make_repo(&repo);
 
-    let addr = free_addr();
-    let server = Server::spawn(&["serve", "--scope", "here", "--addr", &addr], &repo, &home);
-    let mut stderr = String::new();
-    server
-        .wait_for_line(|l| l.contains(" listening on http://"), &mut stderr)
-        .unwrap_or_else(|| panic!("no listening line; stderr:\n{stderr}"));
-    assert!(
-        !stderr.to_lowercase().contains("worktree"),
-        "an ordinary repository must not be described as a worktree:\n{stderr}"
-    );
+        let addr = free_addr();
+        let server = Server::spawn(&[cmd, "--scope", "here", "--addr", &addr], &repo, &home);
+        let mut stderr = String::new();
+        server
+            .wait_for_line(|l| l.contains(" listening on http://"), &mut stderr)
+            .unwrap_or_else(|| panic!("{cmd}: no listening line; stderr:\n{stderr}"));
+        assert!(
+            !stderr.to_lowercase().contains("worktree"),
+            "`roteiro {cmd}`: an ordinary repository must not be described as a \
+             worktree:\n{stderr}"
+        );
+    }
 }
