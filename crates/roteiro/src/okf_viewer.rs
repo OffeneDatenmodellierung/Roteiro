@@ -301,7 +301,26 @@ pub struct Nav {
     /// straight back here is a loop with a label on it.
     pub bundles: Option<String>,
     /// The graph explorer's root, when the same server serves one.
+    ///
+    /// **This is what tells a page which of the two header forms it wears.**
+    /// `Some` means the viewer is one surface of a running application, so the
+    /// header is the hub's breadcrumb and its `← Workspace` control. `None` is
+    /// `serve_okf_only`: there is no workspace and no explorer to go back to, so
+    /// neither is drawn. See [`header_for`].
     pub explorer: Option<String>,
+    /// What to call the bundle this page shows: `<workspace>/<project>` when the
+    /// server resolved one, else the bundle directory's own name.
+    ///
+    /// [`Mount::label`] verbatim — the same string the chooser lists and the
+    /// startup line prints — rather than a second derivation of the same fact.
+    /// `None` on the chooser, which shows every bundle and so is named by none of
+    /// them.
+    ///
+    /// Deliberately **not** the bundle path. The header used to print
+    /// `self.root.display()`, which on a `serve` is an absolute path under the
+    /// operator's home directory, sent to every client on a port `--addr` can
+    /// move off loopback. The extra segments described the host, not the bundle.
+    pub label: Option<String>,
 }
 
 /// One bundle a server has mounted: where it lives, and what to call it.
@@ -411,6 +430,9 @@ pub fn mounts_router(base: &str, mounts: Vec<Mount>, explorer: Option<String>) -
             // Only when there is somewhere else to go — see `Nav::bundles`.
             bundles: (mounts.len() > 1).then(|| base.to_owned()),
             explorer: explorer.clone(),
+            // `Mount::label` verbatim: the header names the bundle the same way
+            // the chooser and the startup line do, and nothing re-derives it.
+            label: Some(m.label.clone()),
         };
         app = app.nest(&prefix, router(m.root.clone(), &prefix, nav));
     }
@@ -493,12 +515,13 @@ fn chooser(base: &str, mounts: &[Mount], explorer: Option<&str>) -> Response {
     }
     page(
         "OKF bundles",
-        "",
         base,
         &Nav {
             bundle: None,
             bundles: None,
             explorer: explorer.map(ToOwned::to_owned),
+            // The chooser shows every bundle, so it is named by none of them.
+            label: None,
         },
         &body,
     )
@@ -643,19 +666,109 @@ const MAX_FILE_BYTES: u64 = 32 * 1024 * 1024;
 /// the reload guarantee the server-side cache is careful to keep.
 const CACHE_ASSET: &str = "public, max-age=3600";
 
-fn page(title: &str, root: &str, base: &str, nav: &Nav, body: &str) -> Response {
-    let mut up = String::new();
-    if let Some(bundles) = &nav.bundles {
-        let _ = write!(up, "<a href=\"{}\">All bundles</a>", escape(bundles));
+/// The application's name, as the explorer shell's own breadcrumb states it.
+///
+/// One literal, in one place, because the whole point of the mounted header is
+/// that the two surfaces say the same word — see [`header_for`].
+const APP_NAME: &str = "Roteiro";
+
+/// Everything in the `<header>` before the page's own `Concepts`/`Graph` nav.
+///
+/// **Two forms, and which one a page wears is [`Nav::explorer`].**
+///
+/// *Mounted* (`explorer` is `Some`) — the viewer is one surface of a running
+/// application, so it wears the shell's own chrome: the `← Workspace` control
+/// from `assets/index.html`'s project bar, then that bar's breadcrumb, reusing
+/// its class names (`p-back`, `p-crumbs`, `p-crumb-root`, `p-crumb-link`,
+/// `p-sep`, `p-crumb-current`) and therefore its rules and its tokens. The trail
+/// is `Roteiro · Workspace ▸ OKF ▸ <label>`, where `OKF` links to the chooser
+/// when this server holds more than one bundle and is plain text when it does
+/// not — the same condition [`Nav::bundles`] already encodes. On the chooser
+/// itself the trail stops at `OKF`, which is then the current view.
+///
+/// The breadcrumb *is* the way up, so the mounted form emits no separate
+/// `Explorer` or `All bundles` link: two controls for one destination is the
+/// second pattern this deliberately does not invent.
+///
+/// *Standalone* (`explorer` is `None`) — `serve_okf_only`, which ADR-0022 keeps
+/// usable for **a stranger's bundle at an arbitrary path**. There is no
+/// workspace above it and no explorer to return to, so a breadcrumb here would
+/// be decoration and a back link would point at a route that 404s. It keeps the
+/// v1.0 header: the surface's name, and the bundle's own name beside it. It also
+/// keeps whatever `All bundles` link it had, because a standalone server can
+/// still hold several bundles and the chooser is then real.
+///
+/// What the standalone form shows is [`Nav::label`] — the bundle directory's own
+/// name — and **not** the absolute path it showed until now. The path's leading
+/// segments name the operator's filesystem rather than the bundle, they are of
+/// no use to the reader who was sent the URL, and `--addr` makes them reachable
+/// from off the host in this form exactly as in the other.
+fn header_for(nav: &Nav) -> String {
+    let Some(explorer) = &nav.explorer else {
+        // Standalone: v1.0's header, with the bundle's name where its path was.
+        let mut out = "<span class=\"name\">OKF viewer</span>".to_owned();
+        if let Some(label) = &nav.label {
+            let _ = write!(out, "<span class=\"root\">{}</span>", escape(label));
+        }
+        if let Some(bundles) = &nav.bundles {
+            let _ = write!(
+                out,
+                "<nav class=\"up\"><a href=\"{}\">All bundles</a></nav>",
+                escape(bundles)
+            );
+        }
+        return out;
+    };
+    let up = escape(explorer);
+    let mut out = format!(
+        "<a class=\"p-back\" href=\"{up}\">← Workspace</a>\
+         <nav class=\"p-crumbs\" aria-label=\"Breadcrumb\">\
+         <span class=\"p-crumb-root\">{APP_NAME}</span>\
+         <span class=\"p-sep\">·</span>\
+         <a class=\"p-crumb-link\" href=\"{up}\">Workspace</a>\
+         <span class=\"p-sep\">▸</span>"
+    );
+    match (&nav.label, &nav.bundles) {
+        // A bundle, under a chooser that exists: `OKF` is the way back to it.
+        (Some(label), Some(bundles)) => {
+            let _ = write!(
+                out,
+                "<a class=\"p-crumb-link\" href=\"{}\">OKF</a>\
+                 <span class=\"p-sep\">▸</span>\
+                 <span class=\"p-crumb-current\">{}</span>",
+                escape(bundles),
+                escape(label)
+            );
+        }
+        // A lone bundle: the chooser would redirect straight back here, so the
+        // crumb states where we are without pretending to be a link.
+        (Some(label), None) => {
+            let _ = write!(
+                out,
+                "<span class=\"p-crumb-step\">OKF</span>\
+                 <span class=\"p-sep\">▸</span>\
+                 <span class=\"p-crumb-current\">{}</span>",
+                escape(label)
+            );
+        }
+        // The chooser itself: it shows every bundle, so it is named by none of
+        // them and `OKF` is the current view.
+        (None, _) => out.push_str("<span class=\"p-crumb-current\">OKF</span>"),
     }
-    if let Some(explorer) = &nav.explorer {
-        let _ = write!(up, "<a href=\"{}\">Explorer</a>", escape(explorer));
-    }
+    out.push_str("</nav>");
+    out
+}
+
+fn page(title: &str, base: &str, nav: &Nav, body: &str) -> Response {
+    let chrome = header_for(nav);
+    // This bundle's own routes. Empty — and then absent, rather than an empty
+    // `<nav>` — on the chooser, which belongs to no single bundle.
     let mut here = String::new();
     if let Some(bundle) = &nav.bundle {
         let _ = write!(
             here,
-            "<a href=\"{}\">Concepts</a><a href=\"{}/graph\">Graph</a>",
+            "<nav class=\"here\"><a href=\"{}\">Concepts</a>\
+             <a href=\"{}/graph\">Graph</a></nav>",
             escape(index_href(bundle)),
             escape(bundle)
         );
@@ -667,16 +780,12 @@ fn page(title: &str, root: &str, base: &str, nav: &Nav, body: &str) -> Response 
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
          <link rel=\"stylesheet\" href=\"{base}/okf-viewer.css\">\
          <title>{} — OKF viewer</title></head><body>\
-         <header><span class=\"name\">OKF viewer</span>\
-         <span class=\"root\">{}</span>\
-         <nav>{here}\
-         {up}</nav></header>\
+         <header>{chrome}{here}</header>\
          <main>{body}</main>\
          <footer>Read-only. Nothing here is imported into the graph — \
          <code>roteiro import --from okf</code> is still the only path that does, \
          and it asks first.</footer></body></html>",
         escape(title),
-        escape(root),
     );
     (
         [
@@ -817,7 +926,7 @@ async fn index(State(v): State<Viewer>) -> Response {
         );
     }
     body.push_str("</table></article>");
-    page("Bundle", &view.root, base, &v.nav, &body)
+    page("Bundle", base, &v.nav, &body)
 }
 
 async fn concept(State(v): State<Viewer>, UrlPath(id): UrlPath<String>) -> Response {
@@ -924,7 +1033,7 @@ async fn concept(State(v): State<Viewer>, UrlPath(id): UrlPath<String>) -> Respo
         body.push_str("</ul>");
     }
     body.push_str("</div></article>");
-    page(&c.title, &v.root.display().to_string(), base, &v.nav, &body)
+    page(&c.title, base, &v.nav, &body)
 }
 
 /// What the graph routes accept, and the bounds they are held to.
@@ -1094,13 +1203,7 @@ async fn graph_page(State(v): State<Viewer>, Query(q): Query<GraphQuery>) -> Res
             }
             .to_string(),
         );
-    let mut res = page(
-        "Concept graph",
-        &v.root.display().to_string(),
-        base,
-        &v.nav,
-        &body,
-    );
+    let mut res = page("Concept graph", base, &v.nav, &body);
     res.headers_mut().insert(
         header::CONTENT_SECURITY_POLICY,
         header::HeaderValue::from_static(
@@ -1160,13 +1263,7 @@ async fn graph_entry(v: &Viewer) -> Response {
         );
     }
     body.push_str("</ol></article>");
-    page(
-        "Concept graph",
-        &v.root.display().to_string(),
-        base,
-        &v.nav,
-        &body,
-    )
+    page("Concept graph", base, &v.nav, &body)
 }
 
 /// Percent-encode a concept id for a query string.
@@ -1479,7 +1576,6 @@ mod tests {
     fn a_hostile_title_cannot_escape_the_shell() {
         let html = page(
             "</title><script>alert(1)</script>",
-            "/tmp/b",
             "",
             &Nav::default(),
             "<article/>",
@@ -2500,6 +2596,353 @@ mod tests {
             let (status, _, _) = get_mounted(&app, link).await;
             assert_eq!(status, StatusCode::OK, "{link}");
         }
+    }
+
+    // ---- the header's two forms (ADR-0022 v1.4) --------------------------
+    //
+    // The viewer has been mounted in the same binary, on the same port, beside
+    // the explorer since v1.2, and its header said so nowhere: it printed the
+    // bundle's absolute path where the shell prints a breadcrumb, and offered no
+    // way back to the workspace. These pin **both** forms verbatim, because the
+    // whole risk here is a change that improves the mounted header by quietly
+    // giving `serve_okf_only` a breadcrumb to nothing and a link to a 404.
+
+    /// The `<header>` element of `body`, opening and closing tags included.
+    fn header_of(body: &str) -> String {
+        let start = body.find("<header>").expect("a header");
+        let end = body.find("</header>").expect("a header end") + "</header>".len();
+        body[start..end].to_owned()
+    }
+
+    /// A mount built the way `okf_mounts` builds one.
+    ///
+    /// `origin` is the root's own `display()`, **not** a placeholder, because
+    /// that is what production puts there and a fixture that quietly says
+    /// `"test"` would make `no_mounted_page_publishes_the_bundle_path`'s scan of
+    /// the chooser pass by having nothing to find.
+    fn labelled(slug: &str, label: &str, root: PathBuf) -> Mount {
+        Mount {
+            slug: slug.to_owned(),
+            label: label.to_owned(),
+            origin: root.display().to_string(),
+            root,
+        }
+    }
+
+    /// Mounted beside an explorer, the header **is** the shell's project bar.
+    ///
+    /// Verbatim, because every part of it is load-bearing: the `← Workspace`
+    /// control and the `Workspace` crumb are the affordance the viewer had none
+    /// of, the `Roteiro` root crumb is what makes the two surfaces read as one
+    /// application, and `Acme/widgets` is the workspace/project label standing
+    /// where `/Users/…/okf` used to.
+    ///
+    /// With two bundles mounted, `OKF` is a link to the chooser — the hierarchy
+    /// the trail describes is real at every step.
+    #[tokio::test]
+    async fn the_mounted_header_is_the_shells_breadcrumb_and_back_control() {
+        let mounts = vec![
+            labelled("one", "Acme/widgets", named_bundle("crumb-a", "Alpha")),
+            labelled("two", "Acme/gadgets", named_bundle("crumb-b", "Beta")),
+        ];
+        let app = host().merge(mounts_router("/okf", mounts, Some("/".to_owned())));
+        let (status, body, _) = get_mounted(&app, "/okf/one").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            header_of(&body),
+            "<header><a class=\"p-back\" href=\"/\">← Workspace</a>\
+             <nav class=\"p-crumbs\" aria-label=\"Breadcrumb\">\
+             <span class=\"p-crumb-root\">Roteiro</span>\
+             <span class=\"p-sep\">·</span>\
+             <a class=\"p-crumb-link\" href=\"/\">Workspace</a>\
+             <span class=\"p-sep\">▸</span>\
+             <a class=\"p-crumb-link\" href=\"/okf\">OKF</a>\
+             <span class=\"p-sep\">▸</span>\
+             <span class=\"p-crumb-current\">Acme/widgets</span></nav>\
+             <nav class=\"here\"><a href=\"/okf/one\">Concepts</a>\
+             <a href=\"/okf/one/graph\">Graph</a></nav></header>"
+        );
+        // Every crumb goes somewhere that answers.
+        for link in hrefs(&header_of(&body)) {
+            let (status, _, _) = get_mounted(&app, &link).await;
+            assert!(
+                status.is_success() || status.is_redirection(),
+                "{link} {status}"
+            );
+        }
+    }
+
+    /// A lone mounted bundle keeps the whole trail; its `OKF` step is not a
+    /// *link*, because the only thing it could link to redirects straight back.
+    ///
+    /// `Nav::bundles` is already `None` here — the chooser redirects rather than
+    /// listing one row — so `OKF` states the level without claiming to be a link.
+    #[tokio::test]
+    async fn a_lone_mounted_bundle_has_a_trail_with_no_chooser_step() {
+        let mounts = vec![labelled("only", "Acme/widgets", sample())];
+        let app = host().merge(mounts_router("/okf", mounts, Some("/".to_owned())));
+        let (status, body, _) = get_mounted(&app, "/okf/only").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            header_of(&body),
+            "<header><a class=\"p-back\" href=\"/\">← Workspace</a>\
+             <nav class=\"p-crumbs\" aria-label=\"Breadcrumb\">\
+             <span class=\"p-crumb-root\">Roteiro</span>\
+             <span class=\"p-sep\">·</span>\
+             <a class=\"p-crumb-link\" href=\"/\">Workspace</a>\
+             <span class=\"p-sep\">▸</span>\
+             <span class=\"p-crumb-step\">OKF</span>\
+             <span class=\"p-sep\">▸</span>\
+             <span class=\"p-crumb-current\">Acme/widgets</span></nav>\
+             <nav class=\"here\"><a href=\"/okf/only\">Concepts</a>\
+             <a href=\"/okf/only/graph\">Graph</a></nav></header>"
+        );
+    }
+
+    /// **Standalone stays standalone.** `serve_okf_only` passes `explorer: None`
+    /// because there is no explorer, no workspace, and quite possibly no
+    /// repository — ADR-0022's premise is that the viewer opens *a stranger's
+    /// bundle at a path*. A breadcrumb reading `Roteiro · Workspace ▸ …` there
+    /// would name two things that do not exist, and a `← Workspace` control would
+    /// be a link to a 404.
+    ///
+    /// So: no trail, no back control, and the v1.0 header kept — with one change.
+    /// Where it printed the bundle's absolute path it now prints the bundle's own
+    /// name. The leading segments of that path named the operator's filesystem
+    /// rather than the bundle, and `--addr` reaches this form off loopback just
+    /// as it reaches the other.
+    #[tokio::test]
+    async fn the_standalone_header_names_the_bundle_and_offers_no_way_up() {
+        let mounts = vec![labelled("bare", "okf", sample())];
+        let app = Router::new().merge(mounts_router("/okf", mounts, None));
+        let (status, body, _) = get_mounted(&app, "/okf/bare").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            header_of(&body),
+            "<header><span class=\"name\">OKF viewer</span>\
+             <span class=\"root\">okf</span>\
+             <nav class=\"here\"><a href=\"/okf/bare\">Concepts</a>\
+             <a href=\"/okf/bare/graph\">Graph</a></nav></header>"
+        );
+    }
+
+    /// A standalone server holding several bundles keeps its way back to the
+    /// chooser, which is the one link above a bundle that is real without an
+    /// explorer. Losing it to a breadcrumb that cannot be drawn here would be a
+    /// regression dressed as an improvement.
+    #[tokio::test]
+    async fn a_standalone_server_with_several_bundles_keeps_its_chooser_link() {
+        let mounts = vec![
+            labelled("one", "alpha", named_bundle("bare-a", "Alpha")),
+            labelled("two", "beta", named_bundle("bare-b", "Beta")),
+        ];
+        let app = Router::new().merge(mounts_router("/okf", mounts, None));
+        let (status, body, _) = get_mounted(&app, "/okf/one").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            header_of(&body),
+            "<header><span class=\"name\">OKF viewer</span>\
+             <span class=\"root\">alpha</span>\
+             <nav class=\"up\"><a href=\"/okf\">All bundles</a></nav>\
+             <nav class=\"here\"><a href=\"/okf/one\">Concepts</a>\
+             <a href=\"/okf/one/graph\">Graph</a></nav></header>"
+        );
+    }
+
+    /// The header names a bundle with [`Mount::label`] and nothing else.
+    ///
+    /// Not the slug, which is [`slug`]'s lossy fold and exists for the URL; not
+    /// the path, which is what this replaced. The label is `<workspace>/<project>`
+    /// where `okf_mounts` resolved one and the bundle directory's name where it
+    /// did not, and it is the same string the chooser lists and the startup line
+    /// prints — one derivation, read in three places.
+    ///
+    /// And it is bundle-controlled text, so it is escaped: a workspace directory
+    /// may be called anything a filesystem allows.
+    #[tokio::test]
+    async fn the_header_names_a_bundle_with_the_mounts_own_label() {
+        let mounts = vec![labelled(
+            "folded-slug",
+            "Ops/<b>alpha</b>",
+            named_bundle("label-esc", "Alpha"),
+        )];
+        let app = host().merge(mounts_router("/okf", mounts, Some("/".to_owned())));
+        let (_, body, _) = get_mounted(&app, "/okf/folded-slug").await;
+        let head = header_of(&body);
+        assert!(
+            head.contains("<span class=\"p-crumb-current\">Ops/&lt;b&gt;alpha&lt;/b&gt;</span>"),
+            "{head}"
+        );
+        assert!(!head.contains("<b>alpha</b>"), "{head}");
+        // The slug is the route, never the name.
+        assert!(!head.contains(">folded-slug<"), "{head}");
+    }
+
+    /// **No page the mounted viewer serves carries the bundle's path.**
+    ///
+    /// The header was the only place it appeared, and this is the assertion that
+    /// keeps it the *last* place: `serve` takes `--addr` and #832's `--scope`
+    /// makes a non-loopback bind expressible, so an absolute path under the
+    /// operator's home directory was host information published to every client.
+    ///
+    /// Every route a mounted bundle answers on, and a 404 from inside it —
+    /// scanned for the fixture's own root, which is a real absolute path.
+    ///
+    /// **The chooser is the one page that still prints one, and it is excluded
+    /// here deliberately rather than by omission** — see
+    /// `the_chooser_still_names_each_bundles_directory` below, which pins that it
+    /// does. It is `Mount::origin`, a v1.2 column whose stated job is letting a
+    /// reader tell two similarly-named bundles apart; whether that is worth the
+    /// same disclosure is a decision about the chooser, not about the header, and
+    /// it is not this change's to make.
+    #[tokio::test]
+    async fn no_mounted_page_publishes_the_bundle_path() {
+        let a = named_bundle("nopath-a", "Alpha");
+        let b = named_bundle("nopath-b", "Beta");
+        let roots = [a.display().to_string(), b.display().to_string()];
+        let mounts = vec![
+            labelled("one", "Acme/widgets", a),
+            labelled("two", "Acme/gadgets", b),
+        ];
+        let app = host().merge(mounts_router("/okf", mounts, Some("/".to_owned())));
+        for uri in [
+            "/okf/one",
+            "/okf/one/graph",
+            "/okf/one/api/graph.json",
+            "/okf/one/c/metrics/only",
+            "/okf/one/c/metrics/nope",
+        ] {
+            let (_, body, _) = get_mounted(&app, uri).await;
+            for root in &roots {
+                assert!(
+                    !body.contains(root.as_str()),
+                    "`{uri}` publishes the bundle path `{root}`"
+                );
+            }
+        }
+    }
+
+    /// **Characterisation, not endorsement.** The chooser lists each bundle's
+    /// directory beside its name, and that directory is an absolute path — so a
+    /// `serve` bound off loopback publishes the operator's filesystem layout on
+    /// this one page, which is the same disclosure the header stopped making.
+    ///
+    /// It is deliberately left alone by the header change and pinned here so the
+    /// state of the world is stated rather than assumed: `Mount::origin` exists
+    /// because two projects may carry the same `<workspace>/<project>` label
+    /// after `slug` folds them, and dropping it takes away the only thing that
+    /// tells them apart. Trading that off is a decision about the chooser.
+    ///
+    /// If it is ever changed, this test fails and should be deleted, not relaxed.
+    #[tokio::test]
+    async fn the_chooser_still_names_each_bundles_directory() {
+        let a = named_bundle("origin-a", "Alpha");
+        let root = a.display().to_string();
+        let mounts = vec![
+            labelled("one", "Acme/widgets", a),
+            labelled("two", "Acme/gadgets", named_bundle("origin-b", "Beta")),
+        ];
+        let app = host().merge(mounts_router("/okf", mounts, Some("/".to_owned())));
+        let (status, body, _) = get_mounted(&app, "/okf").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains(&escape(&root)),
+            "the chooser no longer prints `Mount::origin` — if that was on \
+             purpose, delete this test rather than weakening it"
+        );
+    }
+
+    /// The mounted header wears the explorer shell's chrome rather than a second
+    /// thing that looks like it.
+    ///
+    /// Every `p-*` class this module writes into markup must be one
+    /// `assets/index.html` already styles, and every one of them must be styled
+    /// here too — the two files cannot share a stylesheet (`index.html` carries
+    /// its CSS inline and the viewer's is a separate served file), so "reuse" is
+    /// a claim that has to be checked rather than a thing the compiler enforces.
+    ///
+    /// `p-crumb-step` is the one exception and is listed as such: the shell's
+    /// breadcrumb links every crumb but the last, so it never needs a step that
+    /// is neither. It is declared here, in the viewer's own file, and named here
+    /// so that adding a second exception is a deliberate edit to this list.
+    #[test]
+    fn the_mounted_header_wears_the_shells_own_chrome() {
+        const SHELL: &str = include_str!("assets/index.html");
+        /// Emitted by `header_for`, and the shell's own.
+        const SHARED: &[&str] = &[
+            "p-back",
+            "p-crumbs",
+            "p-crumb-root",
+            "p-crumb-link",
+            "p-crumb-current",
+            "p-sep",
+        ];
+        /// Emitted by `header_for`, and the viewer's alone — see the doc above.
+        const VIEWER_ONLY: &[&str] = &["p-crumb-step"];
+
+        for class in SHARED {
+            assert!(
+                SHELL.contains(&format!(".{class} {{")),
+                "`{class}` is not a rule in `assets/index.html` — the mounted \
+                 header must reuse the shell's controls, not invent new ones"
+            );
+            assert!(
+                VIEWER_CSS.contains(&format!(".{class} ")),
+                "`{class}` is written into the viewer's markup but styled only in \
+                 the shell, whose CSS the viewer's pages never load"
+            );
+        }
+        for class in VIEWER_ONLY {
+            assert!(
+                !SHELL.contains(&format!(".{class} {{")),
+                "`{class}` is now a shell rule too — reuse it from there and drop \
+                 it from `VIEWER_ONLY`"
+            );
+            assert!(VIEWER_CSS.contains(&format!(".{class} ")), "{class}");
+        }
+        // Nothing else: a `p-` class the viewer emits and neither list names is a
+        // control invented in passing, which is the thing this guards against.
+        // All three shapes `header_for` can draw in the mounted form: under a
+        // chooser, without one, and the chooser itself.
+        let mounted: Vec<String> = [
+            (Some("/okf".to_owned()), Some("Acme/widgets".to_owned())),
+            (None, Some("Acme/widgets".to_owned())),
+            (Some("/okf".to_owned()), None),
+        ]
+        .into_iter()
+        .map(|(bundles, label)| {
+            header_for(&Nav {
+                bundle: Some("/okf/one".to_owned()),
+                bundles,
+                explorer: Some("/".to_owned()),
+                label,
+            })
+        })
+        .collect();
+        let emitted: std::collections::BTreeSet<&str> =
+            mounted.iter().flat_map(|h| classes_in(h)).collect();
+        let known: std::collections::BTreeSet<&str> =
+            SHARED.iter().chain(VIEWER_ONLY).copied().collect();
+        let stray: Vec<&&str> = emitted
+            .iter()
+            .filter(|c| c.starts_with("p-") && !known.contains(*c))
+            .collect();
+        assert!(
+            stray.is_empty(),
+            "the mounted header emits {stray:?}, which is neither the shell's nor \
+             declared as the viewer's own"
+        );
+    }
+
+    /// Every `class="…"` value in `html`, split into individual class names.
+    fn classes_in(html: &str) -> Vec<&str> {
+        html.match_indices("class=\"")
+            .filter_map(|(i, m)| {
+                let rest = &html[i + m.len()..];
+                rest.find('"').map(|end| &rest[..end])
+            })
+            .flat_map(str::split_whitespace)
+            .collect()
     }
 
     /// A bundle offers only the neighbours it actually has.
