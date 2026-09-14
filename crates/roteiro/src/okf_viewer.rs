@@ -2984,11 +2984,25 @@ mod tests {
             );
             let rule = resting_rule(class)
                 .unwrap_or_else(|| panic!("the viewer styles `.{class}` nowhere"));
-            assert!(
-                rule.contains("text-decoration"),
-                "`.{class}` is an `<a>` here and a `<button>` in the shell, and its \
-                 resting rule states no `text-decoration` — so the UA underlines it \
-                 and the `:hover` underline stops meaning anything. Rule: {rule}"
+            // The **value**, not merely the property. Asserting that the rule
+            // mentions `text-decoration` at all would be satisfied by
+            // `text-decoration: underline`, which is the very state this exists
+            // to forbid — the first version of this guard did exactly that and
+            // review caught it.
+            let stated = declared(rule, "text-decoration").unwrap_or_else(|| {
+                panic!(
+                    "`.{class}` is an `<a>` here and a `<button>` in the shell, and \
+                     its resting rule states no `text-decoration` — so the UA \
+                     underlines it and the `:hover` underline stops meaning \
+                     anything. Rule: {rule}"
+                )
+            });
+            assert_eq!(
+                stated, "none",
+                "`.{class}` states `text-decoration: {stated}` at rest. It must be \
+                 `none`: an anchor is underlined by the user agent, and anything \
+                 else here either keeps that or replaces it with another \
+                 decoration, leaving the `:hover` underline meaningless"
             );
         }
     }
@@ -3006,6 +3020,99 @@ mod tests {
             })
             .flat_map(str::split_whitespace)
             .collect()
+    }
+
+    /// A header that draws two lateral navs must leave exactly one auto margin
+    /// doing the pushing.
+    ///
+    /// **The verbatim header tests cannot see this**, which is the point.
+    /// `a_standalone_server_with_several_bundles_keeps_its_chooser_link` pins the
+    /// markup byte-for-byte and stays green, because the defect is not in the
+    /// markup: `<header>` is a flex container, and free space in a flex line is
+    /// distributed **equally among every `auto` margin**, not handed to the first
+    /// one. With `margin-left: auto` on both `nav.up` and `nav.here`, `All
+    /// bundles` and `Concepts`/`Graph` each drift to the middle of their own
+    /// share instead of seating together at the trailing edge.
+    ///
+    /// Only `serve_okf_only` with more than one bundle draws both, so this is
+    /// also the layout nobody looks at — the reason it is pinned rather than
+    /// eyeballed. Raised by review of the change that introduced `nav.up`.
+    #[test]
+    fn two_lateral_navs_leave_one_auto_margin_between_them() {
+        let header = header_for(&Nav {
+            bundle: Some("/okf/one".to_owned()),
+            bundles: Some("/okf".to_owned()),
+            explorer: None,
+            label: Some("alpha".to_owned()),
+        });
+        // The premise: this is the shape that draws both. `header_for` emits the
+        // `up` nav; `page` appends the `here` nav, so assert on the shape that
+        // produces the pair.
+        assert!(
+            header.contains("<nav class=\"up\">"),
+            "standalone with several bundles should still offer the chooser: {header}"
+        );
+
+        // Which lateral navs some rule pushes with an auto margin.
+        let pushed: Vec<&str> = ["nav.up", "nav.here"]
+            .into_iter()
+            .filter(|nav| {
+                rules().iter().any(|(sel, body)| {
+                    sel.split(',').any(|s| s.trim().ends_with(nav))
+                        && declared(body, "margin-left") == Some("auto")
+                })
+            })
+            .collect();
+        if pushed.len() < 2 {
+            // Only one is pushed, so there is nothing to split. Nothing to check.
+            return;
+        }
+
+        // Both are pushed, so the free space would be halved between them unless
+        // a later rule naming the pair takes one out of the running.
+        let neutralised = rules().iter().any(|(sel, body)| {
+            sel.contains("nav.up")
+                && sel.contains("nav.here")
+                && declared(body, "margin-left") == Some("0")
+        });
+        assert!(
+            neutralised,
+            "both lateral navs take `margin-left: auto`, and a flex line splits free \
+             space equally between every auto margin — so `All bundles` and \
+             `Concepts`/`Graph` are driven apart instead of seating together. \
+             Neutralise the second, e.g. `header nav.up ~ nav.here {{ margin-left: 0; }}`"
+        );
+    }
+
+    /// The viewer's stylesheet as `(selector, declarations)` pairs, comments out.
+    fn rules() -> Vec<(String, String)> {
+        let css = crate::theme::without_comments(VIEWER_CSS);
+        let mut out = Vec::new();
+        let mut rest = css.as_str();
+        while let Some(open) = rest.find('{') {
+            let Some(close) = rest[open..].find('}') else {
+                break;
+            };
+            out.push((
+                rest[..open]
+                    .rsplit('}')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_owned(),
+                rest[open + 1..open + close].to_owned(),
+            ));
+            rest = &rest[open + close..];
+        }
+        out
+    }
+
+    /// The value `rule` gives `prop`, or `None` when it does not set it.
+    fn declared<'a>(rule: &'a str, prop: &str) -> Option<&'a str> {
+        rule.split(';')
+            .filter_map(|d| d.split_once(':'))
+            .find(|(p, _)| p.trim() == prop)
+            .map(|(_, v)| v.trim())
     }
 
     /// The viewer's `header .{class} { … }` rule body, excluding `:hover` and any

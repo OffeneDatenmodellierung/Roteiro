@@ -59,6 +59,14 @@ header .root { color: var(--sub); font-size: .85rem; font-family: var(--font-mon
 /* Scoped to the two lateral navs by class, because the breadcrumb is a `<nav>`
    too and `margin-left: auto` would push the trail to the far edge. */
 header nav.here, header nav.up { margin-left: auto; display: flex; gap: 1rem; }
+/* A standalone server holding several bundles draws **both** lateral navs, and
+   free space in a flex line is split **equally among every auto margin**, not
+   given to the first one. Two autos would therefore drive `All bundles` and
+   `Concepts`/`Graph` apart, each drifting to the middle of its own share,
+   instead of seating them together at the trailing edge. The second one is
+   neutralised so exactly one auto margin does the pushing. Raised by review of
+   the change that introduced the second nav. */
+header nav.up ~ nav.here { margin-left: 0; }
 
 /* The mounted header's chrome, lifted from the explorer shell's project bar in
    `assets/index.html` rather than restated: same class names, same rules, same
