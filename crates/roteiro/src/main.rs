@@ -6585,7 +6585,10 @@ fn okf_screen_lines(r: &rto_render::okf::read::OkfReport) -> Vec<String> {
     for row in r.screened.iter().take(OKF_SCREEN_ROWS) {
         out.push(format!(
             "    {} ({}) {}: {}",
-            row.path,
+            // The bundle-relative path is the peer's; `field`, `verdict` and
+            // `detail` are this workspace's own words — `ScreenedRow` is
+            // explicit that `detail` never quotes the offending text.
+            rto_graph::screen::escape_for_diagnostic(&row.path),
             row.field,
             row.verdict,
             row.detail.join("; ")
@@ -7405,10 +7408,10 @@ fn read_bundle_files(root: &std::path::Path) -> anyhow::Result<Vec<(String, Stri
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir)
-            .map_err(|e| anyhow::anyhow!("reading {}: {e}", dir.display()))?
+        for entry in
+            std::fs::read_dir(&dir).map_err(|e| anyhow::anyhow!("reading {}: {e}", shown(&dir)))?
         {
-            let entry = entry.map_err(|e| anyhow::anyhow!("reading {}: {e}", dir.display()))?;
+            let entry = entry.map_err(|e| anyhow::anyhow!("reading {}: {e}", shown(&dir)))?;
             // Symlinks are not followed. A bundle is somebody **else's**
             // directory, so `is_dir()` — which follows them — would let a link
             // pointing at an ancestor spin this walk forever, and one pointing
@@ -7433,13 +7436,13 @@ fn read_bundle_files(root: &std::path::Path) -> anyhow::Result<Vec<(String, Stri
                 let rel = p.strip_prefix(root).map_err(|_| {
                     anyhow::anyhow!(
                         "{} is not inside the bundle root {}",
-                        p.display(),
-                        root.display()
+                        shown(&p),
+                        shown(root)
                     )
                 })?;
                 let rel = rel.to_string_lossy().replace('\\', "/");
                 let text = std::fs::read_to_string(&p)
-                    .map_err(|e| anyhow::anyhow!("reading {}: {e}", p.display()))?;
+                    .map_err(|e| anyhow::anyhow!("reading {}: {e}", shown(&p)))?;
                 out.push((format!("/{rel}"), text));
             }
         }
@@ -7448,6 +7451,154 @@ fn read_bundle_files(root: &std::path::Path) -> anyhow::Result<Vec<(String, Stri
     // the order files arrive in, and `read_dir` does not promise one.
     out.sort();
     Ok(out)
+}
+
+/// A path out of somebody else's bundle, as a diagnostic may show it.
+///
+/// Every path passed here is chosen by a peer — a directory name, a filename
+/// inside their bundle — and every message it reaches is read by a person in a
+/// terminal. So it is escaped, and the rule is stated rather than listed: see
+/// [`rto_graph::screen::escape_for_diagnostic`] for why a denylist of the
+/// invisible cannot be finished.
+fn shown(p: &std::path::Path) -> String {
+    rto_graph::screen::escape_for_diagnostic(&p.display().to_string())
+}
+
+#[cfg(test)]
+mod okf_diagnostic_tests {
+    use super::{okf_screen_lines, read_bundle_files, shown};
+
+    /// The peer's own names cannot reorder or hide part of the import's output.
+    ///
+    /// Three diagnostics in this file are built from a peer's bundle: the walk's
+    /// refusals (`read_bundle_files`), the screening rows (`okf_screen_lines`,
+    /// whose `path` is bundle-relative and therefore theirs), and the three
+    /// lines `apply_okf_decision` writes around a decision. They are read in a
+    /// terminal beside the consent question, so the same rule applies to them.
+    ///
+    /// Asserted with this workspace's own invisible-character detector rather
+    /// than a list written here — the invariant over all 1,114,112 code points
+    /// is swept in `rto_graph::screen`, and a list of characters to *check for*
+    /// is the same mistake as a list of characters to escape.
+    #[test]
+    fn a_peers_filenames_cannot_rewrite_the_imports_diagnostics() {
+        let hostile = "okf-\u{202E}dnab\u{200B}\u{2066}x\u{2069}";
+
+        // The walk's refusal. A directory that is not there is the cheapest way
+        // to reach it, and the message is built from the name either way.
+        let missing = std::env::temp_dir().join(format!("roteiro-okf-absent-{hostile}"));
+        let err = read_bundle_files(&missing).expect_err("the path does not exist");
+        let text = format!("{err}");
+        if let Some(name) = text.chars().find_map(rto_graph::screen::invisible_name) {
+            panic!("the walk's refusal carries {name} raw: {text:?}");
+        }
+        // The premise: the name really did reach the message.
+        assert!(
+            text.contains("roteiro-okf-absent-okf-"),
+            "the refusal should still name the directory: {text:?}"
+        );
+        assert!(
+            text.contains("\\u{202e}"),
+            "the strange character should be shown, not removed: {text:?}"
+        );
+
+        // The screening rows.
+        let report = rto_render::okf::read::OkfReport {
+            concepts_blocked: 1,
+            screened: vec![rto_render::okf::read::ScreenedRow {
+                path: format!("/c/{hostile}.md"),
+                verdict: "block".to_owned(),
+                field: "body".to_owned(),
+                classes: vec!["model-directive".to_owned()],
+                detail: vec!["text addressed to a language model".to_owned()],
+            }],
+            ..Default::default()
+        };
+        let lines = okf_screen_lines(&report).join("\n");
+        if let Some(name) = lines.chars().find_map(rto_graph::screen::invisible_name) {
+            panic!("a screening row carries {name} raw: {lines:?}");
+        }
+        assert!(
+            lines.contains("/c/okf-") && lines.contains("\\u{202e}"),
+            "the row should still name the concept, escaped: {lines:?}"
+        );
+    }
+
+    /// `apply_okf_decision`'s three lines interpolate the peer's name and path,
+    /// and nothing above can reach them.
+    ///
+    /// Driving them needs a workspace, a store and a recorded decision, which is
+    /// a lot of scaffolding for a one-argument change that a later edit could
+    /// undo in a second. So this scans the function's source instead — the same
+    /// idiom, and for the same reason, as
+    /// `okf_viewer::tests::the_viewer_has_one_diagnostic_path`: a guard on a
+    /// shape that no reachable test observes.
+    ///
+    /// A negative assertion, deliberately, and one about **shape**: it does not
+    /// check that the escaper is called — a wiring test would say that better
+    /// and is not available here — it checks that neither of the peer's two
+    /// values appears as a bare positional format argument, which is the form
+    /// the defect had and the form `rustfmt` puts one in.
+    ///
+    /// Matching the whole body instead was tried and was wrong: `peer:
+    /// &d.bundle.peer,` in the reader's options *contains* the bare spelling
+    /// while being data rather than a diagnostic, so a substring check reported
+    /// a defect in the one line that never had one.
+    #[test]
+    fn the_imports_own_lines_never_interpolate_a_peer_bare() {
+        let src = include_str!("main.rs");
+        // `"\nfn apply_okf_decision("` and not the bare name: this file now
+        // contains that name in *this test's own source*, earlier in the file
+        // than the definition, so splitting on the name matched the test first
+        // and then scanned itself — which it duly failed. Anchoring on the
+        // definition's own spelling, at column 0 and with its parenthesis, is
+        // what makes the scanned region the function rather than the scanner.
+        let body = src
+            .split("\nfn apply_okf_decision(")
+            .nth(1)
+            .expect("the function's definition")
+            .split("\nfn ")
+            .next()
+            .expect("its end");
+        // The premise: this really is the function, and it really does print.
+        assert!(
+            body.contains("eprintln!("),
+            "apply_okf_decision should still be the code that writes these lines"
+        );
+        let bare: Vec<&str> = body
+            .lines()
+            .map(str::trim)
+            .filter(|l| {
+                matches!(*l, "d.bundle.peer," | "d.bundle.bundle.display(),")
+                    || l.contains(", d.bundle.peer")
+                    || l.contains(", d.bundle.bundle.display()")
+            })
+            .collect();
+        assert_eq!(
+            bare,
+            Vec::<&str>::new(),
+            "a peer chooses both of these values and they are read in a \
+             terminal, so wrap them in `rto_graph::screen::escape_for_diagnostic` \
+             (or `shown`, for the path) as their siblings do"
+        );
+    }
+
+    /// And a real bundle path survives unchanged, which is the constraint that
+    /// makes this an allowlist rather than a refusal.
+    #[test]
+    fn a_legitimate_bundle_path_is_shown_as_itself() {
+        for real in [
+            "/Users/mark/データ/概念/okf",
+            "/home/ünal/Müller-Schröder/okf",
+            "/Volumes/Cafe\u{301}/okf",
+        ] {
+            assert_eq!(
+                shown(std::path::Path::new(real)),
+                real,
+                "a legitimate bundle path was altered"
+            );
+        }
+    }
 }
 
 /// `roteiro docs` — ADR-0023's authoring verbs over the authored documents.
@@ -10228,8 +10379,8 @@ fn apply_okf_decision(
         eprintln!(
             "roteiro: {}'s OKF bundle at {} no longer reads ({}), so it was not \
              re-imported. Anything already imported from it is untouched.",
-            d.bundle.peer,
-            d.bundle.bundle.display(),
+            rto_graph::screen::escape_for_diagnostic(&d.bundle.peer),
+            shown(&d.bundle.bundle),
             d.summary(),
         );
         return Ok(());
@@ -10249,7 +10400,7 @@ fn apply_okf_decision(
     if !decision.imports() {
         eprintln!(
             "  okf: {} ignored — the cross-repo placeholder stays as it is",
-            d.bundle.peer
+            rto_graph::screen::escape_for_diagnostic(&d.bundle.peer)
         );
         return Ok(());
     }
@@ -10293,7 +10444,7 @@ fn apply_okf_decision(
     eprintln!(
         "  okf: {} {} — {} concept(s), {} edge(s), {} placeholder(s) filled, \
          {} removed as withdrawn (under {src_ref})",
-        d.bundle.peer,
+        rto_graph::screen::escape_for_diagnostic(&d.bundle.peer),
         decision.as_str(),
         report.concepts_read,
         applied.edges_applied,

@@ -170,12 +170,26 @@ impl ConsentState {
 
     /// A short sentence for the prompt or the note, explaining why this peer is
     /// being raised. `None` when the answer holds and nothing need be said.
+    ///
+    /// `Moved`'s `was` is **a path a peer chose**, recorded here when their
+    /// bundle was last decided about, and this sentence is read by a person
+    /// deciding whether to trust them — so it goes through
+    /// [`crate::screen::escape_for_diagnostic`]. A U+202E in the old directory
+    /// name would otherwise reverse the rest of the prompt around it.
+    ///
+    /// `Lapsed`'s two values are screening fingerprints:
+    /// [`screen_fingerprint`] joins this crate's own finding tokens, which are
+    /// `&'static str` and ASCII, so there is nothing there for a bundle to
+    /// choose.
     #[must_use]
     pub fn why_asking(&self) -> Option<String> {
         match self {
             Self::Holds(_) => None,
             Self::Unasked => Some("not seen before".to_owned()),
-            Self::Moved { was } => Some(format!("the bundle moved (it was at {was})")),
+            Self::Moved { was } => Some(format!(
+                "the bundle moved (it was at {})",
+                crate::screen::escape_for_diagnostic(was)
+            )),
             Self::Lapsed { was, now } => Some(format!(
                 "the bundle now screens differently (it was [{was}], it is now [{now}])"
             )),

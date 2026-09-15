@@ -4490,6 +4490,7 @@ dependencies = [
  "tree-sitter-sequel",
  "tree-sitter-tags",
  "tree-sitter-typescript",
+ "unicode-properties",
  "yaml-rust2",
 ]
 

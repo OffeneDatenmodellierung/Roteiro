@@ -154,10 +154,28 @@ impl Discovered {
     /// This is the sentence that makes the question answerable. "Import a peer's
     /// bundle?" is not a question anyone can answer well; "this bundle contains
     /// 3 concepts with hidden control characters" is.
+    ///
+    /// # Two of its three sources are the bundle's, so they are escaped
+    ///
+    /// The `Err` string is the OKF reader's, and that reader quotes the file it
+    /// choked on. The extension list is built from the bundle's own filenames.
+    /// Both go through [`rto_graph::screen::escape_for_diagnostic`]: this
+    /// sentence is the one a person reads while deciding whether to trust a
+    /// stranger, and a bundle able to reorder or hide part of it could make
+    /// "3 concepts blocked" read as something reassuring.
+    ///
+    /// The screening classes in between are this workspace's own tokens — see
+    /// [`rto_graph::screen_fingerprint`] — so there is nothing there for a
+    /// bundle to choose.
     #[must_use]
     pub fn summary(&self) -> String {
         let concepts = match &self.screened {
-            Err(e) => return format!("unreadable: {e}"),
+            Err(e) => {
+                return format!(
+                    "unreadable: {}",
+                    rto_graph::screen::escape_for_diagnostic(e)
+                );
+            }
             Ok(r) if r.concepts_quarantined > 0 || r.concepts_blocked > 0 => format!(
                 "{} concept(s), {} quarantined, {} blocked by the content screen [{}]",
                 r.concepts_read,
@@ -195,14 +213,14 @@ impl Discovered {
         if contents.files.is_empty() {
             return format!("{concepts}{note}");
         }
-        let mut kinds: Vec<&str> = contents
+        let mut kinds: Vec<String> = contents
             .files
             .iter()
             .map(|f| {
                 if f.extension.is_empty() {
-                    "no extension"
+                    "no extension".to_owned()
                 } else {
-                    f.extension.as_str()
+                    rto_graph::screen::escape_for_diagnostic(&f.extension)
                 }
             })
             .collect();
@@ -315,6 +333,20 @@ pub fn may_prompt() -> bool {
 ///
 /// Carries the peer, the path, why it is being raised, and the screening
 /// summary — the last of which is the part that makes the question answerable.
+///
+/// # The most load-bearing diagnostic here, so the peer's text is escaped
+///
+/// This is not a log line somebody reads later; it is the question itself, and
+/// the answer decides whether a stranger's prose enters this graph. The path is
+/// theirs and the peer name reaches here from a workspace's configuration, so
+/// both go through [`rto_graph::screen::escape_for_diagnostic`]. Unescaped, a
+/// single U+202E in a directory name reverses every line after it — including
+/// the three that explain what `[t]`, `[a]` and `[i]` do — so the operator
+/// could grant trust while reading a prompt that said they were declining it.
+///
+/// [`Discovered::summary`] and [`rto_graph::ConsentState::why_asking`] escape
+/// what is theirs, at the value rather than here, so nothing is escaped twice
+/// and no `\\u{202e}` appears where a `\u{202e}` is meant.
 #[must_use]
 pub fn prompt_text(d: &Discovered) -> String {
     let why = d
@@ -336,8 +368,8 @@ pub fn prompt_text(d: &Discovered) -> String {
          \x20               confirmation\n\
          [i] ignore      leave the cross-repo placeholder as it is\n\
          \n",
-        peer = d.bundle.peer,
-        path = d.bundle.bundle.display(),
+        peer = rto_graph::screen::escape_for_diagnostic(&d.bundle.peer),
+        path = rto_graph::screen::escape_for_diagnostic(&d.bundle.bundle.display().to_string()),
         why = why,
         summary = d.summary(),
     )
@@ -349,6 +381,12 @@ pub fn prompt_text(d: &Discovered) -> String {
 /// it is being raised — because a note that only said "there is a bundle" would
 /// leave the reader unable to tell "never asked" from "you answered, and it has
 /// since changed", which are different problems with different fixes.
+///
+/// The peer and the path are escaped for the reasons given on [`prompt_text`],
+/// with one more that belongs to this function alone: the path is repeated
+/// inside a `roteiro import --from okf <path>` the reader is invited to run. A
+/// name that rendered as one thing and pasted as another is the worst version
+/// of this bug, because the misreading survives into a command.
 #[must_use]
 pub fn note_text(d: &Discovered, silent_because: Unasked) -> String {
     format!(
@@ -357,8 +395,8 @@ pub fn note_text(d: &Discovered, silent_because: Unasked) -> String {
          graph does not adopt a stranger's concepts because nobody was there to object. \
          Decide it with `roteiro import --from okf {path}` (add --trust to keep their \
          tiers).",
-        peer = d.bundle.peer,
-        path = d.bundle.bundle.display(),
+        peer = rto_graph::screen::escape_for_diagnostic(&d.bundle.peer),
+        path = rto_graph::screen::escape_for_diagnostic(&d.bundle.bundle.display().to_string()),
         summary = d.summary(),
         why = d
             .state
@@ -459,7 +497,7 @@ pub const NOTE_LIMIT: usize = 3;
 
 #[cfg(test)]
 mod tests {
-    use super::{NOTE_LIMIT, Noted};
+    use super::{Discovered, NOTE_LIMIT, Noted, Unasked, note_text, prompt_text, read};
 
     #[test]
     fn a_peer_is_noted_once_per_process() {
@@ -481,6 +519,126 @@ mod tests {
             noted.suppressed(),
             2,
             "the cap must account for what it did not print"
+        );
+    }
+
+    /// The consent question cannot be reordered or hidden by the peer it is
+    /// about.
+    ///
+    /// **This is the most load-bearing diagnostic in the OKF path**, and the
+    /// only one whose misreading costs something immediately: the reader answers
+    /// it, and the answer decides whether a stranger's prose enters this graph.
+    /// Four of its parts come from the peer — the bundle path, the peer name,
+    /// the OKF reader's complaint about their files, and the previous path a
+    /// `Moved` record kept — and one fixture carries all four so a leaf that
+    /// stopped escaping cannot hide behind a sibling that still does.
+    ///
+    /// The invariant over the whole code-point space lives in
+    /// `rto_graph::screen`; asserted here is the wiring, using this workspace's
+    /// own invisible-character detector as the reader — a different code path
+    /// from the escaper, so the two are not marking each other's homework.
+    #[test]
+    fn a_peers_own_text_cannot_rewrite_the_question_about_them() {
+        // A U+202E reverses every line after it, which in this prompt includes
+        // the three that say what `[t]`, `[a]` and `[i]` do: the reader could
+        // grant trust while reading a sentence that said they were declining.
+        // U+200B and the isolate pair hide a run outright.
+        let hostile = "peer\u{202E}dnab\u{200B}\u{2066}x\u{2069}";
+        let d = Discovered {
+            bundle: rto_graph::OkfBundle {
+                repo: std::path::PathBuf::from("/repo"),
+                bundle: std::path::PathBuf::from(format!("/repo/{hostile}/okf")),
+                peer: hostile.to_owned(),
+            },
+            state: rto_graph::ConsentState::Moved {
+                was: format!("/old/{hostile}"),
+            },
+            screened: Err(format!("could not parse {hostile}/index.md")),
+        };
+
+        for (what, text) in [
+            ("the prompt", prompt_text(&d)),
+            ("the note", note_text(&d, Unasked::NoTerminal)),
+        ] {
+            if let Some(name) = text.chars().find_map(rto_graph::screen::invisible_name) {
+                panic!("{what} carries {name} raw, so the peer can rewrite it: {text:?}");
+            }
+            // The premise, and the anti-vacuity guard: all four of the peer's
+            // contributions must really be in the text, or the assertion above
+            // is holding on a message that never carried any of them.
+            assert!(
+                text.contains("peer") && text.contains("dnab"),
+                "{what} should carry the peer's own text, escaped: {text:?}"
+            );
+            assert!(
+                text.contains("/repo/") && text.contains("/okf"),
+                "{what} should still name the bundle: {text:?}"
+            );
+            assert!(
+                text.contains("/old/"),
+                "{what} should still say where the bundle moved from: {text:?}"
+            );
+            assert!(
+                text.contains("index.md"),
+                "{what} should still carry the reader's complaint: {text:?}"
+            );
+            // Escaped, not stripped: a reader told `\u{202e}` was in the name
+            // can act on it, where a silently-cleaned name reads as ordinary and
+            // sends them looking in the wrong place.
+            assert!(
+                text.contains("\\u{202e}"),
+                "{what} should show the strange character rather than remove it: {text:?}"
+            );
+        }
+    }
+
+    /// A file whose *extension* is hostile, which is the one part of the summary
+    /// read from the directory rather than from the reader's complaint.
+    ///
+    /// Driven through a real directory, because that is the actual carrier: a
+    /// POSIX filename may contain anything but `/` and NUL.
+    #[test]
+    fn a_bundles_filenames_cannot_rewrite_its_inventory() {
+        let root = std::env::temp_dir().join(format!(
+            "roteiro-okf-ext-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("mkdir");
+        std::fs::write(
+            root.join("index.md"),
+            "---\nokf_version: \"0.2\"\n---\n\n# Bundle\n",
+        )
+        .expect("write index");
+        // `.pdf` reversed by an override, so an inventory saying "also 1 file(s)
+        // [fdp\u{202e}]" would render as though it ended somewhere else.
+        std::fs::write(root.join("cited.p\u{202E}df"), b"x").expect("write cited");
+
+        let d = Discovered {
+            bundle: rto_graph::OkfBundle {
+                repo: root.clone(),
+                bundle: root.clone(),
+                peer: "peer".to_owned(),
+            },
+            state: rto_graph::ConsentState::Unasked,
+            screened: Ok(read::OkfReport::default()),
+        };
+        let summary = d.summary();
+        let _ = std::fs::remove_dir_all(&root);
+
+        if let Some(name) = summary.chars().find_map(rto_graph::screen::invisible_name) {
+            panic!("the inventory carries {name} raw: {summary:?}");
+        }
+        // The premise: the extension really did reach the summary. Without this
+        // the assertion above passes on a sentence that listed no files at all.
+        assert!(
+            summary.contains("file(s) that are not concepts"),
+            "the non-concept file should be inventoried: {summary:?}"
+        );
+        assert!(
+            summary.contains("\\u{202e}"),
+            "the strange character in the extension should be shown: {summary:?}"
         );
     }
 }

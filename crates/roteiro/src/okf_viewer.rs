@@ -888,7 +888,7 @@ fn escape(raw: &str) -> String {
     out
 }
 
-/// `raw` as a single log line: one line, and no terminal control sequences.
+/// `raw` as a single log line the operator can trust to read as itself.
 ///
 /// **The text is not ours and reaching this is not our decision.** It carries a
 /// bundle path and `okf-core`'s parser detail, which quotes the bundle's own
@@ -896,28 +896,39 @@ fn escape(raw: &str) -> String {
 /// and a remote client chooses *when* it is written by asking for a route. A
 /// newline would let that text forge whole log lines; an `ESC` would let it
 /// write colour, move the cursor, or clear the screen of whatever terminal is
-/// tailing the log. Both are escaped rather than stripped, so the operator can
-/// still see that something strange was in the name instead of reading a
-/// silently-edited one.
+/// tailing the log; and a U+202E RIGHT-TO-LEFT OVERRIDE would let it reverse
+/// the rest of the sentence describing it. All three are escaped rather than
+/// stripped, so the operator can still see that something strange was in the
+/// name instead of reading a silently-edited one.
+///
+/// # Why this is no longer a list of the characters to escape
+///
+/// The first version of this function escaped `char::is_control`, which is
+/// Rust's name for `Cc` plus the C1 range. That let every `Cf` **format**
+/// character through raw — U+202E, U+200B, U+2066..U+2069, U+061C,
+/// U+206A..U+206F and whatever Unicode assigns next — and its own comment
+/// admitted an allowlist was the stronger shape, declining it because "a path
+/// is legitimately any printable Unicode". That is true, and it is the reason
+/// the allowlist is stated in Unicode's own categories rather than in ASCII:
+/// see [`rto_graph::screen::escape_for_diagnostic`] for the rule and the
+/// argument that a list of the bad cannot be finished.
+///
+/// # A second pass over text `InspectError` has already escaped
+///
+/// Deliberate. [`InspectError`] escapes its own interpolated fields, but it is
+/// `#[non_exhaustive]` and lives in another crate: it *will* grow variants, and
+/// one whose `Display` forgot to escape would otherwise reach this line
+/// unguarded. An operator boundary should not rest on another crate's promise.
+///
+/// The cost is that a backslash the inner pass introduced is doubled here, so a
+/// hostile name reads `\\u{202e}` rather than `\u{202e}`. That is visible,
+/// still names the code point, and only ever happens to input that was already
+/// pathological — where silently passing an invisible character through is the
+/// failure this exists to prevent.
+///
+/// [`InspectError`]: rto_render::okf::inspect::InspectError
 fn one_line(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    for c in raw.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            // Everything else a terminal acts on rather than shows: C0, DEL and
-            // C1. An allowlist of the visible would be the stronger shape, but a
-            // path is legitimately any printable Unicode, so this names the
-            // classes that are *executable* instead.
-            c if c.is_control() => {
-                let _ = write!(out, "\\u{{{:04x}}}", c as u32);
-            }
-            c => out.push(c),
-        }
-    }
-    out
+    rto_graph::screen::escape_for_diagnostic(raw)
 }
 
 /// A bundle this server cannot read — whether it never could, or stopped.
@@ -3186,6 +3197,116 @@ mod tests {
         );
     }
 
+    /// `one_line` holds on text **no other layer has touched**.
+    ///
+    /// # Why this test exists beside the two end-to-end ones
+    ///
+    /// On the viewer's path `one_line` and `InspectError`'s `Display` see the
+    /// same string, so the two guards overlap completely and no input separates
+    /// them: reverting either one alone leaves the operator's line safe, and a
+    /// fault injection against either would come back green and "prove" the
+    /// other unnecessary. An injection that cannot fail is worse than none,
+    /// because it is read as evidence.
+    ///
+    /// So the function's own contract is asserted directly. This is also the
+    /// case that will really arise: `InspectError` is `#[non_exhaustive]` and in
+    /// another crate, so the day it grows a variant whose `Display` interpolates
+    /// something raw, this function is what stands between that variant and the
+    /// operator's terminal.
+    #[test]
+    fn one_line_escapes_text_no_other_layer_has_seen() {
+        let line = one_line("okf-\u{202E}dnab\u{200B}\u{2066}x\u{2069}\u{061C}\u{1B}[2J\nfine");
+        if let Some(name) = line.chars().find_map(rto_graph::screen::invisible_name) {
+            panic!("{name} survived: {line:?}");
+        }
+        assert_eq!(line.lines().count(), 1, "{line:?} is not one line");
+        assert_eq!(
+            line, "okf-\\u{202e}dnab\\u{200b}\\u{2066}x\\u{2069}\\u{061c}\\u{001b}[2J\\nfine",
+            "every character should be named rather than removed"
+        );
+        // And ordinary text is left alone, including the non-ASCII a real bundle
+        // path carries. An escaper that garbled this would be a worse bug than
+        // the one it fixes.
+        assert_eq!(
+            one_line("/データ/概念/Cafe\u{301}"),
+            "/データ/概念/Cafe\u{301}"
+        );
+    }
+    /// The operator's line cannot be **reordered or hidden** by a bundle name
+    /// either, which escaping only the control characters did not prevent.
+    ///
+    /// The sibling test above covers what a terminal *executes*: `ESC`, and a
+    /// newline forging a second line. This one covers what a terminal
+    /// *renders* — and it is the half `char::is_control` missed. U+202E
+    /// RIGHT-TO-LEFT OVERRIDE is `Cf`, not `Cc`, so it is not a control
+    /// character by Rust's definition and went through raw; it reverses the
+    /// display order of everything after it. U+200B and the isolate pair
+    /// U+2066/U+2069 hide a run outright. Nothing is executed and the log file
+    /// holds exactly the bytes it should — and the operator still reads a
+    /// different sentence than the one that was written, about the very bundle
+    /// the sentence is warning them about.
+    ///
+    /// Driven through a real directory for the same reason as the sibling: a
+    /// POSIX filename may contain anything but `/` and NUL, so every character
+    /// below is legal in a path somebody hands this server.
+    ///
+    /// The assertion is made with this workspace's own invisible-character
+    /// detector rather than a list written here, and the invariant over all
+    /// 1,114,112 code points is swept in `rto_graph::screen` — a list of the
+    /// characters to check for is the same mistake as a list of the characters
+    /// to escape, one layer up.
+    #[tokio::test]
+    async fn the_operators_line_cannot_be_reordered_by_a_bundle_name() {
+        let hostile = "okf-\u{202E}dnab\u{200B}\u{2066}x\u{2069}\u{061C}";
+        let root =
+            std::env::temp_dir().join(format!("roteiro-okf-bidi-{}-{hostile}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&log);
+        let v = Viewer {
+            root: Arc::new(root.clone()),
+            base: Arc::new(String::new()),
+            nav: Arc::new(Nav::default()),
+            cache: Arc::new(Mutex::new(None)),
+            reported: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            report: Arc::new(move |line: &str| {
+                sink.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(line.to_owned());
+            }),
+        };
+        assert!(
+            v.overview().is_err(),
+            "the path does not exist, so it fails"
+        );
+
+        let written = log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(written.len(), 1, "one outage, one line");
+        let line = &written[0];
+        // The premise: the hostile name really did reach the diagnostic. Without
+        // this the assertion below passes on a line that never carried it.
+        assert!(
+            line.contains("okf-") && line.contains("dnab"),
+            "the bundle name should be in the operator's line: {line:?}"
+        );
+        if let Some(name) = line.chars().find_map(rto_graph::screen::invisible_name) {
+            panic!("a bundle name put {name} in the operator's line: {line:?}");
+        }
+        // Escaped, not stripped, and the same rule for all four: the operator
+        // learns which characters were in the name rather than that something
+        // was.
+        assert!(
+            line.contains("u{202e}")
+                && line.contains("u{200b}")
+                && line.contains("u{2066}")
+                && line.contains("u{061c}"),
+            "each strange character should be named, not silently removed: {line:?}"
+        );
+    }
     /// Stderr is written from exactly one place in this module's production code.
     ///
     /// The counting test above measures the sink; this is what stops a second
