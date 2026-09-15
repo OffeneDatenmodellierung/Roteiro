@@ -2576,3 +2576,112 @@ fn scope_here_in_an_ordinary_repository_announces_no_worktree() {
         );
     }
 }
+
+/// **A worktree at a detached HEAD is announced honestly** (issue #837).
+///
+/// `git worktree add --detach`, or adding one at a tag or a commit, produces a
+/// perfectly ordinary worktree with no branch. The announcement said "hosting
+/// this checkout at this branch's revision" unconditionally, so in exactly the
+/// case it had just reported as having no branch it asserted one — a note whose
+/// whole job is to stop the server misrepresenting what it serves.
+#[test]
+fn scope_here_in_a_detached_worktree_does_not_claim_a_branch() {
+    let fx = Scratch::new("scope-here-detached");
+    let home = IsolatedHome::new("scope-here-detached");
+    let main = fx.join("plain");
+    make_repo(&main);
+
+    let checkout = fx.join("detached");
+    git(
+        &main,
+        &["worktree", "add", "-q", "--detach", utf8_arg(&checkout)],
+    );
+
+    let addr = free_addr();
+    let server = Server::spawn(
+        &["serve", "--scope", "here", "--addr", &addr],
+        &checkout,
+        &home,
+    );
+    let mut stderr = String::new();
+    server
+        .wait_for_line(|l| l.contains(" listening on http://"), &mut stderr)
+        .unwrap_or_else(|| panic!("no listening line; stderr:\n{stderr}"));
+
+    let note = stderr
+        .lines()
+        .find(|l| l.contains("linked git WORKTREE"))
+        .unwrap_or_else(|| panic!("no worktree note at all; stderr:\n{stderr}"));
+    assert!(
+        note.contains("at a detached HEAD"),
+        "a detached worktree must be reported as detached: {note}"
+    );
+    assert!(
+        !note.contains("branch"),
+        "the announcement claims a branch for a checkout that has none: {note}"
+    );
+}
+
+/// **The explorer prints the scanned-roots note too** (issues #580 and #837).
+///
+/// `run_explorer` builds its workspace set itself and never calls
+/// `build_serve_workspaces`, where that note was printed — so the depth
+/// diagnostic and the worktree clause were both invisible on the surface that
+/// actually shows a person the repository list, while the documentation for both
+/// issues described the behaviour as the explorer's.
+///
+/// Driven against **both** surfaces from one fixture, because one startup summary
+/// reached by two unshared paths is precisely the shape that let #806's five
+/// markdown-link scanners and #787's two walkers come apart.
+#[test]
+fn both_serve_and_explorer_report_the_worktrees_a_root_walked_past() {
+    for cmd in ["serve", "explorer"] {
+        let fx = Scratch::new(&format!("roots-note-{cmd}"));
+        let home = IsolatedHome::new(&format!("roots-note-{cmd}"));
+        let root = fx.join("ws");
+        std::fs::create_dir_all(&root).expect("mkdir root");
+        let main = root.join("plain");
+        make_repo(&main);
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                utf8_arg(&root.join("checkout")),
+                "-b",
+                "side",
+            ],
+        );
+        make_repo(&root.join("other"));
+        write_config(&home, &[("pool", &root)]);
+
+        let addr = free_addr();
+        let server = Server::spawn(&[cmd, "--scope", "all", "--addr", &addr], &root, &home);
+        let mut stderr = String::new();
+        server
+            .wait_for_line(|l| l.contains(" listening on http://"), &mut stderr)
+            .unwrap_or_else(|| panic!("{cmd}: no listening line; stderr:\n{stderr}"));
+
+        let note = stderr
+            .lines()
+            .find(|l| l.contains("scanned one level deep"))
+            .unwrap_or_else(|| {
+                panic!("`roteiro {cmd}` printed no scanned-roots note at all; stderr:\n{stderr}")
+            });
+        for expected in [
+            "1 subdirectory skipped for being a linked git worktree",
+            // The remedy, named where the count is — a diagnostic that reports a
+            // loss without naming the way back is half a diagnostic.
+            "include_worktrees = true",
+            // And the two real repositories are still hosted, so this is not a
+            // note produced by having skipped everything.
+            "2 repos hosted",
+        ] {
+            assert!(
+                note.contains(expected),
+                "`roteiro {cmd}`'s scanned-roots note must contain {expected:?}; got: {note}"
+            );
+        }
+    }
+}
