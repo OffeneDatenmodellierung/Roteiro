@@ -11,8 +11,8 @@ architectural-significance: MEDIUM  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.8"
-last-modified: 2026-09-08
+version: "1.9"
+last-modified: 2026-09-14
 confluence-url:
 ---
 
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | Accepted |
 | **Architectural Significance** | MEDIUM |
 | **Domain** | Developer Tooling |
-| **Document version** | 1.8 |
+| **Document version** | 1.9 |
 
 ## Reference
 
@@ -65,6 +65,7 @@ Everything else is a **value**, and values follow the ordinary order above. Most
 | `[ingest] ocr`/`vision`/`audio` | value | **corrected on inspection.** Each defaults to `true`, so a project setting `true` grants nothing that is not already granted. What actually gates them is the **build feature** — `image-ocr`, `image-vision`, `audio-transcribe`, none of them default — which is a stronger gate than a config default, being a decision taken at install. Should any default ever flip to `false`, these become capability keys and this row is wrong |
 | `[ingest] prose`/`pdf` | value | no model and no repository-supplied code: parsing, which is what the rest of extraction already does |
 | `[paths] model_store`, `[telemetry] file` | value | test 3 as sharpened above. These change **where** Roteiro writes, not **whether** — it writes to `~/.roteiro` by default regardless |
+| `[paths] exclude`, `[paths] opaque` | value | **no clause of the test can fire on a key that only subtracts.** Setting either causes strictly *less* to happen — fewer nodes, fewer bytes read — so it fails clause 1 of the capability test (*"causes something to happen that otherwise would not"*) before any of 1–5 is reached. The built-in default is *nothing declared*, which is the permissive end, so the capability rule's own corollary applies in reverse: the key can only deny. It is nonetheless the **second** key whose every setting is a denial, after `[mcp] tools`, and it takes the same additive layering for the same reason — see below (v1.9) |
 | `[models]`, `[debt]`, `[serve]`, `[infer]`, `[duplicates]`, `[workspace]`, `[[links]]`, `[pins]`, `[telemetry] rotation`/`format`, `[media] silence_rms`/`image_variance` | value | settings, not permissions |
 | `[mcp] tools` | value — but see below | test 1. The default already advertises every tool, so a project file setting it causes nothing that would not otherwise happen. It is nonetheless the **first key whose every setting is a denial**, and its layers therefore intersect rather than override (v1.5) |
 
@@ -114,6 +115,60 @@ in one table, over two different surfaces, would be worse than a second table.
 `RemoteConfig` implements the inversion with a bespoke `overlaid_with`. A second bespoke implementation is how a rule decays into a convention, and a third is how a convention decays into folklore. A capability key's layering must therefore be carried by its **type**, so that declaring a key a capability and getting its precedence right are *the same act* rather than two things a future author has to remember to do together — the same reasoning that put debt exclusions behind one function and truncation behind one `window`.
 
 `roteiro config` reports a key's class beside its layer, because a reader who sees one key inherit and its neighbour refuse to cannot otherwise tell whether that is the rule or a bug.
+
+### Three states, because two of the requests are not the same one (v1.9)
+
+`[paths] exclude` and `[paths] opaque` are the **only** keys here that decide
+what is *in the graph* rather than how it is reported, and that is the whole
+reason they exist. Before them there was no mechanism to exclude a path from
+extraction at all (issue #840): the one exclusion list in this file is
+`[debt] ignore`, which is scoped to markers and filters the **report**. The node
+stays in the store, and `search`, `explain`, `list_kind`, `path` and **`export`**
+all still see it — so a repository could suppress a false finding from the report
+it reads and still publish it to a consumer.
+
+The two keys are two of **three** states, and the third is the default:
+
+| class | produces | the decision that needs it |
+|---|---|---|
+| *(nothing declared)* | everything, as before | every path not named |
+| `opaque` | a `file` node and nothing else — path, name, blob id, byte and line counts, and `meta.scan = "opaque"` | a corpus manifest must be **committed in every storage mode**, so that a missing source is *detectable rather than silent* ([[docs/adr/0026-research-knowledge-layer.md]] Resolved question 2). It must therefore be **in** the graph, and must equally not be mined: as data it is otherwise shredded into one `config_key` node per JSON leaf and its English prose scanned for intent-debt markers |
+| `exclude` | no node, and the bytes are never read | a `raw/` source root reached by an explicit ingest path is graphed **once**, as its summary, not twice ([[docs/adr/0026-research-knowledge-layer.md]] Implementation step 1) |
+
+*"Do not mine this as configuration"* and *"do not put this in the graph"* are
+different requests and two live decisions need one each, which is why two states
+would not do. A **fourth** — in the graph, mined, but muted from the reports —
+already exists and is `[debt] ignore`; it is deliberately not reproduced here.
+
+**The rule is consulted by every reader, and this is the part that is easy to
+under-build.** There are two independent readers of committed blobs: derived
+extraction, and the authored layer, which walks every path on its own and
+classifies **by content, not by location**. A document that declares `type: adr`
+is parsed as one of this project's decisions *wherever it sits* — the rule that
+lets a repository keep its decisions outside `docs/adr/`, and exactly what makes
+an ingested third-party document dangerous. An exclusion applied at extraction
+alone would therefore remove a manifest's `config_key` nodes while still parsing
+a stranger's paper as one of ours. The policy is carried in the resolved
+ingestion configuration, which already reaches every entry point that reads
+repository bytes, so a reader that has one has the other.
+
+**Nothing is excluded by a built-in default** — not `raw/`, not `vendor/`. A
+built-in would silently drop a directory out of the graph of every repository
+that happens to have one, on upgrade, with nothing said, and the only way to
+notice would be to know the default existed. Declaring is visible in review;
+un-declaring a default is not.
+
+**Both lists merge across layers, and neither has a reset.** They merge for the
+reason `[debt] ignore` does (v1.1). They have no reset because a reset on an
+exclusion would let a committed project file *widen* what is read over a user's
+own declaration — re-admitting, on their machine, a corpus they excluded
+machine-wide, by a line somebody else merged. Narrowing is the safe direction for
+an exclusion, so only narrowing is expressible. That is the same asymmetry v1.4's
+capability rule draws, reached from the other side: there the project layer may
+deny and not grant; here it may only subtract, so there is nothing to invert.
+
+A path matching both lists is **excluded**: between two declarations about the
+same bytes, the narrower one wins.
 
 **Format: TOML, and only TOML.** Not YAML.
 
@@ -173,6 +228,8 @@ addr = "127.0.0.1:8080"
 
 [paths]
 model_store = "~/.roteiro/models"   # today only the ROTEIRO_HOME env var
+exclude = ["raw/**"]                # not in the graph at all          (v1.9)
+opaque  = ["manifest/**"]           # a file node, nothing mined       (v1.9)
 ```
 
 - **Loading:** parse user file, then project file, then apply CLI flags — each layer overriding the previous; a missing file is simply skipped; a present-but-malformed file is a hard error naming the offending key/line.
@@ -227,3 +284,4 @@ Project direction incorporated: add a config file, but keep it **optional and fu
 | 1.6 | 2026-09-07 | Amended (no issue; implemented directly at the owner's request). Adds `[serve] max_client_tool_bytes` to the table above as a **capability**, and — more to the point — **§111's type finally exists.** That section required a capability key's layering to be carried by its type "so that declaring a key a capability and getting its precedence right are *the same act*", and warned that a second bespoke implementation is how the rule decays into a convention and a third into folklore. On inspection there were already **three** hand-written copies of "a project may deny but never grant": `rto_remote::ConfigGrant`, `rto_exec::LintConfigGrant`, and the reasoning that would have been written a fourth time here. They are now one `rto_graph::layering::Grant<T>`, which all three delegate to. The generalisation is smaller than the prose suggests: "deny but never grant" and "lower but never raise" are one comparison under `Ord`, since `false < true` and a tighter bound is a smaller number. Two things did **not** generalise and are documented where they live — `project_denied` and `project_grant_ignored` report what a *file said*, which is a `bool`-shaped question rather than a layering one, so each grant type keeps its own; and the comparison is `<=`, not `<`, so a project restating the baseline applies rather than being misreported as an overruled grant. |
 | 1.7 | 2026-09-07 | Amended (issue #578). Adds `[serve] prefix_cache_mb` to the table above as a **capability**, by the same clause 4 as `max_client_tool_bytes` and with the same `Grant` carrying it. Recorded because it is the first key added *after* v1.6 built the shared type, and so the first evidence that §111's requirement — that declaring a key a capability and getting its precedence right be *one act* — actually holds in practice rather than only in principle: the key's whole layering is `Grant::from_layers(project, user, 0).as_effective()`, one line, with no new rule written and none available to get wrong. It is also the first key at a *different width* to reach the type, `u64` where the others are `bool` and `usize`, which is what the generalisation was for. |
 | 1.8 | 2026-09-08 | Amended (no issue). **Re-grounds v1.5's reason for `--tools` narrowing rather than winning, which cited issue #579 — now closed *not planned*.** The conclusion is unchanged and the argument is stronger without it. v1.5 argued the invocation "is not reliably written by a person" because *Roteiro itself might one day* write a `roteiro mcp …` line into a third-party agent's config (#579). That will not happen, and it was always the weaker form of the point: it rested on a hypothetical feature rather than on what an MCP invocation already is. It is **argv in a client's configuration file** — written once by whoever wired the client up, then committed and shared with a team. Observed rather than supposed: a bundle in use against this server carried `args: [mcp, --tools, query]` in a checked-in `config.yaml`, which is precisely the "consent by pull request, granted by someone else, noticed by nobody" shape [[docs/adr/0019-remote-model-tier.md]] §3 names — reached here through a *narrowing* flag rather than a granting one, which is why intersection is the right regime whoever writes it. No key changes class and no precedence moves; this replaces a citation that no longer points at anything with the reason that was underneath it. |
+| 1.9 | 2026-09-14 | Amended (issue #840, [[docs/adr/0026-research-knowledge-layer.md]] step 1). **Two new keys — `[paths] exclude` and `[paths] opaque` — the first in this file that decide what is *in the graph* rather than how it is reported.** Until now the only exclusion list here was `[debt] ignore`, which is scoped to markers and filters the **report**: the node stays in the store and `search`, `explain`, `list_kind`, `path` and `export` all still see it, so a repository could mute a false finding from the report it reads and still publish it to a consumer. The new keys remove the node instead, which needs no per-surface honouring — a node that was never stored cannot be exported. **Three states, not two**, because *"do not mine this as configuration"* and *"do not put this in the graph"* are different requests that two live decisions need one each: `opaque` keeps a `file` node with identity and no derived content, so a committed corpus manifest stays **detectable rather than silent** while not being mined; `exclude` produces no node and never reads the bytes, so a document reached by an explicit ingest path is graphed once rather than twice. A fourth state — mined but muted — already exists and is `[debt] ignore`, deliberately not reproduced. Both classify as **values** under v1.4's test, which no clause of can fire on a key that only subtracts. Both lists **merge** across layers as `[debt] ignore` does, and neither takes a **reset**: a reset on an exclusion would let a committed project file widen what is read over a user's own declaration, and narrowing is the safe direction. **Nothing is excluded by a built-in default**, because a built-in would drop a directory out of every existing repository's graph on upgrade with nothing said. Records the requirement that decides whether the mechanism works at all: the policy is consulted by **every** reader of repository bytes, not by extraction alone — the authored layer walks every path independently and classifies by *content*, so a `type: adr` declaration is honoured wherever the file sits, and an exclusion reaching one reader and not the other would remove a manifest's `config_key` nodes while still parsing a stranger's paper as one of this project's decisions. |

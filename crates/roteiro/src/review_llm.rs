@@ -406,11 +406,20 @@ fn worktree_graph(
     let mut store = rto_graph::Store::open_in_memory()?;
     let registry = rto_graph::Registry::new(ingest);
     rto_graph::sync_worktree(&mut store, &graph_repo, &cache, &registry)?;
-    crate::apply_authored_layer(&mut store, graph_repo.walk_blobs()?, &|blob| {
-        Ok(graph_repo
-            .workdir()
-            .and_then(|w| std::fs::read(w.join(&blob.path)).ok()))
-    })?;
+    // `walk_blobs` rather than `authored_blobs` — this caller wants the whole
+    // tree from disk — so the `[paths]` policy is supplied explicitly here. That
+    // is the case `authored_docs_from` re-checks for: a blob list built outside
+    // `rto-spec` cannot have been filtered by it.
+    crate::apply_authored_layer(
+        &mut store,
+        graph_repo.walk_blobs()?,
+        &|blob| {
+            Ok(graph_repo
+                .workdir()
+                .and_then(|w| std::fs::read(w.join(&blob.path)).ok()))
+        },
+        ingest.paths,
+    )?;
     Ok(store)
 }
 
@@ -678,9 +687,34 @@ impl ReviewSet {
     /// `diff_of` returning `None` is treated as an unreadable diff rather than as
     /// an absent file: it lands in `skipped`, where it is reported, instead of
     /// being dropped on the floor.
-    fn collect(reviewed_sha: &str, names: &str, diff_of: &dyn Fn(&str) -> Option<String>) -> Self {
+    fn collect(
+        reviewed_sha: &str,
+        names: &str,
+        paths: &rto_graph::PathPolicy,
+        diff_of: &dyn Fn(&str) -> Option<String>,
+    ) -> Self {
         let mut set = Self::default();
         for path in names.lines().filter(|p| !p.is_empty()) {
+            // **The egress gate, and it is here because this is the one place
+            // either route turns a name into bytes.** `review --llm` differs in
+            // kind from every other reader of `[paths]`: it does not *store* what
+            // it reads, it **sends** it, so a declaration is an egress control and
+            // not merely a graph filter. A user who excludes a corpus of
+            // third-party documents will take that to mean the bytes do not leave
+            // the machine, and a filter holding on one route into the model and
+            // not another reads as a guarantee while not being one.
+            //
+            // Asked **before** `diff_of`, which shells out to `git diff` and reads
+            // the file: that is what makes `exclude`'s "the bytes are never read"
+            // true here rather than approximately true.
+            //
+            // Gating the two callers instead was the first attempt and it left the
+            // replay path open — `files_at` builds a diff for every changed name
+            // and hands it straight to `review_file`. One rule, at the chokepoint,
+            // is what a third caller inherits without being told.
+            if !paths.classify(path).mines() {
+                continue;
+            }
             let diff = diff_of(path).unwrap_or_default();
             // No hunk header means there is no text to review: git emits
             // `Binary files a/… and b/… differ` for a blob, and a bare header for
@@ -703,7 +737,12 @@ impl ReviewSet {
 ///
 /// # Errors
 /// If the diff cannot be reconstructed.
-pub fn files_at(repo: &Path, sha: &str, main: &str) -> anyhow::Result<ReviewSet> {
+pub fn files_at(
+    repo: &Path,
+    sha: &str,
+    main: &str,
+    paths: &rto_graph::PathPolicy,
+) -> anyhow::Result<ReviewSet> {
     let fork = fork_point(repo, sha, main)?;
     anyhow::ensure!(
         fork != sha,
@@ -712,7 +751,7 @@ pub fn files_at(repo: &Path, sha: &str, main: &str) -> anyhow::Result<ReviewSet>
     );
     let names = git(repo, &["diff", "--name-only", &fork, sha])
         .ok_or_else(|| anyhow::anyhow!("git diff --name-only {fork}..{sha} failed"))?;
-    Ok(ReviewSet::collect(sha, &names, &|path| {
+    Ok(ReviewSet::collect(sha, &names, paths, &|path| {
         crate::diff::unified(repo, &[&fork, sha], path)
     }))
 }
@@ -860,7 +899,7 @@ pub fn run_replay(
     let object_cache =
         rto_graph::ObjectCache::open(graph_repo.common_dir().join("roteiro").join("objects"))?;
     for (idx, sha) in shas.iter().enumerate() {
-        let set = files_at(repo, sha, &main)?;
+        let set = files_at(repo, sha, &main, ingest.paths)?;
         let graph = graph_at(&graph_repo, &object_cache, ingest, arm, sha)?;
         run.attempted_shas.insert((*sha).to_owned());
         report.commits += 1;
@@ -882,7 +921,14 @@ pub fn run_replay(
         // commit, not per run: a verdict is about one change.
         let mut reported: Vec<String> = Vec::new();
         for file in &set.files {
-            let sources = |p: &str| blob_at(repo, sha, p);
+            // Every byte that reaches the model passes through this closure, so
+            // the policy is asked **here** rather than only over the change set.
+            // `context_for` follows a file's parent modules, which a filtered
+            // change set does not cover: a narrow `exclude` naming one module
+            // file would otherwise be read and sent as an admitted file's parent.
+            // This is the last gate before egress, which is the one worth being
+            // total.
+            let sources = |p: &str| ingest.class(p).mines().then(|| blob_at(repo, sha, p))?;
             let context = context_for(graph.as_ref(), file, &sources)?;
             report.context_items += context.items.len();
             report.context_dropped += context.dropped_items;
@@ -1258,8 +1304,34 @@ fn warn_if_reviewing_own_work(repo: &Path, base: Option<&str>, model: &str) {
     );
 }
 
+/// Read a working-tree file's text, **or refuse it** because the repository
+/// declared its path out of the scan (ADR-0007 `[paths]`).
+///
+/// A named function rather than an inline closure because it is the **last gate
+/// before egress**: everything `context_for` and `review_file` put in front of a
+/// model passes through here, and a rule that decides what leaves the machine
+/// should be findable by name. Filtering the change set is not sufficient on its
+/// own — `context_for` follows a file's *parent modules*, so a narrow `exclude`
+/// naming one module file would otherwise be read and sent as an admitted file's
+/// parent, which a filtered file set does not cover.
+///
+/// It refuses `opaque` as well as `excluded`: an opaque path's bytes may be
+/// measured, never mined, and handing them to a model is mining by any reading.
+#[cfg(feature = "inference-local-models")]
+fn worktree_sources<'a>(
+    repo: &'a Path,
+    paths: &'a rto_graph::PathPolicy,
+) -> impl Fn(&str) -> Option<String> + 'a {
+    move |p: &str| {
+        paths
+            .classify(p)
+            .mines()
+            .then(|| std::fs::read_to_string(repo.join(p)).ok())?
+    }
+}
+
 #[cfg(any(feature = "serve", feature = "inference-local-models"))]
-fn changed_files(repo: &Path, base: Option<&str>) -> ReviewSet {
+fn changed_files(repo: &Path, base: Option<&str>, paths: &rto_graph::PathPolicy) -> ReviewSet {
     let head = git(repo, &["rev-parse", "HEAD"]).unwrap_or_else(|| "HEAD".to_owned());
     let range: Vec<String> = match base {
         Some(b) => vec![b.to_owned(), "HEAD".to_owned()],
@@ -1274,7 +1346,10 @@ fn changed_files(repo: &Path, base: Option<&str>) -> ReviewSet {
     // `ReviewSet::collect` and there is no way to build one around it. This used
     // to filter on `!diff.is_empty()` alone, which sent binary blobs and
     // mode-only records to the model under a contract they cannot satisfy.
-    ReviewSet::collect(&head, &names, &|path| {
+    // The policy is applied inside `collect`, not here: both this path and the
+    // replay path build their diffs there, and one rule at the shared chokepoint
+    // is what stops a second route being opened without one.
+    ReviewSet::collect(&head, &names, paths, &|path| {
         let r: Vec<&str> = range.iter().map(String::as_str).collect();
         crate::diff::unified(repo, &r, path)
     })
@@ -1325,7 +1400,7 @@ pub fn run_llm(
     // trailer range below all name the same commit.
     let base = resolve_llm_base(repo, base)?;
     let base = base.as_deref();
-    let ReviewSet { files, skipped } = changed_files(repo, base);
+    let ReviewSet { files, skipped } = changed_files(repo, base, ingest.paths);
 
     if files.is_empty() && skipped.is_empty() {
         println!("no changes to review");
@@ -1374,7 +1449,7 @@ pub fn run_llm(
     // reported.
     let mut reported: Vec<String> = Vec::new();
     for file in &files {
-        let sources = |p: &str| std::fs::read_to_string(repo.join(p)).ok();
+        let sources = worktree_sources(repo, ingest.paths);
         let context = context_for(graph.as_ref(), file, &sources)?;
         let outcome = review_file(&engine, model, file, &context, &checks, &sources)?;
         if outcome.reasoning_truncated {
@@ -1461,6 +1536,124 @@ mod tests {
         FileUnderReview, ReviewArm, ReviewSet, context_for, corpus_shas, files_at, fork_point,
         graph_at, main_ref, parent_module_source,
     };
+
+    /// **`[paths] exclude` is an egress control on this command, not only a graph
+    /// filter — and the replay path must honour it too.**
+    ///
+    /// `review --llm` is different in kind from every other reader of the policy:
+    /// it does not *store* what it reads, it **sends** it. A user who writes
+    /// `exclude = ["raw/**"]` over a corpus of third-party documents will
+    /// reasonably take that to mean those bytes do not leave the machine, and a
+    /// filter that holds on one route into the model and not another reads as a
+    /// guarantee while not being one — which is worse than no filter at all.
+    ///
+    /// The live path filters its **names** before any diff is built. The replay
+    /// path reached the model by a different route: [`files_at`] reconstructs a
+    /// unified diff for every changed name and hands `FileUnderReview::diff`
+    /// straight to `review_file`, which embeds it in the prompt
+    /// (`rto_graph::reviewer::build_prompt` → `annotate_diff(&file.diff)`).
+    /// Gating the `sources` closure does not touch that: the diff is already in
+    /// hand before any source is read.
+    ///
+    /// Asserted on the **diff text**, not merely on the path list, because the
+    /// path list is not what egresses.
+    #[test]
+    fn the_replay_path_builds_no_diff_for_a_declared_path() {
+        let dir =
+            std::env::temp_dir().join(format!("roteiro-replay-egress-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let git_at = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "init.defaultBranch=main",
+                ])
+                .args(args)
+                .current_dir(&dir)
+                .status()
+                .expect("run git");
+            assert!(ok.success(), "git {args:?}");
+        };
+        let write = |rel: &str, body: &str| {
+            let path = dir.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).expect("mkdir");
+            std::fs::write(path, body).expect("write");
+        };
+
+        git_at(&["init", "-q"]);
+        write("src/lib.rs", "pub struct Thing;\n");
+        git_at(&["add", "."]);
+        git_at(&["commit", "-q", "-m", "base"]);
+        git_at(&["checkout", "-q", "-b", "work"]);
+        // One admitted file and one the policy will name. The excluded file's
+        // body is the secret: if it appears in any diff, it would have been sent.
+        write("src/lib.rs", "pub struct Thing;\npub struct Two;\n");
+        write("raw/paper.md", "CONFIDENTIAL-CORPUS-BODY\n");
+        git_at(&["add", "."]);
+        git_at(&["commit", "-q", "-m", "work"]);
+
+        let sha = String::from_utf8(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .expect("rev-parse")
+                .stdout,
+        )
+        .expect("utf8");
+        let sha = sha.trim();
+
+        let policy = rto_graph::PathPolicy::new(vec!["raw/**".to_owned()], Vec::new());
+
+        // Without a declaration the corpus body is in the reviewable set — or
+        // this test is measuring nothing.
+        let open =
+            files_at(&dir, sha, "main", rto_graph::PathPolicy::empty()).expect("reconstructs");
+        assert!(
+            open.files
+                .iter()
+                .any(|f| f.diff.contains("CONFIDENTIAL-CORPUS-BODY")),
+            "the corpus body is reviewable without a declaration"
+        );
+
+        let guarded = files_at(&dir, sha, "main", &policy).expect("reconstructs");
+        assert!(
+            !guarded
+                .files
+                .iter()
+                .any(|f| f.diff.contains("CONFIDENTIAL-CORPUS-BODY")),
+            "an excluded path's bytes must not reach a reviewable diff: {:?}",
+            guarded.files.iter().map(|f| &f.path).collect::<Vec<_>>()
+        );
+        assert!(
+            !guarded.files.iter().any(|f| f.path.starts_with("raw/")),
+            "nor its name"
+        );
+        // The negative: the admitted file is still reviewed, so the gate is a
+        // filter rather than an off switch.
+        assert!(
+            guarded.files.iter().any(|f| f.path == "src/lib.rs"),
+            "an admitted file is still reviewed: {:?}",
+            guarded.files.iter().map(|f| &f.path).collect::<Vec<_>>()
+        );
+        // And it is not silently dropped into `skipped`, which announces files as
+        // unreviewable-but-present; an excluded path is not in the change at all.
+        assert!(
+            !guarded.skipped.iter().any(|p| p.starts_with("raw/")),
+            "an excluded path is absent, not announced as skipped: {:?}",
+            guarded.skipped
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
 
@@ -2023,7 +2216,8 @@ mod tests {
             )
             .expect("the graph at a corpus commit assembles")
             .expect("the graph arm yields a store");
-            let set = files_at(&repo_path, sha, &main).expect("the diff reconstructs");
+            let set = files_at(&repo_path, sha, &main, rto_graph::PathPolicy::empty())
+                .expect("the diff reconstructs");
             for file in &set.files {
                 let sources = |p: &str| {
                     std::process::Command::new("git")
@@ -2118,7 +2312,8 @@ mod tests {
                  the silent zero this recipe exists to avoid",
                 &sha[..8]
             );
-            let set = files_at(&repo, sha, &main).expect("the diff reconstructs");
+            let set = files_at(&repo, sha, &main, rto_graph::PathPolicy::empty())
+                .expect("the diff reconstructs");
             assert!(!set.files.is_empty(), "{}: empty diff", &sha[..8]);
             let paths: Vec<&str> = set.files.iter().map(|f| f.path.as_str()).collect();
             for anchor in anchors {
@@ -2160,7 +2355,8 @@ mod tests {
         let corpus = rto_graph::review_corpus::builtin().expect("parses");
         let mut skipped_total = 0;
         for sha in corpus_shas() {
-            let set = files_at(&repo, &sha, &main).expect("reconstructs");
+            let set =
+                files_at(&repo, &sha, &main, rto_graph::PathPolicy::empty()).expect("reconstructs");
             skipped_total += set.skipped.len();
             for path in &set.skipped {
                 assert!(
@@ -2213,7 +2409,8 @@ mod tests {
         let main = main_ref(&repo).expect("checked above");
         let (mut reviewable, mut changed) = (0usize, 0usize);
         for sha in corpus_shas() {
-            let set = files_at(&repo, &sha, &main).expect("reconstructs");
+            let set =
+                files_at(&repo, &sha, &main, rto_graph::PathPolicy::empty()).expect("reconstructs");
             reviewable += set.files.len();
             changed += set.files.len() + set.skipped.len();
         }
@@ -2280,7 +2477,7 @@ mod tests {
         // absent: it is reported, not dropped on the floor.
         let names = "src/real.rs\nassets/beep.wav\nscripts/run.sh\ngone.rs\n";
 
-        let set = ReviewSet::collect("deadbeef", names, &|p| {
+        let set = ReviewSet::collect("deadbeef", names, rto_graph::PathPolicy::empty(), &|p| {
             diffs.get(p).map(|d| (*d).to_owned())
         });
 

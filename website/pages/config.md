@@ -38,6 +38,11 @@ pdf    = true                           <span class="c"># PDF text   (needs the 
 ocr    = true                           <span class="c"># image OCR  (needs the image-ocr feature)</span>
 vision = true                           <span class="c"># image description (needs image-vision)</span>
 
+[paths]                                  <span class="c"># which repository paths the scan reads at all</span>
+exclude = ["raw/**"]                     <span class="c"># not in the graph at all — no node, bytes never read</span>
+opaque  = ["manifest/**"]                <span class="c"># a file node and nothing else — no content, no config</span>
+                                         <span class="c"># keys, no markers, not an ADR however it declares itself</span>
+
 [infer]
 min_confidence = 0.4                     <span class="c"># cosine-similarity floor for a suggestion</span>
 top_k          = 5                       <span class="c"># max suggestions per node</span>
@@ -105,4 +110,19 @@ beside the project count, so a near-empty workspace says why.</div>
 
 <div class="note">Turning an <code>[ingest]</code> class off changes what <code>sync</code>
 extracts, so affected blobs are re-processed on the next run — the content-addressed
-cache folds the ingestion config into its key.</div>
+cache folds the ingestion config into its key. <code>[paths]</code> is folded into the same
+key, for the same reason.</div>
+
+<div class="note"><strong><code>[paths]</code> removes the node; <code>[debt] ignore</code>
+only mutes the report.</strong> They look alike and are not: an ignored path still has its
+nodes in the store, so <code>search</code>, <code>explain</code> and <code>roteiro export</code>
+still see it. A path under <code>exclude</code> has none, and one under <code>opaque</code> has
+only its identity — path, size, blob id — with nothing derived from what the bytes say.
+<strong>Three states, because two of the requests differ:</strong> a committed data manifest
+usually wants <code>opaque</code> (still findable, so a missing source is detectable, but not
+mined into hundreds of "configuration settings" and false debt markers), while a corpus of source
+documents you ingest another way wants <code>exclude</code>. Both are consulted by every reader,
+including the one that decides whether a markdown file is one of your ADRs — so a downloaded
+document carrying <code>type: adr</code> under a declared path is not adopted as your decision.
+<strong>Nothing is excluded by default</strong>, including <code>raw/</code>: a built-in would
+drop a directory out of your graph on upgrade without saying so.</div>
