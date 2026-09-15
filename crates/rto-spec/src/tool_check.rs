@@ -149,7 +149,7 @@ impl ToolCheck {
 pub fn tool_check(
     store: &Store,
     root: Option<&Path>,
-    paths: &rto_graph::PathPolicy,
+    ingest: rto_graph::IngestConfig<'_>,
 ) -> Result<ToolCheck, rto_graph::StoreError> {
     let Some(root) = root else {
         return Ok(ToolCheck::not_run(
@@ -180,9 +180,16 @@ pub fn tool_check(
     // match alone is not freshness now that `[paths]` is part of it: the same
     // commit under a different declaration is a different graph, and answering
     // from it would be the confident wrong answer `not-run` exists to refuse.
-    let want_env = rto_graph::extraction_identity(&rto_graph::Registry::new(
-        rto_graph::IngestConfig::default().with_paths(paths),
-    ));
+    //
+    // Built from the caller's **whole** ingestion configuration, which is why
+    // this takes an `IngestConfig` rather than a `PathPolicy`. The identity folds
+    // the extraction toggles as well as the policy, so reconstructing it from
+    // `IngestConfig::default()` — every toggle on — would disagree with any graph
+    // synced under `[ingest] prose = false` on a perfectly fresh tree, and refuse
+    // **permanently**. A guard that exists to refuse wrong answers must not
+    // refuse all of them, and this is a case the type can prevent: there is no
+    // longer a way to call this with the paths and forget the toggles.
+    let want_env = rto_graph::extraction_identity(&rto_graph::Registry::new(ingest));
     match store.sync_state()? {
         Some(synced) if synced == head => {}
         Some(synced) => {
@@ -215,7 +222,7 @@ pub fn tool_check(
         )));
     }
 
-    let layer = match authored_layer(&repo, GraphSource::Committed, paths) {
+    let layer = match authored_layer(&repo, GraphSource::Committed, ingest.paths) {
         Ok(layer) => layer,
         Err(e) => {
             return Ok(ToolCheck::not_run(format!(
@@ -326,7 +333,7 @@ mod tests {
         let store = synced(&derived(), &tree);
 
         let out =
-            tool_check(&store, Some(&dir), rto_graph::PathPolicy::empty()).expect("tool_check");
+            tool_check(&store, Some(&dir), rto_graph::IngestConfig::default()).expect("tool_check");
         assert_eq!(out.gate, Gate::Pass, "{out:?}");
         let report = out.report.expect("a check that ran has a report");
         assert_eq!(report.adrs, 1);
@@ -353,7 +360,7 @@ mod tests {
         let store = synced(&derived(), &tree);
 
         let out =
-            tool_check(&store, Some(&dir), rto_graph::PathPolicy::empty()).expect("tool_check");
+            tool_check(&store, Some(&dir), rto_graph::IngestConfig::default()).expect("tool_check");
         assert_eq!(out.gate, Gate::Fail, "{out:?}");
         let report = out.report.expect("report");
         assert_eq!(report.violations.len(), 1, "{:?}", report.violations);
@@ -388,7 +395,7 @@ mod tests {
         );
 
         let out =
-            tool_check(&store, Some(&dir), rto_graph::PathPolicy::empty()).expect("tool_check");
+            tool_check(&store, Some(&dir), rto_graph::IngestConfig::default()).expect("tool_check");
         assert_eq!(out.gate, Gate::Pass);
         assert_eq!(store.node_count().unwrap(), before.0, "nodes changed");
         assert_eq!(store.edge_count().unwrap(), before.1, "edges changed");
@@ -416,7 +423,7 @@ mod tests {
         let store = synced(&derived(), "0000000000000000000000000000000000000000");
 
         let out =
-            tool_check(&store, Some(&dir), rto_graph::PathPolicy::empty()).expect("tool_check");
+            tool_check(&store, Some(&dir), rto_graph::IngestConfig::default()).expect("tool_check");
         assert_eq!(out.gate, Gate::NotRun, "{out:?}");
         assert!(out.report.is_none(), "a not-run check has no report");
         let reason = out.not_run_reason.expect("reason");
@@ -432,7 +439,7 @@ mod tests {
     #[test]
     fn a_project_with_no_repository_reports_not_run_and_no_report() {
         let store = Store::open_in_memory().expect("store");
-        let out = tool_check(&store, None, rto_graph::PathPolicy::empty()).expect("tool_check");
+        let out = tool_check(&store, None, rto_graph::IngestConfig::default()).expect("tool_check");
         assert_eq!(out.gate, Gate::NotRun);
         assert!(out.report.is_none(), "a not-run check has no report");
         assert!(
@@ -454,7 +461,7 @@ mod tests {
         let store = Store::open_in_memory().expect("store");
 
         let out =
-            tool_check(&store, Some(&dir), rto_graph::PathPolicy::empty()).expect("tool_check");
+            tool_check(&store, Some(&dir), rto_graph::IngestConfig::default()).expect("tool_check");
         assert_eq!(out.gate, Gate::NotRun, "{out:?}");
         assert!(
             out.not_run_reason

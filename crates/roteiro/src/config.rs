@@ -1729,7 +1729,13 @@ pub fn debt_ignore_for(
     Ok(loaded.effective.debt.ignore.unwrap_or_default())
 }
 
-/// The **path policy** (`[paths]`) declared by `project`'s own repository.
+/// The **ingestion configuration** — `[paths]` *and* `[ingest]` — declared by
+/// `project`'s own repository.
+///
+/// Both halves, returned together, because the extraction **identity** folds both
+/// and a caller reconstructing it from one of them plus a default for the other
+/// gets a string that matches no graph any repository ever synced. Returning the
+/// pair from one load is what stops that being possible to write.
 ///
 /// The sibling of [`debt_ignore_for`], following the same rule for the same
 /// reason: a surface that answers about a project reads *that project's*
@@ -1748,9 +1754,9 @@ pub fn debt_ignore_for(
 pub fn path_policy_for(
     ws: &rto_graph::Workspace,
     project: Option<&str>,
-) -> anyhow::Result<rto_graph::PathPolicy> {
+) -> anyhow::Result<(rto_graph::PathPolicy, IngestConfig)> {
     let Some(root) = ws.project_root(project)? else {
-        return Ok(rto_graph::PathPolicy::default());
+        return Ok((rto_graph::PathPolicy::default(), IngestConfig::default()));
     };
     let loaded = load(&root).map_err(|e| {
         anyhow::anyhow!(
@@ -1758,7 +1764,10 @@ pub fn path_policy_for(
             root.display()
         )
     })?;
-    Ok(loaded.effective.paths.policy())
+    Ok((
+        loaded.effective.paths.policy(),
+        loaded.effective.ingest.clone(),
+    ))
 }
 
 /// Overlay the `[debt] ignore` **exclusion list**: `over`'s patterns are

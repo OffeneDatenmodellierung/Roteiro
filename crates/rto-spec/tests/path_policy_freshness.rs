@@ -79,7 +79,7 @@ fn the_read_only_check_refuses_a_graph_built_under_another_policy() {
     // Asked under the policy the graph was built with: current, so it runs. This
     // half is what stops the guard from being "always refuse", which would pass
     // the assertion below while making the tool useless.
-    let current = rto_spec::tool_check(&store, Some(&dir), PathPolicy::empty()).expect("check");
+    let current = rto_spec::tool_check(&store, Some(&dir), IngestConfig::default()).expect("check");
     assert_ne!(
         current.gate,
         Gate::NotRun,
@@ -90,7 +90,12 @@ fn the_read_only_check_refuses_a_graph_built_under_another_policy() {
     // Asked under a different one. The tree still matches exactly, so nothing
     // the old check looked at has moved.
     let policy = PathPolicy::new(Vec::new(), vec!["manifest/**".to_owned()]);
-    let stale = rto_spec::tool_check(&store, Some(&dir), &policy).expect("check");
+    let stale = rto_spec::tool_check(
+        &store,
+        Some(&dir),
+        IngestConfig::default().with_paths(&policy),
+    )
+    .expect("check");
     assert_eq!(
         stale.gate,
         Gate::NotRun,
@@ -103,6 +108,48 @@ fn the_read_only_check_refuses_a_graph_built_under_another_policy() {
             .is_some_and(|w| w.contains("sync")),
         "and must say what to do about it: {:?}",
         stale.not_run_reason
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// **A repository that disables an `[ingest]` toggle must still be checkable.**
+///
+/// `extraction_identity` folds the extraction toggles *and* the path policy, so
+/// reconstructing the expected identity from `IngestConfig::default()` — all
+/// toggles on — makes it disagree with any graph synced under `prose = false`,
+/// permanently, on a perfectly fresh tree. That turns a freshness guard into a
+/// blanket refusal for every repository using `[ingest]`, which is a worse defect
+/// than the staleness it was added to catch: the guard is supposed to refuse
+/// *wrong* answers, not all of them.
+#[test]
+fn a_disabled_ingest_toggle_does_not_permanently_refuse_the_check() {
+    let dir = fresh_dir("toggles");
+    git(&dir, &["init", "-q"]);
+    write(&dir, "src/lib.rs", "pub struct Thing;\n");
+    write(&dir, "README.md", "# prose\n");
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+
+    let repo = Repo::discover(&dir).expect("discover");
+    let cache = ObjectCache::open(repo.common_dir().join("roteiro/objects")).expect("cache");
+    let mut store = Store::open_in_memory().expect("store");
+
+    // Synced with prose off — an ordinary, supported configuration.
+    let toggles = IngestConfig {
+        prose: false,
+        ..IngestConfig::default()
+    };
+    sync(&mut store, &repo, &cache, &Registry::new(toggles)).expect("cold sync");
+
+    // Asked with the SAME configuration. The graph is at HEAD and was built under
+    // exactly this ingest config, so there is nothing stale about it.
+    let verdict = rto_spec::tool_check(&store, Some(&dir), toggles).expect("check");
+    assert_ne!(
+        verdict.gate,
+        Gate::NotRun,
+        "a fresh graph under a non-default `[ingest]` must still be checkable: {:?}",
+        verdict.not_run_reason
     );
 
     std::fs::remove_dir_all(&dir).ok();

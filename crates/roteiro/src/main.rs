@@ -17673,10 +17673,16 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
                 // path the repository excluded must be excluded here too or the
                 // tool reports drift against files the graph deliberately does
                 // not hold.
-                let paths =
+                // Both halves of that project's ingestion configuration, not
+                // just `[paths]`: `tool_check` compares the extraction identity,
+                // which folds the `[ingest]` toggles too, so supplying the policy
+                // and defaulting the toggles would refuse every repository that
+                // turns one off.
+                let (paths, toggles) =
                     config::path_policy_for(&self.workspace, project).map_err(|e| e.to_string())?;
+                let ingest = toggles.resolve(&paths);
                 self.run(project, |store| {
-                    rto_spec::tool_check(store, root.as_deref(), &paths)
+                    rto_spec::tool_check(store, root.as_deref(), ingest)
                 })
             }
             "debt" => {
