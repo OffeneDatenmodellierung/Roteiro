@@ -31,7 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and in `[standalone]`. Either way, `roteiro serve`, `roteiro mcp` and the explorer
   now report how many subdirectories each root walked past for being a worktree, in
   the same startup sentence that already reported the ones holding no `.git` — the
-  skip is never silent, which was half the complaint.
+  skip is never silent, which was half the complaint. That includes worktrees found
+  under a `[standalone] roots` entry, whose scan is resolved away to explicit
+  `repos` before the reporting path sees it and which therefore skipped in total
+  silence at first.
 
   A worktree whose **main** checkout lies outside every root is skipped too, and is
   therefore no longer graphed at all. That is deliberate: a scan cannot tell "its
@@ -50,6 +53,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-worktree store, sharing only the content-addressed object cache with the main
   checkout, which cannot mix them: that cache is keyed on
   `(blob oid, path, extractor version, env)`, and one `(path, oid)` is one content.
+- *(explorer)* the explorer prints the **scanned-roots note** at startup, as
+  `serve` and `mcp` already did. It builds its workspace set on its own path and
+  never reached the code that printed it, so the surface that actually shows you
+  the repository list was the one that said least about what it skipped — both
+  this change's worktree clause and the existing "skipped for holding no `.git`"
+  depth diagnostic were invisible there.
+- *(serve)* the "no workspaces to serve" error now names linked worktrees when
+  that is why nothing was hosted, with the count, the directories and both escape
+  hatches. A root holding only worktrees bails before the startup note is reached,
+  so the case that most needs the explanation was the one case that suppressed it.
 - *(config)* `include_worktrees` — a per-workspace opt-in that hosts the linked git
   worktrees that workspace's `roots` find. Accepted in `[workspace]`, in each
   `[[workspaces]]` entry and in `[standalone]`. A property of the group rather than

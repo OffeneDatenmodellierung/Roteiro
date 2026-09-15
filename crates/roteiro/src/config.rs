@@ -1096,9 +1096,21 @@ pub struct WorkspaceConfig {
     /// the escape hatch for the one-off case, and it is why this key is not needed
     /// to host a single worktree.
     ///
-    /// Shaped as `Option<bool>` to match its `roots`/`repos`/`includes` siblings:
-    /// the four are read and merged by the same paths, and an unset key means the
-    /// same "not declared here" for all of them.
+    /// Shaped as `Option<bool>` to match its `roots`/`repos` siblings — the three
+    /// fields of this table, which [`Config::overlaid_with`] merges **per field**,
+    /// project layer over user. An unset key means the same "not declared here"
+    /// for all three, and leaves a lower layer's answer standing rather than
+    /// resetting it to the built-in default.
+    ///
+    /// `includes` is **not** a sibling of these: it belongs to [`NamedWorkspace`],
+    /// whose `[[workspaces]]` array is overlaid *wholesale* — a project layer
+    /// declaring any entry replaces the user layer's entirely — so it is neither
+    /// a field of this table nor merged by this path.
+    ///
+    /// Note that a table declaring **only** this key names no members, so
+    /// [`WorkspaceConfig::is_empty`] reads it as empty and no group is built from
+    /// it. The rule is still honoured: `fold_cli_roots` carries it into the group
+    /// a `--workspace <ROOT>` root creates, so the opt-in is not silently lost.
     pub include_worktrees: Option<bool>,
 }
 

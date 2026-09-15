@@ -4164,6 +4164,19 @@ fn print_named_workspaces_section(e: &config::Config, p: &config::Config, u: &co
         println!("  {}", w.name);
         println!("    roots = {:?}", w.roots);
         println!("    repos = {:?}", w.repos);
+        // Reported per entry and with no separate provenance, unlike the legacy
+        // and standalone tables: the `[[workspaces]]` array is overlaid
+        // **wholesale** (a project layer declaring any wins outright), so the
+        // header above already carries the one provenance there is to report and
+        // a second one here would imply a per-field merge that does not happen.
+        //
+        // Reported at all because this key silently changes how many projects a
+        // workspace hosts, and a key that does that while `roteiro config` stays
+        // quiet about it is the shape of defect issue #837 is about.
+        println!(
+            "    include_worktrees = {}",
+            w.include_worktrees.unwrap_or(false)
+        );
     }
 }
 
@@ -4314,6 +4327,11 @@ struct WorkspaceReport {
     declared_roots: Vec<String>,
     /// Explicit member repos as declared.
     declared_repos: Vec<String>,
+    /// Whether this group's `roots` host the linked git worktrees they find
+    /// (issue #837). Always `false` for a `[standalone]` group, whose roots were
+    /// already expanded to explicit `repos` under the `[standalone]` table's own
+    /// rule before this list existed — there is no scan left for it to govern.
+    include_worktrees: bool,
     /// The member repos this group resolves to now. Absent only when resolution
     /// failed; an empty list is a real answer (see `resolution_error`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -4414,6 +4432,7 @@ fn workspace_resolution(loaded: &config::Loaded) -> WorkspaceResolution {
                 source,
                 declared_roots: rw.roots,
                 declared_repos: rw.repos,
+                include_worktrees: rw.include_worktrees,
                 resolved_repos,
                 resolution_error,
             }
@@ -13903,11 +13922,24 @@ fn run_explorer(
         // naming the subdirectories that do hold repos turns it into a fix.
         anyhow::bail!(
             "no workspaces to serve — run inside a repo, or configure \
-             `[[workspaces]]` / `[standalone]` in config ({WORKSPACE_CONFIG_ADVICE}){}",
-            nested_repo_hint(&resolved)
+             `[[workspaces]]` / `[standalone]` in config ({WORKSPACE_CONFIG_ADVICE}){}{}",
+            nested_repo_hint(&resolved, standalone_table(cfg, &ws_scope)),
+            worktree_hint(&resolved, standalone_table(cfg, &ws_scope))
         );
     }
     let set = Arc::new(set);
+
+    // The same scanned-roots note `serve`/`mcp` print (issues #580 and #837).
+    //
+    // `run_explorer` builds its set here and never calls `build_serve_workspaces`,
+    // which is where that note was printed — so the depth diagnostic and the
+    // worktree clause were both invisible on **the surface that actually shows a
+    // person the repository list**. Two unshared implementations of one startup
+    // summary is the shape #806 and #787 were each about, and the documentation
+    // for both issues already described this behaviour as the explorer's.
+    for note in scanned_roots_note(&resolved, standalone_table(cfg, &ws_scope)) {
+        eprintln!("{note}");
+    }
 
     // Validate an explicit `--workspace-name` once, up front: an unknown name must
     // fail fast — with the existing `UnknownWorkspace` message that lists the known
@@ -15381,6 +15413,18 @@ fn run_mcp(
     // so this passes `All` — today's behaviour — explicitly rather than by
     // omission. It does inherit issue #824's fix, which lives in the fallback
     // guard the two share.
+    //
+    // **Issue #837's amendment therefore does not reach `mcp`, and that is the
+    // deferral above rather than an oversight.** The amendment is about
+    // `--scope here`, and `mcp` has no `--scope` at all; giving it one would be
+    // taking the decision ADR-0008 v1.6 explicitly left open, which is a
+    // different change with a different argument. What `mcp` does today, measured
+    // rather than assumed: with **no** configured workspace it still reaches the
+    // solo branch below (`All` + an empty resolved list + no CLI roots), so
+    // `cd <worktree> && roteiro mcp` serves that worktree and announces it; with
+    // configured roots it serves the configured set and **says** in its startup
+    // note how many worktrees each root walked past. Neither case is silent,
+    // which is the property #837 actually requires.
     let ws = build_serve_workspaces(
         ingest,
         cfg,
@@ -15573,7 +15617,11 @@ fn build_serve_workspaces(
     // the `/v1/{project}/…` routing, and the MCP router. Existing graphs are opened on
     // demand; SIGHUP reloads the set of repos, and `--sync-on-access` (re)builds a
     // project's graph on first touch (ADR-0008).
-    let effective = fold_cli_roots(resolved, workspace_roots);
+    let effective = fold_cli_roots(
+        resolved,
+        workspace_roots,
+        cfg.workspace.include_worktrees.unwrap_or(false),
+    );
     let set = Arc::new(rto_graph::WorkspaceSet::from_resolved(effective.clone())?);
     // A friendly error when nothing resolves — an empty config, only stale roots, or a
     // `-w` naming nothing to serve — BEFORE `from_repo_paths` would surface a raw
@@ -15587,8 +15635,9 @@ fn build_serve_workspaces(
         anyhow::bail!(
             "no workspaces to serve — run inside a repo, pass `--workspace <ROOT>`, \
              or configure `[[workspaces]]` / `[standalone]` in config \
-             ({WORKSPACE_CONFIG_ADVICE}).{}",
-            nested_repo_hint(&effective)
+             ({WORKSPACE_CONFIG_ADVICE}).{}{}",
+            nested_repo_hint(&effective, standalone_table(cfg, scope)),
+            worktree_hint(&effective, standalone_table(cfg, scope))
         );
     }
     // Validate `--workspace-name` once, up front: an unknown name fails fast (listing
@@ -15627,7 +15676,7 @@ fn build_serve_workspaces(
     // whose repos all live one level deeper yields "1 project(s)" and no error
     // (issue #580). Free — the scan already read each root's directory — so it
     // costs nothing to say what was walked past.
-    for note in scanned_roots_note(&effective) {
+    for note in scanned_roots_note(&effective, standalone_table(cfg, scope)) {
         eprintln!("{note}");
     }
     // Undecided peer bundles, mentioned once and never acted on (#706 phase 2).
@@ -15686,8 +15735,11 @@ fn configured_workspace_names(cfg: &config::Config) -> Vec<String> {
 /// being replaced hosted a worktree as a peer project silently, and a skip that was
 /// equally silent would only move the silence rather than remove it.
 #[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
-fn scanned_roots_note(effective: &[rto_graph::ResolvedWorkspace]) -> Vec<String> {
-    scanned_roots(effective)
+fn scanned_roots_note(
+    effective: &[rto_graph::ResolvedWorkspace],
+    standalone: Option<&config::WorkspaceConfig>,
+) -> Vec<String> {
+    scanned_roots(effective, standalone)
         .into_iter()
         .filter(|scan| !scan.skipped.is_empty() || !scan.worktrees.is_empty())
         .map(|scan| {
@@ -15757,9 +15809,15 @@ fn worktree_scope_note(cmd: &str, repo: &rto_graph::Repo) -> Option<String> {
         || "at a detached HEAD".to_owned(),
         |b| format!("on branch `{b}`"),
     );
+    // "at its own revision", never "at this branch's revision": a worktree may sit
+    // at a **detached HEAD**, which is an ordinary state — `git worktree add` at a
+    // tag or a commit produces one — and `{at}` then reads "at a detached HEAD".
+    // A sentence that named a branch anyway would be false in exactly the case it
+    // had just reported, which is a worse failure than saying less: this note
+    // exists to stop the server misrepresenting what it is serving.
     Some(format!(
         "roteiro {cmd}: {here} is a linked git WORKTREE of {}, {at} — hosting this \
-         checkout at this branch's revision, and NOT {}",
+         checkout at its own revision, and NOT {}",
         main.display(),
         main.display(),
     ))
@@ -15785,7 +15843,10 @@ fn plural(n: usize, one: &'static str, many: &'static str) -> &'static str {
 /// stuck, and a dead end is worth one `read_dir` per candidate, but a root with
 /// ten thousand children is not worth ten thousand of them.
 #[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
-fn nested_repo_hint(effective: &[rto_graph::ResolvedWorkspace]) -> String {
+fn nested_repo_hint(
+    effective: &[rto_graph::ResolvedWorkspace],
+    standalone: Option<&config::WorkspaceConfig>,
+) -> String {
     /// How many skipped subdirectories the probe will examine, per root.
     const PROBE_LIMIT: usize = 256;
     /// How many it will name in the message.
@@ -15793,7 +15854,7 @@ fn nested_repo_hint(effective: &[rto_graph::ResolvedWorkspace]) -> String {
 
     let mut named: Vec<String> = Vec::new();
     let mut roots: Vec<String> = Vec::new();
-    for scan in scanned_roots(effective) {
+    for scan in scanned_roots(effective, standalone) {
         let nested = scan.nested_repo_parents(PROBE_LIMIT);
         if nested.is_empty() {
             continue;
@@ -15818,18 +15879,104 @@ fn nested_repo_hint(effective: &[rto_graph::ResolvedWorkspace]) -> String {
     )
 }
 
+/// The linked git worktrees a failed scan walked past, as a sentence to append to
+/// the "no workspaces to serve" error.
+///
+/// # The case that most needs the hint was the case that suppressed it
+///
+/// A root holding *only* worktrees — a directory an orchestrator fills with one
+/// checkout per task, which is exactly the layout issue #837 was reported from —
+/// resolves to no repos at all, so the set is empty and the start bails **before**
+/// [`scanned_roots_note`] is ever reached. [`nested_repo_hint`] cannot cover it
+/// either: that probe examines `RootScan::skipped`, the subdirectories holding no
+/// `.git`, and a worktree holds one.
+///
+/// So the user who has just lost every project to a new default got a generic "no
+/// workspaces to serve" naming neither the reason nor either escape hatch. Both
+/// are named here, because a changed default that cannot explain itself at the
+/// moment it bites is the silent behaviour this issue exists to remove.
+///
+/// Empty when no worktree was walked past, so the error keeps its old wording in
+/// the ordinary case.
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+fn worktree_hint(
+    effective: &[rto_graph::ResolvedWorkspace],
+    standalone: Option<&config::WorkspaceConfig>,
+) -> String {
+    /// How many worktree directories the message will name.
+    const NAME_LIMIT: usize = 8;
+
+    let mut named: Vec<String> = Vec::new();
+    let mut roots: Vec<String> = Vec::new();
+    let mut total = 0usize;
+    for scan in scanned_roots(effective, standalone) {
+        if scan.worktrees.is_empty() {
+            continue;
+        }
+        total += scan.worktrees.len();
+        roots.push(scan.root.display().to_string());
+        named.extend(scan.worktrees.iter().map(|p| p.display().to_string()));
+    }
+    if total == 0 {
+        return String::new();
+    }
+    let shown = named.len().min(NAME_LIMIT);
+    format!(
+        "\n\n{} {} under {} {} a linked git WORKTREE — a second checkout of a \
+         repository rather than a project — so {} NOT hosted: {}{}. Set \
+         `include_worktrees = true` on that workspace to host them, or name one \
+         directly in `repos = [...]`, which is always honoured.",
+        total,
+        plural(total, "subdirectory", "subdirectories"),
+        roots.join(", "),
+        plural(total, "is", "are"),
+        plural(total, "it was", "they were"),
+        named[..shown].join(", "),
+        if named.len() > shown { ", …" } else { "" },
+    )
+}
+
 /// Scan every root named by `effective`, skipping any that cannot be read — a
 /// stale root is what the caller is already reporting, not a second error to
 /// raise from a diagnostic.
 #[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
-fn scanned_roots(effective: &[rto_graph::ResolvedWorkspace]) -> Vec<rto_graph::RootScan> {
+fn scanned_roots(
+    effective: &[rto_graph::ResolvedWorkspace],
+    standalone: Option<&config::WorkspaceConfig>,
+) -> Vec<rto_graph::RootScan> {
     let mut seen = std::collections::BTreeSet::new();
+    // `[standalone] roots` are scanned by `Config::standalone_repo_paths`, which
+    // resolves them to concrete `repos` *before* any `ResolvedWorkspace` exists —
+    // so a standalone group arrives here with `roots: []` and the scan it came
+    // from is not reachable through `effective` at all. Without this the whole
+    // `[standalone]` path skipped worktrees in total silence, which is the very
+    // complaint issue #837 is about, merely moved to a different table.
+    //
+    // `Some` **only under `--scope all`** (the caller's job): that is the one
+    // scope under which the whole `[standalone]` table is what is being served.
+    // `--scope workspace <NAME>` has named a single group, so reporting every
+    // standalone root would describe scans that are not in play, and `here` reads
+    // no configured list at all.
+    let standalone_rule = standalone.map_or(rto_graph::Worktrees::Skip, |sa| {
+        if sa.include_worktrees.unwrap_or(false) {
+            rto_graph::Worktrees::Include
+        } else {
+            rto_graph::Worktrees::Skip
+        }
+    });
     effective
         .iter()
         .flat_map(|ws| {
             let worktrees = worktrees_of(ws);
             ws.roots.iter().map(move |root| (root, worktrees))
         })
+        .chain(
+            standalone
+                .and_then(|sa| sa.roots.as_ref())
+                .into_iter()
+                .flatten()
+                .map(move |root| (root, standalone_rule)),
+        )
         // Keyed on the **pair**, not the path: two groups may name one root and
         // disagree about worktrees, and reporting only the first would describe a
         // scan that did not happen for the second.
@@ -15877,6 +16024,28 @@ struct ServeWorkspaces {
 /// the rule is per-group and the scanner is shared: #806 and #787 are both this
 /// repository discovering that one rule read in several places becomes several
 /// rules.
+/// The `[standalone]` table, when its roots are part of what is about to be
+/// served — and `None` otherwise.
+///
+/// `[standalone] roots` are resolved to concrete `repos` before any
+/// [`rto_graph::ResolvedWorkspace`] exists, so the scan they came from cannot be
+/// recovered from the resolved list; the diagnostics reach
+/// [`scanned_roots_note`] and [`worktree_hint`] only through this table (issue
+/// #837).
+///
+/// **Only under [`WorkspaceScope::All`].** That is the one scope under which the
+/// whole table is what is being served. [`WorkspaceScope::Named`] has already
+/// named a single group, so reporting every standalone root would describe scans
+/// that are not in play — over-reporting in a diagnostic is how a note stops being
+/// read — and [`WorkspaceScope::Here`] consults no configured list at all.
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+fn standalone_table<'c>(
+    cfg: &'c config::Config,
+    scope: &WorkspaceScope,
+) -> Option<&'c config::WorkspaceConfig> {
+    matches!(scope, WorkspaceScope::All).then_some(&cfg.standalone)
+}
+
 fn worktrees_of(ws: &rto_graph::ResolvedWorkspace) -> rto_graph::Worktrees {
     if ws.include_worktrees {
         rto_graph::Worktrees::Include
@@ -15939,6 +16108,7 @@ fn resolved_repo_paths(
 fn fold_cli_roots(
     mut resolved: Vec<rto_graph::ResolvedWorkspace>,
     cli_roots: &[String],
+    legacy_include_worktrees: bool,
 ) -> Vec<rto_graph::ResolvedWorkspace> {
     if cli_roots.is_empty() {
         return resolved;
@@ -15950,12 +16120,28 @@ fn fold_cli_roots(
             roots: cli_roots.to_vec(),
             repos: Vec::new(),
             linked: true,
-            // No `[workspace]` table existed to declare the key, so this group
-            // takes the same answer an undeclared one gets. Folding into an
-            // existing `default` (the arm above) instead *inherits* that group's
-            // declaration, which is the point: a CLI root joins a workspace
-            // rather than becoming a fourth place to configure discovery.
-            include_worktrees: false,
+            // The `[workspace]` table's own rule, **not** the built-in default.
+            //
+            // This arm runs when no `default` group exists to fold into, and a
+            // table declaring `include_worktrees` and no `roots`/`repos` produces
+            // exactly that: `WorkspaceConfig::is_empty()` asks whether the table
+            // names any *members*, so a table that declares only the discovery
+            // rule is "empty" and no group is built from it. Taking `false` here
+            // therefore discarded the operator's opt-in silently — and a silently
+            // ignored opt-in is worse than none, because the escape hatch the
+            // startup note names reads as available and is not.
+            //
+            // Passing it in rather than widening `is_empty()`: that predicate
+            // answers "does this table name members", and several callers depend
+            // on that reading — `scope_default_notice` would announce a workspace
+            // with nothing in it as one `--scope all` would serve, which is a
+            // false statement about the served set in a notice whose whole job is
+            // to describe it.
+            //
+            // Either way a CLI root **joins** the `default` workspace and carries
+            // that workspace's rule; it never becomes a fourth place to configure
+            // discovery (issue #837).
+            include_worktrees: legacy_include_worktrees,
         }),
     }
     resolved
@@ -16310,6 +16496,7 @@ fn reload_workspaces(
     let effective = fold_cli_roots(
         scoped_workspaces(cfg, scope).map_err(ReloadFailure::planning)?,
         cli_roots,
+        cfg.workspace.include_worktrees.unwrap_or(false),
     );
     // All the I/O, before either swap (point 2) — and it is **one** walk, not
     // one per surface: the flat plan is built from the very paths the set's own
@@ -23468,7 +23655,7 @@ mod serve_workspace_paths_tests {
         // With no configured groups, `--workspace <ROOT>` becomes a new linked
         // `default` workspace — so the CLI roots are a first-class named workspace
         // (surfaced by the graph API), not merely merged into the flat model view.
-        let folded = fold_cli_roots(Vec::new(), &["/a".to_owned(), "/b".to_owned()]);
+        let folded = fold_cli_roots(Vec::new(), &["/a".to_owned(), "/b".to_owned()], false);
         assert_eq!(folded.len(), 1);
         assert_eq!(folded[0].name, "default");
         assert!(folded[0].linked);
@@ -23483,7 +23670,7 @@ mod serve_workspace_paths_tests {
             linked: true,
             include_worktrees: false,
         }];
-        let folded = fold_cli_roots(existing, &["/cli".to_owned()]);
+        let folded = fold_cli_roots(existing, &["/cli".to_owned()], false);
         assert_eq!(folded.len(), 1, "no duplicate `default` group");
         assert_eq!(folded[0].roots, vec!["/cfg".to_owned(), "/cli".to_owned()]);
         assert_eq!(
@@ -23500,7 +23687,7 @@ mod serve_workspace_paths_tests {
             linked: true,
             include_worktrees: false,
         }];
-        let folded = fold_cli_roots(named.clone(), &[]);
+        let folded = fold_cli_roots(named.clone(), &[], false);
         assert_eq!(folded, named);
     }
 
@@ -23618,7 +23805,11 @@ mod sighup_reload_tests {
             },
             ..crate::config::Config::default()
         };
-        let effective = fold_cli_roots(cfg.resolved_workspaces().expect("resolve"), &[]);
+        let effective = fold_cli_roots(
+            cfg.resolved_workspaces().expect("resolve"),
+            &[],
+            cfg.workspace.include_worktrees.unwrap_or(false),
+        );
         let set =
             Arc::new(rto_graph::WorkspaceSet::from_resolved(effective.clone()).expect("build set"));
         let flat = Arc::new(
@@ -23722,7 +23913,11 @@ mod sighup_reload_tests {
             },
             ..crate::config::Config::default()
         };
-        let effective = fold_cli_roots(cfg.resolved_workspaces().expect("resolve"), &[]);
+        let effective = fold_cli_roots(
+            cfg.resolved_workspaces().expect("resolve"),
+            &[],
+            cfg.workspace.include_worktrees.unwrap_or(false),
+        );
         let set =
             Arc::new(rto_graph::WorkspaceSet::from_resolved(effective.clone()).expect("build set"));
         let flat = Arc::new(
@@ -23771,7 +23966,11 @@ mod sighup_reload_tests {
             },
             ..crate::config::Config::default()
         };
-        let effective = fold_cli_roots(cfg.resolved_workspaces().expect("resolve"), &[]);
+        let effective = fold_cli_roots(
+            cfg.resolved_workspaces().expect("resolve"),
+            &[],
+            cfg.workspace.include_worktrees.unwrap_or(false),
+        );
         let set = Arc::new(rto_graph::WorkspaceSet::from_resolved(effective).expect("build set"));
         assert_eq!(set_project_names(&set), vec!["alpha".to_owned()]);
 
@@ -24410,6 +24609,68 @@ mod worktree_discovery_tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
+    /// **A `[workspace]` table that declares only `include_worktrees` still
+    /// governs `--workspace <ROOT>`.**
+    ///
+    /// `WorkspaceConfig::is_empty()` asks whether the table names any *members*,
+    /// so a table carrying the discovery rule and nothing else is "empty" and no
+    /// `default` group is built from it. `fold_cli_roots` then has nothing to fold
+    /// into and creates a fresh `default` — which took the built-in `false` and
+    /// discarded the operator's opt-in **silently**.
+    ///
+    /// That is worse than having no opt-in at all: the startup note names
+    /// `include_worktrees = true` as the remedy, so the escape hatch reads as
+    /// available while doing nothing. Both directions are asserted, because a fix
+    /// that simply always included would pass the first half alone.
+    ///
+    /// Gated like its neighbours: `fold_cli_roots` is a server-side item, so a
+    /// default-features build configures it out and an ungated test referring to
+    /// it fails to compile rather than failing to run.
+    #[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+    #[test]
+    fn a_cli_root_inherits_the_legacy_tables_opt_in_rather_than_the_default() {
+        let (base, root) = fixture("cliroot");
+        let cli = vec![root.to_string_lossy().into_owned()];
+
+        let hosted_with = |include: Option<bool>| {
+            let cfg = config::Config {
+                // Deliberately no `roots`/`repos`: this is the shape that made
+                // the table read as absent.
+                workspace: config::WorkspaceConfig {
+                    roots: None,
+                    repos: None,
+                    include_worktrees: include,
+                },
+                ..config::Config::default()
+            };
+            let effective = super::fold_cli_roots(
+                cfg.resolved_workspaces().expect("resolve"),
+                &cli,
+                cfg.workspace.include_worktrees.unwrap_or(false),
+            );
+            hosted(&resolved_repo_paths(&effective, &[]).expect("paths"))
+        };
+
+        assert_eq!(
+            hosted_with(Some(true)),
+            vec![
+                "checkout".to_owned(),
+                "other".to_owned(),
+                "plain".to_owned()
+            ],
+            "`[workspace] include_worktrees = true` was silently discarded for a \
+             `--workspace <ROOT>` root"
+        );
+        // And the rule still applies when the table does not ask for it, so the
+        // fix is inheritance rather than a second default.
+        assert_eq!(
+            hosted_with(None),
+            vec!["other".to_owned(), "plain".to_owned()],
+            "a CLI root started hosting worktrees with no opt-in anywhere"
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     /// `[standalone]` reaches the scanner through `standalone_repo_paths`, which
     /// is a **different** call site from the `roots` path above and resolves its
     /// roots to concrete `repos` before any `ResolvedWorkspace` exists. A fix that
@@ -24454,6 +24715,146 @@ mod worktree_discovery_tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
+    /// **A `[standalone]` root announces its worktree skips too.**
+    ///
+    /// `[standalone] roots` are resolved to concrete `repos` by
+    /// `standalone_repo_paths` before any `ResolvedWorkspace` exists, so the
+    /// resolved list carries `roots: []` and the scan is unreachable from it. The
+    /// whole `[standalone]` path therefore skipped worktrees in **total silence**
+    /// — the complaint of #837 moved to a different table rather than fixed.
+    ///
+    /// The `None` half is not decoration: the table is reported only under
+    /// `--scope all`, and a version that always reported it would describe scans
+    /// that are not in play under `--scope workspace <NAME>`.
+    #[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+    #[test]
+    fn a_standalone_roots_worktree_skip_is_announced_and_only_under_scope_all() {
+        let (base, root) = fixture("sanote");
+        let cfg = config::Config {
+            standalone: config::WorkspaceConfig {
+                roots: Some(vec![root.to_string_lossy().into_owned()]),
+                repos: None,
+                include_worktrees: None,
+            },
+            ..config::Config::default()
+        };
+        let resolved = cfg.resolved_workspaces().expect("resolve");
+
+        let notes = super::scanned_roots_note(
+            &resolved,
+            super::standalone_table(&cfg, &super::WorkspaceScope::All),
+        );
+        assert_eq!(
+            notes,
+            vec![format!(
+                "  note: {} scanned one level deep (not recursive) — 2 repos \
+                 hosted, 1 subdirectory skipped for being a linked git worktree — \
+                 a second checkout of a repository, not a project (set \
+                 `include_worktrees = true` on this workspace to host it)",
+                root.display()
+            )],
+            "a `[standalone]` root skipped a worktree without saying so"
+        );
+
+        // Not under a scope that has already named one group.
+        assert!(
+            super::scanned_roots_note(
+                &resolved,
+                super::standalone_table(&cfg, &super::WorkspaceScope::Named("x".to_owned())),
+            )
+            .is_empty(),
+            "`--scope workspace <NAME>` reported standalone roots that are not in play"
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// **A root holding ONLY worktrees says why it hosted nothing.**
+    ///
+    /// This is the layout an orchestrator that creates a worktree per task
+    /// produces, and it is the case the diagnostic used to suppress: the set is
+    /// empty, so the start bails *before* the startup note is reached, and
+    /// `nested_repo_hint` probes only the subdirectories holding no `.git` — which
+    /// a worktree is not. The user who just lost every project to a new default
+    /// got a generic "no workspaces to serve" naming neither reason nor remedy.
+    #[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+    #[test]
+    fn a_root_of_only_worktrees_names_the_reason_and_both_escape_hatches() {
+        let base = std::env::temp_dir().join(format!("rto-wtonly-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        let main = repo(&base.join("elsewhere"));
+        let root = base.join("pool");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        for task in ["task-one", "task-two"] {
+            git(
+                &main,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    root.join(task).to_str().expect("utf-8"),
+                    "-b",
+                    task,
+                ],
+            );
+        }
+
+        let cfg = config::Config {
+            workspace: config::WorkspaceConfig {
+                roots: Some(vec![root.to_string_lossy().into_owned()]),
+                repos: None,
+                include_worktrees: None,
+            },
+            ..config::Config::default()
+        };
+        let resolved = cfg.resolved_workspaces().expect("resolve");
+        // Nothing to host: the precondition that makes the start bail.
+        assert!(
+            resolved_repo_paths(&resolved, &[])
+                .expect("paths")
+                .is_empty(),
+            "fixture does not reproduce the empty-set case"
+        );
+
+        let hint = super::worktree_hint(&resolved, None);
+        for expected in [
+            // The reason, in the words the rest of the change uses.
+            "linked git WORKTREE",
+            // The count, so the number that vanished is accounted for.
+            "2 subdirectories",
+            // Both escape hatches, because the opt-in is not the answer for
+            // everyone and `repos` needs no opt-in at all.
+            "include_worktrees = true",
+            "repos = [...]",
+            // And which directories, so it is actionable without a second command.
+            "task-one",
+            "task-two",
+        ] {
+            assert!(
+                hint.contains(expected),
+                "the all-worktree diagnostic must name {expected:?}; got: {hint}"
+            );
+        }
+
+        // Silent in the ordinary case, so the error keeps its old wording.
+        let (plain_base, plain_root) = fixture("wtonly-plain");
+        let plain = config::Config {
+            workspace: config::WorkspaceConfig {
+                roots: Some(vec![
+                    plain_root.join("other").to_string_lossy().into_owned(),
+                ]),
+                repos: None,
+                include_worktrees: None,
+            },
+            ..config::Config::default()
+        };
+        assert!(
+            super::worktree_hint(&plain.resolved_workspaces().expect("resolve"), None).is_empty(),
+            "a root with no worktrees still produced a worktree diagnostic"
+        );
+        std::fs::remove_dir_all(&plain_base).ok();
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     /// **The skip is announced.** The reason #837 exists is that the behaviour it
     /// replaces was silent; a silent skip would move the silence rather than
     /// remove it, so the sentence is asserted in full rather than by a `contains`
@@ -24472,7 +24873,7 @@ mod worktree_discovery_tests {
             ..config::Config::default()
         };
         let resolved = cfg.resolved_workspaces().expect("resolve");
-        let notes = super::scanned_roots_note(&resolved);
+        let notes = super::scanned_roots_note(&resolved, None);
         assert_eq!(
             notes,
             vec![format!(
@@ -24499,7 +24900,7 @@ mod worktree_discovery_tests {
         };
         let resolved = cfg.resolved_workspaces().expect("resolve");
         assert_eq!(
-            super::scanned_roots_note(&resolved),
+            super::scanned_roots_note(&resolved, None),
             vec![format!(
                 "  note: {} scanned one level deep (not recursive) — 3 repos \
                  hosted, 1 subdirectory skipped for holding no `.git` (any repo \

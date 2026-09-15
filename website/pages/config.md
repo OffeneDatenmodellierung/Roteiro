@@ -104,8 +104,9 @@ every class. Whatever you leave out, <code>list_tool_classes</code> stays advert
 <em>immediate</em> child of a root that holds a <code>.git</code> becomes a project, plus the root
 itself if it is one — never recursively. A repo at <code>~/code/&lt;org&gt;/&lt;repo&gt;</code> is
 <em>not</em> found: name each <code>&lt;org&gt;</code> directory as its own root, or list the repos
-explicitly. <code>roteiro serve</code> and <code>roteiro mcp</code> print what each root offered
-beside the project count, so a near-empty workspace says why.</div>
+explicitly. <code>roteiro serve</code>, <code>roteiro mcp</code> and the
+<a href="modes.html#explorer">explorer</a> print what each root offered beside the project count,
+so a near-empty workspace says why.</div>
 
 <div class="note"><strong>A <code>roots</code> scan walks past git worktrees.</strong> A
 linked worktree — a second checkout made by <code>git worktree add</code>, whose <code>.git</code>
