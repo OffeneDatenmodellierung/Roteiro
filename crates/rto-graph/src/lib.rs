@@ -200,8 +200,8 @@ pub use reference::{
 };
 pub use store::{ImportApplied, SchemaAhead, Store, StoreError};
 pub use sync::{
-    DEFAULT_KEEP_GENERATIONS, ReclaimReport, SyncError, SyncReport, sweep_superseded, sync,
-    sync_index, sync_tree, sync_worktree,
+    DEFAULT_KEEP_GENERATIONS, ReclaimReport, SyncError, SyncReport, extraction_identity,
+    sweep_superseded, sync, sync_index, sync_tree, sync_worktree,
 };
 pub use text::{
     Heading, LinkKind, LinkScope, MarkdownLink, code_spans, first_h1, heading_id, heading_id_from,

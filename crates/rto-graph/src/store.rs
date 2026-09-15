@@ -311,6 +311,27 @@ impl Store {
         Ok(u64::try_from(n).unwrap_or(0))
     }
 
+    /// Number of `file` nodes currently in the store — the count `SyncReport`
+    /// means by `blobs_total`.
+    ///
+    /// Exists so a **no-op** sync reports the same quantity the reconciling
+    /// paths do. Those derive `blobs_total` from the assembled graph
+    /// (`file_count`), deliberately, so that a path the repository excluded is
+    /// not counted; a no-op branch that answered with the size of its input blob
+    /// list instead would claim excluded files were in the graph, and say so only
+    /// on the runs that did no work.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure.
+    pub fn file_node_count(&self) -> Result<usize, StoreError> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM nodes WHERE kind = ?1",
+            [crate::NodeKind::File.as_str()],
+            |r| r.get(0),
+        )?;
+        Ok(usize::try_from(n).unwrap_or(0))
+    }
+
     /// Number of edges currently in the store.
     ///
     /// # Errors

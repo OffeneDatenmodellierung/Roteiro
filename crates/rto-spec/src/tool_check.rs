@@ -176,6 +176,13 @@ pub fn tool_check(
             )));
         }
     };
+    // The extraction identity this graph *should* have been built under. A tree
+    // match alone is not freshness now that `[paths]` is part of it: the same
+    // commit under a different declaration is a different graph, and answering
+    // from it would be the confident wrong answer `not-run` exists to refuse.
+    let want_env = rto_graph::extraction_identity(&rto_graph::Registry::new(
+        rto_graph::IngestConfig::default().with_paths(paths),
+    ));
     match store.sync_state()? {
         Some(synced) if synced == head => {}
         Some(synced) => {
@@ -192,6 +199,20 @@ pub fn tool_check(
                     .to_owned(),
             ));
         }
+    }
+    // Only when the recorded identity disagrees — `None` is left alone, because a
+    // store predating the stamp is the ordinary upgrade case and its tree match
+    // still means what it always did.
+    if let Some(env) = store.sync_env()?
+        && env != want_env
+    {
+        return Ok(ToolCheck::not_run(format!(
+            "the graph was extracted under `{env}` but this project's configuration \
+             resolves to `{want_env}` — `[paths]` or an `[ingest]` toggle has changed \
+             since the sync, so a drift verdict would compare an authored layer read \
+             under one policy against a derived layer built under another; run \
+             `roteiro sync` and ask again"
+        )));
     }
 
     let layer = match authored_layer(&repo, GraphSource::Committed, paths) {

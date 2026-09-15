@@ -1268,7 +1268,7 @@ fn warn_if_reviewing_own_work(repo: &Path, base: Option<&str>, model: &str) {
 }
 
 #[cfg(any(feature = "serve", feature = "inference-local-models"))]
-fn changed_files(repo: &Path, base: Option<&str>) -> ReviewSet {
+fn changed_files(repo: &Path, base: Option<&str>, paths: &rto_graph::PathPolicy) -> ReviewSet {
     let head = git(repo, &["rev-parse", "HEAD"]).unwrap_or_else(|| "HEAD".to_owned());
     let range: Vec<String> = match base {
         Some(b) => vec![b.to_owned(), "HEAD".to_owned()],
@@ -1277,6 +1277,16 @@ fn changed_files(repo: &Path, base: Option<&str>) -> ReviewSet {
     let mut args: Vec<&str> = vec!["diff", "--name-only"];
     args.extend(range.iter().map(String::as_str));
     let names = git(repo, &args).unwrap_or_default();
+    // A path the repository declared out of the scan is not put to a model
+    // either. This is the strongest form of the rule rather than the noisiest:
+    // every other reader merely declines to *store* what it found, and this one
+    // would otherwise **send** it — the bytes of a corpus a user excluded leaving
+    // the machine is a different order of mistake from a stray node.
+    let names: String = names
+        .lines()
+        .filter(|n| paths.classify(n.trim()).mines())
+        .collect::<Vec<_>>()
+        .join("\n");
 
     // Returns a `ReviewSet` rather than a bare `Vec` so this path cannot differ
     // from the replay path about what is reviewable: the rule lives in
@@ -1334,7 +1344,7 @@ pub fn run_llm(
     // trailer range below all name the same commit.
     let base = resolve_llm_base(repo, base)?;
     let base = base.as_deref();
-    let ReviewSet { files, skipped } = changed_files(repo, base);
+    let ReviewSet { files, skipped } = changed_files(repo, base, ingest.paths);
 
     if files.is_empty() && skipped.is_empty() {
         println!("no changes to review");

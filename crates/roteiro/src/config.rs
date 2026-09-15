@@ -1008,9 +1008,10 @@ pub struct PathsConfig {
     /// authored-layer classifier declines it — so a markdown file under an
     /// opaque path cannot declare itself one of this project's ADRs.
     ///
-    /// Merged and reset exactly as [`PathsConfig::exclude`] is. A path matching
-    /// both lists is **excluded**: between two declarations about the same bytes,
-    /// the narrower one wins.
+    /// Merged across layers exactly as [`PathsConfig::exclude`] is, and with no
+    /// reset for the same reason — neither list has one. A path matching both
+    /// lists is **excluded**: between two declarations about the same bytes, the
+    /// narrower one wins.
     pub opaque: Option<Vec<String>>,
 }
 
@@ -1709,6 +1710,25 @@ pub struct DuplicatesConfig {
 /// being unreadable or malformed. Both are surfaced rather than swallowed: a
 /// fallback to "no exclusions" answers with a silently different number, which is
 /// the defect, not a graceful degradation.
+// The two callers are the graph API (`explorer`) and the MCP `debt` tool
+// (`serve`); a default build has neither, so gate it or dead-code warns.
+#[cfg(any(feature = "explorer", feature = "serve"))]
+pub fn debt_ignore_for(
+    ws: &rto_graph::Workspace,
+    project: Option<&str>,
+) -> anyhow::Result<Vec<String>> {
+    let Some(root) = ws.project_root(project)? else {
+        return Ok(Vec::new());
+    };
+    let loaded = load(&root).map_err(|e| {
+        anyhow::anyhow!(
+            "reading the configuration of the repository at {}: {e}",
+            root.display()
+        )
+    })?;
+    Ok(loaded.effective.debt.ignore.unwrap_or_default())
+}
+
 /// The **path policy** (`[paths]`) declared by `project`'s own repository.
 ///
 /// The sibling of [`debt_ignore_for`], following the same rule for the same
@@ -1739,25 +1759,6 @@ pub fn path_policy_for(
         )
     })?;
     Ok(loaded.effective.paths.policy())
-}
-
-// The two callers are the graph API (`explorer`) and the MCP `debt` tool
-// (`serve`); a default build has neither, so gate it or dead-code warns.
-#[cfg(any(feature = "explorer", feature = "serve"))]
-pub fn debt_ignore_for(
-    ws: &rto_graph::Workspace,
-    project: Option<&str>,
-) -> anyhow::Result<Vec<String>> {
-    let Some(root) = ws.project_root(project)? else {
-        return Ok(Vec::new());
-    };
-    let loaded = load(&root).map_err(|e| {
-        anyhow::anyhow!(
-            "reading the configuration of the repository at {}: {e}",
-            root.display()
-        )
-    })?;
-    Ok(loaded.effective.debt.ignore.unwrap_or_default())
 }
 
 /// Overlay the `[debt] ignore` **exclusion list**: `over`'s patterns are

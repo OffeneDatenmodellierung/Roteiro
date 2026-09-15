@@ -120,11 +120,7 @@ pub fn sync(
     // Recorded with the tree so the next sync can tell whether reusing the stored
     // facts (the incremental path) is sound; a binary upgrade that bumps the
     // version, or a model change, invalidates it and forces a full re-extraction.
-    let env = format!(
-        "v{}-e{:016x}",
-        crate::extract::EXTRACT_VERSION,
-        extractor.env_tag()
-    );
+    let env = extraction_identity(extractor);
 
     // Nothing to do only when **both** the tree and the extraction identity are
     // unchanged.
@@ -174,7 +170,7 @@ pub fn sync(
     let committed = extract_committed(repo, cache, extractor)?;
     let mut assembled = flatten(committed.by_path);
     resolve_calls(&mut assembled);
-    append_submodule_nodes(repo.submodules()?, &mut assembled);
+    append_submodule_nodes(repo.submodules()?, extractor, &mut assembled);
     let total = file_count(&assembled);
     store.reconcile(&assembled, Some(&tree))?;
     store.set_sync_env(&env)?;
@@ -191,6 +187,30 @@ pub fn sync(
         tree,
         rebuilt_from_foreign_worktree: foreign,
     })
+}
+
+/// The extraction **identity**: the extractor code version plus its environment
+/// (installed image models, ingestion toggles, and the `[paths]` policy). Two
+/// syncs sharing a tree but not this string do not describe the same graph.
+///
+/// Public so a **read-only** surface can ask the same question the write paths
+/// ask. `rto_spec::tool_check` gates on "is this graph current?" and compared
+/// only the tree; with the `[paths]` policy now inside this string, a graph can
+/// be at the right tree and still have been built under a different declaration.
+///
+/// One function because all three write paths need it and only `sync` used to
+/// have it — which was the hole: `sync_worktree` and `sync_index` keyed their
+/// no-op solely on tree/dirty/index state, so changing `[paths]` with an
+/// unchanged worktree returned "up to date" over a graph still holding
+/// everything the declaration removed. Silent, and exactly the failure the
+/// policy's presence in the cache key exists to prevent one layer down.
+#[must_use]
+pub fn extraction_identity(extractor: &dyn Extractor) -> String {
+    format!(
+        "v{}-e{:016x}",
+        crate::extract::EXTRACT_VERSION,
+        extractor.env_tag()
+    )
 }
 
 /// Attempt an incremental committed sync from the last-synced tree to `head_tree`.
@@ -296,7 +316,7 @@ fn try_incremental(
     // then reconcile to derived-only — identical to what the full path produces.
     let mut assembled = FactSet { nodes, edges };
     resolve_calls(&mut assembled);
-    append_submodule_nodes(repo.submodules()?, &mut assembled);
+    append_submodule_nodes(repo.submodules()?, extractor, &mut assembled);
     let total = file_count(&assembled);
     store.reconcile(&assembled, Some(head_tree))?;
     store.set_sync_env(env)?;
@@ -439,7 +459,13 @@ pub fn sync_worktree(
     // A dirty-set hash computed for another tree says nothing about this one, so
     // a foreign store may never no-op here (issue #330).
     let foreign = foreign_worktree(store, repo)?;
-    if foreign.is_none() && store.sync_state()?.as_deref() == Some(state.as_str()) {
+    // Both halves, as `sync` has always compared them. The state alone is not the
+    // identity: `[paths]` can change while the tree and the dirty set do not.
+    let env = extraction_identity(extractor);
+    if foreign.is_none()
+        && store.sync_state()?.as_deref() == Some(state.as_str())
+        && store.sync_env()?.as_deref() == Some(env.as_str())
+    {
         return Ok(SyncReport {
             no_op: true,
             blobs_total: total,
@@ -453,8 +479,9 @@ pub fn sync_worktree(
 
     let mut assembled = flatten(by_path);
     resolve_calls(&mut assembled);
-    append_submodule_nodes(repo.submodules()?, &mut assembled);
+    append_submodule_nodes(repo.submodules()?, extractor, &mut assembled);
     store.reconcile(&assembled, Some(&state))?;
+    store.set_sync_env(&env)?;
     store.set_synced_worktree(&worktree_id(repo))?;
 
     Ok(SyncReport {
@@ -501,10 +528,18 @@ pub fn sync_index(
 
     // An index hash from another tree describes another index (issue #330).
     let foreign = foreign_worktree(store, repo)?;
-    if foreign.is_none() && store.sync_state()?.as_deref() == Some(state.as_str()) {
+    let env = extraction_identity(extractor);
+    if foreign.is_none()
+        && store.sync_state()?.as_deref() == Some(state.as_str())
+        && store.sync_env()?.as_deref() == Some(env.as_str())
+    {
         return Ok(SyncReport {
             no_op: true,
-            blobs_total: staged.len(),
+            // The staged set is what a commit would record; the graph holds only
+            // the admitted part of it, and `blobs_total` elsewhere is the file
+            // count of the assembled graph. Counted the same way here so a no-op
+            // does not claim excluded files are in the graph.
+            blobs_total: store.file_node_count()?,
             nodes: store.node_count()?,
             edges: store.edge_count()?,
             tree: state,
@@ -518,8 +553,9 @@ pub fn sync_index(
     resolve_calls(&mut assembled);
     // Index mode is "exactly what a commit would record", so submodule pins come
     // from the *staged* gitlinks, not `HEAD` — a staged bump is reflected.
-    append_submodule_nodes(repo.index_submodules()?, &mut assembled);
+    append_submodule_nodes(repo.index_submodules()?, extractor, &mut assembled);
     store.reconcile(&assembled, Some(&state))?;
+    store.set_sync_env(&env)?;
     store.set_synced_worktree(&worktree_id(repo))?;
 
     Ok(SyncReport {
@@ -561,7 +597,7 @@ pub fn sync_tree(
     let extracted = extract_blobs(repo, cache, extractor, repo.blobs_at(rev)?)?;
     let mut assembled = flatten(extracted.by_path);
     resolve_calls(&mut assembled);
-    append_submodule_nodes(repo.submodules_at(rev)?, &mut assembled);
+    append_submodule_nodes(repo.submodules_at(rev)?, extractor, &mut assembled);
     let total = file_count(&assembled);
     store.rebuild(&assembled, None)?;
     Ok(SyncReport {
@@ -681,10 +717,23 @@ pub(crate) const SUBMODULE_KIND: &str = "submodule";
 /// pin's new sha wins, and a removed submodule leaves none behind. The nodes carry
 /// `path = .gitmodules` (so a `.gitmodules` deletion drops them) and stand alone
 /// (no edges — nothing in the graph is their guaranteed endpoint).
-fn append_submodule_nodes(subs: Vec<crate::Submodule>, assembled: &mut FactSet) {
+fn append_submodule_nodes(
+    subs: Vec<crate::Submodule>,
+    extractor: &dyn Extractor,
+    assembled: &mut FactSet,
+) {
     let kind = NodeKind::Other(SUBMODULE_KIND.to_owned());
     assembled.nodes.retain(|n| n.kind != kind);
     for sm in subs {
+        // The **sixteenth** reader, and the one that hides: these nodes are
+        // assembled from `.gitmodules` after `flatten`, so they never pass
+        // through `Extractor::extract` and the filter in `extract_blobs` cannot
+        // see them. A repository that excludes `vendor/**` would otherwise still
+        // get a `submodule:vendor/thing` node naming the path it declared out.
+        // Keyed on the submodule's own path, which is what a declaration names.
+        if !extractor.mines(&sm.path) {
+            continue;
+        }
         let key = format!("submodule:{}", sm.path);
         let mut node = Node::new(key, kind.clone(), sm.path.clone());
         node.path = Some(".gitmodules".to_owned());

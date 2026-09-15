@@ -185,6 +185,24 @@ pub trait Extractor {
         let _ = path;
         true
     }
+
+    /// Whether anything may be **derived** from what this path holds, beyond a
+    /// file's identity.
+    ///
+    /// Separate from [`Extractor::reads`] because the two answer different
+    /// questions and an [`crate::PathClass::Opaque`] path answers them
+    /// differently: its bytes *are* read (its length is a fact about it) while
+    /// nothing may be mined from what they say. `sync` asks this for the facts it
+    /// assembles **outside** [`Extractor::extract`] — the submodule nodes it
+    /// appends after flattening, which come from `.gitmodules` rather than from
+    /// any one blob and so never pass through the extractor at all.
+    ///
+    /// The default admits everything, so an implementation that ignores it
+    /// behaves exactly as before.
+    fn mines(&self, path: &str) -> bool {
+        let _ = path;
+        true
+    }
 }
 
 /// What `roteiro sync` ingests: **which paths** it reads (ADR-0007 `[paths]`),
@@ -369,6 +387,10 @@ impl Extractor for Registry<'_> {
         self.ingest.class(path).reads()
     }
 
+    fn mines(&self, path: &str) -> bool {
+        self.ingest.class(path).mines()
+    }
+
     fn env_tag(&self) -> u64 {
         let media = media_env_tag();
         // The path policy changes what an *unchanged* blob extracts to, so it
@@ -376,10 +398,17 @@ impl Extractor for Registry<'_> {
         // do: without it, declaring `manifest/**` opaque would serve the
         // previously-mined `config_key` nodes straight back out of the cache and
         // `sync` would report itself up to date over a graph still holding
-        // everything the declaration was written to remove. `0` for an empty
-        // policy, so declaring nothing keeps every existing key.
-        let disabled = self.ingest.disabled_bits() ^ self.ingest.paths.fingerprint();
-        if disabled == 0 {
+        // everything the declaration was written to remove.
+        //
+        // The two are folded as **separate inputs**, not combined with `^`
+        // first. XOR-ing them lets one difference cancel the other — any pair
+        // where `policy_a ^ policy_b == toggles_b ^ toggles_a` collides to the
+        // same key by construction rather than by hash luck, and worse, a policy
+        // whose fingerprint happened to equal the toggle mask would cancel to `0`
+        // and be taken for the all-on default below.
+        let disabled = self.ingest.disabled_bits();
+        let policy = self.ingest.paths.fingerprint();
+        if disabled == 0 && policy == 0 {
             // All-on default with nothing declared: preserve existing cache keys
             // exactly.
             media
@@ -393,6 +422,7 @@ impl Extractor for Registry<'_> {
                 .to_le_bytes()
                 .into_iter()
                 .chain(disabled.to_le_bytes())
+                .chain(policy.to_le_bytes())
             {
                 h ^= u64::from(b);
                 h = h.wrapping_mul(0x0000_0100_0000_01b3);

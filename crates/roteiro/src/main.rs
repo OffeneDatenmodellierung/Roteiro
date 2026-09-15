@@ -4070,8 +4070,10 @@ fn print_paths_section(loaded: &config::Loaded) {
     if loaded.effective.paths.exclude.is_some() || loaded.effective.paths.opaque.is_some() {
         println!(
             "  ** these remove nodes from the graph rather than filtering a \
-             report: an excluded path has no node at all, an opaque one has only \
-             its identity, and neither reaches `roteiro export`"
+             report, so `roteiro export` publishes exactly what is left: an \
+             excluded path has no node at all and appears nowhere, while an \
+             opaque one keeps its identity — path, size, blob id — and nothing \
+             derived from what its bytes say"
         );
     }
 }
@@ -4909,7 +4911,7 @@ fn run_review(
         // no mention. `review` reported "no working-tree changes" on a tree
         // with a staged addition in it, which is the worst way to be wrong: it
         // is the sentence you would read as "you are done".
-        let mut changed = repo.changed_files()?;
+        let mut changed = repo.changed_files(ingest.paths)?;
         let head = repo.walk_blobs()?;
         let head_paths: std::collections::BTreeSet<&str> =
             head.iter().map(|b| b.path.as_str()).collect();
@@ -17862,7 +17864,11 @@ fn discover_site_sources(
         .collect();
     adrs.sort();
 
-    let build_plan = Some(root.join("docs/history/BUILD_PLAN.md")).filter(|p| p.is_file());
+    let build_plan = Some(root.join("docs/history/BUILD_PLAN.md"))
+        .filter(|p| p.is_file())
+        // Read and published like the ADRs above, so gated like them: a
+        // named file is no less excluded than one a directory walk found.
+        .filter(|p| admits(p));
 
     // Blueprints live under docs/blueprint(s)/ (ADR-0004); the overall project
     // blueprint is one. Each is rendered to a root-level page like the Build Plan.

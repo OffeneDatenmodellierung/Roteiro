@@ -32,8 +32,11 @@
 //!
 //! [`PathClass::Opaque`] is not "extract with some rules off". It is *identity
 //! without content*: path, blob id, byte and line counts — the facts a
-//! `(path, blob id, bytes)` derivation can state about a file it has agreed not
-//! to read. That is exactly what #812 asks for, and nothing more.
+//! `(path, blob id, bytes)` derivation can state about a file whose contents it
+//! has agreed not to **mine**. The bytes are still read, because their length is
+//! one of those facts; what stops is deriving anything from what they *say*.
+//! Only [`PathClass::Excluded`] declines to read them. That is exactly what #812
+//! asks for, and nothing more.
 //!
 //! # Why the classes are not a fourth thing
 //!
@@ -234,8 +237,16 @@ impl PathPolicy {
         if self.is_empty() {
             return 0;
         }
-        // FNV-1a over the two lists with distinct per-list tags, so moving a
-        // pattern from `opaque` to `exclude` changes the tag.
+        // FNV-1a over the two lists, **length-prefixed**, with a distinct tag per
+        // list so moving a pattern between them changes the fingerprint.
+        //
+        // The prefix is what makes the encoding unambiguous, and a separator
+        // alone would not be: patterns are arbitrary user strings that may
+        // contain any byte, so `exclude = ["a", "b"]` and `exclude = ["a\0x\0b"]`
+        // fold identically under a tag-and-append scheme — two different policies
+        // with one cache key, reached by writing a pattern rather than by a hash
+        // collision. Encoding each pattern's length first cannot be forged from
+        // inside a pattern.
         let mut h = 0xcbf2_9ce4_8422_2325_u64;
         let mut fold = |bytes: &[u8]| {
             for &b in bytes {
@@ -243,13 +254,13 @@ impl PathPolicy {
                 h = h.wrapping_mul(0x0000_0100_0000_01b3);
             }
         };
-        for pattern in &self.exclude {
-            fold(b"x\0");
-            fold(pattern.as_bytes());
-        }
-        for pattern in &self.opaque {
-            fold(b"o\0");
-            fold(pattern.as_bytes());
+        for (tag, list) in [(b'x', &self.exclude), (b'o', &self.opaque)] {
+            fold(&[tag]);
+            fold(&(list.len() as u64).to_le_bytes());
+            for pattern in list {
+                fold(&(pattern.len() as u64).to_le_bytes());
+                fold(pattern.as_bytes());
+            }
         }
         h
     }
@@ -354,6 +365,30 @@ mod tests {
             excluded.fingerprint(),
             PathPolicy::new(vec!["raw/**".into()], Vec::new()).fingerprint(),
             "deterministic for an identical declaration"
+        );
+    }
+
+    /// A pattern is an arbitrary user string, so the fingerprint's encoding has
+    /// to be unforgeable **from inside a pattern**. Under a tag-and-append
+    /// scheme these two policies fold identically — two different declarations
+    /// sharing one extraction-cache key, reached by typing rather than by a hash
+    /// collision.
+    #[test]
+    fn a_pattern_cannot_forge_the_fingerprint_of_another_policy() {
+        let two = PathPolicy::new(vec!["a".into(), "b".into()], Vec::new());
+        let one_forged = PathPolicy::new(vec!["a\0x\0b".into()], Vec::new());
+        assert_ne!(two.fingerprint(), one_forged.fingerprint());
+
+        // The same hazard across the list boundary: a pattern that spells the
+        // second list's tag must not be taken for the second list.
+        let split = PathPolicy::new(vec!["a".into()], vec!["b".into()]);
+        let forged = PathPolicy::new(vec!["a\0o\0b".into()], Vec::new());
+        assert_ne!(split.fingerprint(), forged.fingerprint());
+
+        // And a pattern moved between the lists still changes it.
+        assert_ne!(
+            PathPolicy::new(vec!["a".into()], vec!["b".into()]).fingerprint(),
+            PathPolicy::new(vec!["b".into()], vec!["a".into()]).fingerprint()
         );
     }
 
