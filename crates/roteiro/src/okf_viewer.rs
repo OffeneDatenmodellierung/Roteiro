@@ -66,6 +66,21 @@ struct Viewer {
     /// still appears on the next request — while the cost is paid only when
     /// there was an edit.
     cache: Arc<Mutex<Option<Cached>>>,
+    /// Whether this bundle's current outage has already been reported.
+    ///
+    /// **A latch, because the reader of that report is the operator and the
+    /// trigger is a stranger.** Every content route reaches the unreadable arm,
+    /// and a bundle that has gone away stays gone — so without this, one line is
+    /// written per request, at whatever rate a client that can reach the server
+    /// chooses. On a non-loopback bind (`--addr`, or #832's `--scope`) that is an
+    /// unauthenticated caller deciding how fast this process does synchronous,
+    /// globally-locked stderr I/O, and how fast whatever collects that stderr
+    /// fills up. The operator needs the fact once per outage; repeating it adds
+    /// nothing for them and hands the volume to somebody else.
+    ///
+    /// Cleared on every successful load, so a later outage is reported again
+    /// rather than swallowed by the first one.
+    reported: Arc<std::sync::atomic::AtomicBool>,
     /// The path this viewer is mounted under: empty when served alone, `/okf`
     /// when nested into `serve` beside the explorer.
     ///
@@ -239,9 +254,27 @@ impl Viewer {
             // The derived views go with it. Keeping them beside a new bundle is
             // how a viewer shows an edited concept in the body and the old title
             // in the sidebar — the two halves of one page disagreeing.
+            let bundle = match view::load(&self.root) {
+                Ok(bundle) => bundle,
+                Err(e) => {
+                    // Reported here rather than in `unreadable`, because this is
+                    // the one place that knows an *attempt* just failed; the
+                    // response is formed once per request and would say so once
+                    // per request. See [`Viewer::reported`].
+                    if !self
+                        .reported
+                        .swap(true, std::sync::atomic::Ordering::Relaxed)
+                    {
+                        eprintln!("roteiro: OKF bundle is not readable: {e}");
+                    }
+                    return Err(e);
+                }
+            };
+            self.reported
+                .store(false, std::sync::atomic::Ordering::Relaxed);
             *cache = Some(Cached {
                 stamp: current,
-                bundle: Arc::new(view::load(&self.root)?),
+                bundle: Arc::new(bundle),
                 overview: None,
                 graph: None,
             });
@@ -574,6 +607,7 @@ pub fn router(root: PathBuf, base: &str, nav: Nav) -> Router {
         base: Arc::new(base.to_owned()),
         nav: Arc::new(nav),
         cache: Arc::new(Mutex::new(None)),
+        reported: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     Router::new()
         .route("/", get(index))
@@ -858,9 +892,14 @@ fn escape(raw: &str) -> String {
 /// stranger.
 ///
 /// [`InspectError::Unreadable`]: rto_render::okf::inspect::InspectError::Unreadable
-fn unreadable(err: &rto_render::okf::inspect::InspectError, nav: &Nav) -> Response {
-    // The operator can act on this; the client cannot, and should not see it.
-    eprintln!("roteiro: OKF bundle is not readable: {err}");
+/// Rendering only, and it does not take the error — that is the point.
+///
+/// The operator's half of the split is written once per outage by
+/// [`Viewer::with_cache`], which is where a failed *attempt* is observable; see
+/// [`Viewer::reported`] for why "once per outage" rather than "once per
+/// response" is the load-bearing part. Not taking the error here is what keeps
+/// a later edit from quietly putting it back on the page.
+fn unreadable(nav: &Nav) -> Response {
     let named = nav.label.as_ref().map_or_else(
         || "<p>This OKF bundle is no longer readable.</p>".to_owned(),
         |label| format!("<p>OKF bundle {} is no longer readable.</p>", escape(label)),
@@ -887,7 +926,7 @@ async fn index(State(v): State<Viewer>) -> Response {
     let built = blocking(move || state.overview()).await;
     let view = match built {
         Some(Ok(view)) => view,
-        Some(Err(e)) => return unreadable(&e, &v.nav),
+        Some(Err(_)) => return unreadable(&v.nav),
         None => return spawn_failed(),
     };
     let base = v.base.as_str();
@@ -987,7 +1026,7 @@ async fn concept(State(v): State<Viewer>, UrlPath(id): UrlPath<String>) -> Respo
     let base = v.base.as_str();
     let found = match built {
         Some(Ok(found)) => found,
-        Some(Err(e)) => return unreadable(&e, &v.nav),
+        Some(Err(_)) => return unreadable(&v.nav),
         None => return spawn_failed(),
     };
     let Some(c) = found else {
@@ -1273,7 +1312,7 @@ async fn graph_entry(v: &Viewer) -> Response {
     .await;
     let graph = match built {
         Some(Ok(graph)) => graph,
-        Some(Err(e)) => return unreadable(&e, &v.nav),
+        Some(Err(_)) => return unreadable(&v.nav),
         None => return spawn_failed(),
     };
     let base = v.base.as_str();
@@ -1345,7 +1384,7 @@ async fn graph_json(State(v): State<Viewer>, Query(q): Query<GraphQuery>) -> Res
     .await;
     let graph = match built {
         Some(Ok(graph)) => graph,
-        Some(Err(e)) => return unreadable(&e, &v.nav),
+        Some(Err(_)) => return unreadable(&v.nav),
         None => return spawn_failed(),
     };
 
@@ -2925,26 +2964,69 @@ mod tests {
         }
     }
 
-    /// The operator keeps the diagnosis the client stopped getting.
+    /// The operator learns which bundle broke — **once per outage, not once per
+    /// request**.
     ///
-    /// The fix above is a **split by audience**, not a deletion: taking the path
-    /// out of the response without leaving it anywhere would trade a disclosure
-    /// for an operator who can no longer tell which of several mounted bundles
-    /// went missing. This pins the half that is easy to lose in a later tidy-up —
-    /// `unreadable` writes the whole error, path included, to stderr.
-    #[test]
-    fn the_operator_still_learns_which_bundle_broke() {
-        let src = include_str!("okf_viewer.rs");
-        let body = src
-            .split_once("fn unreadable(")
-            .and_then(|(_, rest)| rest.split_once("\n}\n"))
-            .map(|(body, _)| body)
-            .expect("`unreadable` should be findable");
+    /// Two halves, and the second is the one review caught. Taking the path out
+    /// of the response without leaving it anywhere would trade a disclosure for
+    /// an operator who can no longer tell which of several mounted bundles went
+    /// missing, so it still reaches stderr. But every content route reaches the
+    /// unreadable arm and a bundle that has gone away stays gone, so reporting
+    /// per *response* let a client that can reach the server choose how often
+    /// this process did synchronous, globally-locked stderr I/O — and how fast
+    /// whatever collects that stderr filled up. On a non-loopback bind that
+    /// caller is unauthenticated.
+    ///
+    /// Driven through `with_cache` rather than asserted against the source, so
+    /// it pins the behaviour and not the spelling of one line.
+    #[tokio::test]
+    async fn the_operator_learns_which_bundle_broke_once_per_outage() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let root = named_bundle("outage", "Alpha");
+        let v = Viewer {
+            root: Arc::new(root.clone()),
+            base: Arc::new(String::new()),
+            nav: Arc::new(Nav::default()),
+            cache: Arc::new(Mutex::new(None)),
+            reported: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+
+        // Healthy: nothing to report.
+        assert!(v.overview().is_ok(), "the fixture should load");
+        assert!(!v.reported.load(Relaxed));
+
+        std::fs::remove_dir_all(&root).expect("break the bundle");
+
+        // First failure reports; the latch is how we observe that it did.
+        assert!(v.overview().is_err(), "a removed bundle should not load");
         assert!(
-            body.contains("eprintln!") && body.contains("{err}"),
-            "`unreadable` no longer reports the error to the operator. The client \
-             deliberately does not get the path; stderr is the only place left \
-             that says which bundle went away: {body}"
+            v.reported.load(Relaxed),
+            "the first failed load must tell the operator"
+        );
+
+        // Every later request re-attempts the load and stays silent. Asserting
+        // the attempts really happened matters: a latch that also stopped
+        // *trying* would pass this while never recovering.
+        for _ in 0..5 {
+            assert!(v.overview().is_err());
+            assert!(
+                v.reported.load(Relaxed),
+                "the latch must stay set, so nothing is written again"
+            );
+        }
+
+        // And it re-arms, so a second outage is reported rather than swallowed
+        // by the first.
+        std::fs::create_dir_all(root.join("metrics")).expect("mkdir");
+        std::fs::write(
+            root.join("index.md"),
+            "---\nokf_version: \"0.2\"\n---\n\n# Bundle\n",
+        )
+        .expect("write");
+        assert!(v.overview().is_ok(), "the bundle should load again");
+        assert!(
+            !v.reported.load(Relaxed),
+            "recovery must re-arm the report, or a later outage is silent"
         );
     }
 
