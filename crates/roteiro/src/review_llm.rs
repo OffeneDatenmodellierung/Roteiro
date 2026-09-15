@@ -1274,6 +1274,32 @@ fn warn_if_reviewing_own_work(repo: &Path, base: Option<&str>, model: &str) {
     );
 }
 
+/// Read a working-tree file's text, **or refuse it** because the repository
+/// declared its path out of the scan (ADR-0007 `[paths]`).
+///
+/// A named function rather than an inline closure because it is the **last gate
+/// before egress**: everything `context_for` and `review_file` put in front of a
+/// model passes through here, and a rule that decides what leaves the machine
+/// should be findable by name. Filtering the change set is not sufficient on its
+/// own — `context_for` follows a file's *parent modules*, so a narrow `exclude`
+/// naming one module file would otherwise be read and sent as an admitted file's
+/// parent, which a filtered file set does not cover.
+///
+/// It refuses `opaque` as well as `excluded`: an opaque path's bytes may be
+/// measured, never mined, and handing them to a model is mining by any reading.
+#[cfg(feature = "inference-local-models")]
+fn worktree_sources<'a>(
+    repo: &'a Path,
+    paths: &'a rto_graph::PathPolicy,
+) -> impl Fn(&str) -> Option<String> + 'a {
+    move |p: &str| {
+        paths
+            .classify(p)
+            .mines()
+            .then(|| std::fs::read_to_string(repo.join(p)).ok())?
+    }
+}
+
 #[cfg(any(feature = "serve", feature = "inference-local-models"))]
 fn changed_files(repo: &Path, base: Option<&str>, paths: &rto_graph::PathPolicy) -> ReviewSet {
     let head = git(repo, &["rev-parse", "HEAD"]).unwrap_or_else(|| "HEAD".to_owned());
@@ -1400,14 +1426,7 @@ pub fn run_llm(
     // reported.
     let mut reported: Vec<String> = Vec::new();
     for file in &files {
-        // As in the replay path above: the closure, not the file set, is the
-        // chokepoint every byte sent to the model passes through.
-        let sources = |p: &str| {
-            ingest
-                .class(p)
-                .mines()
-                .then(|| std::fs::read_to_string(repo.join(p)).ok())?
-        };
+        let sources = worktree_sources(repo, ingest.paths);
         let context = context_for(graph.as_ref(), file, &sources)?;
         let outcome = review_file(&engine, model, file, &context, &checks, &sources)?;
         if outcome.reasoning_truncated {
