@@ -171,9 +171,22 @@ fn on_open_hook_prepares_the_graph_on_first_access() {
     let db = dir.join(".git").join("roteiro").join("graph.db");
     assert!(!db.exists(), "no graph before first access");
 
+    let expected_root = dir.canonicalize().unwrap_or_else(|_| dir.clone());
     let ws = Workspace::from_repo_paths([&dir])
         .expect("build")
-        .with_on_open(Arc::new(|db: &Path| {
+        .with_on_open(Arc::new(move |db: &Path, root: Option<&Path>| {
+            // The hook is handed the recorded working-tree root beside the db
+            // path, because that root cannot be derived from the db path for a
+            // linked worktree (issue #837) — see `OnOpen`. Asserted here rather
+            // than merely accepted, so an implementation that stopped recording it
+            // would fail rather than silently hand back `None` and send every
+            // caller back to the walk this parameter exists to replace.
+            assert_eq!(
+                root.map(|r| r.canonicalize().unwrap_or_else(|_| r.to_path_buf())),
+                Some(expected_root.clone()),
+                "the on-open hook must receive the repository's recorded \
+                 working-tree root"
+            );
             // Stand in for `roteiro sync`: create the graph with one node.
             std::fs::create_dir_all(db.parent().unwrap()).map_err(|e| e.to_string())?;
             let mut store = Store::open(db).map_err(|e| e.to_string())?;

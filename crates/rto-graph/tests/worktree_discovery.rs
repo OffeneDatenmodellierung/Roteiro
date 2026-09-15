@@ -385,3 +385,48 @@ fn a_worktree_and_its_main_checkout_share_a_cache_without_sharing_a_graph() {
     // against populated graphs rather than empty ones.
     assert!(has(&main_store, "shared.txt") && has(&wt_store, "shared.txt"));
 }
+
+/// **The "no graph yet" error names a directory you can actually `cd` into.**
+///
+/// `WorkspaceError::NoGraph` reads "run `roteiro sync` in {path}", so the path is
+/// not decoration — it is the whole instruction. It used to be derived by walking
+/// three parents up from `<git dir>/roteiro/graph.db`, which is the repository for
+/// an ordinary clone and, for a linked worktree, is `<main>/.git/worktrees`: a
+/// directory that is not a repository, that nobody typed, and in which the command
+/// the message recommends cannot work.
+///
+/// The registry already records the working-tree root beside the db path, so the
+/// fix was to use the value it has rather than reconstruct one. Asserted on the
+/// rendered message, because the rendered message is what a user acts on.
+#[test]
+fn a_worktree_with_no_graph_is_told_to_sync_in_the_worktree() {
+    use rto_graph::Workspace;
+
+    let base = base("nograph");
+    let main = repo_with_a_commit(&base.join("plain"));
+    git(
+        &main,
+        &["worktree", "add", "-q", "../checkout", "-b", "side"],
+    );
+    let checkout = base.join("checkout");
+
+    // Never synced, so the first touch takes the missing-graph path.
+    let ws = Workspace::from_repo_paths([&checkout]).expect("build workspace");
+    let err = ws
+        .with_store(Some("checkout"), |_| ())
+        .expect_err("a never-synced worktree must report NoGraph");
+    let msg = err.to_string();
+
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    assert!(
+        msg.contains(&canon(&checkout).display().to_string())
+            || msg.contains(&checkout.display().to_string()),
+        "the missing-graph error must name the WORKTREE as the place to run \
+         `roteiro sync`: {msg}"
+    );
+    assert!(
+        !msg.contains(".git"),
+        "the missing-graph error names a path inside `.git` — `roteiro sync` \
+         cannot be run there, and it is not a directory anyone typed: {msg}"
+    );
+}

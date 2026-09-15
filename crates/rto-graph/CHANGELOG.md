@@ -18,6 +18,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(workspace)* `ResolvedWorkspace` gains `include_worktrees`, carrying one
   workspace group's discovery rule ([#837](https://github.com/OffeneDatenmodellierung/Roteiro/issues/837)).
 
+### Changed
+
+- *(workspace)* `OnOpen` (the `--sync-on-access` hook) takes the project's
+  **recorded working-tree root** beside its `graph.db` path:
+  `Fn(&Path, Option<&Path>)`. The root cannot be derived from the db path — a
+  linked worktree's store is `<main>/.git/worktrees/<name>/roteiro/graph.db`, so
+  the "three parents up is the repository" shortcut lands on
+  `<main>/.git/worktrees`, and discovery from there walks up and finds the *main*
+  checkout. The registry has recorded the right answer all along
+  (`repo.workdir()`, beside the db path it built from `repo.git_dir()`), so it is
+  now handed over rather than reconstructed
+  ([#837](https://github.com/OffeneDatenmodellierung/Roteiro/issues/837)).
+- *(workspace)* `WorkspaceError::NoGraph` names that same recorded root. Its
+  message is "run `roteiro sync` in {path}", and for a worktree it named
+  `<main>/.git/worktrees` — a directory that is not a repository, that nobody
+  typed, and in which the command it recommends cannot work.
+
 ### Added
 
 - *(git)* `Repo::linked_worktree_of` — the main checkout a linked worktree belongs

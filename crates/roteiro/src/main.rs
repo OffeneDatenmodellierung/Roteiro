@@ -1099,8 +1099,11 @@ enum Command {
         /// answers questions about many projects, selected per call by `project`.
         /// A repo two levels down (`ROOT/<org>/<repo>`) is **not** found; pass
         /// each `<org>` directory instead, or list them under `[[workspaces]]`.
-        /// Combined with `[workspace]` config. Omit for single-repo serving
-        /// (the current directory's repo).
+        /// A **linked git worktree** found this way is NOT hosted — it is a second
+        /// checkout of a repository rather than a project (issue #837); set
+        /// `include_worktrees = true` on the workspace to host them, or name one
+        /// in `repos`, which is always honoured. Combined with `[workspace]`
+        /// config. Omit for single-repo serving (the current directory's repo).
         #[arg(long, value_name = "ROOT")]
         workspace: Vec<String>,
         /// Select a **named** workspace from config (`[[workspaces]]`/`[standalone]`,
@@ -1180,8 +1183,12 @@ enum Command {
         /// child** of ROOT, plus ROOT itself if it is one — one level, **not
         /// recursive** (repeatable), selected per call by `project`. A repo two
         /// levels down (`ROOT/<org>/<repo>`) is **not** found; pass each `<org>`
-        /// directory instead, or list them under `[[workspaces]]`. Combined with
-        /// `[workspace]` config. Omit for single-repo serving (the cwd's repo).
+        /// directory instead, or list them under `[[workspaces]]`. A **linked git
+        /// worktree** found this way is NOT hosted — it is a second checkout of a
+        /// repository rather than a project (issue #837); set
+        /// `include_worktrees = true` on the workspace to host them, or name one
+        /// in `repos`, which is always honoured. Combined with `[workspace]`
+        /// config. Omit for single-repo serving (the cwd's repo).
         #[arg(long, value_name = "ROOT")]
         workspace: Vec<String>,
         /// Select a **named** workspace from config as the default the flat tools
@@ -10133,6 +10140,26 @@ fn cwd_repo_workdir() -> Option<std::path::PathBuf> {
 /// ([`rto_graph::discover_repos_under`] + explicit repos) — no `Workspace` is built
 /// and no graph is opened — so one unrelated **misconfigured** group (an unreadable
 /// root) is skipped here rather than aborting selection.
+///
+/// # This probe is SELECTION, so it always sees worktrees
+///
+/// It scans with [`worktrees_for_selection`] and deliberately **not** with
+/// [`worktrees_of`]. The question here is "which configured workspace am I
+/// standing in", and issue #837's amendment is that skipping applies to
+/// *discovery*, not to *selection* — the same rule that makes `--scope here`
+/// serve a worktree you are standing in.
+///
+/// Asking the discovery rule instead had a consequence that was entirely silent.
+/// Standing in a worktree under a named workspace's root with
+/// `include_worktrees = false`, this returned `None`, so [`links_scope_paths`]
+/// fell through to the legacy flat `[workspace]` scope rather than the workspace
+/// that actually contains you — and a config that uses `[[workspaces]]` usually
+/// has no legacy table, so the scope collapsed to the cwd repo alone and every
+/// authored cross-repo link read as drift.
+///
+/// The *member scan* that follows a successful selection is discovery and still
+/// uses [`worktrees_of`]: being selected by standing in a worktree does not make
+/// that worktree a member of the group.
 fn workspace_containing_cwd<'a>(
     resolved: &'a [rto_graph::ResolvedWorkspace],
     cwd_wd: &std::path::Path,
@@ -10142,7 +10169,7 @@ fn workspace_containing_cwd<'a>(
     resolved.iter().find(|rw| {
         // A broken root must not break selection: skip a root that won't read.
         let in_root = rw.roots.iter().any(|root| {
-            rto_graph::discover_repos_under(std::path::Path::new(root), worktrees_of(rw))
+            rto_graph::discover_repos_under(std::path::Path::new(root), worktrees_for_selection())
                 .is_ok_and(|repos| repos.iter().any(|r| is_cwd(r)))
         });
         in_root
@@ -15668,16 +15695,7 @@ fn build_serve_workspaces(
     let paths = resolved_repo_paths(&effective, &[])?;
     let mut ws = rto_graph::Workspace::from_repo_paths(&paths)?;
     if sync_on_access {
-        // The hook outlives this function, so it cannot borrow `main`'s path
-        // policy: it owns a clone and rebinds the toggles onto it per call. The
-        // policy applied is this **server's**, which is the same rule the
-        // ingestion toggles beside it have always followed — unlike `debt`, a
-        // sync-on-access hook has no project config loaded at the point it runs.
-        let toggles = ingest.with_paths(rto_graph::PathPolicy::empty());
-        let owned_paths = ingest.paths.clone();
-        ws = ws.with_on_open(Arc::new(move |db: &std::path::Path| {
-            sync_project_graph(db, toggles.with_paths(&owned_paths)).map_err(|e| e.to_string())
-        }));
+        ws = attach_sync_on_access(ws, ingest);
     }
     let flat = Arc::new(ws);
     eprintln!(
@@ -15942,14 +15960,22 @@ fn worktree_hint(
     }
     let shown = named.len().min(NAME_LIMIT);
     format!(
-        "\n\n{} {} under {} {} a linked git WORKTREE — a second checkout of a \
+        // "2 subdirectories … are a linked git WORKTREE" put a plural verb against
+        // a singular noun phrase: the count and `is/are` were pluralised and the
+        // thing they agree with was not. Pluralising the noun phrase fixes the
+        // agreement without a second sentence.
+        "\n\n{} {} under {} {} — a second checkout of a \
          repository rather than a project — so {} NOT hosted: {}{}. Set \
          `include_worktrees = true` on that workspace to host them, or name one \
          directly in `repos = [...]`, which is always honoured.",
         total,
         plural(total, "subdirectory", "subdirectories"),
         roots.join(", "),
-        plural(total, "is", "are"),
+        plural(
+            total,
+            "is a linked git WORKTREE",
+            "are linked git WORKTREES",
+        ),
         plural(total, "it was", "they were"),
         named[..shown].join(", "),
         if named.len() > shown { ", …" } else { "" },
@@ -16114,6 +16140,71 @@ fn standalone_table<'c>(
     matches!(scope, WorkspaceScope::All).then_some(&cfg.standalone)
 }
 
+/// Install the `--sync-on-access` hook on `ws`: (re)build each project's graph the
+/// first time it is touched.
+///
+/// Lifted out of [`build_serve_workspaces`] because it is a nameable step with an
+/// argument of its own, and because that function is repeatedly at the
+/// `too_many_lines` limit — a step that can be named is worth more out here than
+/// as six more lines in a function that already does five things.
+///
+/// # Two values the hook cannot borrow, and one it must not derive
+///
+/// It outlives this call, so it cannot borrow `main`'s path policy: it owns a
+/// clone and rebinds the toggles onto it per call. The policy applied is this
+/// **server's**, the same rule the ingestion toggles beside it have always
+/// followed — unlike `debt`, a sync-on-access hook has no project config loaded
+/// at the point it runs.
+///
+/// And it is *handed* the project's working-tree root rather than deriving one
+/// from the `graph.db` path: for a linked worktree that derivation lands outside
+/// the repository entirely and rebuilds the main checkout instead. See
+/// [`rto_graph::OnOpen`] and [`sync_project_graph`] (issue #837).
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+fn attach_sync_on_access(
+    ws: rto_graph::Workspace,
+    ingest: rto_graph::IngestConfig,
+) -> rto_graph::Workspace {
+    let toggles = ingest.with_paths(rto_graph::PathPolicy::empty());
+    let owned_paths = ingest.paths.clone();
+    ws.with_on_open(std::sync::Arc::new(
+        move |db: &std::path::Path, root: Option<&std::path::Path>| {
+            sync_project_graph(db, root, toggles.with_paths(&owned_paths))
+                .map_err(|e| e.to_string())
+        },
+    ))
+}
+
+/// The worktree rule for a **selection** question — always
+/// [`rto_graph::Worktrees::Include`].
+///
+/// # Why this exists rather than a bare `Worktrees::Include` at the call
+///
+/// Because the mistake this fixes was not choosing the wrong *variant*; it was
+/// reaching for [`worktrees_of`] — the **discovery** answer — at a site asking a
+/// different question. The `Worktrees` argument is deliberately required rather
+/// than defaulted, which is why nine of the ten scan sites in this binary are
+/// right; the tenth was wrong because the only named helper available answered
+/// the question it was not asking.
+///
+/// So the two questions now have one named answer each, and a new call site picks
+/// between two *intents* rather than between two enum variants:
+///
+/// * **Discovery** — "what does this root contain?" — [`worktrees_of`], per group.
+/// * **Selection** — "is this particular checkout the one meant?" — this.
+///
+/// Note honestly what this does **not** do: it is a naming discipline, not a type
+/// -level guarantee, and nothing stops a future site from calling the wrong one.
+/// Making it unrepresentable would mean splitting the scan API in two at the
+/// `rto-graph` boundary so that a selection probe could not call the discovery
+/// entry point at all — a public API change to that crate, for a distinction only
+/// this binary draws. That is not worth it for one site; this is.
+fn worktrees_for_selection() -> rto_graph::Worktrees {
+    // Standing in a checkout is as explicit an act as naming it in `repos`, which
+    // is why an explicit `repos` entry is honoured too (issue #837).
+    rto_graph::Worktrees::Include
+}
+
 fn worktrees_of(ws: &rto_graph::ResolvedWorkspace) -> rto_graph::Worktrees {
     if ws.include_worktrees {
         rto_graph::Worktrees::Include
@@ -16258,16 +16349,36 @@ fn collect_workspace_repo_paths(
 #[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
 fn sync_project_graph(
     graph_db: &std::path::Path,
+    root: Option<&std::path::Path>,
     ingest: rto_graph::IngestConfig,
 ) -> anyhow::Result<()> {
     use rto_graph::{ObjectCache, Repo, Store};
-    // graph.db → roteiro → .git → repo directory (three parents up).
-    let repo_dir = graph_db
-        .parent()
-        .and_then(std::path::Path::parent)
-        .and_then(std::path::Path::parent)
-        .ok_or_else(|| anyhow::anyhow!("unexpected graph.db path: {}", graph_db.display()))?;
-    let repo = Repo::discover(repo_dir)?;
+    // **The registry's recorded working-tree root, when it has one.**
+    //
+    // The walk below reads `graph.db → roteiro → .git → repo`, which is true of an
+    // ordinary clone and false of a **linked worktree**: its store is
+    // `<main>/.git/worktrees/<name>/roteiro/graph.db`, so three parents up is
+    // `<main>/.git/worktrees`. `Repo::discover` then walks up out of that, finds
+    // `<main>/.git`, and hands back the **main** checkout — so this would extract
+    // the wrong repository at the wrong revision and write it into the worktree's
+    // store, with nothing to show for it. That is the same "serves the wrong tree"
+    // failure issue #837's amendment names, at a path the amendment did not reach.
+    //
+    // `build_registry` already recorded `repo.workdir()` beside the db path it
+    // built from `repo.git_dir()`, so the answer is known and is now passed in;
+    // the walk remains only for a source that records no root
+    // (`Workspace::from_named_dbs`).
+    let repo_dir = if let Some(root) = root {
+        root.to_path_buf()
+    } else {
+        graph_db
+            .parent()
+            .and_then(std::path::Path::parent)
+            .and_then(std::path::Path::parent)
+            .ok_or_else(|| anyhow::anyhow!("unexpected graph.db path: {}", graph_db.display()))?
+            .to_path_buf()
+    };
+    let repo = Repo::discover(&repo_dir)?;
     let store_dir = repo.git_dir().join("roteiro");
     std::fs::create_dir_all(&store_dir)?;
     let mut store = Store::open(&store_dir.join("graph.db"))?;
@@ -24442,6 +24553,74 @@ mod refusal_text_tests {
     }
 }
 
+/// What `--workspace <ROOT>` promises, checked against what it now does.
+#[cfg(test)]
+mod workspace_help_contract_tests {
+    use clap::CommandFactory as _;
+
+    /// The rendered help of an argument at a subcommand path.
+    fn arg_help(path: &[&str], id: &str) -> String {
+        let mut cmd = super::Cli::command();
+        for name in path {
+            let next = cmd
+                .find_subcommand(name)
+                .unwrap_or_else(|| panic!("no subcommand `{name}` under {path:?}"))
+                .clone();
+            cmd = next;
+        }
+        let arg = cmd
+            .get_arguments()
+            .find(|a| a.get_id() == id)
+            .unwrap_or_else(|| panic!("no `--{id}` argument on `{}`", path.join(" ")));
+        arg.get_long_help()
+            .or_else(|| arg.get_help())
+            .map(ToString::to_string)
+            .unwrap_or_default()
+    }
+
+    /// **`--workspace <ROOT>` said it hosts every immediate child repo, and since
+    /// issue #837 it does not.**
+    ///
+    /// A linked worktree that is an immediate child of ROOT holds a `.git` entry
+    /// and is skipped, so the sentence was a false statement in user-facing text —
+    /// the exact class this change is otherwise about, in the one place a user
+    /// looks to find out what the flag does. Worse, nothing else in `--help`
+    /// mentions the escape hatch, so somebody whose project had vanished had no
+    /// thread to pull.
+    ///
+    /// Checked on **both** surfaces that take the flag, from one list, because the
+    /// two help strings are independent copies of one promise and drifting apart is
+    /// how this defect arrived.
+    #[test]
+    fn the_workspace_flag_help_admits_that_worktrees_are_skipped() {
+        for path in [&["serve"][..], &["mcp"][..]] {
+            let help = arg_help(path, "workspace");
+            // It still promises immediate children — that half is unchanged and
+            // the assertion below would otherwise pass on help that said nothing.
+            assert!(
+                help.contains("immediate"),
+                "`{}` --workspace no longer documents the one-level rule: {help}",
+                path.join(" ")
+            );
+            for expected in [
+                // The exception to the promise on the line above.
+                "worktree",
+                // And the way back, since a diagnostic that names no remedy is
+                // half a diagnostic.
+                "include_worktrees = true",
+            ] {
+                assert!(
+                    help.contains(expected),
+                    "`{} --workspace` promises to host each immediate child repo \
+                     but skips linked worktrees, and its help must say so \
+                     ({expected:?} missing): {help}",
+                    path.join(" ")
+                );
+            }
+        }
+    }
+}
+
 /// What `--limit` means, checked across every surface that offers it.
 #[cfg(test)]
 mod limit_contract_tests {
@@ -24512,6 +24691,13 @@ mod limit_contract_tests {
 #[cfg(test)]
 mod worktree_discovery_tests {
     use super::{config, resolved_repo_paths};
+    // Gated with the tests that use them: `sync_project_graph` is a server-side
+    // item, so an ungated import fails to compile under default features, and
+    // `workspace_containing_cwd` is only reached by a gated test, so an ungated
+    // import is an unused-import error there. Both are `-D warnings` failures in
+    // a feature set the all-features run cannot see.
+    #[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+    use super::{sync_project_graph, workspace_containing_cwd};
     use std::path::{Path, PathBuf};
 
     /// Run `git` in `dir` with the identity and signing settings a fixture needs
@@ -24885,8 +25071,12 @@ mod worktree_discovery_tests {
 
         let hint = super::worktree_hint(&resolved, None);
         for expected in [
-            // The reason, in the words the rest of the change uses.
-            "linked git WORKTREE",
+            // The reason, in the words the rest of the change uses — and in the
+            // plural, agreeing with the count beside it. "2 subdirectories … are a
+            // linked git WORKTREE" put a plural verb against a singular noun
+            // phrase, and a `contains("linked git WORKTREE")` assertion could not
+            // see that, because the broken string contains the correct one.
+            "are linked git WORKTREES",
             // The count, so the number that vanished is accounted for.
             "2 subdirectories",
             // Both escape hatches, because the opt-in is not the answer for
@@ -24920,6 +25110,168 @@ mod worktree_discovery_tests {
             "a root with no worktrees still produced a worktree diagnostic"
         );
         std::fs::remove_dir_all(&plain_base).ok();
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// **A worktree is SELECTED by the workspace that contains it, even when that
+    /// workspace does not host worktrees** (issue #837's amendment, at the
+    /// selection seam).
+    ///
+    /// `workspace_containing_cwd` asks "which configured workspace am I standing
+    /// in", which is a *selection* question — and the amendment's rule is that
+    /// skipping applies to discovery, not to selection. It asked the discovery
+    /// rule instead, and the consequence was entirely silent: standing in a
+    /// worktree returned `None`, so `links_scope_paths` fell through to the legacy
+    /// flat `[workspace]` scope rather than the workspace that actually contains
+    /// you. A config using `[[workspaces]]` usually has no legacy table at all, so
+    /// the scope collapsed to the cwd repo alone and every authored cross-repo
+    /// link read as drift — a wrong answer that looks like a finding.
+    ///
+    /// Both directions are asserted, because a probe that selected *everything*
+    /// would satisfy the first half on its own.
+    #[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+    #[test]
+    fn a_worktree_selects_the_workspace_containing_it_though_it_is_not_hosted() {
+        let (base, root) = fixture("selection");
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+
+        // Deliberately the DEFAULT rule: this group does not host worktrees.
+        let cfg = config::Config {
+            workspaces: vec![config::NamedWorkspace {
+                name: "pool".to_owned(),
+                roots: Some(vec![root.to_string_lossy().into_owned()]),
+                ..config::NamedWorkspace::default()
+            }],
+            ..config::Config::default()
+        };
+        let resolved = cfg.resolved_workspaces().expect("resolve");
+
+        // The worktree is NOT a member — that half of the decision is unchanged.
+        assert!(
+            !resolved_repo_paths(&resolved, &[])
+                .expect("paths")
+                .iter()
+                .any(|p| p.file_name().is_some_and(|n| n == "checkout")),
+            "the discovery half regressed: the worktree became a hosted member"
+        );
+
+        // …and yet standing in it still selects the workspace that contains it.
+        assert_eq!(
+            workspace_containing_cwd(&resolved, &canon(&root.join("checkout")))
+                .map(|rw| rw.name.as_str()),
+            Some("pool"),
+            "standing in a worktree must select the workspace whose root contains \
+             it — otherwise `links` silently falls back to the legacy scope"
+        );
+        // An ordinary member still selects it, so the fix did not simply widen
+        // the probe into something that matches anything.
+        assert_eq!(
+            workspace_containing_cwd(&resolved, &canon(&root.join("plain")))
+                .map(|rw| rw.name.as_str()),
+            Some("pool")
+        );
+        // And a repository outside every root still selects nothing.
+        let outside = repo(&base.join("outside"));
+        assert!(
+            workspace_containing_cwd(&resolved, &canon(&outside)).is_none(),
+            "a repository under no configured root was selected anyway"
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// **`--sync-on-access` inside a hosted worktree builds THAT worktree's graph**
+    /// (issue #837).
+    ///
+    /// The hook used to receive only the `graph.db` path and walk three parents to
+    /// find the repository — true of `<repo>/.git/roteiro/graph.db`, and false of a
+    /// linked worktree, whose store is
+    /// `<main>/.git/worktrees/<name>/roteiro/graph.db`. Three parents up is
+    /// `<main>/.git/worktrees`, which is not a repository at all, so `Repo::discover`
+    /// walked up out of it and found the **main** checkout: the hook extracted the
+    /// wrong repository at the wrong revision and wrote it into the worktree's
+    /// store. That is the amendment's "serves the wrong tree" failure at a path the
+    /// amendment did not reach, and it is invisible from outside — a graph is
+    /// produced, under the right name, with plausible contents.
+    ///
+    /// So the fixture diverges the two branches and the assertions are about
+    /// *which* tree arrived, never that one did.
+    #[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+    #[test]
+    fn sync_on_access_builds_the_worktrees_own_graph_not_its_main_checkouts() {
+        let base = std::env::temp_dir().join(format!("rto-wtsync-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        let main = repo(&base.join("plain"));
+        std::fs::write(main.join("only_on_main.rs"), "pub fn only_on_main() {}\n").expect("write");
+        std::fs::write(main.join("shared.rs"), "pub fn shared() {}\n").expect("write");
+        git(&main, &["add", "-A"]);
+        git(&main, &["commit", "-qm", "main-side"]);
+
+        let checkout = base.join("checkout");
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                checkout.to_str().expect("utf-8"),
+                "-b",
+                "side",
+            ],
+        );
+        std::fs::remove_file(checkout.join("only_on_main.rs")).expect("rm");
+        std::fs::write(
+            checkout.join("only_on_side.rs"),
+            "pub fn only_on_side() {}\n",
+        )
+        .expect("write");
+        git(&checkout, &["add", "-A"]);
+        git(&checkout, &["commit", "-qm", "side-only"]);
+
+        // Exactly the db path the registry records for this worktree, derived the
+        // way `build_registry` derives it: `repo.git_dir()/roteiro/graph.db`.
+        let wt = rto_graph::Repo::discover(&checkout).expect("discover worktree");
+        let db = wt.git_dir().join("roteiro").join("graph.db");
+        // Canonicalised on both sides: macOS roots `std::env::temp_dir()` under a
+        // symlink (`/var` → `/private/var`), and `git_dir()` comes back resolved
+        // while the fixture path does not — so a raw `starts_with` compares two
+        // spellings of one directory and fails on this machine only.
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        assert!(
+            canon(&db).starts_with(canon(&main).join(".git").join("worktrees")),
+            "fixture does not reproduce the linked-worktree store layout: {}",
+            db.display()
+        );
+
+        sync_project_graph(
+            &db,
+            Some(checkout.as_path()),
+            rto_graph::IngestConfig::default(),
+        )
+        .expect("sync on access");
+
+        let store = rto_graph::Store::open(&db).expect("open the store it wrote");
+        let has = |name: &str| {
+            store
+                .get_node(&format!("file:{name}"))
+                .expect("get_node")
+                .is_some()
+        };
+        assert!(
+            has("only_on_side.rs"),
+            "the graph is missing the file that exists only on the WORKTREE's \
+             branch — the hook resolved some other repository"
+        );
+        assert!(
+            !has("only_on_main.rs"),
+            "the graph contains a file that exists only on the MAIN checkout's \
+             branch — the hook built the wrong repository into this store"
+        );
+        // Present either way, so the two assertions above cannot have passed on an
+        // empty graph.
+        assert!(
+            has("shared.rs"),
+            "the graph is empty, so nothing above was proven"
+        );
         std::fs::remove_dir_all(&base).ok();
     }
 
