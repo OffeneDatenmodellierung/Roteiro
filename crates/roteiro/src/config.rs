@@ -1121,6 +1121,29 @@ impl WorkspaceConfig {
         self.roots.as_ref().is_none_or(Vec::is_empty)
             && self.repos.as_ref().is_none_or(Vec::is_empty)
     }
+
+    /// Overlay `over` on top of `self` per field (the project layer over the user
+    /// layer), taking `over`'s value wherever set.
+    ///
+    /// **One method for both tables of this shape.** `[workspace]` and
+    /// `[standalone]` are the same three keys under the same rule, and
+    /// [`Config::overlaid_with`] spelled that rule out twice — so adding
+    /// `include_worktrees` (issue #837) meant adding it in two places, and a rule
+    /// written twice is a rule that can come to disagree with itself. Extracted
+    /// here rather than inlined once more, in the shape the five other tables in
+    /// that overlay already use.
+    ///
+    /// **Per field, not wholesale**: a project layer that declares a key wins, and
+    /// one silent about it leaves the user layer's answer standing rather than
+    /// resetting it to the default. The `[[workspaces]]` *array* deliberately does
+    /// not work this way — see [`Config::overlaid_with`], which overlays it whole.
+    fn overlaid_with(&self, over: &Self) -> Self {
+        Self {
+            roots: over.roots.clone().or_else(|| self.roots.clone()),
+            repos: over.repos.clone().or_else(|| self.repos.clone()),
+            include_worktrees: over.include_worktrees.or(self.include_worktrees),
+        }
+    }
 }
 
 /// One `[[workspaces]]` entry: a **named** linked workspace — a set of repos served
@@ -1962,25 +1985,7 @@ impl Config {
                 opaque: merge_patterns(self.paths.opaque.as_deref(), over.paths.opaque.as_deref()),
             },
             telemetry: self.telemetry.overlaid_with(&over.telemetry),
-            workspace: WorkspaceConfig {
-                roots: over
-                    .workspace
-                    .roots
-                    .clone()
-                    .or(self.workspace.roots.clone()),
-                repos: over
-                    .workspace
-                    .repos
-                    .clone()
-                    .or(self.workspace.repos.clone()),
-                // Per field, like its siblings: a project layer that declares the
-                // key wins, and one that is silent about it leaves the user
-                // layer's answer standing rather than resetting it to the default.
-                include_worktrees: over
-                    .workspace
-                    .include_worktrees
-                    .or(self.workspace.include_worktrees),
-            },
+            workspace: self.workspace.overlaid_with(&over.workspace),
             // `[[workspaces]]` overlay like `links`: the project layer wins outright
             // when it declares any, else the user layer's survive.
             workspaces: if over.workspaces.is_empty() {
@@ -1988,26 +1993,9 @@ impl Config {
             } else {
                 over.workspaces.clone()
             },
-            // `[standalone]` merges per field (project over user), like `workspace`.
-            standalone: WorkspaceConfig {
-                roots: over
-                    .standalone
-                    .roots
-                    .clone()
-                    .or(self.standalone.roots.clone()),
-                repos: over
-                    .standalone
-                    .repos
-                    .clone()
-                    .or(self.standalone.repos.clone()),
-                // Per field, like its siblings: a project layer that declares the
-                // key wins, and one that is silent about it leaves the user
-                // layer's answer standing rather than resetting it to the default.
-                include_worktrees: over
-                    .standalone
-                    .include_worktrees
-                    .or(self.standalone.include_worktrees),
-            },
+            // `[standalone]` merges per field (project over user), like `workspace`
+            // — literally so: both go through `WorkspaceConfig::overlaid_with`.
+            standalone: self.standalone.overlaid_with(&over.standalone),
             // Links are per-repo (a spoke declares its own); the project layer wins
             // outright when it has any, else the user layer's (rare).
             links: if over.links.is_empty() {
