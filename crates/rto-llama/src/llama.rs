@@ -1312,11 +1312,28 @@ fn media_prompt(
 /// Two outcomes share one Rust type and must not share one status code:
 ///
 /// * [`TemplateError::Rejected`] is the **template's own refusal** of this
-///   conversation. It is a correct statement about the request, made by the
-///   model's own metadata, so it is an [`EngineError::InvalidRequest`] — the
-///   variant `rto-serve` already answers `400 invalid_request_error` on all
-///   three of its handlers. Nothing new is routed here: this is that mapping
-///   being reached, not a second one being invented.
+///   conversation, made by the model's own metadata, so it becomes
+///   [`EngineError::TemplateRejected`] — answered `400 invalid_request_error`
+///   by the same handler arm that answers [`EngineError::InvalidRequest`].
+///
+///   A *distinct* variant rather than `InvalidRequest` itself, and the reason is
+///   the one thing this function cannot know: **whether the conversation it was
+///   handed is the one the client sent**. `rto-serve` prepends a grounding turn
+///   to every tooled conversation, so a refusal of "the request" may be a
+///   refusal of a turn the client never wrote. This layer is not entitled to
+///   settle that — it cannot see the seam — so it names the case precisely and
+///   lets the layer that *did* alter the conversation answer for it. Folded into
+///   `InvalidRequest`, the case is invisible: it would be indistinguishable from
+///   the encoder-only guard's genuine `400`, which is a real client error and
+///   must keep its status.
+///
+///   The message deliberately stops at "Nothing was sent to the model." It used
+///   to end "Change the request to match it.", and that instruction is exactly
+///   what this function has no standing to give: measured, the *same* refusal
+///   with the *same* wording arises both from a client sending two `system`
+///   turns (theirs to fix) and from a client sending one while Roteiro prepends
+///   a second (ours). Naming the remedy is the caller's job, because only the
+///   caller knows which of those happened.
 /// * Everything else is a gap in **this renderer** — a Jinja feature it does not
 ///   have, a template that will not parse — which is a statement about the
 ///   server and stays [`EngineError::Inference`], answered `500`.
@@ -1336,12 +1353,11 @@ fn template_failure(name: &str, e: &TemplateError) -> EngineError {
         // everything after it is provenance for a reader who does not know that a
         // GGUF carries a template at all. Ending the model's message with our own
         // is what keeps a client that shows only the first line still useful.
-        return EngineError::InvalidRequest(format!(
+        return EngineError::TemplateRejected(format!(
             "model `{name}` rejected this conversation: {message} That refusal is \
              the model's own chat template speaking, not Roteiro's: the template \
              ships inside the model's GGUF and states which conversation shapes \
-             the model was trained on. Nothing was sent to the model. Change the \
-             request to match it."
+             the model was trained on. Nothing was sent to the model."
         ));
     }
     // Actionable, because this is the one failure an unknown model can
@@ -1850,19 +1866,30 @@ mod tests {
         window_for_request,
     };
 
-    /// A template's refusal is a **4xx about the request**, and carries the
-    /// template's sentence intact (issue #848).
+    /// A template's refusal is its **own** variant, and carries the template's
+    /// sentence intact (issue #848).
     ///
-    /// `InvalidRequest` is not decoration: `rto-serve` answers it `400
-    /// invalid_request_error` on every handler it has, and answers `Inference`
-    /// `500`. Choosing the variant here is choosing the status code there, which
-    /// is why this asserts on the variant and not only on the words.
+    /// `TemplateRejected` rather than `InvalidRequest`, and the distinction is
+    /// load-bearing rather than tidy: `rto-serve` answers both `400
+    /// invalid_request_error`, so the *status* is the same and a test asserting
+    /// only the status would pass either way. What the separate variant buys is
+    /// that the case stays **visible** one layer up, where the decision about
+    /// whose fault it is actually has to be made — `tools::chat_with_client_tools`
+    /// prepends a grounding turn and must re-answer for a refusal of it, and it
+    /// cannot do that if this is indistinguishable from the encoder-only guard's
+    /// genuine `400`.
+    ///
+    /// The absent imperative is asserted, not just the present words. The message
+    /// used to end "Change the request to match it.", and measured, the identical
+    /// refusal arises both from a caller sending two `system` turns and from a
+    /// caller sending one while Roteiro prepends a second — so that sentence is
+    /// advice this layer has no standing to give and is wrong half the time.
     #[test]
-    fn a_template_rejection_is_an_invalid_request_carrying_its_own_message() {
+    fn a_template_rejection_is_its_own_variant_carrying_its_own_message() {
         let refusal = "System message must be at the beginning.";
         let e = template_failure("qwen3.8-27b", &TemplateError::Rejected(refusal.to_owned()));
-        let EngineError::InvalidRequest(message) = &e else {
-            panic!("a rejection must not be reported as a server failure: {e:?}");
+        let EngineError::TemplateRejected(message) = &e else {
+            panic!("a rejection must keep a variant of its own: {e:?}");
         };
         assert!(
             message.contains(refusal),
@@ -1876,6 +1903,11 @@ mod tests {
             !message.contains("Roteiro does not yet support"),
             "a template that refused a request is not a gap in this renderer, and \
              saying so is what made #848 take a message to diagnose: {message}"
+        );
+        assert!(
+            !message.contains("Change the request"),
+            "this layer cannot see whether the offending turn is the caller's, so \
+             it must not tell them to change theirs: {message}"
         );
     }
 

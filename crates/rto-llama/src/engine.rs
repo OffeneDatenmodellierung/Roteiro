@@ -131,6 +131,26 @@ pub enum EngineError {
     /// text-only model) — a client error (400), not an internal failure.
     #[error("{0}")]
     InvalidRequest(String),
+    /// The model's **own chat template refused this conversation**, in its own
+    /// words (issue #848).
+    ///
+    /// Distinct from [`Self::InvalidRequest`], which it otherwise resembles,
+    /// because the two differ in *who the caller is*. An `InvalidRequest` is a
+    /// judgement this engine made about the request it was handed. A
+    /// `TemplateRejected` is a judgement the **model's metadata** made, and the
+    /// conversation it judged may contain turns that this engine's caller — not
+    /// the HTTP client — put there. `rto-serve` prepends a grounding turn to
+    /// every tooled conversation (`tools.rs`), so it must be able to tell the
+    /// two apart before deciding whose fault to report; collapsed into
+    /// `InvalidRequest` they are indistinguishable, and the server blames the
+    /// client for a turn the client cannot see.
+    ///
+    /// A layer that did **not** alter the conversation should answer this `400`:
+    /// the refusal is then a true statement about what the client sent. A layer
+    /// that *did* alter it owns the answer instead — see
+    /// `rto_serve::tools::chat_with_client_tools`.
+    #[error("{0}")]
+    TemplateRejected(String),
     /// The operation is unsupported by the active engine (e.g. embeddings on
     /// a chat-only engine) — a 501, not an internal failure.
     #[error("not supported: {0}")]

@@ -531,26 +531,13 @@ async fn chat_json(
 
     match result {
         Ok(Ok(outcome)) => Json(build_response(&model, &outcome)).into_response(),
-        Ok(Err(EngineError::UnknownModel(m))) => error(
-            StatusCode::NOT_FOUND,
-            EngineError::UnknownModel(m).to_string(),
-            "invalid_request_error",
-        ),
-        Ok(Err(e @ EngineError::InvalidRequest(_))) => error(
-            StatusCode::BAD_REQUEST,
-            e.to_string(),
-            "invalid_request_error",
-        ),
-        Ok(Err(e @ EngineError::Unsupported(_))) => error(
-            StatusCode::NOT_IMPLEMENTED,
-            e.to_string(),
-            "not_implemented",
-        ),
-        Ok(Err(e @ EngineError::Inference(_))) => error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            e.to_string(),
-            "inference_error",
-        ),
+        // Status and wire word from the one place that decides them, so this
+        // handler, its sibling, and both streaming workers cannot disagree —
+        // and so `docs/SERVING.md` can publish the mapping from the same source.
+        Ok(Err(e)) => {
+            let (status, kind) = error_class(&e);
+            error(status, e.to_string(), kind)
+        }
         // The worker thread panicked (or was cancelled): report, don't hang.
         Err(e) => error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -645,26 +632,13 @@ async fn embeddings(State(state): State<Shared>, Json(body): Json<EmbeddingReque
 
     match result {
         Ok(Ok(vectors)) => Json(build_embedding_response(&model, vectors)).into_response(),
-        Ok(Err(EngineError::UnknownModel(m))) => error(
-            StatusCode::NOT_FOUND,
-            EngineError::UnknownModel(m).to_string(),
-            "invalid_request_error",
-        ),
-        Ok(Err(e @ EngineError::InvalidRequest(_))) => error(
-            StatusCode::BAD_REQUEST,
-            e.to_string(),
-            "invalid_request_error",
-        ),
-        Ok(Err(e @ EngineError::Unsupported(_))) => error(
-            StatusCode::NOT_IMPLEMENTED,
-            e.to_string(),
-            "not_implemented",
-        ),
-        Ok(Err(e @ EngineError::Inference(_))) => error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            e.to_string(),
-            "inference_error",
-        ),
+        // Status and wire word from the one place that decides them, so this
+        // handler, its sibling, and both streaming workers cannot disagree —
+        // and so `docs/SERVING.md` can publish the mapping from the same source.
+        Ok(Err(e)) => {
+            let (status, kind) = error_class(&e);
+            error(status, e.to_string(), kind)
+        }
         Err(e) => error(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("embedding task failed: {e}"),
@@ -1212,32 +1186,105 @@ fn error(status: StatusCode, message: impl Into<String>, r#type: &'static str) -
     (status, Json(ErrorResponse::new(message, r#type))).into_response()
 }
 
-/// The OpenAI error `type` an [`EngineError`] carries — the streaming
-/// counterpart of the status code the JSON handlers choose (issue #848).
+/// The HTTP status an [`EngineError`] is answered with, and the OpenAI error
+/// `type` that accompanies it (issue #848).
 ///
-/// A stream has already sent `200` and its first event by the time generation
-/// can fail, so the status code is spent and the `type` is the only place left
-/// to say *whose* fault this was. It was the literal `"inference_error"` at
-/// every one of those sites, which is a guess that happened to be right while
-/// the only streaming failure was a broken decode. It stopped being right when
-/// [`EngineError::InvalidRequest`] gained a way to arise from a chat template's
-/// own refusal of the conversation: a client told `inference_error` retries, and
-/// a client told `invalid_request_error` reads the message and fixes its
-/// request.
+/// One function for both facts, and one place for both, because they are one
+/// decision: `400`/`invalid_request_error` and `500`/`inference_error` are the
+/// same claim about whose fault a failure is, said twice on the same wire. They
+/// were said separately in four places — two JSON handlers and two streaming
+/// workers — and the streaming pair simply asserted `"inference_error"` for
+/// everything, which is a guess that stayed right only while a broken decode was
+/// the sole way a stream could fail.
 ///
-/// The strings are the ones the non-streaming handlers already pass to
-/// [`error`], deliberately — two spellings of one refusal is the thing this
-/// server has been bitten by before.
+/// The `type` matters most exactly where the status is gone: a stream has already
+/// sent `200` and its first event before generation can fail, so this string is
+/// all that is left to say whether a client should retry or read. A client told
+/// `inference_error` retries a refusal it can only fix by reading.
 ///
-/// Exhaustive on purpose: [`EngineError`] is not `#[non_exhaustive]`, so a new
-/// variant should stop compiling here and be classified rather than default into
-/// somebody's 500.
-const fn error_kind(e: &EngineError) -> &'static str {
+/// Exhaustive on purpose. [`EngineError`] is not `#[non_exhaustive]`, so a new
+/// variant stops compiling here and must be classified rather than defaulting
+/// into somebody's `500` — and `docs/SERVING.md` publishes this mapping from
+/// [`published_error_table`], so it cannot be classified here and misdescribed
+/// there.
+const fn error_class(e: &EngineError) -> (StatusCode, &'static str) {
     match e {
-        EngineError::UnknownModel(_) | EngineError::InvalidRequest(_) => "invalid_request_error",
-        EngineError::Unsupported(_) => "not_implemented",
-        EngineError::Inference(_) => "inference_error",
+        EngineError::UnknownModel(_) => (StatusCode::NOT_FOUND, "invalid_request_error"),
+        // Same answer as `InvalidRequest`, and deliberately so: a refusal that
+        // arrives here was **not** re-attributed by
+        // `tools::chat_with_client_tools`, which means no Roteiro turn was added
+        // to the conversation — so the template is describing what the client
+        // actually sent. The variants stay distinct because the *decision* has to
+        // be made a layer earlier, where it is still knowable.
+        EngineError::InvalidRequest(_) | EngineError::TemplateRejected(_) => {
+            (StatusCode::BAD_REQUEST, "invalid_request_error")
+        }
+        EngineError::Unsupported(_) => (StatusCode::NOT_IMPLEMENTED, "not_implemented"),
+        EngineError::Inference(_) => (StatusCode::INTERNAL_SERVER_ERROR, "inference_error"),
     }
+}
+
+/// The OpenAI error `type` alone — what a stream's terminal event carries.
+const fn error_kind(e: &EngineError) -> &'static str {
+    error_class(e).1
+}
+
+/// One sample of every [`EngineError`] variant, with the prose `docs/SERVING.md`
+/// gives it.
+///
+/// The samples exist so [`published_error_table`] can ask [`error_class`] rather
+/// than restate it: every status and wire word in the published table is the one
+/// the server will actually send, because it was obtained by asking the server's
+/// own function. Only the `why` column is written by hand, and it is the one
+/// column that cannot go stale in a way a client would notice.
+fn error_rows() -> Vec<(EngineError, &'static str)> {
+    vec![
+        (
+            EngineError::UnknownModel("m".to_owned()),
+            "the model is not served — `GET /v1/models` lists the ones that are",
+        ),
+        (
+            EngineError::InvalidRequest(String::new()),
+            "the request is malformed for the chosen model — images to a text-only              model, a chat turn to an embedding model",
+        ),
+        (
+            EngineError::TemplateRejected(String::new()),
+            "**the model's own chat template refused this conversation**, in its own              words, which the message carries verbatim. Not a Roteiro limitation: the              template ships inside the model's GGUF and states which conversation              shapes the model was trained on. Nothing reaches the model. If Roteiro              itself added a turn to the conversation — it prepends one to every              *tooled* request — the refusal is reported as a `500` instead, because              it may be describing a turn you did not write",
+        ),
+        (
+            EngineError::Unsupported(String::new()),
+            "the active engine has no such operation — embeddings on a chat-only              engine",
+        ),
+        (
+            EngineError::Inference(String::new()),
+            "loading or generation failed, **or** a failure that is Roteiro's to              answer for: a chat template this renderer cannot handle, and a template              refusal of a conversation Roteiro altered",
+        ),
+    ]
+}
+
+/// The error table `docs/SERVING.md` publishes, generated from `error_class`
+/// (private, so named rather than linked).
+///
+/// `cargo run -p rto-serve --example print_error_table` regenerates the block
+/// when `tests::the_published_error_table_is_this_table` fails.
+#[must_use]
+pub fn published_error_table() -> String {
+    use std::fmt::Write as _;
+    let mut out = String::from(
+        "| HTTP status | `error.type` (and streaming `error.code`) | when |\n|---|---|---|\n",
+    );
+    for (sample, why) in error_rows() {
+        let (status, wire) = error_class(&sample);
+        // Whitespace normalised rather than trusted. A `\`-continued string
+        // literal in [`error_rows`] survives `cargo fmt` as one long line with
+        // the source indentation baked in — measured, runs of fourteen spaces
+        // mid-sentence — and a markdown cell cannot hold a newline anyway, so
+        // collapsing runs is both the fix and the meaning. Nothing fails when it
+        // happens: the table publishes, and simply reads wrong.
+        let why = why.split_whitespace().collect::<Vec<_>>().join(" ");
+        let _ = writeln!(out, "| **{}** | `{wire}` | {why} |", status.as_u16());
+    }
+    out
 }
 
 /// Seconds since the Unix epoch (0 if the clock is before the epoch).
@@ -3139,6 +3186,56 @@ mod tests {
         }
     }
 
+    /// `docs/SERVING.md` publishes the error mapping this server actually
+    /// applies (issue #848).
+    ///
+    /// #825's lesson, applied to a second table: a published copy that drifts
+    /// from what the server sends is the same defect as sending the wrong thing,
+    /// with one more place to hide. This change moved a `500 inference_error`
+    /// to a `400 invalid_request_error` for template refusals and gave both
+    /// streaming wires a code that varies — the document would have described
+    /// the old behaviour indefinitely, and it is the page a client author reads
+    /// to decide whether to retry.
+    ///
+    /// Compared whole rather than row-by-row, for the reason
+    /// `openai_params::tests::the_published_table_is_this_table` gives: a
+    /// row-at-a-time check passes when the document carries an **extra** row,
+    /// and an extra row is a promise the server does not keep.
+    /// `cargo run -p rto-serve --example print_error_table` regenerates the
+    /// block.
+    #[test]
+    fn the_published_error_table_is_this_table() {
+        let doc = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/SERVING.md")
+            .canonicalize()
+            .expect("the page that publishes the error contract must exist");
+        let text = std::fs::read_to_string(&doc).expect("readable");
+
+        let expected = super::published_error_table();
+        let header = expected
+            .lines()
+            .next()
+            .expect("the generated table has a header row");
+        let start = text.find(header).unwrap_or_else(|| {
+            panic!(
+                "{} no longer publishes the error table — the page a client author \
+                 reads to decide whether a failure is retryable must show it",
+                doc.display()
+            )
+        });
+        let mut published = String::new();
+        for line in text[start..].lines().take_while(|l| l.starts_with('|')) {
+            published.push_str(line);
+            published.push('\n');
+        }
+        assert_eq!(
+            published,
+            expected,
+            "{} publishes an error table the server does not implement",
+            doc.display()
+        );
+    }
+
     /// The `error.code` a Responses stream reports follows the failure's kind —
     /// and a chat template's refusal is the caller's, not the server's (#848).
     ///
@@ -3218,6 +3315,20 @@ mod tests {
             (
                 || EngineError::Inference("decode aborted".to_owned()),
                 "inference_error",
+            ),
+            // Observable on both streaming workers like the other two, and it was
+            // the one arm of `error_kind` with no case here — so its wire value
+            // was free to drift to whatever the next edit made it.
+            (
+                || EngineError::Unsupported("embeddings on a chat-only engine".to_owned()),
+                "not_implemented",
+            ),
+            // A template refusal that no layer re-attributed: the conversation
+            // reached the engine as the client wrote it, so the refusal describes
+            // what they sent (#848).
+            (
+                || EngineError::TemplateRejected("Unexpected message role.".to_owned()),
+                "invalid_request_error",
             ),
         ] {
             let resp = app(std::sync::Arc::new(FailingEngine(make)))

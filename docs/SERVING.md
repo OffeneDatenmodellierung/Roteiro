@@ -442,6 +442,41 @@ request schema on 2026-09-13 and cross-checked against a captured `codex-cli`
 | `truncation` | **400** | `truncation` is not supported: `auto` asks the server to drop turns from the middle of the conversation so that an over-long input still answers, and nothing here does that — an input past the context window is refused, which is the exact failure `auto` was set to avoid. Trim the conversation on your side and send the shortened `input`; only the caller knows which turns it can afford to lose. |
 | `user` | **dropped** | an end-user label for OpenAI's abuse tooling; a loopback server has no such tooling and the response is identical either way |
 
+## How a failure is reported
+
+Every failure carries an OpenAI-shaped `{"error": {"message", "type"}}` body. The
+`type` is the part worth reading: it says **whose** problem this is, and therefore
+whether retrying can help.
+
+A *streaming* request has already sent `200 OK` and its first event before
+generation can fail, so there is no status code left to carry that. Both streaming
+wires put the same word in their terminal event instead — `response.failed`'s
+`error.code` on `/v1/responses`, and the final `error` frame on a streaming
+`/v1/chat/completions`. So the table below reads the same on all three surfaces.
+
+| HTTP status | `error.type` (and streaming `error.code`) | when |
+|---|---|---|
+| **404** | `invalid_request_error` | the model is not served — `GET /v1/models` lists the ones that are |
+| **400** | `invalid_request_error` | the request is malformed for the chosen model — images to a text-only model, a chat turn to an embedding model |
+| **400** | `invalid_request_error` | **the model's own chat template refused this conversation**, in its own words, which the message carries verbatim. Not a Roteiro limitation: the template ships inside the model's GGUF and states which conversation shapes the model was trained on. Nothing reaches the model. If Roteiro itself added a turn to the conversation — it prepends one to every *tooled* request — the refusal is reported as a `500` instead, because it may be describing a turn you did not write |
+| **501** | `not_implemented` | the active engine has no such operation — embeddings on a chat-only engine |
+| **500** | `inference_error` | loading or generation failed, **or** a failure that is Roteiro's to answer for: a chat template this renderer cannot handle, and a template refusal of a conversation Roteiro altered |
+
+The `message` is never a summary. When a model's chat template refuses a
+conversation, the message carries **the template's own sentence**, verbatim —
+`System message must be at the beginning.` — because that sentence is the answer
+and anything of Roteiro's in its place would be a paraphrase of a fact only the
+model's own metadata knows.
+
+One asymmetry is deliberate. Roteiro prepends a `system` turn of its own to every
+**tooled** conversation, carrying the grounding rules for the tools it advertises.
+Once it has done that, the conversation a template refuses is no longer the one you
+sent, and Roteiro can no longer tell whether the refusal is about your turns or its
+own. It does not guess: it reports those as `500`, names the turn it added, and
+leaves the template's sentence intact so you can still recognise your own case if
+it is yours. An untooled request is passed through untouched, so a refusal there is
+reported as `400` and can be trusted to be about what you sent.
+
 ## Why the `tools` array is bounded
 
 The limits are a **security bound, not a tidiness rule**. Roteiro sizes the model's

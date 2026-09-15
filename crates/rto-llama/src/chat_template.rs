@@ -130,6 +130,29 @@ pub enum TemplateError {
     Rejected(String),
 }
 
+/// What this renderer does with one `transformers`-injected callable.
+///
+/// A typed verdict rather than a prose note, so that [`TRANSFORMERS_CALLABLES`]
+/// can *drive* registration instead of merely describing it. The list was
+/// documentation before: the registrations repeated the same names separately,
+/// so a callable added to the environment without a row here was invisible to
+/// both the list and the test that reads it.
+///
+/// `#[non_exhaustive]` because the set is genuinely open in the one direction
+/// that matters: a third verdict — *implemented*, supplying a real value rather
+/// than honouring or refusing — is exactly what `strftime_now` becomes the day
+/// someone settles which clock and which `strftime` dialect. That is a variant
+/// waiting to happen, not a hypothetical, so downstream code must not be written
+/// as though these two were all there could be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Support {
+    /// Registered and honoured; a call surfaces as [`TemplateError::Rejected`].
+    Rejects,
+    /// Registered **only to refuse by name**, with this explanation.
+    Refused(&'static str),
+}
+
 /// The complete set of callables `transformers` injects into a chat template's
 /// environment, and what this renderer does with each.
 ///
@@ -138,19 +161,32 @@ pub enum TemplateError {
 /// it — is what turns minijinja's bare `unknown function` into a sentence that
 /// says which of the two things went wrong.
 ///
+/// **This list is the only way a callable gets registered.**
+/// `register_transformers_callables` (private) iterates it and matches on
+/// [`Support`];
+/// there is no `env.add_function` anywhere else in this module. So the two
+/// directions are closed by construction rather than by a test: a name in the
+/// list that nothing registers cannot exist (the loop registers every row), and
+/// a registration absent from the list cannot exist either (the loop is the only
+/// registrar). It used to be a `&str` note beside a separate pair of hard-coded
+/// `add_function` calls, which made this doc comment a claim rather than a
+/// mechanism.
+///
 /// `tojson` is absent because it is a *filter* rather than a callable and
 /// minijinja's `json` feature already supplies it.
-pub const TRANSFORMERS_CALLABLES: [(&str, &str); 2] = [
-    (
-        "raise_exception",
-        "supported — surfaces as TemplateError::Rejected, carrying the template's message",
-    ),
+pub const TRANSFORMERS_CALLABLES: [(&str, Support); 2] = [
+    ("raise_exception", Support::Rejects),
     (
         "strftime_now",
-        "refused — Roteiro renders chat templates deterministically and injects no clock",
+        Support::Refused(
+            "strftime_now is a `transformers` template callable Roteiro does not \
+             supply: it would stamp the wall clock into the prompt, and Roteiro \
+             renders a chat template deterministically. No model in the served \
+             registry calls it. Supporting it is a decision about which clock and \
+             which strftime dialect, not a missing line",
+        ),
     ),
 ];
-
 /// Why `strftime_now` is registered only to refuse.
 ///
 /// It is the one injected callable this renderer declines, and declining it is a
@@ -163,12 +199,9 @@ pub const TRANSFORMERS_CALLABLES: [(&str, &str); 2] = [
 ///
 /// No template in the surveyed registry calls it, so this costs nothing today.
 /// When one does, it needs that decision taken deliberately — not guessed at
-/// here — and this message is what will say so at the time.
-const STRFTIME_NOW_REFUSAL: &str = "strftime_now is a `transformers` template callable Roteiro \
-     does not supply: it would stamp the wall clock into the prompt, and \
-     Roteiro renders a chat template deterministically. No model in the served \
-     registry calls it. Supporting it is a decision about which clock and which \
-     strftime dialect, not a missing line";
+/// here — and the message on its [`TRANSFORMERS_CALLABLES`] row is what will say
+/// so at the time.
+const _WHY_STRFTIME_NOW_IS_REFUSED: () = ();
 
 /// Register the [`TRANSFORMERS_CALLABLES`] on `env`, recording any rejection in
 /// `rejection`.
@@ -188,31 +221,31 @@ fn register_transformers_callables(
     env: &mut Environment<'_>,
     rejection: &Arc<Mutex<Option<String>>>,
 ) {
-    let sink = Arc::clone(rejection);
-    env.add_function(
-        "raise_exception",
-        move |message: Value| -> Result<Value, JinjaError> {
-            // `as_str` first so a string argument keeps its exact bytes; `to_string`
-            // only for the template that hands this something else, which is still
-            // better answered with the value than with nothing.
-            let message = message
-                .as_str()
-                .map_or_else(|| message.to_string(), std::borrow::ToOwned::to_owned);
-            // Recorded *before* returning, because the error below is the last this
-            // code sees of the message.
-            *sink.lock().unwrap_or_else(PoisonError::into_inner) = Some(message.clone());
-            Err(JinjaError::new(ErrorKind::InvalidOperation, message))
-        },
-    );
-    env.add_function(
-        "strftime_now",
-        |_format: Value| -> Result<Value, JinjaError> {
-            Err(JinjaError::new(
-                ErrorKind::InvalidOperation,
-                STRFTIME_NOW_REFUSAL,
-            ))
-        },
-    );
+    for (name, support) in TRANSFORMERS_CALLABLES {
+        match support {
+            Support::Rejects => {
+                let sink = Arc::clone(rejection);
+                env.add_function(name, move |message: Value| -> Result<Value, JinjaError> {
+                    // `as_str` first so a string argument keeps its exact bytes;
+                    // `to_string` only for the template that hands this something
+                    // else, which is still better answered with the value than
+                    // with nothing.
+                    let message = message
+                        .as_str()
+                        .map_or_else(|| message.to_string(), std::borrow::ToOwned::to_owned);
+                    // Recorded *before* returning, because the error below is the
+                    // last this code sees of the message.
+                    *sink.lock().unwrap_or_else(PoisonError::into_inner) = Some(message.clone());
+                    Err(JinjaError::new(ErrorKind::InvalidOperation, message))
+                });
+            }
+            Support::Refused(why) => {
+                env.add_function(name, move |_: Value| -> Result<Value, JinjaError> {
+                    Err(JinjaError::new(ErrorKind::InvalidOperation, why))
+                });
+            }
+        }
+    }
 }
 
 /// Whether `template` is Jinja rather than one of llama.cpp's builtin names.
@@ -406,10 +439,22 @@ fn render_shaped(
         return Ok(plain);
     }
     let parts = as_content_parts(messages);
-    if let Ok(shaped) = render(template, &parts, tools, add_generation_prompt)
-        && shaped.contains(text)
-    {
-        return Ok(shaped);
+    match render(template, &parts, tools, add_generation_prompt) {
+        Ok(shaped) if shaped.contains(text) => return Ok(shaped),
+        // A refusal is an **answer**, and the retry is the only place it is
+        // spoken. This arm used to be `if let Ok(shaped) = …`, which discarded
+        // every error the retry produced and reported the generic message below
+        // — so a template saying `parts shape is unsupported by this model` was
+        // replaced by Roteiro guessing that the template "rendered the
+        // conversation away". Measured: it does happen, and the sentence the
+        // template wrote reached nobody.
+        //
+        // Only a rejection is promoted. A `Parse`/`Render` from the retry is a
+        // second failure of a shape we chose to try, and the message below —
+        // which reports that *both* shapes failed — describes that better than
+        // either failure alone does.
+        Err(e @ TemplateError::Rejected(_)) => return Err(e),
+        Ok(_) | Err(_) => {}
     }
     Err(TemplateError::Render(
         "the template rendered the conversation away: the last turn's text is \
@@ -508,7 +553,30 @@ pub fn render_advertising(
             serde_json::json!({"role": "system", "content": tool_advertisement(t)}),
         ),
     }
-    render_shaped(template, &announced, Some(t), add_generation_prompt)
+    // `announced` is no longer the caller's conversation: the turn above is ours.
+    // So a refusal of it is **not** evidence that the caller sent something the
+    // model will not accept — and we can prove that here rather than guess it,
+    // because `rendered` above is the *same* conversation without our turn and it
+    // rendered. Exactly the two-renders-and-compare argument `render_and_test_tools`
+    // already uses to settle whether a template read the tools, applied to blame
+    // instead of to content.
+    //
+    // Reported as a `Render` — a fault of this renderer, a 5xx — because that is
+    // whose it is. Letting the `Rejected` through would send the template's
+    // sentence to a client as a `400` about a turn the client never wrote, and
+    // "System message must be at the beginning." is unanswerable advice when the
+    // misplaced message is Roteiro's own.
+    render_shaped(template, &announced, Some(t), add_generation_prompt).map_err(|e| match e {
+        TemplateError::Rejected(message) => TemplateError::Render(format!(
+            "the template accepted this conversation and then refused it once \
+             Roteiro added its own `system` turn advertising the tools, saying: \
+             {message} The template does not read `tools`, so the tools can only \
+             reach this model as a conversation turn, and this template will not \
+             take one there. Nothing was sent to the model. This is Roteiro's to \
+             fix, not the caller's — the turn it objects to is not theirs."
+        )),
+        other => other,
+    })
 }
 
 #[cfg(test)]
@@ -644,8 +712,7 @@ mod tests {
 #[cfg(test)]
 mod transformers_callables {
     use super::{
-        Message, STRFTIME_NOW_REFUSAL, TRANSFORMERS_CALLABLES, TemplateError, render,
-        render_advertising,
+        Message, Support, TRANSFORMERS_CALLABLES, TemplateError, render, render_advertising,
     };
 
     /// The sentence a template is trying to say when it calls `raise_exception`.
@@ -778,7 +845,7 @@ mod transformers_callables {
     /// `strftime_now` is refused **by name**, not by silence.
     ///
     /// It is the second of the three injected names and the one this renderer
-    /// declines; see [`super::STRFTIME_NOW_REFUSAL`] for why declining is the
+    /// declines; see its [`super::TRANSFORMERS_CALLABLES`] row for why declining is the
     /// decision. A refusal that says which callable and why is the difference
     /// between this and the `unknown function` that started #848 — and it is a
     /// `Render`, because a callable Roteiro does not supply is a fact about
@@ -799,23 +866,141 @@ mod transformers_callables {
         assert!(!message.contains("unknown function"), "{message}");
     }
 
-    /// Every name in [`super::TRANSFORMERS_CALLABLES`] is actually registered.
+    /// A refusal raised by the **parts retry** reaches the caller, instead of
+    /// being replaced by Roteiro's guess.
     ///
-    /// The constant is documentation until something reads it, and a list that
-    /// drifts from the environment it describes is worse than no list: it is the
-    /// survey someone will trust next time instead of re-running it. Calling each
-    /// name is the cheapest thing that cannot drift.
+    /// `render_shaped` retries in `[{type: text}]` shape when the plain render
+    /// drops the operative text. That retry's error used to be discarded wholesale
+    /// by an `if let Ok(…)`, so a template that refused the parts shape *in
+    /// words* had those words replaced by the generic "rendered the conversation
+    /// away" sentence — the precise failure #848 exists to stop, surviving inside
+    /// the fix for it.
+    ///
+    /// The fixture renders each turn to a fixed token when content is a string —
+    /// so the plain render succeeds and drops the text, forcing the retry — and
+    /// raises when it is a list.
     #[test]
-    fn every_allowlisted_callable_is_registered() {
-        for (name, _) in TRANSFORMERS_CALLABLES {
+    fn a_refusal_from_the_parts_retry_is_not_swallowed() {
+        let t = "{%- for m in messages %}{%- if m.content is string %}<turn/>\
+                 {%- else %}{{- raise_exception('parts shape unsupported here') }}\
+                 {%- endif %}{%- endfor %}";
+        let e = render_advertising(t, &msgs(), None, false).expect_err("must not render");
+        assert!(
+            matches!(&e, TemplateError::Rejected(m) if m == "parts shape unsupported here"),
+            "the retry's refusal must survive, but got: {e:?}"
+        );
+    }
+
+    /// A **non-refusal** failure in the parts retry does *not* displace the
+    /// "rendered the conversation away" message.
+    ///
+    /// The negative control for the test above, and it took two attempts. The
+    /// first fixture's retry *succeeded* (it rendered, just without the text), so
+    /// promoting every retry error instead of only a rejection left it green —
+    /// the control pinned nothing about which errors are promoted. Measured: the
+    /// injection ran clean.
+    ///
+    /// This fixture's retry fails for an ordinary reason — an unknown function,
+    /// reachable only in the parts shape — so the two behaviours give different
+    /// answers and the fixture *contains the difference*. Promoting it would
+    /// report `unknown function` to a caller whose real problem is that neither
+    /// shape carried their question.
+    #[test]
+    fn an_ordinary_retry_failure_does_not_displace_the_both_shapes_message() {
+        let t = "{%- for m in messages %}{%- if m.content is string %}<turn/>\
+                 {%- else %}{{- no_such_helper(m) }}{%- endif %}{%- endfor %}";
+        let e = render_advertising(t, &msgs(), None, false).expect_err("must not render");
+        let TemplateError::Render(message) = &e else {
+            panic!("an unknown function is not a refusal: {e:?}");
+        };
+        assert!(
+            message.contains("rendered the conversation away"),
+            "the caller's real problem is the missing question, not the retry's \
+             own failure: {message}"
+        );
+        assert!(!message.contains("no_such_helper"), "{message}");
+    }
+
+    /// A refusal of **Roteiro's own** advertisement turn is reported as Roteiro's
+    /// fault, not the caller's (issues #848, #853).
+    ///
+    /// This is the one injection point where causation is *exactly* known rather
+    /// than guessed: the same conversation without our turn rendered a moment
+    /// earlier, so the turn is the only thing that changed. The fixture is a
+    /// template that ignores `tools` — which is what makes Roteiro splice an
+    /// advertisement turn in at all — and refuses a `system` message, as
+    /// `qwen3.8-27b` does.
+    ///
+    /// `Render` rather than `Rejected`, because the status code follows the
+    /// variant one layer up: a `Rejected` here would become a `400` telling the
+    /// caller to fix a turn Roteiro wrote.
+    #[test]
+    fn a_refusal_of_our_own_advertisement_turn_is_ours_not_the_callers() {
+        let refuses_system = "{%- for m in messages %}{%- if m.role == 'system' %}\
+             {{- raise_exception('this model takes no system messages') }}{%- endif %}\
+             {{- m.content }}{%- endfor %}";
+        let tools = serde_json::json!([{
+            "type": "function",
+            "function": {"name": "roteiro_search", "description": "d", "parameters": {}}
+        }]);
+        let user_only = vec![serde_json::json!({"role": "user", "content": "Where is Lisbon?"})];
+
+        // Without tools the very same conversation renders — so the difference is
+        // ours, and the test is not merely observing a broken template.
+        render(refuses_system, &user_only, None, false).expect("renders without our turn");
+
+        let e = render_advertising(refuses_system, &user_only, Some(&tools), false)
+            .expect_err("our injected system turn is refused");
+        let TemplateError::Render(message) = &e else {
+            panic!("a refusal of Roteiro's own turn must not be billed to the caller: {e:?}");
+        };
+        assert!(
+            message.contains("this model takes no system messages"),
+            "the template's own words are still the answer: {message}"
+        );
+        assert!(
+            message.contains("Roteiro"),
+            "the message must name whose turn was refused: {message}"
+        );
+    }
+
+    /// Every row of [`super::TRANSFORMERS_CALLABLES`] reaches the environment.
+    ///
+    /// The list *drives* registration now, so the two failure modes a hand-kept
+    /// allowlist has — a name listed but not registered, a name registered but
+    /// not listed — are both unrepresentable, and this test cannot be the thing
+    /// that catches them because nothing can: the loop is the only registrar.
+    ///
+    /// What is left for a test is narrower than it looks, and worth being exact
+    /// about. Measured by injection: mis-typing a row (`Rejects` where `Refused`
+    /// was meant) does **not** fail here, because registration follows the row —
+    /// both sides move together and the test agrees with itself. That case is
+    /// caught by `strftime_now_is_refused_by_name`, which pins the refusal's
+    /// words rather than its shape.
+    ///
+    /// So this guards the one thing construction cannot: that the loop is
+    /// *reached at all*. Skipping the `register_transformers_callables` call is
+    /// the whole of #848 in one line, and it fails here.
+    #[test]
+    fn every_allowlisted_callable_behaves_as_its_row_says() {
+        for (name, support) in TRANSFORMERS_CALLABLES {
             let e = render(&format!("{{{{ {name}('x') }}}}"), &msgs(), None, false)
                 .expect_err("each of these refuses by design");
             assert!(
                 !e.to_string().contains("unknown"),
                 "`{name}` is allow-listed but not registered: {e}"
             );
+            match support {
+                Support::Rejects => assert!(
+                    matches!(&e, TemplateError::Rejected(m) if m == "x"),
+                    "`{name}` is listed as honouring the template's message, but \
+                     answered: {e:?}"
+                ),
+                Support::Refused(why) => assert!(
+                    matches!(&e, TemplateError::Render(m) if m.contains(why)),
+                    "`{name}` is listed as refused, but answered: {e:?}"
+                ),
+            }
         }
-        // And the refusal text the list promises is the one that ships.
-        assert!(STRFTIME_NOW_REFUSAL.starts_with("strftime_now"));
     }
 }
