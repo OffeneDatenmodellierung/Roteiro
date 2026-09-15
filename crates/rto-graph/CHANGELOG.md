@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- *(workspace)* `scan_root` and `discover_repos_under` take a `Worktrees` argument
+  (`Skip` — the new default behaviour — or `Include`), and `RootScan` gains a
+  `worktrees` field listing the linked worktrees a scan walked past. Passing it is
+  required rather than defaulted, so each caller states its answer at the call: a
+  shared rule read in several places is how #806's five markdown-link scanners and
+  #787's two walkers came apart.
+- *(workspace)* `ResolvedWorkspace` gains `include_worktrees`, carrying one
+  workspace group's discovery rule ([#837](https://github.com/OffeneDatenmodellierung/Roteiro/issues/837)).
+
+### Changed
+
+- *(workspace)* `OnOpen` (the `--sync-on-access` hook) takes the project's
+  **recorded working-tree root** beside its `graph.db` path:
+  `Fn(&Path, Option<&Path>)`. The root cannot be derived from the db path — a
+  linked worktree's store is `<main>/.git/worktrees/<name>/roteiro/graph.db`, so
+  the "three parents up is the repository" shortcut lands on
+  `<main>/.git/worktrees`, and discovery from there walks up and finds the *main*
+  checkout. The registry has recorded the right answer all along
+  (`repo.workdir()`, beside the db path it built from `repo.git_dir()`), so it is
+  now handed over rather than reconstructed
+  ([#837](https://github.com/OffeneDatenmodellierung/Roteiro/issues/837)).
+- *(workspace)* `WorkspaceError::NoGraph` names that same recorded root. Its
+  message is "run `roteiro sync` in {path}", and for a worktree it named
+  `<main>/.git/worktrees` — a directory that is not a repository, that nobody
+  typed, and in which the command it recommends cannot work.
+
+### Added
+
+- *(git)* `Repo::linked_worktree_of` — the main checkout a linked worktree belongs
+  to, or `None` for an ordinary clone, via gix's `Kind::LinkedWorkTree` and
+  `main_repo()`. Deliberately not `git_dir() != common_dir()`: gix reports the
+  common dir as the `commondir` file records it, relative and unresolved, so that
+  route yields `<main>/.git/worktrees/<name>/../..`.
+- *(git)* `Repo::head_branch` — the short branch name `HEAD` points at, resolved in
+  *this* repository's git dir, which in a linked worktree is
+  `<main>/.git/worktrees/<name>/HEAD` rather than the common dir's.
+- *(workspace)* `is_linked_worktree` — whether a directory is a second checkout
+  made by `git worktree add`, decided by `gix::discover::is_git`'s repository
+  classification rather than by the directory's name. A submodule is not a worktree
+  and is unaffected.
+
 ## [5.14.3](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v5.14.2...rto-graph-v5.14.3) - 2026-09-15
 
 ### Added

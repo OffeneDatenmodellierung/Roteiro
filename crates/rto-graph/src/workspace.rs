@@ -168,7 +168,23 @@ fn source_eq(a: &Source, b: &Source) -> bool {
 /// A hook run against a project's `graph.db` path the first time it is opened —
 /// used by `serve --sync-on-access` to (re)build a stale or missing graph before
 /// it is served (ADR-0008). Returns a human-readable error on failure.
-pub type OnOpen = Arc<dyn Fn(&Path) -> Result<(), String> + Send + Sync>;
+/// The `--sync-on-access` hook: `(graph.db, the recorded working-tree root)`.
+///
+/// # Why the root is passed rather than derived from the db path
+///
+/// Because it cannot be derived. The store lives at `<git dir>/roteiro/graph.db`,
+/// and for a **linked worktree** the git dir is `<main>/.git/worktrees/<name>` —
+/// so the "three parents up is the repository" shortcut a caller would otherwise
+/// reach for lands on `<main>/.git/worktrees`, which is not a repository at all.
+/// Discovering from there walks up and finds the **main** checkout, so the hook
+/// would rebuild the wrong repository's graph and write it to the wrong store,
+/// silently (issue #837).
+///
+/// The registry already knows the answer — [`build_registry`] records
+/// `repo.workdir()` beside the db path it derived from `repo.git_dir()` — so this
+/// hands the value over instead of asking the callee to reconstruct it.
+/// `None` only for a [`Workspace::from_named_dbs`] source, which records no root.
+pub type OnOpen = Arc<dyn Fn(&Path, Option<&Path>) -> Result<(), String> + Send + Sync>;
 
 /// A fully-discovered registry, ready to be swapped into a live [`Workspace`].
 ///
@@ -626,7 +642,7 @@ impl Workspace {
         // it, so a stale or never-synced repo is prepared on first touch. Runs
         // outside the registry lock (it does extraction I/O).
         if let Some(on_open) = &self.on_open {
-            on_open(&db).map_err(|msg| WorkspaceError::Prepare {
+            on_open(&db, root.as_deref()).map_err(|msg| WorkspaceError::Prepare {
                 name: name.to_owned(),
                 msg,
             })?;
@@ -634,13 +650,24 @@ impl Workspace {
         if !db.exists() {
             return Err(WorkspaceError::NoGraph {
                 name: name.to_owned(),
-                // The repo dir is the store's grandparent (`…/.git/roteiro`).
-                path: db
-                    .parent()
-                    .and_then(Path::parent)
-                    .and_then(Path::parent)
-                    .unwrap_or(&db)
-                    .to_path_buf(),
+                // The **recorded** working-tree root, not a walk back up from the
+                // db path. `…/.git/roteiro/graph.db` makes the repository the
+                // store's great-grandparent only for an ordinary clone; a linked
+                // worktree's store is `<main>/.git/worktrees/<name>/roteiro/`, so
+                // the same walk names `<main>/.git/worktrees` — a directory nobody
+                // typed, in the one message whose job is telling the user where to
+                // run `roteiro sync` (issue #837).
+                //
+                // The walk survives only as the fallback for a source that records
+                // no root ([`Workspace::from_named_dbs`]), which is never a
+                // worktree in practice and where a guess beats naming the db file.
+                path: root.clone().unwrap_or_else(|| {
+                    db.parent()
+                        .and_then(Path::parent)
+                        .and_then(Path::parent)
+                        .unwrap_or(&db)
+                        .to_path_buf()
+                }),
             });
         }
         let handle = Arc::new(Mutex::new(Store::open(&db)?));
@@ -894,6 +921,45 @@ fn dedupe_name(projects: &BTreeMap<String, Source>, base: String) -> String {
     }
 }
 
+/// Whether a `roots` scan hosts the **linked git worktrees** it walks over.
+///
+/// A `roots` entry is a *discovery* mechanism, and a second checkout of a
+/// repository you either already have or deliberately did not add is not a
+/// discovery: hosting it presents one repository as N peer projects at N
+/// revisions, which triple-counts its symbols in every metric and lets a
+/// workspace-scoped retrieval return the same file at three revisions as three
+/// independent sources (issue #837).
+///
+/// Deliberately **not** a `bool` parameter, and deliberately **not** defaulted at
+/// this layer: [`scan_root`] and [`discover_repos_under`] take it by value so that
+/// every one of the nine call sites across the CLI and config resolution has to
+/// state its answer at the call. This rule previously existed in one place and was
+/// read by many, which is the shape that let #806's five markdown-link scanners and
+/// #787's two walkers drift; a defaulted argument would restore exactly that — a
+/// new caller inheriting a policy it never considered.
+///
+/// Deliberately not `#[non_exhaustive]`: the set is closed by the question, not by
+/// today's implementation. A discovered directory either is hosted or it is not,
+/// and there is no third answer to give — a future "host it but label it as a
+/// worktree of its parent" (issue #837, option 2) is a property of the *hosted*
+/// project rather than a third outcome of this scan, so it would arrive on
+/// [`RootScan`] and leave this pair intact. Closing it lets every caller match both
+/// arms and be told by the compiler when the policy grows a case, which is the
+/// whole reason the parameter is not a `bool`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum Worktrees {
+    /// Walk past a linked worktree, recording it in [`RootScan::worktrees`] so the
+    /// caller can say what it skipped. The default, and what a `roots` entry gets
+    /// unless the workspace declaring it sets `include_worktrees = true`.
+    #[default]
+    Skip,
+    /// Host a linked worktree as an ordinary member, as every `roots` scan did
+    /// before #837. The opt-in, and what an explicit `repos = [...]` entry gets by
+    /// construction — an explicit path is never discovered, so it never reaches
+    /// this scan at all.
+    Include,
+}
+
 /// Shallow git-repo discovery under `root`: the root itself if it is a repo, plus
 /// each immediate subdirectory that is one, in sorted order. Shallow by design — a
 /// code directory holding sibling checkouts is the common case, and a deep scan
@@ -902,7 +968,8 @@ fn dedupe_name(projects: &BTreeMap<String, Source>, base: String) -> String {
 ///
 /// A repo is any directory containing a `.git` entry (a directory in a normal
 /// clone, a file in worktrees and submodules), so existence — not `is_dir` — is
-/// tested.
+/// tested. A **linked worktree** is then filtered back out unless `worktrees` is
+/// [`Worktrees::Include`]; see [`is_linked_worktree`].
 ///
 /// The rule is invisible to whoever passes the root, which is a separate defect
 /// from the rule being wrong: see [`RootScan`], and the `--workspace` help text
@@ -910,8 +977,11 @@ fn dedupe_name(projects: &BTreeMap<String, Source>, base: String) -> String {
 ///
 /// # Errors
 /// [`WorkspaceError::Discover`] if `root` cannot be read.
-pub fn discover_repos_under(root: &Path) -> Result<Vec<PathBuf>, WorkspaceError> {
-    Ok(scan_root(root)?.repos)
+pub fn discover_repos_under(
+    root: &Path,
+    worktrees: Worktrees,
+) -> Result<Vec<PathBuf>, WorkspaceError> {
+    Ok(scan_root(root, worktrees)?.repos)
 }
 
 /// Whether `dir` is a git repository: it holds a `.git` **entry**. A directory in
@@ -919,6 +989,45 @@ pub fn discover_repos_under(root: &Path) -> Result<Vec<PathBuf>, WorkspaceError>
 /// not `is_dir`.
 fn is_repo(dir: &Path) -> bool {
     dir.join(".git").exists()
+}
+
+/// Whether `dir` is a **linked git worktree** — a second checkout of a repository
+/// whose git directory lives in the main checkout's `.git/worktrees/<name>`.
+///
+/// # The test is structural, never the directory's name
+///
+/// `git worktree add` names the new directory whatever you ask it to. A convention
+/// like `<repo>-wt-<task>` is one machine's habit, not a rule, so a name test both
+/// misses `foo` and falsely claims `my-wt-notes`. What is invariant is the layout:
+/// a linked worktree's `.git` is a **file** holding a `gitdir:` pointer rather than
+/// a directory, equivalently `git rev-parse --git-common-dir` differs from
+/// `--git-dir`.
+///
+/// # Why `gix::discover::is_git` rather than reading `.git` here
+///
+/// This crate already depends on `gix` for every other git question it asks, and
+/// `gix::discover::is_git` (re-exported from `gix_discover::is::git`) is precisely
+/// this classification: it returns `Kind::WorkTree { linked_git_dir: Some(_) }` for
+/// a linked worktree and `Kind::WorkTree { linked_git_dir: None }` for a main
+/// checkout. Hand-parsing the `gitdir:` line would be a second, worse copy of that
+/// — it would have to re-derive gix's handling of relative pointers, of `commondir`,
+/// and of the `.git` file forms — and shelling out to `git rev-parse` would put a
+/// process spawn per candidate directory into startup. It is also the *narrow*
+/// test: `Kind::Submodule` is a different thing and stays hosted, because a
+/// submodule is a different repository rather than a second checkout of this one.
+///
+/// A directory whose `.git` cannot be classified (unreadable, or not a git dir at
+/// all) reads as **not** a worktree, so a probe failure hosts the candidate exactly
+/// as it was hosted before this rule existed. Losing a project to an `EACCES` would
+/// be the worse direction to be wrong in.
+#[must_use]
+pub fn is_linked_worktree(dir: &Path) -> bool {
+    matches!(
+        gix::discover::is_git(&dir.join(".git")),
+        Ok(gix::discover::repository::Kind::WorkTree {
+            linked_git_dir: Some(_)
+        })
+    )
 }
 
 /// Where `render okf` writes when `--out` is omitted, and therefore where a
@@ -1050,6 +1159,17 @@ pub struct RootScan {
     /// scan already read the directory, which is why the successful-start note
     /// can report it without a second pass.
     pub skipped: Vec<PathBuf>,
+    /// Immediate subdirectories that *are* repos but were walked past for being
+    /// **linked git worktrees**, sorted. Always empty under
+    /// [`Worktrees::Include`], because then they are in [`RootScan::repos`].
+    ///
+    /// A separate list rather than more entries in [`RootScan::skipped`]: the two
+    /// are skipped for opposite reasons and have opposite remedies. A subdirectory
+    /// with no `.git` is a layout the user may have meant to reach one level
+    /// deeper; a worktree is a directory we found a repository in and declined, and
+    /// saying so is the whole point of #837 — the behaviour it replaces was already
+    /// silent, and a silent skip would only move the silence.
+    pub worktrees: Vec<PathBuf>,
 }
 
 impl RootScan {
@@ -1079,9 +1199,17 @@ impl RootScan {
 
 /// The shallow scan behind [`discover_repos_under`], keeping what it skipped.
 ///
+/// # The root itself is never skipped for being a worktree
+///
+/// `worktrees` governs **discovery**, and the root is not discovered — it is the
+/// path the operator wrote. Pointing a root at a worktree is the same deliberate
+/// act as naming one in `repos`, and refusing it would leave a config that names a
+/// worktree directly with nothing to host and no error. Only the immediate children
+/// this scan *finds* are subject to the rule.
+///
 /// # Errors
 /// [`WorkspaceError::Discover`] if `root` cannot be read.
-pub fn scan_root(root: &Path) -> Result<RootScan, WorkspaceError> {
+pub fn scan_root(root: &Path, worktrees: Worktrees) -> Result<RootScan, WorkspaceError> {
     let mut repos = Vec::new();
     if is_repo(root) {
         repos.push(root.to_path_buf());
@@ -1090,18 +1218,27 @@ pub fn scan_root(root: &Path) -> Result<RootScan, WorkspaceError> {
         root: root.to_path_buf(),
         msg: e.to_string(),
     })?;
-    let (mut children, mut skipped): (Vec<PathBuf>, Vec<PathBuf>) = entries
+    let (found, mut skipped): (Vec<PathBuf>, Vec<PathBuf>) = entries
         .filter_map(Result::ok)
         .map(|e| e.path())
         .filter(|p| p.is_dir())
         .partition(|p| is_repo(p));
+    // Probe only the directories already known to hold a `.git` entry, so the
+    // classification costs one `metadata` (plus, for a `.git` file, one bounded
+    // read) per *repository* found rather than per directory in the root.
+    let (mut linked, mut children): (Vec<PathBuf>, Vec<PathBuf>) = match worktrees {
+        Worktrees::Include => (Vec::new(), found),
+        Worktrees::Skip => found.into_iter().partition(|p| is_linked_worktree(p)),
+    };
     children.sort();
     skipped.sort();
+    linked.sort();
     repos.extend(children);
     Ok(RootScan {
         root: root.to_path_buf(),
         repos,
         skipped,
+        worktrees: linked,
     })
 }
 
@@ -1126,6 +1263,19 @@ pub struct ResolvedWorkspace {
     /// `true` ⇒ the repos form one linked graph; `false` ⇒ **standalone**: each
     /// member repo is its own single-repo graph (no cross-repo links).
     pub linked: bool,
+    /// `true` ⇒ this group's `roots` host the linked git worktrees they find
+    /// (`include_worktrees = true`); `false` (the default) ⇒ they are walked past
+    /// and reported. Governs `roots` only: `repos` entries are named, not
+    /// discovered, and are hosted either way (issue #837).
+    ///
+    /// A property of the **group** rather than a process-wide switch, because
+    /// `roots` is: one workspace may deliberately scan a pool of worktrees an
+    /// orchestrator maintains while another must not, and a single global answer
+    /// would force both. It is also why this composes with `--scope` instead of
+    /// competing with it — `--scope` chooses which groups are served, and a chosen
+    /// group brings its own discovery rule with it, so the two never have to be
+    /// reconciled.
+    pub include_worktrees: bool,
 }
 
 /// Discover each resolved group's member repo paths as
@@ -1145,8 +1295,13 @@ fn discover_groups(
     let mut out: Vec<(String, Vec<PathBuf>, bool)> = Vec::new();
     for rw in resolved {
         let mut paths: Vec<PathBuf> = Vec::new();
+        let worktrees = if rw.include_worktrees {
+            Worktrees::Include
+        } else {
+            Worktrees::Skip
+        };
         for root in &rw.roots {
-            paths.extend(discover_repos_under(Path::new(root))?);
+            paths.extend(discover_repos_under(Path::new(root), worktrees)?);
         }
         for repo in &rw.repos {
             paths.push(PathBuf::from(repo));
@@ -2016,11 +2171,17 @@ mod tests {
         for dir in ["direct/.git", "orgA/repo1/.git", "orgB/repo2/.git", "empty"] {
             std::fs::create_dir_all(base.join(dir)).expect("mkdir");
         }
-        let scan = scan_root(&base).expect("scan");
+        let scan = scan_root(&base, Worktrees::Skip).expect("scan");
 
         // Membership is unchanged — this is not a change to the rule.
         assert_eq!(scan.repos, vec![base.join("direct")]);
-        assert_eq!(discover_repos_under(&base).expect("discover"), scan.repos);
+        assert_eq!(
+            discover_repos_under(&base, Worktrees::Skip).expect("discover"),
+            scan.repos
+        );
+        // Nothing here is a worktree, so the #837 list is empty and the note it
+        // feeds says nothing extra.
+        assert!(scan.worktrees.is_empty(), "{:?}", scan.worktrees);
 
         // And the three directories it did not descend into are recorded.
         assert_eq!(

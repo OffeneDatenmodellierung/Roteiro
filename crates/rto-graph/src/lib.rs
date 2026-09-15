@@ -211,6 +211,6 @@ pub use text::{
 pub use trust::ProducerTrust;
 pub use workspace::{
     Follow, OKF_BUNDLE_DIR, OkfBundle, ReloadPlan, ResolvedWorkspace, RootScan, SetReloadPlan,
-    Workspace, WorkspaceError, WorkspaceSet, discover_okf_bundles, discover_repos_under,
-    okf_bundle_in, parse_qualified, scan_root,
+    Workspace, WorkspaceError, WorkspaceSet, Worktrees, discover_okf_bundles, discover_repos_under,
+    is_linked_worktree, okf_bundle_in, parse_qualified, scan_root,
 };

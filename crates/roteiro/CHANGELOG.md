@@ -7,6 +7,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- *(workspace)* **A `roots` scan no longer hosts linked git worktrees.** A second
+  checkout made by `git worktree add` — whose `.git` is a file pointing into the
+  main checkout — is not an independent project, and hosting it presented one
+  repository as several peers at several revisions: coupling, hotspot and debt
+  figures counted the same symbols once per checkout, cross-repo drift was computed
+  between two branches of one repo, and a workspace-scoped question could retrieve
+  one file at three revisions as three independent sources
+  ([#837](https://github.com/OffeneDatenmodellierung/Roteiro/issues/837)).
+
+  **This is a behaviour change to a shipped default, not a pure bug fix: an
+  unchanged config will host fewer projects.** On the installation that prompted
+  the issue, the `stream-sync` workspace goes from 23 hosted projects to 21. The
+  detection is structural — `gix`'s repository classification, never the directory's
+  name — so it applies to a worktree called anything at all.
+
+  **Migration, if you want one hosted.** `repos = ["…/my-worktree"]` names it
+  directly and still works unchanged: an explicit path is never *discovered*, so the
+  rule does not reach it. `include_worktrees = true` sets the rule for one
+  workspace's roots, beside `roots` in `[workspace]`, in any `[[workspaces]]` entry
+  and in `[standalone]`. Either way, `roteiro serve`, `roteiro mcp` and the explorer
+  now report how many subdirectories each root walked past for being a worktree, in
+  the same startup sentence that already reported the ones holding no `.git` — the
+  skip is never silent, which was half the complaint. That includes worktrees found
+  under a `[standalone] roots` entry, whose scan is resolved away to explicit
+  `repos` before the reporting path sees it and which therefore skipped in total
+  silence at first.
+
+  A worktree whose **main** checkout lies outside every root is skipped too, and is
+  therefore no longer graphed at all. That is deliberate: a scan cannot tell "its
+  main checkout is elsewhere in your config" from "its main checkout is on another
+  disk", and both escape hatches above cover it.
+
+### Added
+
+- *(serve)* **`--scope here` inside a linked worktree serves that worktree**, scoped
+  to it alone and at its own revision — its branch, or `at a detached HEAD` for a
+  worktree added with `--detach` or at a tag, which is an ordinary state and is
+  reported as such rather than being described as a branch — skipping applies to *discovery*, not to
+  selection, so `cd <worktree> && roteiro serve` composes with the `here` default
+  from #832 and simply works. The startup line announces it, naming the repository
+  the worktree belongs to and its branch — or reporting it as detached when it has
+  none. Sibling repositories beside the
+  worktree are not picked up: `here` means this checkout. The worktree's graph is
+  built from **its own** `HEAD` (`<main>/.git/worktrees/<name>/HEAD`) into its own
+  per-worktree store, sharing only the content-addressed object cache with the main
+  checkout, which cannot mix them: that cache is keyed on
+  `(blob oid, path, extractor version, env)`, and one `(path, oid)` is one content.
+- *(links)* **`roteiro links` run inside a worktree now scopes to the workspace
+  that contains it.** Selecting a workspace by "which one am I standing in" asked
+  the *discovery* rule, so standing in a worktree under a named workspace's root
+  returned no match and the command fell through to the legacy flat `[workspace]`
+  scope. A config that uses `[[workspaces]]` usually has no legacy table, so the
+  scope collapsed to the current repo alone and every authored cross-repo link
+  read as drift — a wrong answer shaped like a finding. Skipping applies to
+  discovery, not to selection; the member scan that follows is discovery and is
+  unchanged, so being selected by standing in a worktree does not make that
+  worktree a member.
+- *(serve)* **`--sync-on-access` inside a hosted worktree builds that worktree's
+  graph**, rather than its main checkout's. The hook derived the repository by
+  walking three parents up from `graph.db`, which is the repository for an
+  ordinary clone and `<main>/.git/worktrees` for a worktree — so it extracted the
+  wrong repository at the wrong revision and wrote it into the worktree's store,
+  producing a plausible graph under the right name. Reachable via
+  `include_worktrees = true` or an explicit `repos` entry. The "no graph yet"
+  error had the same defect and named a directory `roteiro sync` cannot run in.
+- *(cli)* `serve --workspace` and `mcp --workspace` help no longer claims to host
+  **each** immediate child repo, which stopped being true when worktrees began
+  being skipped, and now names `include_worktrees` as the way back. A false
+  statement in `--help` is the one place a user looks to find out why a project
+  vanished.
+- *(explorer)* the explorer prints the **scanned-roots note** at startup, as
+  `serve` and `mcp` already did. It builds its workspace set on its own path and
+  never reached the code that printed it, so the surface that actually shows you
+  the repository list was the one that said least about what it skipped — both
+  this change's worktree clause and the existing "skipped for holding no `.git`"
+  depth diagnostic were invisible there.
+- *(serve)* the "no workspaces to serve" error now names linked worktrees when
+  that is why nothing was hosted, with the count, the directories and both escape
+  hatches. A root holding only worktrees bails before the startup note is reached,
+  so the case that most needs the explanation was the one case that suppressed it.
+- *(config)* `include_worktrees` — a per-workspace opt-in that hosts the linked git
+  worktrees that workspace's `roots` find. Accepted in `[workspace]`, in each
+  `[[workspaces]]` entry and in `[standalone]`. A property of the group rather than
+  of the process, so two workspaces may name one root and answer differently, and so
+  it composes with `--scope`: choosing a workspace carries its discovery rule with
+  it.
+
 ## [5.14.3](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.14.2...roteiro-v5.14.3) - 2026-09-15
 
 ### Other
