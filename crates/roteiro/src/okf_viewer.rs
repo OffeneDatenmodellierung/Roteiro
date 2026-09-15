@@ -81,6 +81,15 @@ struct Viewer {
     /// Cleared on every successful load, so a later outage is reported again
     /// rather than swallowed by the first one.
     reported: Arc<std::sync::atomic::AtomicBool>,
+    /// Where an outage diagnostic goes. Production writes a line to stderr.
+    ///
+    /// A seam, because the property that matters is **how many** lines are
+    /// written and a test cannot count `eprintln!`. Asserting on [`Self::reported`]
+    /// instead looks equivalent and is not: a regression that keeps the `swap`
+    /// but moves the write out from behind it flips the latch exactly as before
+    /// while restoring one write per request — green test, defect restored. That
+    /// was the first version of this guard, and review caught it.
+    report: Arc<dyn Fn(&str) + Send + Sync>,
     /// The path this viewer is mounted under: empty when served alone, `/okf`
     /// when nested into `serve` beside the explorer.
     ///
@@ -265,7 +274,7 @@ impl Viewer {
                         .reported
                         .swap(true, std::sync::atomic::Ordering::Relaxed)
                     {
-                        eprintln!("roteiro: OKF bundle is not readable: {e}");
+                        (self.report)(&format!("roteiro: OKF bundle is not readable: {e}"));
                     }
                     return Err(e);
                 }
@@ -608,6 +617,7 @@ pub fn router(root: PathBuf, base: &str, nav: Nav) -> Router {
         nav: Arc::new(nav),
         cache: Arc::new(Mutex::new(None)),
         reported: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        report: Arc::new(|line: &str| eprintln!("{line}")),
     };
     Router::new()
         .route("/", get(index))
@@ -900,9 +910,14 @@ fn escape(raw: &str) -> String {
 /// response" is the load-bearing part. Not taking the error here is what keeps
 /// a later edit from quietly putting it back on the page.
 fn unreadable(nav: &Nav) -> Response {
+    // "could not be read", **not** "is no longer readable". Mount admission only
+    // checks that an `index.md` exists (`okf_mounts`), so the very first load can
+    // fail and this is then the page for a bundle that was never readable at all —
+    // `a_path_that_is_not_a_bundle_is_refused` is exactly that case. "No longer"
+    // would tell such a reader something untrue about what happened.
     let named = nav.label.as_ref().map_or_else(
-        || "<p>This OKF bundle is no longer readable.</p>".to_owned(),
-        |label| format!("<p>OKF bundle {} is no longer readable.</p>", escape(label)),
+        || "<p>This OKF bundle could not be read.</p>".to_owned(),
+        |label| format!("<p>OKF bundle {} could not be read.</p>", escape(label)),
     );
     (
         StatusCode::NOT_FOUND,
@@ -2464,7 +2479,7 @@ mod tests {
         // here is unchanged: a 404 saying the bundle cannot be read, rather than
         // an empty page that reads as a bundle with nothing in it. This `Nav` has
         // no label, so it also covers the unnamed branch.
-        assert!(body.contains("no longer readable"), "{body}");
+        assert!(body.contains("could not be read"), "{body}");
     }
 
     // ---- the mount layer -------------------------------------------------
@@ -2953,7 +2968,7 @@ mod tests {
                 "`{uri}` did not fail: {body}"
             );
             assert!(
-                body.contains("no longer readable"),
+                body.contains("could not be read"),
                 "`{uri}` 404'd for some other reason, so this says nothing about \
                  the unreadable path: {body}"
             );
@@ -2965,55 +2980,76 @@ mod tests {
     }
 
     /// The operator learns which bundle broke — **once per outage, not once per
-    /// request**.
+    /// request** — and this counts the diagnostics rather than inferring them.
     ///
-    /// Two halves, and the second is the one review caught. Taking the path out
-    /// of the response without leaving it anywhere would trade a disclosure for
-    /// an operator who can no longer tell which of several mounted bundles went
-    /// missing, so it still reaches stderr. But every content route reaches the
-    /// unreadable arm and a bundle that has gone away stays gone, so reporting
-    /// per *response* let a client that can reach the server choose how often
-    /// this process did synchronous, globally-locked stderr I/O — and how fast
-    /// whatever collects that stderr filled up. On a non-loopback bind that
-    /// caller is unauthenticated.
+    /// Two halves. Taking the path out of the response without leaving it
+    /// anywhere would trade a disclosure for an operator who can no longer tell
+    /// which of several mounted bundles went missing, so it still reaches stderr.
+    /// But every content route reaches the unreadable arm and a bundle that has
+    /// gone away stays gone, so reporting per *response* let a client that can
+    /// reach the server choose how often this process did synchronous,
+    /// globally-locked stderr I/O — and how fast whatever collects that stderr
+    /// filled up. On a non-loopback bind that caller is unauthenticated.
     ///
-    /// Driven through `with_cache` rather than asserted against the source, so
-    /// it pins the behaviour and not the spelling of one line.
+    /// **The first version of this test asserted on `reported` and was vacuous in
+    /// the direction that mattered.** A regression keeping the `swap` and moving
+    /// the write out from behind it flips the latch exactly as a correct
+    /// implementation does, so the assertions stayed green while one line per
+    /// request came back. The latch is a *mechanism*; the property is the number
+    /// of diagnostics, so that is what is counted now, through `Viewer::report`.
     #[tokio::test]
     async fn the_operator_learns_which_bundle_broke_once_per_outage() {
-        use std::sync::atomic::Ordering::Relaxed;
         let root = named_bundle("outage", "Alpha");
+        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&log);
         let v = Viewer {
             root: Arc::new(root.clone()),
             base: Arc::new(String::new()),
             nav: Arc::new(Nav::default()),
             cache: Arc::new(Mutex::new(None)),
             reported: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            report: Arc::new(move |line: &str| {
+                sink.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(line.to_owned());
+            }),
+        };
+        let written = || {
+            log.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len()
         };
 
         // Healthy: nothing to report.
         assert!(v.overview().is_ok(), "the fixture should load");
-        assert!(!v.reported.load(Relaxed));
+        assert_eq!(written(), 0);
 
         std::fs::remove_dir_all(&root).expect("break the bundle");
 
-        // First failure reports; the latch is how we observe that it did.
+        // The outage is reported, once, and the line names the bundle so the
+        // operator can tell which of several mounted bundles went away.
         assert!(v.overview().is_err(), "a removed bundle should not load");
+        assert_eq!(written(), 1, "the first failed load must tell the operator");
         assert!(
-            v.reported.load(Relaxed),
-            "the first failed load must tell the operator"
+            log.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)[0]
+                .contains(&root.display().to_string()),
+            "the operator's line must name the bundle — that is the whole reason \
+             it is kept after the client stopped getting it"
         );
 
-        // Every later request re-attempts the load and stays silent. Asserting
-        // the attempts really happened matters: a latch that also stopped
-        // *trying* would pass this while never recovering.
+        // Every later request re-attempts the load and writes nothing more.
+        // Asserting the attempts really happen matters: a latch that also stopped
+        // *trying* would satisfy this while never recovering.
         for _ in 0..5 {
             assert!(v.overview().is_err());
-            assert!(
-                v.reported.load(Relaxed),
-                "the latch must stay set, so nothing is written again"
-            );
         }
+        assert_eq!(
+            written(),
+            1,
+            "a client that can reach this server must not be able to choose how \
+             many lines it writes"
+        );
 
         // And it re-arms, so a second outage is reported rather than swallowed
         // by the first.
@@ -3024,9 +3060,40 @@ mod tests {
         )
         .expect("write");
         assert!(v.overview().is_ok(), "the bundle should load again");
-        assert!(
-            !v.reported.load(Relaxed),
-            "recovery must re-arm the report, or a later outage is silent"
+        std::fs::remove_dir_all(&root).expect("break it a second time");
+        assert!(v.overview().is_err());
+        assert_eq!(
+            written(),
+            2,
+            "a later outage must be reported rather than swallowed by the first"
+        );
+    }
+
+    /// Stderr is written from exactly one place in this module's production code.
+    ///
+    /// The counting test above measures the sink; this is what stops a second
+    /// write path appearing beside it, which the sink by construction cannot see.
+    /// Together they say: one reporting path, and it fires once per outage.
+    #[test]
+    fn the_viewer_has_one_diagnostic_path() {
+        let src = include_str!("okf_viewer.rs");
+        let production = src.split("mod tests {").next().expect("a test module");
+        // Anywhere on the line, not at its start: the one real write lives inside
+        // a closure — `Arc::new(|line| eprintln!("{line}"))` — and a scanner that
+        // only matched at the start of a line found zero of one and would have
+        // reported "no diagnostic path" as a pass.
+        let writes: Vec<&str> = production
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.contains("eprintln!(") || l.contains("println!("))
+            .collect();
+        assert_eq!(
+            writes.len(),
+            1,
+            "the viewer should write from one place only — `Viewer::report`'s \
+             default. A second one is unreachable by \
+             `the_operator_learns_which_bundle_broke_once_per_outage`, so it could \
+             restore per-request output with that test green. Found: {writes:?}"
         );
     }
 
