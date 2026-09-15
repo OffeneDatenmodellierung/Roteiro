@@ -15777,10 +15777,25 @@ fn scanned_roots_note(
     effective: &[rto_graph::ResolvedWorkspace],
     standalone: Option<&config::WorkspaceConfig>,
 ) -> Vec<String> {
-    scanned_roots(effective, standalone)
-        .into_iter()
-        .filter(|scan| !scan.skipped.is_empty() || !scan.worktrees.is_empty())
-        .map(|scan| {
+    let scans = scanned_roots(effective, standalone);
+    // Every worktree some *other* scan ended up hosting, and who hosts it.
+    //
+    // Two groups may name one root and disagree about `include_worktrees`, and the
+    // startup line above prints **one** flat project list across all of them — so a
+    // worktree skipped by group B while group A hosts it is, at the level the
+    // reader is looking, hosted. Saying "NOT hosted" there is not merely
+    // ambiguous, it is false, and the remedy it offers (`set include_worktrees`)
+    // is advice to fix something that is not broken. Whose scan hosts it is
+    // recorded so the note can name them rather than gesture at "another
+    // workspace".
+    let hosted_elsewhere: std::collections::BTreeMap<&std::path::Path, &str> = scans
+        .iter()
+        .flat_map(|(name, scan)| scan.repos.iter().map(move |p| (p.as_path(), name.as_str())))
+        .collect();
+    scans
+        .iter()
+        .filter(|(_, scan)| !scan.skipped.is_empty() || !scan.worktrees.is_empty())
+        .map(|(owner, scan)| {
             // One clause per *reason* a directory was walked past, because the two
             // have different remedies: a no-`.git` subdirectory may want a deeper
             // root, a worktree wants `include_worktrees` or nothing at all. Joined
@@ -15795,20 +15810,46 @@ fn scanned_roots_note(
                     plural(scan.skipped.len(), "subdirectory", "subdirectories"),
                 ));
             }
-            if !scan.worktrees.is_empty() {
+            // Split by what actually became of each one, because the two halves
+            // are different facts with different remedies — and only one of them
+            // is a loss.
+            let (elsewhere, lost): (Vec<_>, Vec<_>) = scan
+                .worktrees
+                .iter()
+                .partition(|w| hosted_elsewhere.contains_key(w.as_path()));
+            if !lost.is_empty() {
                 clauses.push(format!(
                     "{} {} skipped for being a linked git worktree — a second \
                      checkout of a repository, not a project (set \
-                     `include_worktrees = true` on this workspace to host {})",
-                    scan.worktrees.len(),
-                    plural(scan.worktrees.len(), "subdirectory", "subdirectories"),
-                    plural(scan.worktrees.len(), "it", "them"),
+                     `include_worktrees = true` on {} to host {})",
+                    lost.len(),
+                    plural(lost.len(), "subdirectory", "subdirectories"),
+                    workspace_label(owner),
+                    plural(lost.len(), "it", "them"),
+                ));
+            }
+            if !elsewhere.is_empty() {
+                let by: std::collections::BTreeSet<&str> = elsewhere
+                    .iter()
+                    .filter_map(|w| hosted_elsewhere.get(w.as_path()).copied())
+                    .collect();
+                clauses.push(format!(
+                    "{} {} skipped here for being a linked git worktree but \
+                     HOSTED by {}, so {} in the project list above",
+                    elsewhere.len(),
+                    plural(elsewhere.len(), "subdirectory", "subdirectories"),
+                    by.into_iter()
+                        .map(workspace_label)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    plural(elsewhere.len(), "it is", "they are"),
                 ));
             }
             format!(
-                "  note: {} scanned one level deep (not recursive) — {} {} hosted, \
-                 {}",
+                "  note: {} scanned one level deep (not recursive) for {} — {} {} \
+                 hosted, {}",
                 scan.root.display(),
+                workspace_label(owner),
                 scan.repos.len(),
                 plural(scan.repos.len(), "repo", "repos"),
                 clauses.join(", "),
@@ -15861,6 +15902,22 @@ fn worktree_scope_note(cmd: &str, repo: &rto_graph::Repo) -> Option<String> {
     ))
 }
 
+/// How a scan's owner is named in a diagnostic: a configured group by name, and
+/// the `[standalone]` table as the table it is.
+///
+/// `[standalone]` is not a workspace name — it is unnameable by design (ADR-0008
+/// v1.3), so `--scope workspace [standalone]` selects nothing. Rendering it as
+/// ``workspace `[standalone]` `` would invite exactly that, so it is spelled as
+/// the table.
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+fn workspace_label(owner: &str) -> String {
+    if owner == "[standalone]" {
+        "the `[standalone]` table".to_owned()
+    } else {
+        format!("workspace `{owner}`")
+    }
+}
+
 /// `one`/`many` chosen by `n`. A local helper so notes read as English rather
 /// than as `subdirector(y/ies)`.
 ///
@@ -15892,7 +15949,7 @@ fn nested_repo_hint(
 
     let mut named: Vec<String> = Vec::new();
     let mut roots: Vec<String> = Vec::new();
-    for scan in scanned_roots(effective, standalone) {
+    for (_, scan) in scanned_roots(effective, standalone) {
         let nested = scan.nested_repo_parents(PROBE_LIMIT);
         if nested.is_empty() {
             continue;
@@ -15947,7 +16004,7 @@ fn worktree_hint(
     let mut named: Vec<String> = Vec::new();
     let mut roots: Vec<String> = Vec::new();
     let mut total = 0usize;
-    for scan in scanned_roots(effective, standalone) {
+    for (_, scan) in scanned_roots(effective, standalone) {
         if scan.worktrees.is_empty() {
             continue;
         }
@@ -15989,7 +16046,7 @@ fn worktree_hint(
 fn scanned_roots(
     effective: &[rto_graph::ResolvedWorkspace],
     standalone: Option<&config::WorkspaceConfig>,
-) -> Vec<rto_graph::RootScan> {
+) -> Vec<(String, rto_graph::RootScan)> {
     let mut seen = std::collections::BTreeSet::new();
     // `[standalone] roots` are scanned by `Config::standalone_repo_paths`, which
     // resolves them to concrete `repos` *before* any `ResolvedWorkspace` exists —
@@ -16014,23 +16071,32 @@ fn scanned_roots(
         .iter()
         .flat_map(|ws| {
             let worktrees = worktrees_of(ws);
-            ws.roots.iter().map(move |root| (root, worktrees))
+            let name = ws.name.clone();
+            ws.roots
+                .iter()
+                .map(move |root| (name.clone(), root, worktrees))
         })
         .chain(
             standalone
                 .and_then(|sa| sa.roots.as_ref())
                 .into_iter()
                 .flatten()
-                .map(move |root| (root, standalone_rule)),
+                .map(move |root| ("[standalone]".to_owned(), root, standalone_rule)),
         )
         // Keyed on the **pair**, not the path: two groups may name one root and
         // disagree about worktrees, and reporting only the first would describe a
         // scan that did not happen for the second.
-        .filter_map(|(root, worktrees)| {
+        //
+        // The **name travels with the scan** for the same reason. Two scans of one
+        // root produce two notes, and without an owner the reader cannot tell which
+        // is which — nor that one root's "skipped" and another's "hosted" describe
+        // the same directory. See [`scanned_roots_note`].
+        .filter_map(|(name, root, worktrees)| {
             let path = config::expand_tilde(root);
             seen.insert((path.clone(), worktrees))
                 .then(|| rto_graph::scan_root(&path, worktrees).ok())
                 .flatten()
+                .map(|scan| (name, scan))
         })
         .collect()
 }
@@ -16159,12 +16225,7 @@ fn standalone_table<'c>(
 /// And it is *handed* the project's working-tree root rather than deriving one
 /// from the `graph.db` path: for a linked worktree that derivation lands outside
 /// the repository entirely and rebuilds the main checkout instead. See
-/// [`rto_graph::Workspace::with_on_open`] and [`sync_project_graph`] (issue #837).
-///
-/// (The hook's type, `OnOpen`, is not re-exported from `rto_graph`'s root, so it
-/// is named here only in prose — an intra-doc link to it does not resolve, and
-/// `-D rustdoc::broken-intra-doc-links` is checked by a job that neither clippy
-/// nor the test runs can stand in for.)
+/// [`rto_graph::OnOpen`] and [`sync_project_graph`] (issue #837).
 #[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
 fn attach_sync_on_access(
     ws: rto_graph::Workspace,
@@ -24981,6 +25042,72 @@ mod worktree_discovery_tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
+    /// **Two workspaces, one root, opposite rules — the note must not call a
+    /// hosted worktree "NOT hosted".**
+    ///
+    /// The startup line prints ONE flat project list across every workspace, so a
+    /// worktree that group `opted-in` hosts is, at the level the reader is
+    /// looking, hosted — even though group `default` walked past it. The note
+    /// used to say `NOT hosted` for it and advise setting `include_worktrees`,
+    /// which is advice to fix something that is not broken, printed directly
+    /// below a project list that contains the thing it says is missing.
+    ///
+    /// Both halves are asserted, because a fix that simply dropped the clause
+    /// would satisfy "no false claim" while losing the true one: the skip is
+    /// still reported, attributed to the group that made it, and the group that
+    /// hosts it is named.
+    #[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+    #[test]
+    fn a_worktree_hosted_by_another_workspace_is_not_reported_as_lost() {
+        let (base, root) = fixture("twogroups");
+        let root_s = root.to_string_lossy().into_owned();
+        let cfg = config::Config {
+            workspaces: vec![
+                config::NamedWorkspace {
+                    name: "opted-in".to_owned(),
+                    roots: Some(vec![root_s.clone()]),
+                    include_worktrees: Some(true),
+                    ..config::NamedWorkspace::default()
+                },
+                config::NamedWorkspace {
+                    name: "plain".to_owned(),
+                    roots: Some(vec![root_s]),
+                    ..config::NamedWorkspace::default()
+                },
+            ],
+            ..config::Config::default()
+        };
+        let resolved = cfg.resolved_workspaces().expect("resolve");
+        let notes = super::scanned_roots_note(&resolved, None).join("\n");
+
+        // Each note says whose scan it is, so two lines about one root are
+        // tellable apart at all.
+        assert!(
+            notes.contains("for workspace `plain`"),
+            "a note must name the workspace whose scan it describes:\n{notes}"
+        );
+        // The skip is still reported — and attributed.
+        assert!(
+            notes.contains("skipped here for being a linked git worktree"),
+            "the skip itself must still be reported:\n{notes}"
+        );
+        // …and named as hosted, by the group that hosts it, rather than lost.
+        assert!(
+            notes.contains("HOSTED by workspace `opted-in`"),
+            "the note must name the workspace that DOES host it:\n{notes}"
+        );
+        // The false claim and its false remedy are both gone for this worktree.
+        assert!(
+            !notes.contains(
+                "not a project (set `include_worktrees = true` on \
+                             workspace `plain`"
+            ),
+            "the note still advises enabling a key for a worktree that is \
+             already hosted:\n{notes}"
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     /// **A `[standalone]` root announces its worktree skips too.**
     ///
     /// `[standalone] roots` are resolved to concrete `repos` by
@@ -25013,10 +25140,11 @@ mod worktree_discovery_tests {
         assert_eq!(
             notes,
             vec![format!(
-                "  note: {} scanned one level deep (not recursive) — 2 repos \
-                 hosted, 1 subdirectory skipped for being a linked git worktree — \
-                 a second checkout of a repository, not a project (set \
-                 `include_worktrees = true` on this workspace to host it)",
+                "  note: {} scanned one level deep (not recursive) for the \
+                 `[standalone]` table — 2 repos hosted, 1 subdirectory skipped for \
+                 being a linked git worktree — a second checkout of a repository, \
+                 not a project (set `include_worktrees = true` on the \
+                 `[standalone]` table to host it)",
                 root.display()
             )],
             "a `[standalone]` root skipped a worktree without saying so"
@@ -25309,12 +25437,12 @@ mod worktree_discovery_tests {
         assert_eq!(
             notes,
             vec![format!(
-                "  note: {} scanned one level deep (not recursive) — 2 repos \
-                 hosted, 1 subdirectory skipped for holding no `.git` (any repo \
-                 nested inside those is NOT hosted), 1 subdirectory skipped for \
-                 being a linked git worktree — a second checkout of a repository, \
-                 not a project (set `include_worktrees = true` on this workspace \
-                 to host it)",
+                "  note: {} scanned one level deep (not recursive) for workspace \
+                 `default` — 2 repos hosted, 1 subdirectory skipped for holding no \
+                 `.git` (any repo nested inside those is NOT hosted), 1 \
+                 subdirectory skipped for being a linked git worktree — a second \
+                 checkout of a repository, not a project (set \
+                 `include_worktrees = true` on workspace `default` to host it)",
                 root.display()
             )]
         );
@@ -25334,9 +25462,9 @@ mod worktree_discovery_tests {
         assert_eq!(
             super::scanned_roots_note(&resolved, None),
             vec![format!(
-                "  note: {} scanned one level deep (not recursive) — 3 repos \
-                 hosted, 1 subdirectory skipped for holding no `.git` (any repo \
-                 nested inside those is NOT hosted)",
+                "  note: {} scanned one level deep (not recursive) for workspace \
+                 `default` — 3 repos hosted, 1 subdirectory skipped for holding no \
+                 `.git` (any repo nested inside those is NOT hosted)",
                 root.display()
             )]
         );

@@ -79,6 +79,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   being skipped, and now names `include_worktrees` as the way back. A false
   statement in `--help` is the one place a user looks to find out why a project
   vanished.
+- *(serve)* the scanned-roots note **names the workspace whose scan it describes**,
+  and no longer calls a worktree "NOT hosted" when another workspace hosts it. Two
+  groups may name one root and disagree about `include_worktrees`; the startup line
+  prints one flat project list across all of them, so the skipping group's note was
+  reporting a loss — and advising `include_worktrees = true` to fix it — directly
+  below a project list that already contained the thing it said was missing. The
+  skip is still reported and is now attributed, and the workspace that does host it
+  is named.
 - *(explorer)* the explorer prints the **scanned-roots note** at startup, as
   `serve` and `mcp` already did. It builds its workspace set on its own path and
   never reached the code that printed it, so the surface that actually shows you

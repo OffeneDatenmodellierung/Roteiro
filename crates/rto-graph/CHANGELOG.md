@@ -37,6 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- *(workspace)* `OnOpen` is re-exported from the crate root. `Workspace::with_on_open`
+  is public and takes it, but the `workspace` module is private, so a caller outside
+  this crate could not name the type its own argument has.
 - *(git)* `Repo::linked_worktree_of` — the main checkout a linked worktree belongs
   to, or `None` for an ordinary clone, via gix's `Kind::LinkedWorkTree` and
   `main_repo()`. Deliberately not `git_dir() != common_dir()`: gix reports the

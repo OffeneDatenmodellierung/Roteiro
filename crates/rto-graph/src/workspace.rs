@@ -183,7 +183,16 @@ fn source_eq(a: &Source, b: &Source) -> bool {
 /// The registry already knows the answer — [`build_registry`] records
 /// `repo.workdir()` beside the db path it derived from `repo.git_dir()` — so this
 /// hands the value over instead of asking the callee to reconstruct it.
-/// `None` only for a [`Workspace::from_named_dbs`] source, which records no root.
+/// `None` whenever the source has **no working-tree root** to record. Two cases,
+/// not one: a [`Workspace::from_named_dbs`] source, which records no root at all,
+/// and a **bare** repository passed to [`Workspace::from_repo_paths`], because
+/// [`build_registry`] records `repo.workdir()` and a bare repo has none. A hook
+/// that assumed `from_named_dbs` were the only nameless case would be wrong about
+/// the second, so it is named here.
+///
+/// Re-exported from the crate root ([`crate::OnOpen`]) because
+/// [`Workspace::with_on_open`] is public and takes it: a caller outside this crate
+/// could otherwise not name the type its own argument has.
 pub type OnOpen = Arc<dyn Fn(&Path, Option<&Path>) -> Result<(), String> + Send + Sync>;
 
 /// A fully-discovered registry, ready to be swapped into a live [`Workspace`].
