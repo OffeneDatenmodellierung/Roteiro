@@ -891,7 +891,14 @@ pub fn run_replay(
         // commit, not per run: a verdict is about one change.
         let mut reported: Vec<String> = Vec::new();
         for file in &set.files {
-            let sources = |p: &str| blob_at(repo, sha, p);
+            // Every byte that reaches the model passes through this closure, so
+            // the policy is asked **here** rather than only over the change set.
+            // `context_for` follows a file's parent modules, which a filtered
+            // change set does not cover: a narrow `exclude` naming one module
+            // file would otherwise be read and sent as an admitted file's parent.
+            // This is the last gate before egress, which is the one worth being
+            // total.
+            let sources = |p: &str| ingest.class(p).mines().then(|| blob_at(repo, sha, p))?;
             let context = context_for(graph.as_ref(), file, &sources)?;
             report.context_items += context.items.len();
             report.context_dropped += context.dropped_items;
@@ -1393,7 +1400,14 @@ pub fn run_llm(
     // reported.
     let mut reported: Vec<String> = Vec::new();
     for file in &files {
-        let sources = |p: &str| std::fs::read_to_string(repo.join(p)).ok();
+        // As in the replay path above: the closure, not the file set, is the
+        // chokepoint every byte sent to the model passes through.
+        let sources = |p: &str| {
+            ingest
+                .class(p)
+                .mines()
+                .then(|| std::fs::read_to_string(repo.join(p)).ok())?
+        };
         let context = context_for(graph.as_ref(), file, &sources)?;
         let outcome = review_file(&engine, model, file, &context, &checks, &sources)?;
         if outcome.reasoning_truncated {

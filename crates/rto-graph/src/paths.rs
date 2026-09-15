@@ -285,14 +285,55 @@ pub fn glob_match(pattern: &str, path: &str) -> bool {
 
 /// Anchored match of glob segments `pat` against path segments `seg`, with `**`
 /// consuming zero or more segments.
+///
+/// # Why this memoises, when the `[debt] ignore` original did not
+///
+/// Each `**` branches over every split of the remaining path, so a pattern with
+/// several of them revisits the same `(pattern suffix, path suffix)` state
+/// exponentially many times: twenty `**` tokens against a twenty-segment path is
+/// on the order of 10^11 calls, which does not return.
+///
+/// It was survivable while this matcher ran only when `roteiro debt` *reported*,
+/// over a handful of patterns. It is not survivable now: [`PathPolicy::classify`]
+/// asks it for **every declared pattern on every path**, at extraction, at the
+/// authored layer, and at every other reader — so a pattern a user is free to
+/// write turns a scan into a hang. Widening the blast radius of existing code is
+/// the change that has to pay for its own hardening, so it pays here.
+///
+/// Recording only *failures* is what keeps this a memo rather than a rewrite: a
+/// state that succeeded ends the search, so it is never revisited, and only the
+/// dead ends are worth remembering. Bounded at `(pat.len() + 1) * (seg.len() + 1)`
+/// states, and the semantics are untouched — the tests below are the ones that
+/// passed before it.
 fn match_segments(pat: &[&str], seg: &[&str]) -> bool {
-    match pat.first() {
-        None => seg.is_empty(),
-        Some(&"**") => (0..=seg.len()).any(|i| match_segments(&pat[1..], &seg[i..])),
-        Some(token) => {
-            !seg.is_empty() && match_token(token, seg[0]) && match_segments(&pat[1..], &seg[1..])
-        }
+    let stride = seg.len() + 1;
+    let mut failed = vec![false; (pat.len() + 1) * stride];
+    match_segments_memo(pat, seg, &mut failed, stride)
+}
+
+/// [`match_segments`] with the dead-end memo threaded through. Keyed on the
+/// **suffix lengths**, which identify the state exactly: both slices only ever
+/// shrink from the front.
+fn match_segments_memo(pat: &[&str], seg: &[&str], failed: &mut [bool], stride: usize) -> bool {
+    let slot = pat.len() * stride + seg.len();
+    if failed[slot] {
+        return false;
     }
+    let matched = match pat.first() {
+        None => seg.is_empty(),
+        Some(&"**") => {
+            (0..=seg.len()).any(|i| match_segments_memo(&pat[1..], &seg[i..], failed, stride))
+        }
+        Some(token) => {
+            !seg.is_empty()
+                && match_token(token, seg[0])
+                && match_segments_memo(&pat[1..], &seg[1..], failed, stride)
+        }
+    };
+    if !matched {
+        failed[slot] = true;
+    }
+    matched
 }
 
 /// Match a single path segment `s` against a `pattern` token containing `*`
@@ -303,16 +344,38 @@ fn match_token(pattern: &str, s: &str) -> bool {
     match_token_chars(&pat, &chars)
 }
 
-/// Recursive char-slice matcher backing [`match_token`].
+/// Recursive char-slice matcher backing [`match_token`], memoised on dead ends
+/// for the reason [`match_segments`] is: several `*` in one segment branch the
+/// same way `**` does across segments, so `*a*a*a*a*a*a*a*a.rs` is the
+/// within-segment form of the same hang.
 fn match_token_chars(pat: &[char], chars: &[char]) -> bool {
-    match pat.first() {
-        None => chars.is_empty(),
-        Some('*') => (0..=chars.len()).any(|i| match_token_chars(&pat[1..], &chars[i..])),
-        Some('?') => !chars.is_empty() && match_token_chars(&pat[1..], &chars[1..]),
-        Some(&ch) => {
-            !chars.is_empty() && chars[0] == ch && match_token_chars(&pat[1..], &chars[1..])
-        }
+    let stride = chars.len() + 1;
+    let mut failed = vec![false; (pat.len() + 1) * stride];
+    match_token_memo(pat, chars, &mut failed, stride)
+}
+
+/// [`match_token_chars`] with the dead-end memo threaded through.
+fn match_token_memo(pat: &[char], chars: &[char], failed: &mut [bool], stride: usize) -> bool {
+    let slot = pat.len() * stride + chars.len();
+    if failed[slot] {
+        return false;
     }
+    let matched = match pat.first() {
+        None => chars.is_empty(),
+        Some('*') => {
+            (0..=chars.len()).any(|i| match_token_memo(&pat[1..], &chars[i..], failed, stride))
+        }
+        Some('?') => !chars.is_empty() && match_token_memo(&pat[1..], &chars[1..], failed, stride),
+        Some(&ch) => {
+            !chars.is_empty()
+                && chars[0] == ch
+                && match_token_memo(&pat[1..], &chars[1..], failed, stride)
+        }
+    };
+    if !matched {
+        failed[slot] = true;
+    }
+    matched
 }
 
 #[cfg(test)]
@@ -397,6 +460,55 @@ mod tests {
         assert!(PathClass::Extract.mines() && PathClass::Extract.reads());
         assert!(!PathClass::Opaque.mines() && PathClass::Opaque.reads());
         assert!(!PathClass::Excluded.mines() && !PathClass::Excluded.reads());
+    }
+
+    /// A pattern a user is free to write must not turn a scan into a hang.
+    ///
+    /// Unmemoised, twenty `**` tokens against a twenty-segment non-matching path
+    /// explore on the order of `C(40, 20)` ≈ 10^11 states and never return. The
+    /// same shape within one segment (`*a*a*…`) is the other half. Both are
+    /// asserted here **with a wall-clock bound** rather than merely for their
+    /// answer, because the defect's signature is time rather than a wrong result
+    /// — without the memo this test does not fail, it fails to finish, and a
+    /// bound is what turns that into a red rather than a hung CI job.
+    ///
+    /// The bound is deliberately loose. The memoised search is microseconds, so
+    /// seconds of headroom cannot flake on a loaded machine while still being
+    /// four orders of magnitude tighter than the unmemoised version's hours.
+    #[test]
+    fn a_pathological_pattern_is_bounded_rather_than_exponential() {
+        let deep = vec!["**"; 20].join("/") + "/needle";
+        let path = (0..20)
+            .map(|i| format!("d{i}"))
+            .collect::<Vec<_>>()
+            .join("/");
+
+        let start = std::time::Instant::now();
+        assert!(
+            !glob_match(&deep, &path),
+            "no `needle` segment, so no match"
+        );
+        assert!(glob_match(&deep, &format!("{path}/needle")));
+
+        // The within-segment form of the same branching. The subject ends
+        // `.txt`, so the trailing literal can never match and every split of
+        // every `*` is explored before the answer is known — which is the case
+        // that costs, not the one that matches early.
+        let starred = format!("{}.rs", "*a".repeat(16));
+        assert!(
+            !glob_match(&starred, &format!("{}.txt", "a".repeat(40))),
+            "the trailing `.rs` cannot match `.txt`"
+        );
+        assert!(
+            glob_match(&starred, &format!("{}.rs", "a".repeat(40))),
+            "and the matching case still matches"
+        );
+
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "the matcher must be bounded, not exponential — took {elapsed:?}"
+        );
     }
 
     #[test]
