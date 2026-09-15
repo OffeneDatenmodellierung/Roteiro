@@ -800,8 +800,14 @@ impl GraphServer {
             Ok(root) => root,
             Err(e) => return tool_error(&e.to_string()),
         };
+        // The ingestion configuration is the default by necessity, not by
+        // oversight, and for the same reason `debt` below passes no ignore list:
+        // this crate cannot read the target project's `roteiro.toml`. The
+        // binary's own MCP surface, which can, passes the real one. A repository
+        // that declares `[paths]` or `[ingest]` should reach its graph through
+        // that surface.
         query_result(self.with_project(project, |store| {
-            rto_spec::tool_check(store, root.as_deref())
+            rto_spec::tool_check(store, root.as_deref(), rto_graph::IngestConfig::default())
         }))
     }
 

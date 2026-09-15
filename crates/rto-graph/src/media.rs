@@ -789,9 +789,10 @@ pub struct MediaBlob {
     pub kind: MediaKind,
 }
 
-/// Every media blob in `repo`'s `HEAD` tree that some modality can read and that
-/// is within that modality's byte cap, de-duplicated by `(blob id, kind)` and
-/// ordered by `(kind, blob id)` so a build is deterministic.
+/// Every media blob in `repo`'s `HEAD` tree that some modality can read, that
+/// `paths` admits for mining (ADR-0007 `[paths]`), and that is within that
+/// modality's byte cap — de-duplicated by `(blob id, kind)` and ordered by
+/// `(kind, blob id)` so a build is deterministic.
 ///
 /// The same blob committed at two paths is **one** candidate: the record is keyed
 /// by blob, so describing it twice would be work for one row. The lexically
@@ -800,7 +801,10 @@ pub struct MediaBlob {
 /// # Errors
 /// Returns [`crate::GitError`] if the tree cannot be walked or a blob cannot be
 /// read.
-pub fn media_blobs(repo: &crate::Repo) -> Result<Vec<MediaBlob>, crate::GitError> {
+pub fn media_blobs(
+    repo: &crate::Repo,
+    paths: &crate::PathPolicy,
+) -> Result<Vec<MediaBlob>, crate::GitError> {
     let mut blobs = repo.walk_blobs()?;
     // Sort by path so "the lexically first path wins" is a fact, not an accident
     // of the walk order.
@@ -809,6 +813,14 @@ pub fn media_blobs(repo: &crate::Repo) -> Result<Vec<MediaBlob>, crate::GitError
         std::collections::BTreeSet::new();
     let mut out = Vec::new();
     for blob in blobs {
+        // Describing or transcribing a blob is mining — it derives a claim from
+        // what the bytes hold — so an excluded or opaque path is not a
+        // candidate. This walks `HEAD` on its own rather than through `sync`, so
+        // it has to ask for itself; that it is a *separate* reader is the whole
+        // reason the rule is a policy both consult rather than a branch in one.
+        if !paths.classify(&blob.path).mines() {
+            continue;
+        }
         for kind in [MediaKind::Audio, MediaKind::Vision] {
             if !kind.accepts_path(&blob.path) {
                 continue;

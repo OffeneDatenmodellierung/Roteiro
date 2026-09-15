@@ -75,6 +75,42 @@ impl Loaded {
             .collect()
     }
 
+    /// The effective `[paths] exclude` (and `opaque`) patterns, each tagged with
+    /// the layer it came from.
+    ///
+    /// The same shape as [`Loaded::debt_ignore_sources`] and for the same reason:
+    /// these lists **merge** across layers, so one label per key would be a lie.
+    /// It matters more here than there, because a `[paths]` pattern decides what
+    /// is *in the graph* — a reader asking "is my exclusion in force?" is asking
+    /// about nodes that exist or do not, not about rows in a report.
+    #[must_use]
+    pub fn path_pattern_sources(&self, list: PathList) -> Vec<(&str, &'static str)> {
+        fn of(list: PathList, c: &Config) -> Option<&[String]> {
+            list.of(&c.paths)
+        }
+        let contains = |c: &Config, pattern: &str| {
+            of(list, c).is_some_and(|ps| ps.iter().any(|p| p == pattern))
+        };
+        of(list, &self.effective)
+            .unwrap_or_default()
+            .iter()
+            .map(|pattern| {
+                let layer = match (
+                    contains(&self.project, pattern),
+                    contains(&self.user, pattern),
+                ) {
+                    (true, true) => "project, user",
+                    (true, false) => "project",
+                    (false, true) => "user",
+                    // Unreachable while the effective list is built from the two
+                    // layers; reported honestly rather than asserted away.
+                    (false, false) => "unknown",
+                };
+                (pattern.as_str(), layer)
+            })
+            .collect()
+    }
+
     /// Whether the **user** layer asked for an `ignore_reset` that did nothing.
     ///
     /// A reset drops what a layer inherits, and the user layer is the bottom of
@@ -877,13 +913,118 @@ impl SecurityConfig {
     }
 }
 
-/// `[paths]` — filesystem locations.
+/// Which of [`PathsConfig`]'s two glob lists a caller means.
+///
+/// A parameter rather than two near-identical methods, so the provenance logic
+/// that makes a merged list legible exists once. The two lists differ in what
+/// they *produce*, never in how they layer.
+///
+/// # Deliberately closed, and not `#[non_exhaustive]`
+///
+/// This enumerates [`PathsConfig`]'s glob-list fields, so it is closed by the
+/// struct rather than by a judgement: a third variant with no third field does
+/// not compile, and a third field with no variant is caught by
+/// [`PathList::of`]'s match. The two must move together, and the attribute would
+/// let them drift apart by admitting a wildcard arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathList {
+    /// [`PathsConfig::exclude`] — not in the graph at all.
+    Exclude,
+    /// [`PathsConfig::opaque`] — a file node and nothing else.
+    Opaque,
+}
+
+impl PathList {
+    /// The list this names, within `paths`.
+    #[must_use]
+    pub fn of(self, paths: &PathsConfig) -> Option<&[String]> {
+        match self {
+            Self::Exclude => paths.exclude.as_deref(),
+            Self::Opaque => paths.opaque.as_deref(),
+        }
+    }
+
+    /// The key's name, as it is written in `roteiro.toml`.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Exclude => "exclude",
+            Self::Opaque => "opaque",
+        }
+    }
+}
+
+/// `[paths]` — filesystem locations, and **which repository paths the scan
+/// reads** (issue #840, ADR-0026 step 1).
 #[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct PathsConfig {
     /// The model store directory (default `~/.roteiro/models`, or
     /// `$ROTEIRO_HOME/models`). A leading `~/` is expanded to the home directory.
     pub model_store: Option<String>,
+    /// Glob patterns whose matching paths are **not in the graph at all**: no
+    /// node is produced and the bytes are never read.
+    ///
+    /// The strongest of the three states. It is what ADR-0026's `raw/` source
+    /// root needs: a document reached by the explicit ingest path is graphed
+    /// once, as its `knowledge/` summary, and excluding the source from the
+    /// standard scan is what keeps it at once rather than two (issue #817).
+    ///
+    /// Patterns use the same syntax as [`DebtConfig::ignore`] — anchored
+    /// end-to-end against the whole repo-relative path, `*`/`?` within a
+    /// segment, `**` across segments — and the same matcher
+    /// ([`rto_graph::glob_match`]).
+    ///
+    /// **Nothing is excluded by default.** Not `raw/`, not `vendor/`, not
+    /// `node_modules/`: a built-in default would silently drop a directory out
+    /// of the graph of every repository that happens to have one, on upgrade,
+    /// with nothing said. See [`rto_graph::PathPolicy`].
+    ///
+    /// # Additive across layers, and with no reset
+    ///
+    /// Like [`DebtConfig::ignore`], the project layer's patterns are **appended**
+    /// to the user layer's. Unlike it, there is deliberately **no
+    /// `exclude_reset`**: a reset on this list would let a committed project file
+    /// *widen* what is read over a user's own declaration — re-admitting a
+    /// corpus that a user excluded machine-wide, on their machine, by a line
+    /// somebody else merged. Narrowing is the safe direction for an exclusion, so
+    /// only narrowing is expressible. Restating a pattern you want is cheap;
+    /// silently regaining one you excluded is not.
+    pub exclude: Option<Vec<String>>,
+    /// Glob patterns whose matching paths yield **a `file` node and nothing
+    /// else** — identity without content.
+    ///
+    /// The middle state, and the one that cannot be expressed by any of
+    /// `.gitignore`, `[debt] ignore` or `[ingest]`. Issue #812 requires a corpus
+    /// manifest to be **committed in every storage mode**, so that a missing
+    /// `raw/` is *detectable rather than silent* — the manifest must therefore be
+    /// in the graph. It must equally not be mined: it is data, and mining it
+    /// shreds it into one `config_key` node per JSON leaf (issue #839) and scans
+    /// its English prose for intent-debt markers (issue #838).
+    ///
+    /// An opaque path keeps its path, name, blob id, byte and line counts, and
+    /// records `meta.scan = "opaque"`. It gains no `meta.content`, no config
+    /// keys, no symbols, no image or audio facts and no markers, and the
+    /// authored-layer classifier declines it — so a markdown file under an
+    /// opaque path cannot declare itself one of this project's ADRs.
+    ///
+    /// Merged across layers exactly as [`PathsConfig::exclude`] is, and with no
+    /// reset for the same reason — neither list has one. A path matching both
+    /// lists is **excluded**: between two declarations about the same bytes, the
+    /// narrower one wins.
+    pub opaque: Option<Vec<String>>,
+}
+
+impl PathsConfig {
+    /// Resolve to the graph-layer [`rto_graph::PathPolicy`] every reader of
+    /// repository bytes consults.
+    #[must_use]
+    pub fn policy(&self) -> rto_graph::PathPolicy {
+        rto_graph::PathPolicy::new(
+            self.exclude.clone().unwrap_or_default(),
+            self.opaque.clone().unwrap_or_default(),
+        )
+    }
 }
 
 /// `[telemetry]` — opt-in structured file logging, the groundwork for a future
@@ -1150,11 +1291,18 @@ pub struct IngestConfig {
 
 impl IngestConfig {
     /// Resolve to the graph-layer [`rto_graph::IngestConfig`], defaulting each
-    /// unset toggle to on.
+    /// unset toggle to on and carrying `paths` — the `[paths]` policy every
+    /// reader of repository bytes consults (issue #840).
+    ///
+    /// The policy is borrowed rather than owned so the resolved value stays
+    /// `Copy` and keeps travelling by value to the readers it already reaches;
+    /// `paths` must therefore outlive the run, which for the one caller that
+    /// matters is the whole of `main`.
     #[must_use]
-    pub fn resolve(&self) -> rto_graph::IngestConfig {
+    pub fn resolve<'a>(&self, paths: &'a rto_graph::PathPolicy) -> rto_graph::IngestConfig<'a> {
         let default = rto_graph::IngestConfig::default();
         rto_graph::IngestConfig {
+            paths,
             prose: self.prose.unwrap_or(default.prose),
             pdf: self.pdf.unwrap_or(default.pdf),
             ocr: self.ocr.unwrap_or(default.ocr),
@@ -1581,6 +1729,47 @@ pub fn debt_ignore_for(
     Ok(loaded.effective.debt.ignore.unwrap_or_default())
 }
 
+/// The **ingestion configuration** — `[paths]` *and* `[ingest]` — declared by
+/// `project`'s own repository.
+///
+/// Both halves, returned together, because the extraction **identity** folds both
+/// and a caller reconstructing it from one of them plus a default for the other
+/// gets a string that matches no graph any repository ever synced. Returning the
+/// pair from one load is what stops that being possible to write.
+///
+/// The sibling of [`debt_ignore_for`], following the same rule for the same
+/// reason: a surface that answers about a project reads *that project's*
+/// configuration, never the one the server was started in. Substituting some
+/// other repository's declaration would classify its files by a policy nobody
+/// wrote for them.
+///
+/// # Errors
+/// The project name not resolving in `ws`, or that repository's `roteiro.toml`
+/// being unreadable or malformed — surfaced rather than swallowed, because
+/// falling back to "nothing excluded" answers with a graph the repository asked
+/// not to have.
+// One caller today — the binary's own MCP `check` tool (`serve`). A default
+// build has none, so gate it or dead-code warns.
+#[cfg(feature = "serve")]
+pub fn path_policy_for(
+    ws: &rto_graph::Workspace,
+    project: Option<&str>,
+) -> anyhow::Result<(rto_graph::PathPolicy, IngestConfig)> {
+    let Some(root) = ws.project_root(project)? else {
+        return Ok((rto_graph::PathPolicy::default(), IngestConfig::default()));
+    };
+    let loaded = load(&root).map_err(|e| {
+        anyhow::anyhow!(
+            "reading the configuration of the repository at {}: {e}",
+            root.display()
+        )
+    })?;
+    Ok((
+        loaded.effective.paths.policy(),
+        loaded.effective.ingest.clone(),
+    ))
+}
+
 /// Overlay the `[debt] ignore` **exclusion list**: `over`'s patterns are
 /// *appended* to `base`'s (de-duplicated, inherited first), unless `over` sets
 /// `ignore_reset`, in which case `base` is dropped entirely.
@@ -1609,7 +1798,20 @@ fn merge_ignore(base: Option<&[String]>, over: &DebtConfig) -> Option<Vec<String
     if over.ignore_reset.declared() == Some(true) {
         return over.ignore.clone();
     }
-    match (base, over.ignore.as_deref()) {
+    merge_patterns(base, over.ignore.as_deref())
+}
+
+/// Append `over`'s patterns to `base`'s, de-duplicated, inherited first — the
+/// additive overlay every glob **exclusion** list in this file uses.
+///
+/// Factored out of [`merge_ignore`] when `[paths] exclude`/`opaque` arrived,
+/// because three lists merging by three copies of one loop is how the
+/// `roteiro config` output and the effective value drift apart. The reset is
+/// *not* here: `[debt] ignore` has one and `[paths]` deliberately does not, and
+/// that difference belongs at the call site where it can be read next to the key
+/// it applies to.
+fn merge_patterns(base: Option<&[String]>, over: Option<&[String]>) -> Option<Vec<String>> {
+    match (base, over) {
         (None, None) => None,
         (Some(only), None) | (None, Some(only)) => Some(only.to_vec()),
         (Some(base), Some(over)) => {
@@ -1708,6 +1910,16 @@ impl Config {
                     .model_store
                     .clone()
                     .or(self.paths.model_store.clone()),
+                // Exclusion lists merge rather than replace, for the reason
+                // `[debt] ignore` does (see `merge_ignore`): a user who excludes
+                // a private corpus machine-wide and then opens a project that
+                // excludes its own vendor tree wants both. There is no reset
+                // counterpart — see `PathsConfig::exclude`.
+                exclude: merge_patterns(
+                    self.paths.exclude.as_deref(),
+                    over.paths.exclude.as_deref(),
+                ),
+                opaque: merge_patterns(self.paths.opaque.as_deref(), over.paths.opaque.as_deref()),
             },
             telemetry: self.telemetry.overlaid_with(&over.telemetry),
             workspace: WorkspaceConfig {
@@ -2634,6 +2846,79 @@ mod tests {
             loaded.effective.pins.get("other").map(String::as_str),
             Some("user-{tag}")
         );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `[paths]`'s two lists merge across layers as `[debt] ignore` does, and the
+    /// **project layer cannot take away** what the user layer excluded.
+    ///
+    /// The direction is the point. For `[debt] ignore` a narrowed union costs a
+    /// wrong number in a report; here it costs *nodes in the graph* — a corpus a
+    /// user excluded machine-wide would be scanned, mined and published because
+    /// somebody merged a line into a project file. That asymmetry is why there is
+    /// no `exclude_reset` to test: only narrowing is expressible.
+    #[test]
+    fn path_exclusions_merge_across_layers_and_report_their_layer() {
+        let dir = std::env::temp_dir().join(format!("roteiro-cfg-paths-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let user = dir.join("config.toml");
+        let project = dir.join("roteiro.toml");
+
+        std::fs::write(
+            &user,
+            "[paths]\nexclude = [\"~private/**\"]\nopaque = [\"data/**\"]\n",
+        )
+        .expect("user");
+        std::fs::write(&project, "[paths]\nexclude = [\"raw/**\"]\n").expect("project");
+        let loaded = load_from(Some(user.clone()), Some(project.clone())).expect("load");
+
+        assert_eq!(
+            loaded.effective.paths.exclude.as_deref(),
+            Some(["~private/**".to_owned(), "raw/**".to_owned()].as_slice()),
+            "the union, inherited first — the project may add, never subtract"
+        );
+        assert_eq!(
+            loaded.effective.paths.opaque.as_deref(),
+            Some(["data/**".to_owned()].as_slice()),
+            "a list the project says nothing about is inherited whole"
+        );
+        assert_eq!(
+            loaded.path_pattern_sources(super::PathList::Exclude),
+            vec![("~private/**", "user"), ("raw/**", "project")],
+            "every pattern reports its layer, because a merged list has no single one"
+        );
+        assert_eq!(
+            loaded.path_pattern_sources(super::PathList::Opaque),
+            vec![("data/**", "user")]
+        );
+
+        // And the resolved policy is what both readers actually consult.
+        let policy = loaded.effective.paths.policy();
+        assert_eq!(
+            policy.classify("raw/paper.pdf"),
+            rto_graph::PathClass::Excluded
+        );
+        assert_eq!(
+            policy.classify("~private/notes.md"),
+            rto_graph::PathClass::Excluded
+        );
+        assert_eq!(
+            policy.classify("data/rows.json"),
+            rto_graph::PathClass::Opaque
+        );
+        assert_eq!(
+            policy.classify("src/main.rs"),
+            rto_graph::PathClass::Extract
+        );
+
+        // Nothing declared anywhere resolves to the empty policy, which is
+        // today's behaviour and costs no extraction-cache key.
+        std::fs::write(&user, "").expect("user");
+        std::fs::write(&project, "").expect("project");
+        let bare = load_from(Some(user), Some(project)).expect("load");
+        assert!(bare.effective.paths.policy().is_empty());
+        assert_eq!(bare.effective.paths.policy().fingerprint(), 0);
 
         std::fs::remove_dir_all(&dir).ok();
     }

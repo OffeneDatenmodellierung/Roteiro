@@ -784,12 +784,21 @@ impl Repo {
     /// # Errors
     /// Returns [`GitError`] on a git failure. In a bare repo (no working tree)
     /// the change set is empty.
-    pub fn changed_files(&self) -> Result<Vec<ChangedFile>, GitError> {
+    pub fn changed_files(&self, paths: &crate::PathPolicy) -> Result<Vec<ChangedFile>, GitError> {
         let mut out = Vec::new();
         let Some(workdir) = self.workdir() else {
             return Ok(out);
         };
         for blob in self.walk_blobs()? {
+            // Asked **before** the read, not after. This walk hashes every
+            // tracked path's working-tree bytes to find the dirty ones, so a
+            // caller that filtered the result instead would still have read every
+            // byte of an excluded corpus — and `exclude`'s contract is that the
+            // bytes are never read, which is the half that matters when the
+            // corpus is gigabytes of PDFs (ADR-0007 `[paths]`).
+            if !paths.classify(&blob.path).reads() {
+                continue;
+            }
             match std::fs::read(workdir.join(&blob.path)) {
                 Ok(bytes) => {
                     if self.blob_oid(&bytes)? != blob.oid {

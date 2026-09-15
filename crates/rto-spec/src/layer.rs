@@ -12,7 +12,7 @@
 //! and writes nothing, so a read-only surface can call it — which is what
 //! [`crate::tool_check`] does.
 
-use rto_graph::{BlobRef, GitError, GraphSource, Repo};
+use rto_graph::{BlobRef, GitError, GraphSource, PathPolicy, Repo};
 
 use crate::adr::AdrDoc;
 use crate::annotate::Annotation;
@@ -79,9 +79,32 @@ pub struct AuthoredLayer {
 /// disagreed about which tree they were describing, in one worktree, with no
 /// second worktree involved.
 ///
+/// # The path policy applies here, and this is the reader that is easy to miss
+///
+/// `paths` (ADR-0007 `[paths]`) drops every path the repository has declared
+/// excluded or opaque, because neither carries authored intent. This is the
+/// **second** of the two independent readers of committed blobs, and it walks
+/// every path on its own: excluding a path from derived extraction does not
+/// exclude it from here (issue #817, ADR-0026 §"The exclusion covers two scans,
+/// not one"). The classifier this feeds matches **by content, not by location**,
+/// so a committed markdown file under an excluded directory that declares
+/// `type: adr` is otherwise parsed as one of *ours* — which is precisely the
+/// hazard an ingested third-party document carries.
+///
 /// # Errors
 /// Returns [`GitError`] if the tree or the index cannot be walked.
-pub fn authored_blobs(repo: &Repo, source: GraphSource) -> Result<Vec<BlobRef>, GitError> {
+pub fn authored_blobs(
+    repo: &Repo,
+    source: GraphSource,
+    paths: &PathPolicy,
+) -> Result<Vec<BlobRef>, GitError> {
+    let mut blobs = authored_blobs_unfiltered(repo, source)?;
+    blobs.retain(|b| paths.classify(&b.path).mines());
+    Ok(blobs)
+}
+
+/// The tree walk itself, before [`authored_blobs`] applies the path policy.
+fn authored_blobs_unfiltered(repo: &Repo, source: GraphSource) -> Result<Vec<BlobRef>, GitError> {
     match source {
         GraphSource::Index => repo.index_files(),
         GraphSource::Committed => repo.walk_blobs(),
@@ -146,8 +169,9 @@ pub struct AuthoredDocs {
 pub fn authored_layer_from<E>(
     blobs: Vec<BlobRef>,
     read: &BlobReader<'_, E>,
+    paths: &PathPolicy,
 ) -> Result<AuthoredLayer, E> {
-    Ok(authored_docs_from(blobs, read)?.layer)
+    Ok(authored_docs_from(blobs, read, paths)?.layer)
 }
 
 /// Read and parse the authored layer from `source`'s tree, **discarding the site
@@ -156,8 +180,12 @@ pub fn authored_layer_from<E>(
 /// # Errors
 /// Returns [`GitError`] if the tree cannot be walked or a source file cannot be
 /// read.
-pub fn authored_layer(repo: &Repo, source: GraphSource) -> Result<AuthoredLayer, GitError> {
-    Ok(authored_docs(repo, source)?.layer)
+pub fn authored_layer(
+    repo: &Repo,
+    source: GraphSource,
+    paths: &PathPolicy,
+) -> Result<AuthoredLayer, GitError> {
+    Ok(authored_docs(repo, source, paths)?.layer)
 }
 
 /// Read and parse **everything** the authored classification yields from
@@ -167,10 +195,16 @@ pub fn authored_layer(repo: &Repo, source: GraphSource) -> Result<AuthoredLayer,
 /// # Errors
 /// Returns [`GitError`] if the tree cannot be walked or a source file cannot be
 /// read.
-pub fn authored_docs(repo: &Repo, source: GraphSource) -> Result<AuthoredDocs, GitError> {
-    authored_docs_from(authored_blobs(repo, source)?, &|blob| {
-        repo.read_source(blob, source)
-    })
+pub fn authored_docs(
+    repo: &Repo,
+    source: GraphSource,
+    paths: &PathPolicy,
+) -> Result<AuthoredDocs, GitError> {
+    authored_docs_from(
+        authored_blobs(repo, source, paths)?,
+        &|blob| repo.read_source(blob, source),
+        paths,
+    )
 }
 
 /// Classify and parse the authored layer out of `blobs`, reading each blob's
@@ -202,16 +236,34 @@ pub fn authored_docs(repo: &Repo, source: GraphSource) -> Result<AuthoredDocs, G
 /// query. It is generic over its error so a caller in a crate with its own error
 /// type does not have to convert on the way in.
 ///
+/// `paths` is the repository's path policy (ADR-0007 `[paths]`), and it is a
+/// parameter rather than something read off `repo` because this function has no
+/// `repo` — which is exactly the property that made the exclusion easy to miss
+/// here. A caller that supplies its own blob list supplies the policy with it.
+///
 /// # Errors
 /// Returns `E` if `read` fails. A file that reads but does not *parse* is not an
 /// error: a malformed ADR lands in [`AuthoredLayer::malformed`] as a violation.
 pub fn authored_docs_from<E>(
     blobs: Vec<BlobRef>,
     read: &BlobReader<'_, E>,
+    paths: &PathPolicy,
 ) -> Result<AuthoredDocs, E> {
     let mut out = AuthoredDocs::default();
     let layer = &mut out.layer;
     for blob in blobs {
+        // The path policy, asked again — **not** redundantly. `authored_blobs`
+        // filters the set it produces, but this function's whole point is that
+        // its callers reach it by different routes and supply blob lists from
+        // somewhere else: an arbitrary rev's `blobs_at`, a plain `walk_blobs`,
+        // a caller's own filtered `.md` set. A rule enforced only where one of
+        // those lists is built is a rule the other three routes walk past, and
+        // the classification below matches **by content, not by location** — so
+        // a file that got this far is judged on what it declares itself to be,
+        // wherever it sits.
+        if !paths.classify(&blob.path).mines() {
+            continue;
+        }
         // Parse the authored source from the same tree the derived layer used.
         let Some(bytes) = read(&blob)? else {
             continue;
@@ -300,6 +352,14 @@ mod tests {
     /// Classify a set of `(path, text)` pairs through the one classification
     /// rule, reading bytes straight from the fixture.
     fn classify(files: &[(&str, &str)]) -> super::AuthoredDocs {
+        classify_under(files, rto_graph::PathPolicy::empty())
+    }
+
+    /// As [`classify`], under an explicit path policy.
+    fn classify_under(
+        files: &[(&str, &str)],
+        paths: &rto_graph::PathPolicy,
+    ) -> super::AuthoredDocs {
         let blobs: Vec<BlobRef> = files
             .iter()
             .map(|(path, _)| BlobRef {
@@ -307,13 +367,83 @@ mod tests {
                 oid: String::new(),
             })
             .collect();
-        authored_docs_from(blobs, &|blob: &BlobRef| -> Result<Option<Vec<u8>>, ()> {
-            Ok(files
-                .iter()
-                .find(|(p, _)| *p == blob.path)
-                .map(|(_, text)| text.as_bytes().to_vec()))
-        })
+        authored_docs_from(
+            blobs,
+            &|blob: &BlobRef| -> Result<Option<Vec<u8>>, ()> {
+                Ok(files
+                    .iter()
+                    .find(|(p, _)| *p == blob.path)
+                    .map(|(_, text)| text.as_bytes().to_vec()))
+            },
+            paths,
+        )
         .expect("classify")
+    }
+
+    /// **The two-scan test.** The classifier matches by *content*, so an
+    /// excluded document declaring `type: adr` is otherwise parsed as one of
+    /// ours — and an exclusion applied only at derived extraction would leave
+    /// exactly that. Both non-`Extract` classes must refuse, and the ordinary
+    /// ADR beside them must not.
+    #[test]
+    fn a_declared_adr_under_an_excluded_or_opaque_path_is_not_one_of_ours() {
+        const FOREIGN: &str = "---\ntype: adr\nadr-id: \"0042\"\nstatus: Accepted\n---\n\n\
+                               # ADR-0042: a downloaded paper\n\n## Decision\n\nProse.\n";
+        const OURS: &str = "---\nadr-id: \"0001\"\nstatus: Accepted\n---\n\n\
+                            # ADR-0001: Thing\n\n## Decision\n\nOurs.\n";
+        let files = &[
+            ("raw/paper.md", FOREIGN),
+            ("manifest/decision.md", FOREIGN),
+            ("docs/adr/0001-thing.md", OURS),
+        ];
+
+        // Without a policy the hazard is real, which is what makes the assertion
+        // below mean something.
+        let open = classify(files);
+        assert_eq!(open.layer.docs.len(), 3, "all three parse as ADRs today");
+
+        let policy =
+            rto_graph::PathPolicy::new(vec!["raw/**".to_owned()], vec!["manifest/**".to_owned()]);
+        let guarded = classify_under(files, &policy);
+        let paths: Vec<&str> = guarded.layer.docs.iter().map(|d| d.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["docs/adr/0001-thing.md"],
+            "excluded and opaque both refuse the content classifier; ours does not"
+        );
+    }
+
+    /// The other door in the same classifier: the final `else` arm scans
+    /// everything it was not able to classify for `@rto:` annotations, so a
+    /// refusal that only covered the ADR arm would still let a foreign document
+    /// author edges into this repository's graph.
+    #[test]
+    fn an_excluded_or_opaque_file_contributes_no_annotations() {
+        let files = &[
+            ("raw/notes.txt", "// @rto:0001 a claim about our decision\n"),
+            ("manifest/notes.txt", "// @rto:0001 another claim\n"),
+            (
+                "src/lib.rs",
+                "// @rto:0001 our own annotation\npub struct Thing;\n",
+            ),
+        ];
+        let open = classify(files);
+        assert_eq!(
+            open.layer.annotations.len(),
+            3,
+            "all three annotate today, or this test proves nothing"
+        );
+
+        let policy =
+            rto_graph::PathPolicy::new(vec!["raw/**".to_owned()], vec!["manifest/**".to_owned()]);
+        let guarded = classify_under(files, &policy);
+        let paths: Vec<&str> = guarded
+            .layer
+            .annotations
+            .iter()
+            .map(|a| a.path.as_str())
+            .collect();
+        assert_eq!(paths, vec!["src/lib.rs"]);
     }
 
     #[test]
@@ -527,11 +657,14 @@ mod tests {
             path: files[0].0.to_owned(),
             oid: String::new(),
         }];
-        let layer =
-            super::authored_layer_from(blobs, &|_: &BlobRef| -> Result<Option<Vec<u8>>, ()> {
+        let layer = super::authored_layer_from(
+            blobs,
+            &|_: &BlobRef| -> Result<Option<Vec<u8>>, ()> {
                 Ok(Some(files[0].1.as_bytes().to_vec()))
-            })
-            .expect("classify");
+            },
+            rto_graph::PathPolicy::empty(),
+        )
+        .expect("classify");
         assert!(layer.docs.is_empty());
         assert!(layer.blueprints.is_empty());
         assert!(
