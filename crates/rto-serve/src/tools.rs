@@ -629,6 +629,75 @@ pub fn chat_with_tools(
     Ok(chat_with_client_tools(engine, registry, &[], req, max_rounds)?.completion)
 }
 
+/// One round's [`ChatRequest`]: the caller's settings, with this round's
+/// conversation and the tools the template will carry.
+///
+/// Split out of `chat_with_client_tools` only to keep that function under the
+/// line limit; it has no logic of its own, and every field is the caller's.
+fn round_request(
+    req: &ChatRequest,
+    messages: &[Message],
+    tools: Option<serde_json::Value>,
+) -> ChatRequest {
+    ChatRequest {
+        tools,
+        model: req.model.clone(),
+        messages: messages.to_vec(),
+        images: req.images.clone(),
+        audio: req.audio.clone(),
+        temperature: req.temperature,
+        max_tokens: req.max_tokens,
+    }
+}
+
+/// **This conversation is no longer only the caller's** (issue #848, #853).
+///
+/// The `system` turn pushed on above is Roteiro's, and the model's chat
+/// template is entitled to refuse the result — `qwen3.8-27b` refuses any
+/// `system` message that is not first, so a client sending a perfectly valid
+/// Responses `instructions` field gets a conversation of two system turns that
+/// it never wrote and did not ask for. Left alone, the refusal travels out as
+/// `400 invalid_request_error`: the server telling the client to fix a request
+/// that was correct, about a turn the client cannot see. That is #853, and the
+/// measured case is the very one that motivated #848.
+///
+/// So a refusal of *this* conversation is answered as a server fault. Note
+/// what is **not** claimed: not that our turn caused it. Measured, the
+/// identical refusal — same variant, same sentence — also arises from a client
+/// sending two `system` turns of its own, which is genuinely theirs to fix. We
+/// cannot separate the two here, because we can no longer see which turns were
+/// whose by the time the template speaks.
+///
+/// Unattributable is the point. Once Roteiro has edited the conversation, it is
+/// the only party that can see both versions and the client can see neither —
+/// so the uncertainty resolves against us, not against the party without the
+/// information. The message carries the template's own sentence *and* says we
+/// added a turn, so a client that really did send two system turns still has
+/// everything it needs; a client that sent one is not sent hunting through
+/// correct code.
+///
+/// A layer that does **not** edit the conversation keeps the `400` and should:
+/// the untooled early return above passes `req` through untouched, and
+/// `render_advertising` folds its tool advertisement into an existing system
+/// turn rather than adding one. Both are cases where the template really is
+/// describing what the client sent.
+///
+/// The narrow fix — fold instead of prepend, as `render_advertising` already
+/// does — is #853 and changes the prompt every model sees, so it is its own
+/// change. This is only about who gets told.
+fn attribute_edited_conversation(e: EngineError) -> EngineError {
+    match e {
+        EngineError::TemplateRejected(message) => EngineError::Inference(format!(
+            "{message} Roteiro added a `system` turn of its own to the front of \
+             this conversation before rendering it — the grounding rules for the \
+             tools it advertises — so the conversation the template refused is not \
+             the one you sent, and this refusal may be describing Roteiro's turn \
+             rather than yours. Tracked as issue #853."
+        )),
+        other => other,
+    }
+}
+
 /// As [`chat_with_tools`], but also honouring the tools the **client** supplied
 /// on the request (#485).
 ///
@@ -729,15 +798,9 @@ pub fn chat_with_client_tools(
     messages.extend(req.messages.iter().cloned());
 
     let generate = |messages: &[Message]| {
-        engine.chat(&ChatRequest {
-            tools: tools_for_template.clone(),
-            model: req.model.clone(),
-            messages: messages.to_vec(),
-            images: req.images.clone(),
-            audio: req.audio.clone(),
-            temperature: req.temperature,
-            max_tokens: req.max_tokens,
-        })
+        engine
+            .chat(&round_request(req, messages, tools_for_template.clone()))
+            .map_err(attribute_edited_conversation)
     };
 
     for _ in 0..limits.rounds {
@@ -2645,6 +2708,87 @@ mod tests {
             description: "a tool the client runs".to_owned(),
             parameters: serde_json::json!({"type": "object"}),
         }
+    }
+
+    /// An engine that refuses every conversation the way a chat template does.
+    struct RefusingEngine;
+
+    impl Engine for RefusingEngine {
+        fn models(&self) -> Vec<ModelInfo> {
+            vec![ModelInfo {
+                id: "scripted".to_owned(),
+            }]
+        }
+        fn chat_stream(
+            &self,
+            _req: &ChatRequest,
+            _on_token: &mut dyn FnMut(&str),
+        ) -> Result<CompletionStats, EngineError> {
+            Err(EngineError::TemplateRejected(
+                "System message must be at the beginning.".to_owned(),
+            ))
+        }
+    }
+
+    /// **The thread's finding, pinned** (issues #848, #853).
+    ///
+    /// Roteiro prepends a grounding `system` turn to every tooled conversation.
+    /// `qwen3.8-27b`'s template then refuses any `system` message that is not
+    /// first — so a client sending one well-formed `instructions` field gets a
+    /// refusal of a conversation it did not write. Reported as
+    /// `TemplateRejected` it becomes `400 invalid_request_error`: the server
+    /// telling a correct client to fix correct code.
+    ///
+    /// Asserted on the **variant**, because the variant is the status code: an
+    /// `Inference` is the `500` that says this is the server's to answer for.
+    /// And on the message, because the status alone would let the template's
+    /// sentence be dropped — the client still needs to know what was refused,
+    /// and a client that *did* send two system turns of its own needs enough to
+    /// recognise its own case.
+    #[test]
+    fn a_refusal_of_the_conversation_we_edited_is_not_billed_to_the_caller() {
+        let mut req = user_request();
+        // One well-formed leading system turn — exactly what a Responses
+        // `instructions` field becomes, and exactly what Roteiro then displaces.
+        req.messages.insert(
+            0,
+            Message {
+                role: "system".to_owned(),
+                content: "Be terse.".to_owned(),
+            },
+        );
+        let e = chat_with_client_tools(&RefusingEngine, &EchoRegistry, &[], &req, 4)
+            .expect_err("the template refuses the conversation Roteiro assembled");
+        let EngineError::Inference(message) = &e else {
+            panic!("a refusal of a conversation Roteiro edited is not the caller's: {e:?}");
+        };
+        assert!(
+            message.contains("System message must be at the beginning."),
+            "the template's own sentence must still reach the client: {message}"
+        );
+        assert!(
+            message.contains("system") && message.contains("Roteiro added"),
+            "the client must be told a turn it cannot see was added, or it goes \
+             hunting through correct code: {message}"
+        );
+    }
+
+    /// The other half: a layer that did **not** edit the conversation keeps the
+    /// `400`, because there the template really is describing what was sent.
+    ///
+    /// Without this, "never blame the caller" would be indistinguishable from
+    /// "never report a client error", and the genuine case is real — measured, a
+    /// client sending two `system` turns of its own draws the identical refusal.
+    /// The untooled path passes the request through untouched, so it is the arm
+    /// where the refusal is trustworthy.
+    #[test]
+    fn a_refusal_of_an_unedited_conversation_stays_the_callers() {
+        let e = chat_with_client_tools(&RefusingEngine, &NoGraphTools, &[], &user_request(), 4)
+            .expect_err("the template refuses this conversation");
+        assert!(
+            matches!(&e, EngineError::TemplateRejected(m) if m.contains("must be at the beginning")),
+            "an untouched conversation's refusal must reach the client unchanged: {e:?}"
+        );
     }
 
     fn user_request() -> ChatRequest {

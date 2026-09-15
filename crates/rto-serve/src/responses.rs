@@ -1306,12 +1306,16 @@ impl ResponseWriter {
     /// A lifecycle event rather than a bare `error` blob, because a client
     /// waiting for `response.completed` needs a terminal event of the shape it
     /// is waiting for; anything else leaves it retrying a stream that is over.
-    pub fn failed(&mut self, message: &str) -> Frame {
+    /// `code` comes from the caller (`server::error_kind`) rather than being
+    /// fixed here, because the status line is long gone by the time this event
+    /// can be sent: this envelope is the only thing left that can tell a client
+    /// whether to retry the stream or fix its request (issue #848).
+    pub fn failed(&mut self, message: &str, code: &str) -> Frame {
         let mut response = self.envelope("failed", None);
         if let Some(obj) = response.as_object_mut() {
             obj.insert(
                 "error".to_owned(),
-                json!({"code": "inference_error", "message": message}),
+                json!({"code": code, "message": message}),
             );
         }
         self.frame("response.failed", json!({ "response": response }))

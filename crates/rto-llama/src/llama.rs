@@ -79,6 +79,7 @@ use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::token::LlamaToken;
 use llama_cpp_2::{LogOptions, send_logs_to_tracing};
 
+use crate::chat_template::TemplateError;
 use crate::engine::{
     ChatRequest, CompletionStats, Engine, EngineError, FinishReason, Message, ModelInfo,
 };
@@ -1305,6 +1306,76 @@ fn media_prompt(
     render_prompt(model, &req.model, &messages, req.tools.as_ref())
 }
 
+/// The [`EngineError`] a [`TemplateError`] becomes — and, with it, the HTTP
+/// status `rto-serve` will answer (issue #848).
+///
+/// Two outcomes share one Rust type and must not share one status code:
+///
+/// * [`TemplateError::Rejected`] is the **template's own refusal** of this
+///   conversation, made by the model's own metadata, so it becomes
+///   [`EngineError::TemplateRejected`] — answered `400 invalid_request_error`
+///   by the same handler arm that answers [`EngineError::InvalidRequest`].
+///
+///   A *distinct* variant rather than `InvalidRequest` itself, and the reason is
+///   the one thing this function cannot know: **whether the conversation it was
+///   handed is the one the client sent**. `rto-serve` prepends a grounding turn
+///   to every tooled conversation, so a refusal of "the request" may be a
+///   refusal of a turn the client never wrote. This layer is not entitled to
+///   settle that — it cannot see the seam — so it names the case precisely and
+///   lets the layer that *did* alter the conversation answer for it. Folded into
+///   `InvalidRequest`, the case is invisible: it would be indistinguishable from
+///   the encoder-only guard's genuine `400`, which is a real client error and
+///   must keep its status.
+///
+///   The message deliberately stops at "Nothing was sent to the model." It used
+///   to end "Change the request to match it.", and that instruction is exactly
+///   what this function has no standing to give: measured, the *same* refusal
+///   with the *same* wording arises both from a client sending two `system`
+///   turns (theirs to fix) and from a client sending one while Roteiro prepends
+///   a second (ours). Naming the remedy is the caller's job, because only the
+///   caller knows which of those happened.
+/// * Everything else is a gap in **this renderer** — a Jinja feature it does not
+///   have, a template that will not parse — which is a statement about the
+///   server and stays [`EngineError::Inference`], answered `500`.
+///
+/// The `Inference` prose is unchanged, and deliberately so: it explains that the
+/// template is the model's own, that the gap is Roteiro's rather than the
+/// model's, and why Roteiro renders the Jinja itself. All three remain true of
+/// exactly the cases that still take this arm. What it was *not* true of is a
+/// rejection, where "a Jinja feature Roteiro does not yet support" was actively
+/// misleading — the template worked perfectly and was turning the request away.
+///
+/// Split out of `render_prompt` because that function needs a loaded
+/// `LlamaModel` and this decision does not. Tested directly, below.
+fn template_failure(name: &str, e: &TemplateError) -> EngineError {
+    if let TemplateError::Rejected(message) = e {
+        // The template's sentence first and untouched, because it is the answer;
+        // everything after it is provenance for a reader who does not know that a
+        // GGUF carries a template at all. Ending the model's message with our own
+        // is what keeps a client that shows only the first line still useful.
+        return EngineError::TemplateRejected(format!(
+            "model `{name}` rejected this conversation: {message} That refusal is \
+             the model's own chat template speaking, not Roteiro's: the template \
+             ships inside the model's GGUF and states which conversation shapes \
+             the model was trained on. Nothing was sent to the model."
+        ));
+    }
+    // Actionable, because this is the one failure an unknown model can
+    // bring: its template uses a Jinja feature this renderer does not
+    // have. Naming the model and the gap is what turns "it broke" into a
+    // fix — and the registry has already produced two such gaps
+    // (`tojson`, `startswith`), each closed by adding the feature rather
+    // than by giving up on Jinja.
+    EngineError::Inference(format!(
+        "model `{name}`: its embedded chat template could not be rendered \
+         ({e}). The template is the model's own, so this is a Jinja feature \
+         Roteiro does not yet support rather than a fault in the model. \
+         Roteiro renders the template itself because llama.cpp's does not \
+         run Jinja at all and would otherwise return a prompt this model \
+         was not trained on."
+    ))
+}
+
 /// Render the conversation into a prompt, using the model's **own** template.
 ///
 /// Prefers rendering the embedded Jinja in Rust (issue #492). `apply_chat_template`
@@ -1355,22 +1426,8 @@ fn render_prompt(
         // `render_advertising` rather than `render`, so that a template which
         // never references `tools` still gets them: that is what lets rto-serve
         // stop listing the tools a second time in its own system turn.
-        return crate::chat_template::render_advertising(raw, &msgs, tools, true).map_err(|e| {
-            // Actionable, because this is the one failure an unknown model can
-            // bring: its template uses a Jinja feature this renderer does not
-            // have. Naming the model and the gap is what turns "it broke" into a
-            // fix — and the registry has already produced two such gaps
-            // (`tojson`, `startswith`), each closed by adding the feature rather
-            // than by giving up on Jinja.
-            EngineError::Inference(format!(
-                "model `{name}`: its embedded chat template could not be rendered \
-                 ({e}). The template is the model's own, so this is a Jinja feature \
-                 Roteiro does not yet support rather than a fault in the model. \
-                 Roteiro renders the template itself because llama.cpp's does not \
-                 run Jinja at all and would otherwise return a prompt this model \
-                 was not trained on."
-            ))
-        });
+        return crate::chat_template::render_advertising(raw, &msgs, tools, true)
+            .map_err(|e| template_failure(name, &e));
     }
 
     // A builtin template *name* has no `tools` slot — llama.cpp renders it from
@@ -1803,10 +1860,95 @@ fn l2_normalize(v: &[f32]) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChatTemplateError, EngineError, LlamaChatTemplate, MIN_N_CTX, WINDOW_HEADROOM,
-        check_batch_capacity, fallback_template_name, install_native_log_bridge,
-        is_encoder_only_arch, lru_evict_count, resolve_chat_template_from, window_for_request,
+        ChatTemplateError, EngineError, LlamaChatTemplate, MIN_N_CTX, TemplateError,
+        WINDOW_HEADROOM, check_batch_capacity, fallback_template_name, install_native_log_bridge,
+        is_encoder_only_arch, lru_evict_count, resolve_chat_template_from, template_failure,
+        window_for_request,
     };
+
+    /// A template's refusal is its **own** variant, and carries the template's
+    /// sentence intact (issue #848).
+    ///
+    /// `TemplateRejected` rather than `InvalidRequest`, and the distinction is
+    /// load-bearing rather than tidy: `rto-serve` answers both `400
+    /// invalid_request_error`, so the *status* is the same and a test asserting
+    /// only the status would pass either way. What the separate variant buys is
+    /// that the case stays **visible** one layer up, where the decision about
+    /// whose fault it is actually has to be made — `tools::chat_with_client_tools`
+    /// prepends a grounding turn and must re-answer for a refusal of it, and it
+    /// cannot do that if this is indistinguishable from the encoder-only guard's
+    /// genuine `400`.
+    ///
+    /// The absent imperative is asserted, not just the present words. The message
+    /// used to end "Change the request to match it.", and measured, the identical
+    /// refusal arises both from a caller sending two `system` turns and from a
+    /// caller sending one while Roteiro prepends a second — so that sentence is
+    /// advice this layer has no standing to give and is wrong half the time.
+    #[test]
+    fn a_template_rejection_is_its_own_variant_carrying_its_own_message() {
+        let refusal = "System message must be at the beginning.";
+        let e = template_failure("qwen3.8-27b", &TemplateError::Rejected(refusal.to_owned()));
+        let EngineError::TemplateRejected(message) = &e else {
+            panic!("a rejection must keep a variant of its own: {e:?}");
+        };
+        assert!(
+            message.contains(refusal),
+            "the template's words must survive: {message}"
+        );
+        assert!(
+            message.contains("qwen3.8-27b"),
+            "a reader with five models installed needs to know which: {message}"
+        );
+        assert!(
+            !message.contains("Roteiro does not yet support"),
+            "a template that refused a request is not a gap in this renderer, and \
+             saying so is what made #848 take a message to diagnose: {message}"
+        );
+        assert!(
+            !message.contains("Change the request"),
+            "this layer cannot see whether the offending turn is the caller's, so \
+             it must not tell them to change theirs: {message}"
+        );
+    }
+
+    /// A gap in *this* renderer is still a 5xx, still in the original words.
+    ///
+    /// That prose is the reason #848 was diagnosable at all — it says the
+    /// template is the model's own, that the gap is Roteiro's rather than the
+    /// model's, and why Roteiro renders the Jinja itself. Splitting rejections
+    /// out of this arm must not cost it, so the claims are pinned here rather
+    /// than left to survive by luck.
+    #[test]
+    fn a_renderer_gap_is_still_an_inference_failure_in_the_original_words() {
+        let e = template_failure(
+            "some-new-model",
+            &TemplateError::Render("unknown filter: pyformat".to_owned()),
+        );
+        let EngineError::Inference(message) = &e else {
+            panic!("a renderer gap must not be blamed on the caller: {e:?}");
+        };
+        for claim in [
+            "some-new-model",
+            "unknown filter: pyformat",
+            "The template is the model's own",
+            "Roteiro does not yet support",
+            "llama.cpp's does not run Jinja at all",
+        ] {
+            assert!(message.contains(claim), "lost `{claim}` from: {message}");
+        }
+    }
+
+    /// A template that does not parse takes the same 5xx arm, not the 4xx one.
+    ///
+    /// The split is two-way in the code and three-way in the type, and `Parse` is
+    /// the variant with no test of its own to notice if it drifted to the
+    /// caller's side of the line. A template that will not parse is nobody's
+    /// request.
+    #[test]
+    fn an_unparseable_template_is_not_the_callers_fault() {
+        let e = template_failure("some-new-model", &TemplateError::Parse("eof".to_owned()));
+        assert!(matches!(e, EngineError::Inference(_)), "{e:?}");
+    }
 
     /// The trained windows of the models actually served, read from their GGUFs
     /// (`tests/context_window.rs` prints them). They span **512×**, which is the

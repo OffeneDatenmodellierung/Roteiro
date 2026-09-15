@@ -5861,14 +5861,106 @@ fn warn_if_chat_template_unrenderable(name: &str, dir: &std::path::Path) {
     // conversation; one that fails here fails every time.
     let probe = [serde_json::json!({"role": "user", "content": "hello"})];
     if let Err(e) = rto_llama::chat_template::render(&template, &probe, None, true) {
-        eprintln!(
-            "warning: `{name}` embeds a chat template Roteiro cannot render ({e}).\n  \
-             The model is installed and usable for anything that does not need a \
-             chat prompt. Chat requests to it will fail with this same message \
-             rather than silently using a prompt it was not trained on.\n  \
-             The template is the model's own — this is a Jinja feature Roteiro does \
-             not support yet, not a fault in the model."
+        eprintln!("{}", unrenderable_template_warning(name, &e));
+    }
+}
+
+/// The warning [`warn_if_chat_template_unrenderable`] prints for a failing probe.
+///
+/// Split out to be tested: the choice between these two messages is the whole
+/// behaviour, and it is a choice that got its first wrong answer the moment
+/// `TemplateError::Rejected` existed (#848).
+#[cfg(all(feature = "models", feature = "inference-local-models"))]
+fn unrenderable_template_warning(
+    name: &str,
+    e: &rto_llama::chat_template::TemplateError,
+) -> String {
+    // A refusal is **not** a renderer gap, and reporting it as one would be a new
+    // false message. `raise_exception` reaching here means the template rendered
+    // perfectly and then declined this particular conversation — so "a Jinja
+    // feature Roteiro does not support yet" is exactly backwards, and an operator
+    // told it goes looking for a missing filter that is not missing.
+    //
+    // Still a warning, because the probe is the *minimum* conversation — one
+    // `user` turn — and a template that will not take that will not take a chat.
+    // But the two say opposite things about where to look, so they must not share
+    // a sentence. No template in the current registry reaches this arm (checked:
+    // `voxtral-mini-3b`, the registry's other `raise_exception` user, renders the
+    // probe); it is written for the one that will.
+    if matches!(e, rto_llama::chat_template::TemplateError::Rejected(_)) {
+        return format!(
+            "warning: `{name}`'s chat template refuses even a single-turn \
+             conversation, saying: {e}\n  \
+             The template renders — this is not a gap in Roteiro — but it declines \
+             the simplest chat there is, so chat requests to this model are likely \
+             to be refused the same way. The model is installed and usable for \
+             anything that does not need a chat prompt."
         );
+    }
+    format!(
+        "warning: `{name}` embeds a chat template Roteiro cannot render ({e}).\n  \
+         The model is installed and usable for anything that does not need a \
+         chat prompt. Chat requests to it will fail with this same message \
+         rather than silently using a prompt it was not trained on.\n  \
+         The template is the model's own — this is a Jinja feature Roteiro does \
+         not support yet, not a fault in the model."
+    )
+}
+
+/// The install-time probe's choice of warning (#848).
+#[cfg(all(test, feature = "models", feature = "inference-local-models"))]
+mod template_probe_warning {
+    use super::unrenderable_template_warning;
+    use rto_llama::chat_template::TemplateError;
+
+    /// A template that merely **refuses** the probe is not reported as one
+    /// Roteiro cannot render.
+    ///
+    /// The false message this PR would otherwise have introduced: before
+    /// `Rejected` existed every `Err` here really was a renderer gap, so the one
+    /// sentence was true. It stopped being true the moment a template could
+    /// decline a conversation while rendering perfectly — and the sentence sends
+    /// an operator hunting for a missing Jinja filter that is not missing.
+    #[test]
+    fn a_refusal_is_not_reported_as_a_missing_jinja_feature() {
+        let w = unrenderable_template_warning(
+            "some-model",
+            &TemplateError::Rejected("No user query found in messages.".to_owned()),
+        );
+        assert!(
+            w.contains("No user query found in messages."),
+            "the template's own words are the useful part: {w}"
+        );
+        assert!(
+            !w.contains("Jinja feature Roteiro does not support yet"),
+            "a template that rendered and then declined is not an unsupported \
+             renderer, and saying so points the reader at the wrong thing: {w}"
+        );
+        assert!(
+            w.contains("not a gap in Roteiro"),
+            "the warning must say where NOT to look, or it is only less wrong: {w}"
+        );
+    }
+
+    /// A genuine renderer gap keeps the original message, in the original words.
+    ///
+    /// The negative control: splitting the arm must not cost the message that
+    /// was right all along, and "print nothing for a rejection" would pass a
+    /// test that only checked the first assertion above.
+    #[test]
+    fn a_renderer_gap_keeps_its_original_wording() {
+        let w = unrenderable_template_warning(
+            "some-model",
+            &TemplateError::Render("unknown filter: pyformat".to_owned()),
+        );
+        for claim in [
+            "some-model",
+            "unknown filter: pyformat",
+            "Jinja feature Roteiro does not support yet",
+            "not a fault in the model",
+        ] {
+            assert!(w.contains(claim), "lost `{claim}` from: {w}");
+        }
     }
 }
 
