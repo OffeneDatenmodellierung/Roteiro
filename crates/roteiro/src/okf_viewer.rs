@@ -836,14 +836,39 @@ fn escape(raw: &str) -> String {
     out
 }
 
-fn unreadable(err: &rto_render::okf::inspect::InspectError) -> Response {
+/// A bundle that stopped being readable underneath the running server.
+///
+/// **The error is not rendered to the client, and that is the whole point.**
+/// [`InspectError::Unreadable`] is a *CLI* error: it names the path because
+/// `roteiro okf inspect <path>` must say which path failed, and its `detail`
+/// from `okf-core` names it a second time. Writing that into an HTTP response
+/// published the bundle's absolute path — under the operator's home directory on
+/// a `serve` — to whoever asked, on a port `--addr` and `--scope` can move off
+/// loopback.
+///
+/// So it is split by audience rather than softened: the **operator** gets the
+/// whole error on stderr, where the path is the useful part and the reader is
+/// the person who can act on it; the **client** gets the fact and the bundle's
+/// own label, which the header already shows them and which therefore discloses
+/// nothing new.
+///
+/// Fixing it here rather than in `InspectError` is deliberate. The error type is
+/// right for its own callers; what was wrong was one presentation boundary
+/// treating a diagnostic written for an operator as a page written for a
+/// stranger.
+///
+/// [`InspectError::Unreadable`]: rto_render::okf::inspect::InspectError::Unreadable
+fn unreadable(err: &rto_render::okf::inspect::InspectError, nav: &Nav) -> Response {
+    // The operator can act on this; the client cannot, and should not see it.
+    eprintln!("roteiro: OKF bundle is not readable: {err}");
+    let named = nav.label.as_ref().map_or_else(
+        || "<p>This OKF bundle is no longer readable.</p>".to_owned(),
+        |label| format!("<p>OKF bundle {} is no longer readable.</p>", escape(label)),
+    );
     (
         StatusCode::NOT_FOUND,
         [(header::CONTENT_SECURITY_POLICY, CSP)],
-        Html(format!(
-            "<p>Not a readable OKF bundle: {}</p>",
-            escape(&err.to_string())
-        )),
+        Html(named),
     )
         .into_response()
 }
@@ -862,7 +887,7 @@ async fn index(State(v): State<Viewer>) -> Response {
     let built = blocking(move || state.overview()).await;
     let view = match built {
         Some(Ok(view)) => view,
-        Some(Err(e)) => return unreadable(&e),
+        Some(Err(e)) => return unreadable(&e, &v.nav),
         None => return spawn_failed(),
     };
     let base = v.base.as_str();
@@ -962,7 +987,7 @@ async fn concept(State(v): State<Viewer>, UrlPath(id): UrlPath<String>) -> Respo
     let base = v.base.as_str();
     let found = match built {
         Some(Ok(found)) => found,
-        Some(Err(e)) => return unreadable(&e),
+        Some(Err(e)) => return unreadable(&e, &v.nav),
         None => return spawn_failed(),
     };
     let Some(c) = found else {
@@ -1248,7 +1273,7 @@ async fn graph_entry(v: &Viewer) -> Response {
     .await;
     let graph = match built {
         Some(Ok(graph)) => graph,
-        Some(Err(e)) => return unreadable(&e),
+        Some(Err(e)) => return unreadable(&e, &v.nav),
         None => return spawn_failed(),
     };
     let base = v.base.as_str();
@@ -1320,7 +1345,7 @@ async fn graph_json(State(v): State<Viewer>, Query(q): Query<GraphQuery>) -> Res
     .await;
     let graph = match built {
         Some(Ok(graph)) => graph,
-        Some(Err(e)) => return unreadable(&e),
+        Some(Err(e)) => return unreadable(&e, &v.nav),
         None => return spawn_failed(),
     };
 
@@ -2394,7 +2419,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let (status, body) = get_(&root, "", "/").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
-        assert!(body.contains("Not a readable OKF bundle"), "{body}");
+        // Refused, and visibly so. The wording moved when `unreadable` stopped
+        // rendering `InspectError` to the client — see
+        // `no_mounted_error_page_publishes_the_bundle_path_either` — but the claim
+        // here is unchanged: a 404 saying the bundle cannot be read, rather than
+        // an empty page that reads as a bundle with nothing in it. This `Nav` has
+        // no label, so it also covers the unnamed branch.
+        assert!(body.contains("no longer readable"), "{body}");
     }
 
     // ---- the mount layer -------------------------------------------------
@@ -2840,6 +2871,83 @@ mod tests {
         }
     }
 
+    /// **And no page it serves when the bundle BREAKS carries it either.**
+    ///
+    /// `no_mounted_page_publishes_the_bundle_path` walks a bundle that loads, and
+    /// could not see this: the routes it visits all answer from a bundle that is
+    /// fine, so the four `unreadable` arms behind them never ran. They published
+    /// the path twice per response — once from `InspectError::Unreadable`'s own
+    /// `path`, once from the `okf-core` `detail` beside it — which made the claim
+    /// "the header was the only place" false for any server whose bundle changed
+    /// underneath it. A bundle is somebody else's directory and may be moved,
+    /// renamed or unmounted at any moment, so this is ordinary rather than exotic.
+    ///
+    /// **The breakage is asserted, not assumed.** The first version of this probe
+    /// deleted `index.md` and got four `200 OK`s — `okf-core` loads a bundle
+    /// without one — so it measured nothing while looking like a pass. A test that
+    /// says "then it is broken" without checking has no more claim on the error
+    /// path than one that never tried, so each response must be a 404 that says it
+    /// is unreadable before its body is worth scanning.
+    #[tokio::test]
+    async fn no_mounted_error_page_publishes_the_bundle_path_either() {
+        let a = named_bundle("broken-a", "Alpha");
+        let root = a.display().to_string();
+        let mounts = vec![labelled("one", "Acme/widgets", a.clone())];
+        let app = host().merge(mounts_router("/okf", mounts, Some("/".to_owned())));
+
+        // Unreadable the way a real one becomes unreadable: it went away. Removing
+        // `index.md` is NOT enough — see the doc above.
+        std::fs::remove_dir_all(&a).expect("remove the bundle");
+
+        for uri in [
+            "/okf/one",
+            "/okf/one/graph",
+            "/okf/one/api/graph.json",
+            "/okf/one/c/metrics/only",
+        ] {
+            let (status, body, _) = get_mounted(&app, uri).await;
+            // The premise: this response came from the error path. Without this
+            // the scan below passes on any page that simply has no path in it.
+            assert_eq!(
+                status,
+                StatusCode::NOT_FOUND,
+                "`{uri}` did not fail: {body}"
+            );
+            assert!(
+                body.contains("no longer readable"),
+                "`{uri}` 404'd for some other reason, so this says nothing about \
+                 the unreadable path: {body}"
+            );
+            assert!(
+                !body.contains(root.as_str()) && !body.contains(&escape(&root)),
+                "`{uri}` publishes the bundle path `{root}` when the bundle breaks"
+            );
+        }
+    }
+
+    /// The operator keeps the diagnosis the client stopped getting.
+    ///
+    /// The fix above is a **split by audience**, not a deletion: taking the path
+    /// out of the response without leaving it anywhere would trade a disclosure
+    /// for an operator who can no longer tell which of several mounted bundles
+    /// went missing. This pins the half that is easy to lose in a later tidy-up —
+    /// `unreadable` writes the whole error, path included, to stderr.
+    #[test]
+    fn the_operator_still_learns_which_bundle_broke() {
+        let src = include_str!("okf_viewer.rs");
+        let body = src
+            .split_once("fn unreadable(")
+            .and_then(|(_, rest)| rest.split_once("\n}\n"))
+            .map(|(body, _)| body)
+            .expect("`unreadable` should be findable");
+        assert!(
+            body.contains("eprintln!") && body.contains("{err}"),
+            "`unreadable` no longer reports the error to the operator. The client \
+             deliberately does not get the path; stderr is the only place left \
+             that says which bundle went away: {body}"
+        );
+    }
+
     /// **Characterisation, not endorsement.** The chooser lists each bundle's
     /// directory beside its name, and that directory is an absolute path — so a
     /// `serve` bound off loopback publishes the operator's filesystem layout on
@@ -2854,20 +2962,30 @@ mod tests {
     /// If it is ever changed, this test fails and should be deleted, not relaxed.
     #[tokio::test]
     async fn the_chooser_still_names_each_bundles_directory() {
-        let a = named_bundle("origin-a", "Alpha");
-        let root = a.display().to_string();
+        let (a, b) = (
+            named_bundle("origin-a", "Alpha"),
+            named_bundle("origin-b", "Beta"),
+        );
+        let roots = [a.display().to_string(), b.display().to_string()];
         let mounts = vec![
             labelled("one", "Acme/widgets", a),
-            labelled("two", "Acme/gadgets", named_bundle("origin-b", "Beta")),
+            labelled("two", "Acme/gadgets", b),
         ];
         let app = host().merge(mounts_router("/okf", mounts, Some("/".to_owned())));
         let (status, body, _) = get_mounted(&app, "/okf").await;
         assert_eq!(status, StatusCode::OK);
-        assert!(
-            body.contains(&escape(&root)),
-            "the chooser no longer prints `Mount::origin` — if that was on \
-             purpose, delete this test rather than weakening it"
-        );
+        // **Every** row, not the first. Captured only `origin-a` until review
+        // pointed out that a regression dropping the second row's `origin` — or
+        // printing the first bundle's for both — would have passed. "Each" is the
+        // word in the name and it has to be the assertion too.
+        for root in &roots {
+            assert!(
+                body.contains(&escape(root)),
+                "the chooser no longer prints `Mount::origin` for every bundle \
+                 (missing `{root}`) — if that was on purpose, delete this test \
+                 rather than weakening it"
+            );
+        }
     }
 
     /// The mounted header wears the explorer shell's chrome rather than a second
