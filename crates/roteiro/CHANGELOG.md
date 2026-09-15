@@ -44,10 +44,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - *(serve)* **`--scope here` inside a linked worktree serves that worktree**, scoped
-  to it alone and on its own branch — skipping applies to *discovery*, not to
+  to it alone and at its own revision — its branch, or `at a detached HEAD` for a
+  worktree added with `--detach` or at a tag, which is an ordinary state and is
+  reported as such rather than being described as a branch — skipping applies to *discovery*, not to
   selection, so `cd <worktree> && roteiro serve` composes with the `here` default
   from #832 and simply works. The startup line announces it, naming the repository
-  the worktree belongs to and the branch it is on. Sibling repositories beside the
+  the worktree belongs to and its branch — or reporting it as detached when it has
+  none. Sibling repositories beside the
   worktree are not picked up: `here` means this checkout. The worktree's graph is
   built from **its own** `HEAD` (`<main>/.git/worktrees/<name>/HEAD`) into its own
   per-worktree store, sharing only the content-addressed object cache with the main

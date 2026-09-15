@@ -4132,7 +4132,7 @@ fn print_workspace_section(loaded: &config::Loaded) {
     );
     // Reported like its `roots`/`repos` siblings and for the same reason: a key
     // that silently changes how many projects are hosted, and that `roteiro
-    // config` does not mention, is the shape of defect #837 is about.
+    // config` does not mention, is exactly the defect #837 describes.
     println!(
         "  include_worktrees = {}  ({})",
         e.workspace.include_worktrees.unwrap_or(false),
@@ -4172,7 +4172,7 @@ fn print_named_workspaces_section(e: &config::Config, p: &config::Config, u: &co
         //
         // Reported at all because this key silently changes how many projects a
         // workspace hosts, and a key that does that while `roteiro config` stays
-        // quiet about it is the shape of defect issue #837 is about.
+        // quiet about it is exactly the defect issue #837 describes.
         println!(
             "    include_worktrees = {}",
             w.include_worktrees.unwrap_or(false)
@@ -4198,7 +4198,7 @@ fn print_standalone_section(e: &config::Config, p: &config::Config, u: &config::
     );
     // Reported like its `roots`/`repos` siblings and for the same reason: a key
     // that silently changes how many projects are hosted, and that `roteiro
-    // config` does not mention, is the shape of defect #837 is about.
+    // config` does not mention, is exactly the defect #837 describes.
     println!(
         "  include_worktrees = {}  ({})",
         e.standalone.include_worktrees.unwrap_or(false),
@@ -13881,6 +13881,13 @@ fn run_explorer(
     let set = if from_config {
         rto_graph::WorkspaceSet::from_resolved(resolved.clone())?
     } else {
+        // The same note `serve`/`mcp` print before their fallback (issue #837): a
+        // `[standalone] roots` entry holding only worktrees resolves to no groups,
+        // so `from_config` is false and this path quietly hosts the current
+        // directory instead of what was configured. Silent under `--scope here` by
+        // construction — `standalone_table` returns `None` for any scope that did
+        // not consult the configured list.
+        announce_worktree_only_roots("explorer", &resolved, standalone_table(cfg, &ws_scope));
         match explorer_cwd_set() {
             Ok(set) => set,
             // Not a repository. Before serving nothing, ask whether this is a
@@ -15547,12 +15554,25 @@ fn build_serve_workspaces(
     // somebody who was inside one. The fallback is now chosen by the **scope**,
     // and `-w` is validated against the set it produces — so it selects within
     // the fallback, the way `explorer` has always done, or names what is wrong.
-    let solo = match scope {
-        WorkspaceScope::Here => true,
-        WorkspaceScope::All => resolved.is_empty() && workspace_roots.is_empty(),
-        WorkspaceScope::Named(_) => false,
-    };
+    let solo = wants_solo_workspace(scope, &resolved, workspace_roots);
     if solo {
+        // **Before the fallback takes over, say why the configured roots gave
+        // nothing** (issue #837).
+        //
+        // A `[standalone] roots` entry holding only linked worktrees resolves to
+        // no repos, so no group exists, so `solo` is true and this path hosts the
+        // current directory instead — silently substituting one thing for another
+        // the operator did not ask for, which is worse than the bail further down
+        // because it *succeeds*. The bail's own diagnostic cannot cover it: that
+        // code is never reached.
+        //
+        // A note rather than a refusal. Serving the repository you are standing in
+        // is a reasonable thing to do and is what happens today; what was missing
+        // is being told that the roots you declared contributed nothing, and why.
+        // Silent under `--scope here`, without a special case here, because
+        // `standalone_table` already returns `None` for any scope that did not
+        // consult the configured list.
+        announce_worktree_only_roots(cmd, &resolved, standalone_table(cfg, scope));
         let (repo, mut store, cache) = match open_graph() {
             Ok(opened) => opened,
             // `here` standing outside a repository is the refusal issue #810
@@ -16024,6 +16044,54 @@ struct ServeWorkspaces {
 /// the rule is per-group and the scanner is shared: #806 and #787 are both this
 /// repository discovering that one rule read in several places becomes several
 /// rules.
+/// Whether `serve`/`mcp` should host the current directory's repository alone
+/// rather than the configured set.
+///
+/// Extracted from `build_serve_workspaces` so the choice has a name and one
+/// place: `explorer` asks the same question through `from_config` on its own
+/// path, and this binary has already grown two copies of two other decisions
+/// that pair (issue #837).
+///
+/// [`WorkspaceScope::Here`] takes it **always**, ignoring the configured list —
+/// that is what `here` means. [`WorkspaceScope::All`] takes it only when nothing
+/// else selects a workspace. [`WorkspaceScope::Named`] never does, because a name
+/// has already selected one (issue #824 moved this guard off `workspace_name`,
+/// which used to make `serve -w NAME` unstartable for every NAME).
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+fn wants_solo_workspace(
+    scope: &WorkspaceScope,
+    resolved: &[rto_graph::ResolvedWorkspace],
+    workspace_roots: &[String],
+) -> bool {
+    match scope {
+        WorkspaceScope::Here => true,
+        WorkspaceScope::All => resolved.is_empty() && workspace_roots.is_empty(),
+        WorkspaceScope::Named(_) => false,
+    }
+}
+
+/// Print the "your declared roots held only worktrees" note, before a fallback
+/// takes over (issue #837).
+///
+/// Shared by `build_serve_workspaces` and `run_explorer`, which are the two
+/// unshared single-repo fallback paths in this binary — the same pair that had
+/// already grown two copies of the worktree announcement and two answers to
+/// whether the scanned-roots note is printed at all. A third copy is not a risk
+/// worth taking twice in one change.
+///
+/// Silent for any scope that did not consult the configured list, because
+/// [`standalone_table`] hands back `None` there.
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+fn announce_worktree_only_roots(
+    cmd: &str,
+    resolved: &[rto_graph::ResolvedWorkspace],
+    standalone: Option<&config::WorkspaceConfig>,
+) {
+    for note in worktree_hint(resolved, standalone).trim_start().lines() {
+        eprintln!("roteiro {cmd}: {note}");
+    }
+}
+
 /// The `[standalone]` table, when its roots are part of what is about to be
 /// served — and `None` otherwise.
 ///

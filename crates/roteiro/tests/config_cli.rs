@@ -561,3 +561,98 @@ fn an_include_cycle_is_reported_not_thrown() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// **`roteiro config` reports `include_worktrees` for all three tables** — the
+/// legacy `[workspace]`, each `[[workspaces]]` entry and `[standalone]` — in both
+/// the text and the `--json` output (issue #837).
+///
+/// This key silently changes how many projects a workspace hosts. A key that does
+/// that while the one command whose job is to be believed about the configuration
+/// stays quiet is the defect #837 describes, one level down: reporting was added
+/// for the legacy and standalone tables first and the named form was missed,
+/// which is exactly what an assertion here would have caught.
+///
+/// The `false` cells are as load-bearing as the `true` one: a reporting bug that
+/// printed a constant would satisfy any single-value check.
+#[test]
+fn config_reports_include_worktrees_for_every_workspace_form() {
+    let dir = std::env::temp_dir().join(format!("roteiro-config-wt-{}", std::process::id()));
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::create_dir_all(dir.join(".git")).expect("mkdir .git");
+    for repo in ["alpha", "beta"] {
+        std::fs::create_dir_all(dir.join(repo).join(".git")).expect("mkdir repo");
+    }
+    std::fs::write(
+        dir.join("roteiro.toml"),
+        format!(
+            // Declared differently in each table, so a constant cannot pass.
+            "[workspace]\nroots = [\"{0}\"]\ninclude_worktrees = true\n\n\
+             [[workspaces]]\nname = \"opted\"\nroots = [\"{0}\"]\ninclude_worktrees = true\n\n\
+             [[workspaces]]\nname = \"plain\"\nroots = [\"{0}\"]\n\n\
+             [standalone]\nrepos = [\"{1}\"]\n",
+            at(&dir, "alpha"),
+            at(&dir, "beta"),
+        ),
+    )
+    .expect("write config");
+
+    let out = roteiro(&dir, &["config"]);
+    assert!(out.status.success(), "config failed: {out:?}");
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+
+    // The legacy table, with provenance like its `roots`/`repos` siblings — that
+    // table merges per field, so it has its own to report.
+    assert!(
+        text.contains("include_worktrees = true  (project)"),
+        "`[workspace] include_worktrees` must be reported with its provenance; \
+         output was:\n{text}"
+    );
+    // `[standalone]`, which did not declare it, still reports the effective value
+    // rather than omitting the line — an absent line reads as "no such key".
+    assert!(
+        text.contains("include_worktrees = false  (default)"),
+        "`[standalone] include_worktrees` must report its effective value even \
+         when undeclared; output was:\n{text}"
+    );
+    // And both named entries, which is the half that was missed: no provenance
+    // per entry, because the `[[workspaces]]` array is overlaid wholesale.
+    for expected in [
+        "    include_worktrees = true",
+        "    include_worktrees = false",
+    ] {
+        assert!(
+            text.contains(expected),
+            "each `[[workspaces]]` entry must report `include_worktrees` \
+             ({expected:?} missing); output was:\n{text}"
+        );
+    }
+
+    let out = roteiro(&dir, &["config", "--json"]);
+    assert!(out.status.success(), "config --json failed: {out:?}");
+    let cfg: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    let by_name = |name: &str| -> bool {
+        cfg["workspace_resolution"]["workspaces"]
+            .as_array()
+            .expect("resolved workspaces array")
+            .iter()
+            .find(|w| w["name"] == name)
+            .unwrap_or_else(|| panic!("no resolved workspace `{name}` in {cfg}"))["include_worktrees"]
+            .as_bool()
+            .unwrap_or_else(|| panic!("`{name}` has no boolean `include_worktrees` in {cfg}"))
+    };
+    assert!(
+        by_name("default"),
+        "the legacy group's rule is missing from JSON"
+    );
+    assert!(
+        by_name("opted"),
+        "an opted-in named group reads as false in JSON"
+    );
+    assert!(
+        !by_name("plain"),
+        "a named group that declared nothing reads as true in JSON"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}

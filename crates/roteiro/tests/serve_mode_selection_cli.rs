@@ -2685,3 +2685,158 @@ fn both_serve_and_explorer_report_the_worktrees_a_root_walked_past() {
         }
     }
 }
+
+/// A pool of worktrees and nothing else, under `[standalone] roots`: the config
+/// resolves to **no groups at all**, so the server does not reach the empty-set
+/// error — it takes the single-repo fallback and hosts the current directory
+/// instead.
+///
+/// That is worse than the bail it bypasses, because it *succeeds*: the operator
+/// declared a root, got something else served under a different name, and was
+/// told nothing. The note now comes before the fallback. It is a note and not a
+/// refusal — serving the repo you are standing in is reasonable and is what
+/// happens today; what was missing is being told the declared roots contributed
+/// nothing, and why.
+#[test]
+fn a_standalone_pool_of_only_worktrees_is_announced_before_the_cwd_fallback() {
+    for cmd in ["serve", "explorer"] {
+        let fx = Scratch::new(&format!("sa-pool-{cmd}"));
+        let home = IsolatedHome::new(&format!("sa-pool-{cmd}"));
+
+        // The worktrees' main repository lives outside the pool, so the pool
+        // really does resolve to nothing.
+        let main = fx.join("elsewhere");
+        make_repo(&main);
+        let pool = fx.join("pool");
+        std::fs::create_dir_all(&pool).expect("mkdir pool");
+        for task in ["task-one", "task-two"] {
+            git(
+                &main,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    utf8_arg(&pool.join(task)),
+                    "-b",
+                    task,
+                ],
+            );
+        }
+        // A repository to stand in, so the fallback succeeds and a server starts
+        // — the point is that it starts while saying what it skipped.
+        let here = fx.join("here");
+        make_repo(&here);
+
+        std::fs::write(
+            home.path().join("config.toml"),
+            format!(
+                "[standalone]\nroots = [\"{}\"]\n",
+                toml_escape(utf8_arg(&pool))
+            ),
+        )
+        .expect("write config.toml");
+
+        let addr = free_addr();
+        let server = Server::spawn(&[cmd, "--scope", "all", "--addr", &addr], &here, &home);
+        let mut stderr = String::new();
+        server
+            .wait_for_line(|l| l.contains(" listening on http://"), &mut stderr)
+            .unwrap_or_else(|| panic!("{cmd}: no listening line; stderr:\n{stderr}"));
+
+        for expected in [
+            "linked git WORKTREE",
+            "2 subdirectories",
+            "include_worktrees = true",
+            "task-one",
+        ] {
+            assert!(
+                stderr.contains(expected),
+                "`roteiro {cmd} --scope all` fell back to the cwd repo without \
+                 saying the configured `[standalone]` root held only worktrees; \
+                 expected {expected:?} in:\n{stderr}"
+            );
+        }
+    }
+}
+
+/// **What `roteiro mcp` actually does in a worktree**, pinned so the claim in the
+/// PR description is checkable rather than asserted.
+///
+/// `mcp` deliberately has no `--scope` and passes `All` (ADR-0008 v1.6: its
+/// invocation is argv in a client's config file, where "the current directory" is
+/// wherever that client was started, so inverting its default is a separate
+/// decision). #837's amendment is about `--scope here`, so it does not reach
+/// `mcp` — but "not reached" must not mean "silent", which is the property the
+/// issue actually requires. Both rows are asserted:
+///
+/// | `cd <worktree> && roteiro mcp` | expected |
+/// |---|---|
+/// | no configured workspace | reaches the single-repo branch and **serves the worktree**, announcing it |
+/// | configured roots | serves the configured set and **reports** the skip |
+/// Gated on `mcp` and not on `serve`: `roteiro mcp` is *dispatchable* under
+/// either, but actually serving either transport refuses without the `mcp`
+/// feature ("MCP serving needs the `mcp` feature"), so a test gated on `serve`
+/// fails on a build that cannot run the thing it is testing. Covered by CI's
+/// `--all-features` job.
+#[cfg(feature = "mcp")]
+#[test]
+fn mcp_serves_a_lone_worktree_and_reports_the_skip_when_roots_are_configured() {
+    let fx = Scratch::new("mcp-worktree");
+    let root = fx.join("ws");
+    std::fs::create_dir_all(&root).expect("mkdir root");
+    let main = root.join("plain");
+    make_repo(&main);
+    git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            utf8_arg(&root.join("checkout")),
+            "-b",
+            "side",
+        ],
+    );
+    make_repo(&root.join("other"));
+
+    // Row 1: nothing configured — `All` finds an empty list, so the single-repo
+    // branch takes over and serves the worktree we are standing in.
+    let home = IsolatedHome::new("mcp-worktree-nocfg");
+    let server = Server::spawn(
+        &["mcp", "--http", &free_addr()],
+        &root.join("checkout"),
+        &home,
+    );
+    let mut stderr = String::new();
+    server
+        .wait_for_line(|l| l.contains("MCP server listening on"), &mut stderr)
+        .unwrap_or_else(|| panic!("mcp did not start; stderr:\n{stderr}"));
+    assert!(
+        stderr.contains("linked git WORKTREE") && stderr.contains("on branch `side`"),
+        "`roteiro mcp` in a worktree with no config must serve it and say so:\n{stderr}"
+    );
+
+    // Row 2: configured roots — `All` serves the configured set, and the worktree
+    // it walked past is named in the startup note rather than vanishing.
+    let home2 = IsolatedHome::new("mcp-worktree-cfg");
+    write_config(&home2, &[("pool", &root)]);
+    let server2 = Server::spawn(
+        &["mcp", "--http", &free_addr()],
+        &root.join("checkout"),
+        &home2,
+    );
+    let mut stderr2 = String::new();
+    server2
+        .wait_for_line(|l| l.contains("MCP server listening on"), &mut stderr2)
+        .unwrap_or_else(|| panic!("mcp did not start; stderr:\n{stderr2}"));
+    assert!(
+        stderr2.contains("1 subdirectory skipped for being a linked git worktree"),
+        "`roteiro mcp` with configured roots must report the worktree it walked \
+         past:\n{stderr2}"
+    );
+    assert!(
+        stderr2.contains("2 project(s)") && !stderr2.contains("checkout,"),
+        "`roteiro mcp` with configured roots must serve the configured set, not \
+         the worktree:\n{stderr2}"
+    );
+}
