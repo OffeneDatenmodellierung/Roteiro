@@ -336,6 +336,133 @@ pub fn invisible_name(c: char) -> Option<&'static str> {
     None
 }
 
+/// `raw` as one line of diagnostic an operator can trust to read as itself.
+///
+/// # A list of the bad cannot be finished, so this states the good
+///
+/// The text reaching here is **not ours**. It carries a peer's bundle path and
+/// `okf-core`'s parser detail, which quotes the bundle's own bytes — a directory
+/// and a malformed file are somebody else's, per ADR-0021 — and on the viewer's
+/// path a remote client chooses *when* it is written by asking for a route. So
+/// it can hold anything Unicode can express, including the characters that exist
+/// to make a run of text render as something other than what it is: U+202E
+/// RIGHT-TO-LEFT OVERRIDE reverses everything after it, U+200B and the tag block
+/// occupy no width at all, and U+2066..U+2069 open and close isolates no reader
+/// can see. A diagnostic *about a hostile bundle*, rewritten in the terminal by
+/// that bundle, is the one sentence the operator most needs to be true.
+///
+/// The instinct is to name those characters and escape them. **This repository
+/// has already paid for that instinct twice.** #807 escaped a list of invisible
+/// code points; Copilot then found two more, and then eight more. [`INVISIBLE`]
+/// above is the remains of that approach and is, by construction, still
+/// incomplete — it is a *reporter*, and a reporter that misses a character
+/// under-reports, where a *sanitiser* that misses one lets it through. The
+/// `GivenName` separator rule was the same defect from the other side: a list of
+/// the hyphens somebody had thought of, one space short, refusing real names.
+/// Unicode assigns new code points every year and will always supply the next
+/// one.
+///
+/// So this states what a diagnostic character **is** and escapes everything
+/// else. A character passes through unchanged exactly when Unicode says it puts
+/// a mark on the page:
+///
+/// - it is U+0020 SPACE — the one separator a single log line may contain; or
+/// - its `General_Category` is a **L**etter, **M**ark, **N**umber,
+///   **P**unctuation or **S**ymbol, **and** it is not a
+///   `Default_Ignorable_Code_Point`.
+///
+/// Everything outside that is escaped: every `Other` category (`Cc` control,
+/// `Cf` **format** — which is where every bidi override and every zero-width
+/// joiner lives, `Cs`, `Co` private use, `Cn` unassigned), every `Separator`
+/// that is not that space (`Zl`, `Zp`, and the no-break and ideographic spaces
+/// of `Zs`), and the default-ignorables that hide *inside* the ink categories
+/// (U+3164 HANGUL FILLER is a `Lo` **letter**; U+FE0F VARIATION SELECTOR-16 is
+/// an `Mn` **mark**).
+///
+/// **No character is named in the code below, and that is the whole point.** The
+/// question is put to the Unicode Character Database, through
+/// [`str::escape_debug`], whose printable table is generated from it. The next
+/// code point Unicode assigns is `Cf` or `Cn` from the day it is published, so
+/// it is escaped here before anyone has read the announcement — and nobody has
+/// to come back and add it.
+///
+/// # What must survive, because refusing it would be the worse bug
+///
+/// An allowlist narrow enough to feel safe that garbles a real path is not a
+/// safer diagnostic, it is an unreadable one — and "unreadable for some
+/// languages and not others" is precisely the `GivenName` failure. So a bundle
+/// under `/データ/概念`, a peer called `Ünal`, an `é` written NFD as `e` plus
+/// U+0301, Devanagari and Thai with their combining marks, `—`, `、`, `€`, `'`
+/// and an emoji all pass through **byte-identical**. Marks are ink here: macOS
+/// hands out NFD paths, so escaping U+0301 would mangle every accented path on
+/// the platform the developers use.
+///
+/// The cost of the `Default_Ignorable` half is real and accepted: a
+/// variation-selector-qualified emoji renders as its base character plus a
+/// visible `\u{fe0f}`. That is noisier, and it is still the whole truth — where
+/// passing an invisible character through silently is the class of bug this
+/// function exists to close.
+///
+/// # The escapes
+///
+/// Escaped, never stripped: an operator who is told `\u{202e}` was in the name
+/// can act on it, where a silently-cleaned name reads as an ordinary one and
+/// sends them looking in the wrong place. `\` is escaped to `\\` so the encoding
+/// is unambiguous — `\u{202e}` in the output always means an escaped U+202E and
+/// never a bundle whose path spells those seven characters. `\n`, `\r` and `\t`
+/// get their short names; everything else is `\u{...}` naming the code point,
+/// and every escape is ASCII, so the output can introduce nothing it was written
+/// to remove.
+///
+/// The result is genuinely one line: `\n`, `\r`, U+0085 NEL, U+2028 LINE
+/// SEPARATOR and U+2029 PARAGRAPH SEPARATOR are all outside the ink set, so none
+/// of them can forge a log line of its own.
+#[must_use]
+pub fn escape_for_diagnostic(raw: &str) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            // `Po`, both of them, and a terminal shows them as themselves.
+            // `escape_debug` escapes them because it is written for a quoted
+            // Rust literal, which a log line is not, and `/Users/who/Mark's
+            // Notes` should read back as itself.
+            '\'' | '"' => out.push(c),
+            c if is_ink(c) => out.push(c),
+            c => {
+                let _ = write!(out, "\\u{{{:04x}}}", u32::from(c));
+            }
+        }
+    }
+    out
+}
+
+/// Does Unicode say `c` puts a mark on the page? The rule, and why it is asked
+/// this way rather than written out, is on [`escape_for_diagnostic`].
+fn is_ink(c: char) -> bool {
+    // Asked of `c` in *continuation* position: a `.` goes in front and is
+    // dropped from the answer.
+    //
+    // `str::escape_debug` applies a stricter rule to a string's **first**
+    // character — it escapes a combining mark there, because in the quoted
+    // literal it is written for, the mark would attach to the opening quote.
+    // Mid-string the mark attaches to the character before it, which is where it
+    // belongs. Asking the first-character question instead would escape every
+    // NFD accent, which is most accented paths on macOS: the over-narrow
+    // allowlist this function is specifically written not to be.
+    let mut probe = [0_u8; 5];
+    probe[0] = b'.';
+    let width = c.encode_utf8(&mut probe[1..]).len();
+    let probe =
+        std::str::from_utf8(&probe[..=width]).expect("an ASCII `.` and one `char` are both UTF-8");
+    probe.escape_debug().eq(probe.chars())
+}
+
 /// A phrase pattern: a sequence of positions, each a set of accepted tokens.
 ///
 /// An empty string `""` among a position's alternatives makes that position
@@ -1037,7 +1164,7 @@ fn matches_at(tokens: &[&str], phrase: Phrase, start: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{FindingKind, Verdict, screen_text};
+    use super::{FindingKind, Verdict, escape_for_diagnostic, screen_text};
 
     #[test]
     fn ordinary_prose_passes_unchanged() {
@@ -1350,5 +1477,189 @@ mod tests {
                 "model-directive"
             ]
         );
+    }
+
+    // ---- `escape_for_diagnostic`, swept rather than sampled -----------------
+    //
+    // These tests deliberately do **not** name U+202E and its friends as the
+    // thing to check. A test that named today's four bidi controls would pass
+    // over the fifth, which is the same failure as the denylist the function
+    // exists to replace — it would hold the implementation to whatever its
+    // author had heard of.
+    //
+    // The invariant asserted instead is over the whole code-point space:
+    // *whatever* Unicode classes as `Other` or as a `Separator` that is not
+    // U+0020 never reaches the operator, and everything Unicode classes as ink
+    // either reaches them unchanged or reaches them as a visible escape naming
+    // its code point. Nothing is silently altered and nothing is silently
+    // dropped.
+    //
+    // The oracle is `unicode-properties`, a second reading of the Unicode
+    // Character Database — see this crate's `[dev-dependencies]` for why the
+    // question must not be put back to the table the implementation itself
+    // asked.
+
+    use unicode_properties::{GeneralCategoryGroup, UnicodeGeneralCategory};
+
+    /// Does the UCD oracle — not std, and not us — say `c` puts a mark on the
+    /// page?
+    fn oracle_says_ink(c: char) -> bool {
+        c == ' '
+            || matches!(
+                c.general_category_group(),
+                GeneralCategoryGroup::Letter
+                    | GeneralCategoryGroup::Mark
+                    | GeneralCategoryGroup::Number
+                    | GeneralCategoryGroup::Punctuation
+                    | GeneralCategoryGroup::Symbol
+            )
+    }
+
+    /// Every `char` there is, in ascending order.
+    fn all_code_points() -> impl Iterator<Item = char> {
+        (0..=0x0010_FFFF_u32).filter_map(char::from_u32)
+    }
+
+    #[test]
+    fn no_code_point_reaches_a_diagnostic_invisibly() {
+        // The security claim, over the whole space at once: an operator reading
+        // a diagnostic is reading only characters that put ink on the page. A
+        // bidi override cannot reverse the sentence because it is not there any
+        // more; a zero-width joiner cannot hide a word because it is not there
+        // either. Neither is named below, and neither has to be.
+        let mut passed_through = 0_u32;
+        for c in all_code_points() {
+            let escaped = escape_for_diagnostic(&c.to_string());
+            for out in escaped.chars() {
+                assert!(
+                    oracle_says_ink(out),
+                    "U+{:04X} produced U+{:04X}, which the UCD calls {:?} — a \
+                     diagnostic must carry only ink",
+                    u32::from(c),
+                    u32::from(out),
+                    out.general_category()
+                );
+            }
+            if escaped == c.to_string() {
+                passed_through += 1;
+            }
+        }
+        // Anti-vacuity: an implementation that escaped *everything* would
+        // satisfy the assertion above and be useless. Real text has to survive,
+        // and the ink half of Unicode is around 159,000 code points.
+        assert!(
+            passed_through > 150_000,
+            "only {passed_through} code points survived unchanged — an escaper \
+             this aggressive garbles ordinary text"
+        );
+    }
+
+    #[test]
+    fn a_character_the_ucd_calls_other_or_separator_is_always_escaped() {
+        // The same claim stated from the input side, so a failure names the
+        // offending *input* rather than the output it produced. Swept, so it
+        // covers `Cf` (every bidi control, every zero-width joiner), `Cc`,
+        // `Co`, `Cn` — including the unassigned code points Unicode has not
+        // given a meaning to yet — `Zl`, `Zp`, and every `Zs` but the space.
+        let mut checked = 0_u32;
+        for c in all_code_points() {
+            if oracle_says_ink(c) {
+                continue;
+            }
+            checked += 1;
+            let escaped = escape_for_diagnostic(&c.to_string());
+            assert_ne!(
+                escaped,
+                c.to_string(),
+                "U+{:04X} ({:?}) passed through raw",
+                u32::from(c),
+                c.general_category()
+            );
+            assert!(
+                escaped.is_ascii(),
+                "U+{:04X} escaped to non-ASCII {escaped:?}",
+                u32::from(c)
+            );
+            // Escaped, not stripped: the operator is told which character was
+            // in the name. `\n`, `\r` and `\t` carry their short names instead
+            // of a code point, which is the same information in fewer glyphs.
+            let named = matches!(c, '\n' | '\r' | '\t');
+            assert!(
+                named || escaped == format!("\\u{{{:04x}}}", u32::from(c)),
+                "U+{:04X} escaped to {escaped:?}, which does not name it",
+                u32::from(c)
+            );
+        }
+        assert!(
+            checked > 800_000,
+            "only {checked} non-ink code points were swept; the oracle is not \
+             seeing the space"
+        );
+    }
+
+    #[test]
+    fn legitimate_non_ascii_survives_byte_identical() {
+        // The constraint that makes this an allowlist rather than a refusal.
+        // An escaper that garbled a real path would be the `GivenName`
+        // separator defect in a new place: safe-looking, and wrong for
+        // everybody whose name or filesystem is not ASCII.
+        for real in [
+            "/Users/mark/データ/概念/bundle",
+            "/home/ünal/Müller-Schröder/paquete",
+            // NFD, which is what macOS hands out: `e` + U+0301, not `é`.
+            "/Volumes/Cafe\u{301}/notes",
+            "/srv/okf/\u{5F00}\u{653E}\u{77E5}\u{8BC6}/index.md",
+            "/mnt/данные/понятия",
+            "/mnt/بيانات/مفاهيم",
+            "/mnt/\u{0928}\u{092E}\u{0938}\u{094D}\u{0924}\u{0947}/\u{0E2A}\u{0E27}\u{0E31}\u{0E2A}\u{0E14}\u{0E35}",
+            "/Users/who/Mark's Notes/a \"quoted\" dir",
+            "/tmp/naïve — em-dash, 、ideographic comma, €20",
+            "/tmp/\u{1F600}/bundle",
+            "concept `a/b` is not readable: expected a mapping at line 3",
+        ] {
+            assert_eq!(
+                escape_for_diagnostic(real),
+                real,
+                "a legitimate path or parser detail was altered"
+            );
+        }
+    }
+
+    #[test]
+    fn a_default_ignorable_is_escaped_even_inside_an_ink_category() {
+        // The accepted cost, pinned so it is a decision and not a surprise.
+        // U+FE0F is an `Mn` mark and U+3164 an `Lo` letter, so a rule stated in
+        // general categories alone would pass both through — invisibly. They
+        // are `Default_Ignorable_Code_Point`, which is the third clause of the
+        // rule, and the consequence is that a variation-selector-qualified
+        // emoji shows its base character beside a visible escape.
+        assert_eq!(
+            escape_for_diagnostic("\u{2764}\u{FE0F}"),
+            "\u{2764}\\u{fe0f}"
+        );
+        assert_eq!(escape_for_diagnostic("a\u{3164}b"), "a\\u{3164}b");
+        assert_eq!(escape_for_diagnostic("a\u{200D}b"), "a\\u{200d}b");
+    }
+
+    #[test]
+    fn the_escape_encoding_is_unambiguous_and_one_line() {
+        // A path that spells the seven characters of an escape must not read as
+        // one, or the encoding tells the operator something false — which is
+        // the failure mode, in miniature, of escaping at all.
+        assert_eq!(
+            escape_for_diagnostic("\\u{202e}"),
+            "\\\\u{202e}",
+            "a literal backslash must not be able to forge an escape"
+        );
+        assert_ne!(
+            escape_for_diagnostic("\\u{202e}"),
+            escape_for_diagnostic("\u{202E}"),
+            "a path spelling an escape and the character it names must differ"
+        );
+        // One line, whichever of Unicode's five line breaks is tried.
+        for breaker in ['\n', '\r', '\u{0085}', '\u{2028}', '\u{2029}'] {
+            let escaped = escape_for_diagnostic(&format!("before{breaker}after"));
+            assert_eq!(escaped.lines().count(), 1, "{escaped:?} is not one line");
+        }
     }
 }

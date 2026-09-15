@@ -65,15 +65,38 @@ use serde::Serialize;
 /// A second failure mode here (a bundle that loads but declares an OKF version
 /// this crate cannot read, say) is an ordinary addition, and these crates are
 /// published, so it must not be a breaking change.
+///
+/// # Its `Display` is an operator's diagnostic, so it is escaped
+///
+/// Both interpolated values come from somebody else. `path` is a peer's bundle
+/// directory, `detail` is `okf-core` quoting that bundle's own bytes back, and
+/// this message is then read by a person in a terminal — on `roteiro okf
+/// inspect`'s stderr, inside the consent prompt `okf_discovery` builds, and in
+/// the line the OKF viewer logs when a request finds the bundle broken.
+///
+/// Rendered raw, a bundle could therefore rewrite the sentence describing it: a
+/// U+202E in a directory name reverses the rest of the line, and a zero-width
+/// run hides a word, so the operator misreads a diagnostic *about that bundle*.
+/// Every field is passed through
+/// [`rto_graph::screen::escape_for_diagnostic`], which states what a printable
+/// diagnostic character is rather than listing the characters that are not one.
+///
+/// The fields themselves stay **raw**, and are documented as such: what was
+/// wrong was one presentation boundary, not the error's own record of what
+/// happened. A caller that wants the path to open it still gets the path.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum InspectError {
     /// The path could not be loaded as an OKF bundle.
-    #[error("`{path}` is not a readable OKF bundle: {detail}")]
+    #[error(
+        "`{}` is not a readable OKF bundle: {}",
+        rto_graph::screen::escape_for_diagnostic(.path),
+        rto_graph::screen::escape_for_diagnostic(.detail)
+    )]
     Unreadable {
-        /// The path as the caller gave it.
+        /// The path as the caller gave it. Raw; `Display` escapes it.
         path: String,
-        /// What `okf-core` said went wrong.
+        /// What `okf-core` said went wrong. Raw; `Display` escapes it.
         detail: String,
     },
     /// `--today` was given a value that is not an ISO `YYYY-MM-DD` date.
@@ -81,9 +104,19 @@ pub enum InspectError {
     /// Refused rather than silently falling back to the real clock: the flag
     /// exists so a run is reproducible, and a typo that quietly restored
     /// today's date would make a green pipeline mean nothing.
-    #[error("`{given}` is not an ISO date (expected YYYY-MM-DD)")]
+    #[error(
+        "`{}` is not an ISO date (expected YYYY-MM-DD)",
+        rto_graph::screen::escape_for_diagnostic(.given)
+    )]
     BadDate {
-        /// The value as the caller gave it.
+        /// The value as the caller gave it. Raw; `Display` escapes it.
+        ///
+        /// Escaped for the same reason as `Unreadable`, though this one arrives
+        /// from the command line rather than from a bundle: a `--today` read
+        /// from a script, a CI variable or a pasted command is no more the
+        /// operator's own typing than a path is, and an escaper applied only
+        /// where the text is *known* to be hostile is an escaper somebody has
+        /// to keep deciding about.
         given: String,
     },
     /// The host clock could not be read and no `--today` was given.
@@ -1113,4 +1146,92 @@ fn bundle_title(bundle: &Bundle) -> Option<String> {
         .frontmatter
         .title()
         .map(std::borrow::Cow::into_owned)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::InspectError;
+
+    /// No variant's `Display` can carry a character the operator cannot see.
+    ///
+    /// # Why the match below is the completeness argument
+    ///
+    /// `InspectError` is `#[non_exhaustive]`, which binds other crates and not
+    /// this one. The match here is therefore exhaustive, so a variant added
+    /// later **fails this test to compile** until somebody has decided what its
+    /// `Display` does with the text it carries. A test that listed the three
+    /// variants that existed when it was written would go green past the fourth.
+    ///
+    /// The invariant itself — that whatever Unicode calls `Other` or a
+    /// `Separator` other than a space never reaches a diagnostic, for all
+    /// 1,114,112 code points and not just the ones below — is swept in
+    /// `rto_graph::screen`. This test is the wiring: that *this* type's
+    /// `Display` asks for it.
+    #[test]
+    fn no_variant_can_put_an_invisible_character_in_a_diagnostic() {
+        // One of everything, in a single string a bundle could really carry: a
+        // bidi override that reverses the rest of the line, a zero-width space,
+        // an isolate pair, a C0 control that clears the terminal, and a newline
+        // that forges a second log line. A POSIX filename may hold all of them
+        // — anything but `/` and NUL is legal.
+        let hostile = "bundle\u{202E}drowssap\u{200B}\u{2066}x\u{2069}\u{1B}[2J\nfine".to_owned();
+
+        let shown: Vec<String> = [
+            InspectError::Unreadable {
+                path: hostile.clone(),
+                detail: hostile.clone(),
+            },
+            InspectError::BadDate {
+                given: hostile.clone(),
+            },
+            InspectError::NoClock,
+        ]
+        .iter()
+        .map(|e| match e {
+            // Exhaustive on purpose — see this test's doc comment.
+            InspectError::Unreadable { .. }
+            | InspectError::BadDate { .. }
+            | InspectError::NoClock => e.to_string(),
+        })
+        .collect();
+
+        for line in &shown {
+            assert!(
+                !line.contains('\u{202E}'),
+                "a bidi override reached the operator raw and can reverse the \
+                 sentence after it: {line:?}"
+            );
+            assert!(
+                !line.contains('\u{200B}')
+                    && !line.contains('\u{2066}')
+                    && !line.contains('\u{2069}'),
+                "a zero-width or isolate character reached the operator raw: {line:?}"
+            );
+            assert!(
+                !line.chars().any(char::is_control),
+                "a control character reached the operator raw: {line:?}"
+            );
+            assert_eq!(line.lines().count(), 1, "{line:?} is not one line");
+        }
+
+        // The premise, and the anti-vacuity guard: the two variants that carry
+        // text must really have interpolated it, or every assertion above holds
+        // on a message that never saw the hostile string. `NoClock` interpolates
+        // nothing, which is why it is asserted separately.
+        for line in &shown[..2] {
+            assert!(
+                line.contains("bundle") && line.contains("drowssap"),
+                "the hostile text should reach the diagnostic, escaped: {line:?}"
+            );
+            assert!(
+                line.contains("\\u{202e}"),
+                "escaped, not stripped — the operator must learn which character \
+                 was in the name: {line:?}"
+            );
+        }
+        assert_eq!(
+            shown[2],
+            "cannot read the current date; pass --today YYYY-MM-DD"
+        );
+    }
 }
