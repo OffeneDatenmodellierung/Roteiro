@@ -53,8 +53,10 @@ header {
 }
 header .name { font-weight: bold; }
 /* Standalone only (`serve_okf_only`): the bundle directory's own name, where
-   v1.0 through v1.3 printed the absolute path it was loaded from. Monospaced
-   because it is still a directory name and reads as one. */
+   every earlier version printed the absolute path it was loaded from. v1.4
+   included — #810 added `--scope bundle` and left this header untouched, so the
+   path went out of that entry point too. Monospaced because it is still a
+   directory name and reads as one. */
 header .root { color: var(--sub); font-size: .85rem; font-family: var(--font-mono); }
 /* Scoped to the two lateral navs by class, because the breadcrumb is a `<nav>`
    too and `margin-left: auto` would push the trail to the far edge. */

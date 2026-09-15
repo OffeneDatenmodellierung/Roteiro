@@ -274,7 +274,10 @@ impl Viewer {
                         .reported
                         .swap(true, std::sync::atomic::Ordering::Relaxed)
                     {
-                        (self.report)(&format!("roteiro: OKF bundle is not readable: {e}"));
+                        (self.report)(&format!(
+                            "roteiro: OKF bundle is not readable: {}",
+                            one_line(&e.to_string())
+                        ));
                     }
                     return Err(e);
                 }
@@ -737,7 +740,10 @@ const APP_NAME: &str = "Roteiro";
 /// *Standalone* (`explorer` is `None`) — `serve_okf_only`, which ADR-0022 keeps
 /// usable for **a stranger's bundle at an arbitrary path**. There is no
 /// workspace above it and no explorer to return to, so a breadcrumb here would
-/// be decoration and a back link would point at a route that 404s. It keeps the
+/// be decoration and a back link would be a control that goes nowhere: it is
+/// **not** that `/` 404s — `serve_okf_only` redirects `/` to the mount base —
+/// but that following it lands the reader back in this same viewer, which is
+/// worse than a dead link because it looks like it worked. It keeps the
 /// v1.0 header: the surface's name, and the bundle's own name beside it. It also
 /// keeps whatever `All bundles` link it had, because a standalone server can
 /// still hold several bundles and the chooser is then real.
@@ -757,7 +763,8 @@ fn header_for(nav: &Nav) -> String {
         if let Some(bundles) = &nav.bundles {
             let _ = write!(
                 out,
-                "<nav class=\"up\"><a href=\"{}\">All bundles</a></nav>",
+                "<nav class=\"up\" aria-label=\"Bundle chooser\">\
+                 <a href=\"{}\">All bundles</a></nav>",
                 escape(bundles)
             );
         }
@@ -829,7 +836,8 @@ fn page(title: &str, base: &str, nav: &Nav, body: &str) -> Response {
     if let Some(bundle) = &nav.bundle {
         let _ = write!(
             here,
-            "<nav class=\"here\"><a href=\"{}\">Concepts</a>\
+            "<nav class=\"here\" aria-label=\"This bundle\">\
+             <a href=\"{}\">Concepts</a>\
              <a href=\"{}/graph\">Graph</a></nav>",
             escape(index_href(bundle)),
             escape(bundle)
@@ -880,7 +888,39 @@ fn escape(raw: &str) -> String {
     out
 }
 
-/// A bundle that stopped being readable underneath the running server.
+/// `raw` as a single log line: one line, and no terminal control sequences.
+///
+/// **The text is not ours and reaching this is not our decision.** It carries a
+/// bundle path and `okf-core`'s parser detail, which quotes the bundle's own
+/// bytes — a directory or a malformed file is somebody else's, per ADR-0022 —
+/// and a remote client chooses *when* it is written by asking for a route. A
+/// newline would let that text forge whole log lines; an `ESC` would let it
+/// write colour, move the cursor, or clear the screen of whatever terminal is
+/// tailing the log. Both are escaped rather than stripped, so the operator can
+/// still see that something strange was in the name instead of reading a
+/// silently-edited one.
+fn one_line(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            // Everything else a terminal acts on rather than shows: C0, DEL and
+            // C1. An allowlist of the visible would be the stronger shape, but a
+            // path is legitimately any printable Unicode, so this names the
+            // classes that are *executable* instead.
+            c if c.is_control() => {
+                let _ = write!(out, "\\u{{{:04x}}}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// A bundle this server cannot read — whether it never could, or stopped.
 ///
 /// **The error is not rendered to the client, and that is the whole point.**
 /// [`InspectError::Unreadable`] is a *CLI* error: it names the path because
@@ -2762,7 +2802,8 @@ mod tests {
              <a class=\"p-crumb-link\" href=\"/okf\">OKF</a>\
              <span class=\"p-sep\">▸</span>\
              <span class=\"p-crumb-current\">Acme/widgets</span></nav>\
-             <nav class=\"here\"><a href=\"/okf/one\">Concepts</a>\
+             <nav class=\"here\" aria-label=\"This bundle\">\
+             <a href=\"/okf/one\">Concepts</a>\
              <a href=\"/okf/one/graph\">Graph</a></nav></header>"
         );
         // Every crumb goes somewhere that answers.
@@ -2797,7 +2838,8 @@ mod tests {
              <span class=\"p-crumb-step\">OKF</span>\
              <span class=\"p-sep\">▸</span>\
              <span class=\"p-crumb-current\">Acme/widgets</span></nav>\
-             <nav class=\"here\"><a href=\"/okf/only\">Concepts</a>\
+             <nav class=\"here\" aria-label=\"This bundle\">\
+             <a href=\"/okf/only\">Concepts</a>\
              <a href=\"/okf/only/graph\">Graph</a></nav></header>"
         );
     }
@@ -2824,7 +2866,8 @@ mod tests {
             header_of(&body),
             "<header><span class=\"name\">OKF viewer</span>\
              <span class=\"root\">okf</span>\
-             <nav class=\"here\"><a href=\"/okf/bare\">Concepts</a>\
+             <nav class=\"here\" aria-label=\"This bundle\">\
+             <a href=\"/okf/bare\">Concepts</a>\
              <a href=\"/okf/bare/graph\">Graph</a></nav></header>"
         );
     }
@@ -2846,8 +2889,10 @@ mod tests {
             header_of(&body),
             "<header><span class=\"name\">OKF viewer</span>\
              <span class=\"root\">alpha</span>\
-             <nav class=\"up\"><a href=\"/okf\">All bundles</a></nav>\
-             <nav class=\"here\"><a href=\"/okf/one\">Concepts</a>\
+             <nav class=\"up\" aria-label=\"Bundle chooser\">\
+             <a href=\"/okf\">All bundles</a></nav>\
+             <nav class=\"here\" aria-label=\"This bundle\">\
+             <a href=\"/okf/one\">Concepts</a>\
              <a href=\"/okf/one/graph\">Graph</a></nav></header>"
         );
     }
@@ -3066,6 +3111,78 @@ mod tests {
             written(),
             2,
             "a later outage must be reported rather than swallowed by the first"
+        );
+    }
+
+    /// The operator's line cannot be forged or made to drive their terminal.
+    ///
+    /// **This text is not ours and a remote client chooses when it is written.**
+    /// `InspectError`'s `Display` interpolates the bundle path and `okf-core`'s
+    /// parser detail, which quotes the bundle's own bytes — and ADR-0022's whole
+    /// premise is that a bundle is *somebody else's*. A newline in there forges
+    /// whole log lines, so anything downstream that reads one line per event can
+    /// be told a lie; an `ESC` writes colour, moves the cursor or clears the
+    /// screen of whatever terminal is tailing the log.
+    ///
+    /// Driven through a real directory, because that is the actual carrier: a
+    /// POSIX filename may contain anything but `/` and NUL, so both characters
+    /// below are legal in a path somebody hands this server.
+    #[tokio::test]
+    async fn the_operators_line_cannot_be_forged_by_a_bundle_name() {
+        // A name that would, unescaped, end the line and then start a plausible
+        // second one — and clear the reader's screen on the way past.
+        let hostile = "okf-\u{1b}[2J\nroteiro: everything is fine";
+        let root = std::env::temp_dir().join(format!(
+            "roteiro-okf-inject-{}-{hostile}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&log);
+        let v = Viewer {
+            root: Arc::new(root.clone()),
+            base: Arc::new(String::new()),
+            nav: Arc::new(Nav::default()),
+            cache: Arc::new(Mutex::new(None)),
+            reported: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            report: Arc::new(move |line: &str| {
+                sink.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(line.to_owned());
+            }),
+        };
+        assert!(
+            v.overview().is_err(),
+            "the path does not exist, so it fails"
+        );
+
+        let written = log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(written.len(), 1, "one outage, one line");
+        let line = &written[0];
+        // The premise: the hostile name really did reach the diagnostic. Without
+        // this the assertions below pass on a line that never carried it.
+        assert!(
+            line.contains("okf-"),
+            "the bundle name should be in the operator's line: {line:?}"
+        );
+        assert!(
+            !line.contains('\n') && !line.contains('\r'),
+            "a bundle name forged a second log line: {line:?}"
+        );
+        assert!(
+            !line.chars().any(char::is_control),
+            "a bundle name put a control sequence in the operator's terminal: \
+             {line:?}"
+        );
+        // Escaped, not stripped: the operator must still be able to see that
+        // something strange was in the name rather than read an edited one.
+        assert!(
+            line.contains("\\u{001b}") && line.contains("\\n"),
+            "the strange characters should be shown, not silently removed: {line:?}"
         );
     }
 
@@ -3476,7 +3593,7 @@ mod tests {
         // `up` nav; `page` appends the `here` nav, so assert on the shape that
         // produces the pair.
         assert!(
-            header.contains("<nav class=\"up\">"),
+            header.contains("<nav class=\"up\" aria-label="),
             "standalone with several bundles should still offer the chooser: {header}"
         );
 
