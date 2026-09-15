@@ -16159,7 +16159,12 @@ fn standalone_table<'c>(
 /// And it is *handed* the project's working-tree root rather than deriving one
 /// from the `graph.db` path: for a linked worktree that derivation lands outside
 /// the repository entirely and rebuilds the main checkout instead. See
-/// [`rto_graph::OnOpen`] and [`sync_project_graph`] (issue #837).
+/// [`rto_graph::Workspace::with_on_open`] and [`sync_project_graph`] (issue #837).
+///
+/// (The hook's type, `OnOpen`, is not re-exported from `rto_graph`'s root, so it
+/// is named here only in prose — an intra-doc link to it does not resolve, and
+/// `-D rustdoc::broken-intra-doc-links` is checked by a job that neither clippy
+/// nor the test runs can stand in for.)
 #[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
 fn attach_sync_on_access(
     ws: rto_graph::Workspace,
@@ -24554,7 +24559,14 @@ mod refusal_text_tests {
 }
 
 /// What `--workspace <ROOT>` promises, checked against what it now does.
-#[cfg(test)]
+///
+/// Gated on the features that make **both** subcommands exist: `Serve` is
+/// `any(mcp, serve, explorer)` and `Mcp` is `any(mcp, serve)`, so their
+/// intersection is `any(mcp, serve)`. A default-features build has neither, and an
+/// ungated test panics in `arg_help` on a subcommand that was compiled out — which
+/// is a red `default-features` job, invisible to an `--all-features` run. CI's
+/// `checks` job runs `--all-features`, where this does run.
+#[cfg(all(test, any(feature = "mcp", feature = "serve")))]
 mod workspace_help_contract_tests {
     use clap::CommandFactory as _;
 
