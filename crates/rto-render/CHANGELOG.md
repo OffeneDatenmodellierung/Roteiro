@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.14.3](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v5.14.2...rto-render-v5.14.3) - 2026-09-15
+
+### Added
+
+- *(paths)* exclude a path from extraction, in three states, at every reader
+
+### Fixed
+
+- *(paths)* close the replay egress route, and stop tool_check refusing everything
+
 ## [5.13.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v5.12.1...rto-render-v5.13.0) - 2026-09-13
 
 ### Added
