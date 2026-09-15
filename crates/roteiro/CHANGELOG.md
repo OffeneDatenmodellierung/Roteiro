@@ -56,6 +56,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-worktree store, sharing only the content-addressed object cache with the main
   checkout, which cannot mix them: that cache is keyed on
   `(blob oid, path, extractor version, env)`, and one `(path, oid)` is one content.
+- *(links)* **`roteiro links` run inside a worktree now scopes to the workspace
+  that contains it.** Selecting a workspace by "which one am I standing in" asked
+  the *discovery* rule, so standing in a worktree under a named workspace's root
+  returned no match and the command fell through to the legacy flat `[workspace]`
+  scope. A config that uses `[[workspaces]]` usually has no legacy table, so the
+  scope collapsed to the current repo alone and every authored cross-repo link
+  read as drift — a wrong answer shaped like a finding. Skipping applies to
+  discovery, not to selection; the member scan that follows is discovery and is
+  unchanged, so being selected by standing in a worktree does not make that
+  worktree a member.
+- *(serve)* **`--sync-on-access` inside a hosted worktree builds that worktree's
+  graph**, rather than its main checkout's. The hook derived the repository by
+  walking three parents up from `graph.db`, which is the repository for an
+  ordinary clone and `<main>/.git/worktrees` for a worktree — so it extracted the
+  wrong repository at the wrong revision and wrote it into the worktree's store,
+  producing a plausible graph under the right name. Reachable via
+  `include_worktrees = true` or an explicit `repos` entry. The "no graph yet"
+  error had the same defect and named a directory `roteiro sync` cannot run in.
+- *(cli)* `serve --workspace` and `mcp --workspace` help no longer claims to host
+  **each** immediate child repo, which stopped being true when worktrees began
+  being skipped, and now names `include_worktrees` as the way back. A false
+  statement in `--help` is the one place a user looks to find out why a project
+  vanished.
 - *(explorer)* the explorer prints the **scanned-roots note** at startup, as
   `serve` and `mcp` already did. It builds its workspace set on its own path and
   never reached the code that printed it, so the surface that actually shows you

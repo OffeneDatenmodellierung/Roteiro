@@ -168,7 +168,23 @@ fn source_eq(a: &Source, b: &Source) -> bool {
 /// A hook run against a project's `graph.db` path the first time it is opened —
 /// used by `serve --sync-on-access` to (re)build a stale or missing graph before
 /// it is served (ADR-0008). Returns a human-readable error on failure.
-pub type OnOpen = Arc<dyn Fn(&Path) -> Result<(), String> + Send + Sync>;
+/// The `--sync-on-access` hook: `(graph.db, the recorded working-tree root)`.
+///
+/// # Why the root is passed rather than derived from the db path
+///
+/// Because it cannot be derived. The store lives at `<git dir>/roteiro/graph.db`,
+/// and for a **linked worktree** the git dir is `<main>/.git/worktrees/<name>` —
+/// so the "three parents up is the repository" shortcut a caller would otherwise
+/// reach for lands on `<main>/.git/worktrees`, which is not a repository at all.
+/// Discovering from there walks up and finds the **main** checkout, so the hook
+/// would rebuild the wrong repository's graph and write it to the wrong store,
+/// silently (issue #837).
+///
+/// The registry already knows the answer — [`build_registry`] records
+/// `repo.workdir()` beside the db path it derived from `repo.git_dir()` — so this
+/// hands the value over instead of asking the callee to reconstruct it.
+/// `None` only for a [`Workspace::from_named_dbs`] source, which records no root.
+pub type OnOpen = Arc<dyn Fn(&Path, Option<&Path>) -> Result<(), String> + Send + Sync>;
 
 /// A fully-discovered registry, ready to be swapped into a live [`Workspace`].
 ///
@@ -626,7 +642,7 @@ impl Workspace {
         // it, so a stale or never-synced repo is prepared on first touch. Runs
         // outside the registry lock (it does extraction I/O).
         if let Some(on_open) = &self.on_open {
-            on_open(&db).map_err(|msg| WorkspaceError::Prepare {
+            on_open(&db, root.as_deref()).map_err(|msg| WorkspaceError::Prepare {
                 name: name.to_owned(),
                 msg,
             })?;
@@ -634,13 +650,24 @@ impl Workspace {
         if !db.exists() {
             return Err(WorkspaceError::NoGraph {
                 name: name.to_owned(),
-                // The repo dir is the store's grandparent (`…/.git/roteiro`).
-                path: db
-                    .parent()
-                    .and_then(Path::parent)
-                    .and_then(Path::parent)
-                    .unwrap_or(&db)
-                    .to_path_buf(),
+                // The **recorded** working-tree root, not a walk back up from the
+                // db path. `…/.git/roteiro/graph.db` makes the repository the
+                // store's great-grandparent only for an ordinary clone; a linked
+                // worktree's store is `<main>/.git/worktrees/<name>/roteiro/`, so
+                // the same walk names `<main>/.git/worktrees` — a directory nobody
+                // typed, in the one message whose job is telling the user where to
+                // run `roteiro sync` (issue #837).
+                //
+                // The walk survives only as the fallback for a source that records
+                // no root ([`Workspace::from_named_dbs`]), which is never a
+                // worktree in practice and where a guess beats naming the db file.
+                path: root.clone().unwrap_or_else(|| {
+                    db.parent()
+                        .and_then(Path::parent)
+                        .and_then(Path::parent)
+                        .unwrap_or(&db)
+                        .to_path_buf()
+                }),
             });
         }
         let handle = Arc::new(Mutex::new(Store::open(&db)?));
