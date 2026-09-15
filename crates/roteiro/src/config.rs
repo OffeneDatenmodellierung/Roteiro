@@ -1781,8 +1781,17 @@ pub fn path_policy_for(
 /// narrowed to one pattern is a trap that reports debt the user believed excluded
 /// — or, worse, hides it.
 ///
-/// Only this list merges. The other list-valued keys stay replace-wins, and that
-/// is a decision rather than an oversight:
+/// **Every *exclusion* list merges; the other list-valued keys stay replace-wins.**
+/// Since ADR-0007 v1.9 that is three lists, not one — this one plus
+/// [`PathsConfig::exclude`] and [`PathsConfig::opaque`], which merge for exactly
+/// the reason below and through the same [`merge_patterns`]. They differ in one
+/// respect, and it is deliberate: `[debt] ignore` has a **reset**
+/// ([`DebtConfig::ignore_reset`]) and the `[paths]` lists have none, because a
+/// reset on a key that decides what is *in the graph* would let a committed
+/// project file widen what is read over a user's own declaration.
+///
+/// The keys that stay replace-wins, and why that is a decision rather than an
+/// oversight:
 ///
 /// - `[workspace]`/`[standalone]` `roots`/`repos` are **discovery** lists: a
 ///   merge would silently serve repos the project never named, which is a

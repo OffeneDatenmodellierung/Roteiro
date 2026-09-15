@@ -203,6 +203,22 @@ pub trait Extractor {
         let _ = path;
         true
     }
+
+    /// The policy itself, for the one reader that needs to ask about a path it
+    /// has not been handed.
+    ///
+    /// [`Extractor::reads`] and [`Extractor::mines`] answer about a *given* path,
+    /// which suits every reader that is iterating one. The submodule reader is
+    /// different: it reads `.gitmodules` to derive facts about `vendor/dep`, so
+    /// the decision about the **source** file happens inside `rto_graph::git`,
+    /// below the extractor, and that code needs the policy rather than an answer
+    /// about a path chosen for it.
+    ///
+    /// Defaults to the empty policy, so an implementation that ignores it behaves
+    /// exactly as before.
+    fn paths(&self) -> &PathPolicy {
+        PathPolicy::empty()
+    }
 }
 
 /// What `roteiro sync` ingests: **which paths** it reads (ADR-0007 `[paths]`),
@@ -389,6 +405,10 @@ impl Extractor for Registry<'_> {
 
     fn mines(&self, path: &str) -> bool {
         self.ingest.class(path).mines()
+    }
+
+    fn paths(&self) -> &PathPolicy {
+        self.ingest.paths
     }
 
     fn env_tag(&self) -> u64 {

@@ -170,7 +170,11 @@ pub fn sync(
     let committed = extract_committed(repo, cache, extractor)?;
     let mut assembled = flatten(committed.by_path);
     resolve_calls(&mut assembled);
-    append_submodule_nodes(repo.submodules()?, extractor, &mut assembled);
+    append_submodule_nodes(
+        repo.submodules(extractor.paths())?,
+        extractor,
+        &mut assembled,
+    );
     let total = file_count(&assembled);
     store.reconcile(&assembled, Some(&tree))?;
     store.set_sync_env(&env)?;
@@ -316,7 +320,11 @@ fn try_incremental(
     // then reconcile to derived-only — identical to what the full path produces.
     let mut assembled = FactSet { nodes, edges };
     resolve_calls(&mut assembled);
-    append_submodule_nodes(repo.submodules()?, extractor, &mut assembled);
+    append_submodule_nodes(
+        repo.submodules(extractor.paths())?,
+        extractor,
+        &mut assembled,
+    );
     let total = file_count(&assembled);
     store.reconcile(&assembled, Some(head_tree))?;
     store.set_sync_env(env)?;
@@ -479,7 +487,11 @@ pub fn sync_worktree(
 
     let mut assembled = flatten(by_path);
     resolve_calls(&mut assembled);
-    append_submodule_nodes(repo.submodules()?, extractor, &mut assembled);
+    append_submodule_nodes(
+        repo.submodules(extractor.paths())?,
+        extractor,
+        &mut assembled,
+    );
     store.reconcile(&assembled, Some(&state))?;
     store.set_sync_env(&env)?;
     store.set_synced_worktree(&worktree_id(repo))?;
@@ -553,7 +565,11 @@ pub fn sync_index(
     resolve_calls(&mut assembled);
     // Index mode is "exactly what a commit would record", so submodule pins come
     // from the *staged* gitlinks, not `HEAD` — a staged bump is reflected.
-    append_submodule_nodes(repo.index_submodules()?, extractor, &mut assembled);
+    append_submodule_nodes(
+        repo.index_submodules(extractor.paths())?,
+        extractor,
+        &mut assembled,
+    );
     store.reconcile(&assembled, Some(&state))?;
     store.set_sync_env(&env)?;
     store.set_synced_worktree(&worktree_id(repo))?;
@@ -597,7 +613,11 @@ pub fn sync_tree(
     let extracted = extract_blobs(repo, cache, extractor, repo.blobs_at(rev)?)?;
     let mut assembled = flatten(extracted.by_path);
     resolve_calls(&mut assembled);
-    append_submodule_nodes(repo.submodules_at(rev)?, extractor, &mut assembled);
+    append_submodule_nodes(
+        repo.submodules_at(rev, extractor.paths())?,
+        extractor,
+        &mut assembled,
+    );
     let total = file_count(&assembled);
     store.rebuild(&assembled, None)?;
     Ok(SyncReport {
@@ -724,6 +744,16 @@ fn append_submodule_nodes(
 ) {
     let kind = NodeKind::Other(SUBMODULE_KIND.to_owned());
     assembled.nodes.retain(|n| n.kind != kind);
+    // **The source path, not the subject.** Every node below is attributed to
+    // `.gitmodules` (`node.path`), so a repository that declared *that* file out
+    // gets no submodule nodes at all — an excluded path contributes no node, and
+    // this is the only reader where the file supplying the facts is not the file
+    // they are about. The per-submodule check further down asks the other
+    // question, about `vendor/dep` itself; both declarations are real and they
+    // mean different things.
+    if !extractor.reads(crate::git::GITMODULES) {
+        return;
+    }
     for sm in subs {
         // The **sixteenth** reader, and the one that hides: these nodes are
         // assembled from `.gitmodules` after `flatten`, so they never pass

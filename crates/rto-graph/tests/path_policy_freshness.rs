@@ -313,3 +313,112 @@ fn a_submodule_under_a_declared_path_is_not_a_node() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// **The declaring file is a second key, and it means something different.**
+///
+/// `.gitmodules` supplies the URLs; the facts are about `vendor/dep`. Two
+/// repo-relative paths, so a repository may declare either, and gating one and
+/// not the other was a live defect — the only production reader in the workspace
+/// where the file supplying the facts is not the file they are about.
+///
+/// Asserted as **two separate halves**, because a test covering only `exclude`
+/// passes over a live `opaque` hole: the two classes differ precisely here, and
+/// `opaque` is the subtler one.
+#[test]
+fn declaring_gitmodules_itself_gates_the_source_not_only_the_subject() {
+    let dir = fresh_dir("gitmodules-source");
+    git(&dir, &["init", "-q"]);
+    write(&dir, "src/lib.rs", "pub struct Thing;\n");
+    write(
+        &dir,
+        ".gitmodules",
+        "[submodule \"vendor/dep\"]\n\tpath = vendor/dep\n\turl = https://example.invalid/dep.git\n",
+    );
+    git(&dir, &["add", "."]);
+    let fake = "0000000000000000000000000000000000000001";
+    git(
+        &dir,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{fake},vendor/dep"),
+        ],
+    );
+    git(&dir, &["commit", "-q", "-m", "submodule"]);
+
+    let repo = Repo::discover(&dir).expect("discover");
+    let cache = ObjectCache::open(repo.common_dir().join("roteiro/objects")).expect("cache");
+
+    let submodule_nodes = |store: &Store| -> Vec<rto_graph::Node> {
+        store
+            .all_nodes()
+            .expect("nodes")
+            .into_iter()
+            .filter(|n| n.key.starts_with("submodule:"))
+            .collect()
+    };
+
+    // Undeclared: a node exists and carries the URL parsed out of `.gitmodules`.
+    // Without this the two halves below would be measuring an empty tree.
+    let mut open_store = Store::open_in_memory().expect("store");
+    sync(
+        &mut open_store,
+        &repo,
+        &cache,
+        &Registry::new(IngestConfig::default()),
+    )
+    .expect("cold");
+    let open = submodule_nodes(&open_store);
+    assert_eq!(open.len(), 1, "one submodule node without a declaration");
+    assert_eq!(
+        open[0].meta["url"], "https://example.invalid/dep.git",
+        "and its URL is derived from `.gitmodules`' contents"
+    );
+
+    // Half one — `exclude = [".gitmodules"]`. Every submodule node is attributed
+    // to that file (`node.path`), so an excluded source contributes none.
+    let excluded = PathPolicy::new(vec![".gitmodules".to_owned()], Vec::new());
+    let mut ex_store = Store::open_in_memory().expect("store");
+    sync(
+        &mut ex_store,
+        &repo,
+        &cache,
+        &Registry::new(IngestConfig::default().with_paths(&excluded)),
+    )
+    .expect("excluded");
+    assert!(
+        submodule_nodes(&ex_store).is_empty(),
+        "an excluded `.gitmodules` contributes no node: {:?}",
+        submodule_nodes(&ex_store)
+            .iter()
+            .map(|n| &n.key)
+            .collect::<Vec<_>>()
+    );
+
+    // Half two — `opaque = [".gitmodules"]`. Identity survives; the URL does not,
+    // because it is the one field derived from what the bytes *say*. Path and sha
+    // are gitlink facts read out of the tree, so they stay.
+    let opaque = PathPolicy::new(Vec::new(), vec![".gitmodules".to_owned()]);
+    let mut op_store = Store::open_in_memory().expect("store");
+    sync(
+        &mut op_store,
+        &repo,
+        &cache,
+        &Registry::new(IngestConfig::default().with_paths(&opaque)),
+    )
+    .expect("opaque");
+    let op = submodule_nodes(&op_store);
+    assert_eq!(op.len(), 1, "the gitlink is still a fact about the tree");
+    assert!(
+        op[0].meta["url"].is_null(),
+        "but no URL may be derived from an opaque file's contents: {}",
+        op[0].meta
+    );
+    assert_eq!(
+        op[0].meta["path"], "vendor/dep",
+        "while the gitlink's own facts survive"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}

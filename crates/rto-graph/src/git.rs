@@ -100,6 +100,14 @@ fn blob_at<'p>(
     Ok(found)
 }
 
+/// The file a repository declares its submodule URLs in — the **source** path for
+/// every submodule fact, distinct from the **subject** path each fact is about.
+///
+/// A named constant because two modules must agree on it: `git` asks the policy
+/// about it before reading the blob, and `sync` asks about it before attributing
+/// a node to it. A literal in both places is how the two drift apart.
+pub(crate) const GITMODULES: &str = ".gitmodules";
+
 /// A discovered git repository.
 pub struct Repo {
     inner: gix::Repository,
@@ -431,9 +439,9 @@ impl Repo {
     /// # Errors
     /// Returns [`GitError`] if the tree cannot be traversed, `.gitmodules` cannot
     /// be read, or a path is not valid UTF-8.
-    pub fn submodules(&self) -> Result<Vec<Submodule>, GitError> {
+    pub fn submodules(&self, paths: &crate::PathPolicy) -> Result<Vec<Submodule>, GitError> {
         let tree = self.inner.head_tree().map_err(ge)?;
-        self.submodules_in_tree(&tree)
+        self.submodules_in_tree(&tree, paths)
     }
 
     /// Every git submodule pinned at an arbitrary commit/tree `rev`, sorted by path
@@ -443,13 +451,21 @@ impl Repo {
     ///
     /// # Errors
     /// As [`Repo::submodules`], plus if `rev` cannot be resolved to a tree.
-    pub fn submodules_at(&self, rev: &str) -> Result<Vec<Submodule>, GitError> {
+    pub fn submodules_at(
+        &self,
+        rev: &str,
+        paths: &crate::PathPolicy,
+    ) -> Result<Vec<Submodule>, GitError> {
         let tree = self.tree_by_rev(rev)?;
-        self.submodules_in_tree(&tree)
+        self.submodules_in_tree(&tree, paths)
     }
 
     /// Collect the submodule gitlinks (and `.gitmodules` URLs) in `tree`.
-    fn submodules_in_tree(&self, tree: &gix::Tree<'_>) -> Result<Vec<Submodule>, GitError> {
+    fn submodules_in_tree(
+        &self,
+        tree: &gix::Tree<'_>,
+        paths: &crate::PathPolicy,
+    ) -> Result<Vec<Submodule>, GitError> {
         let mut recorder = gix::traverse::tree::Recorder::default();
         tree.traverse().breadthfirst(&mut recorder).map_err(ge)?;
 
@@ -464,7 +480,7 @@ impl Repo {
                 gitmodules = Some(entry.oid);
             }
         }
-        self.assemble_submodules(links, gitmodules)
+        self.assemble_submodules(links, gitmodules, paths)
     }
 
     /// Every git submodule pinned in the **staged index** (the tree a commit would
@@ -474,7 +490,7 @@ impl Repo {
     ///
     /// # Errors
     /// As [`Repo::submodules`], plus index-load failure.
-    pub fn index_submodules(&self) -> Result<Vec<Submodule>, GitError> {
+    pub fn index_submodules(&self, paths: &crate::PathPolicy) -> Result<Vec<Submodule>, GitError> {
         use gix::index::entry::Mode;
         let index = self.inner.index_or_load_from_head().map_err(ge)?;
         let mut links: Vec<(String, String)> = Vec::new();
@@ -493,26 +509,54 @@ impl Repo {
                 gitmodules = Some(entry.id);
             }
         }
-        self.assemble_submodules(links, gitmodules)
+        self.assemble_submodules(links, gitmodules, paths)
     }
 
     /// Assemble `(path, sha)` gitlinks into sorted [`Submodule`]s, resolving each
     /// path's URL from the `.gitmodules` blob at `gitmodules` (when present). Shared
     /// by the `HEAD`-tree and index submodule readers.
+    ///
+    /// # Two paths, two declarations
+    ///
+    /// This is the one production reader in the workspace that reads **one** file
+    /// to derive facts about **another**: `.gitmodules` supplies the URLs, and the
+    /// facts are about `vendor/dep`. Two repo-relative paths therefore appear, a
+    /// repository may declare either, and they mean different things — so `paths`
+    /// is consulted for the *source* here and for the *subject* where the nodes
+    /// are built (`crate::sync::append_submodule_nodes`). Gating one key and not
+    /// the other was a live defect: `exclude = [".gitmodules"]` still read the
+    /// blob and still produced nodes, and `opaque = [".gitmodules"]` still put
+    /// URLs parsed out of it into the graph.
+    ///
+    /// The two classes act on the two questions the policy already asks:
+    ///
+    /// * [`crate::PathClass::reads`] is false for `exclude`, so the blob is not
+    ///   read at all — which is what makes "the bytes are never read" true rather
+    ///   than nearly true.
+    /// * [`crate::PathClass::mines`] is false for `opaque` as well, so no URL is
+    ///   derived. The path and sha survive, because those are **gitlink** facts
+    ///   read out of the tree rather than claims made by `.gitmodules`.
     fn assemble_submodules(
         &self,
         links: Vec<(String, String)>,
         gitmodules: Option<gix::ObjectId>,
+        paths: &crate::PathPolicy,
     ) -> Result<Vec<Submodule>, GitError> {
         if links.is_empty() {
             return Ok(Vec::new());
         }
+        let mines_gitmodules = paths.classify(GITMODULES).mines();
         let urls = match gitmodules {
-            Some(oid) => {
+            // `mines()` rather than `reads()`: an opaque `.gitmodules` may be read
+            // for its own identity, but nothing may be derived from what it says,
+            // and a URL is exactly that. Skipping the read for both classes is the
+            // stronger half of the same answer and costs nothing here — there is
+            // no other fact this blob contributes.
+            Some(oid) if mines_gitmodules => {
                 let bytes = self.read_blob(&oid.to_hex().to_string())?;
                 parse_gitmodules(&String::from_utf8_lossy(&bytes))
             }
-            None => std::collections::HashMap::new(),
+            _ => std::collections::HashMap::new(),
         };
         let mut out: Vec<Submodule> = links
             .into_iter()
