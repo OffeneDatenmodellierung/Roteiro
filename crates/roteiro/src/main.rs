@@ -7062,6 +7062,152 @@ fn run_okf_lint(path: &str, json: bool) -> anyhow::Result<()> {
     print_okf_findings(&report, json, false)
 }
 
+/// A foreign scalar as an `okf` report shows it: escaped **exactly once**, with
+/// the fact that escaping changed it recorded for [`OKF_ESCAPED_NOTE`].
+///
+/// # What counts as foreign here, and how the list was established
+///
+/// Every value in an `okf` report comes from one of three places, and the class
+/// decides the treatment:
+///
+/// - **foreign** — a concept id, a bundle path, a status or runtime the bundle
+///   declared, an actor it named, a parser's quotation of its bytes. Escaped.
+/// - **ours** — a severity, a lint code, a tier, a scope, `checkable_languages`,
+///   every count, and every word of prose in these functions. Left alone; they
+///   are `&'static str` or `usize` and no bundle can reach them.
+/// - **assembled** — a line, or a fragment like `okf_computations_lines`'s
+///   `where_`, built from values already escaped. Never escaped again, which is
+///   what [`rto_graph::screen::Diagnostic`] exists to make non-accidental.
+///
+/// The classification was made by walking **backwards from every `println!`** in
+/// this family to the field it prints and then to that field's type, rather than
+/// forwards from a type to its uses — the direction that missed three sites on
+/// #865. A `usize` or a `&'static str` is ours by construction; a `String` or an
+/// `Option<String>` on a report struct came out of a bundle unless the struct's
+/// own documentation says otherwise.
+///
+/// # The copy-back decision, and what it costs
+///
+/// Several of these fields exist to be **pasted into the next command**: the
+/// `where_` of a finding, a trust line's concept id, a computation's concept, a
+/// link's two ends, and every id in `okf diff`. Escaping them changes what a
+/// reader copies. The decision is to **escape anyway**, everywhere, and to say
+/// so on the report when it made a difference.
+///
+/// The argument is that the round trip an unescaped id preserves is one that was
+/// already broken:
+///
+/// - The escape is a **no-op on every id a person could actually paste**. The
+///   allowlist passes anything that puts a mark on the page through
+///   byte-identical, so an ASCII id, a CJK id and an NFD-accented id all survive
+///   unchanged and stay pasteable. The only ids the escape alters are ones
+///   carrying characters that render as nothing or render as their own reverse.
+/// - For exactly those ids, **the raw form is not pasteable either**. What the
+///   terminal shows is not what the bytes are, so selecting the visible text
+///   copies something else — and the operator cannot see which part.
+/// - Leaving the id raw to protect the paste puts the one value that can reverse
+///   the rest of the line outside the guard. In `okf diff` that is the whole
+///   line's meaning: `added` and `removed` sit either side of an arrow a single
+///   U+202E turns around.
+///
+/// So the cost is named rather than avoided: **an id whose printed form carries
+/// a `\u{…}` or a doubled `\\` cannot be copied out of the report.** `--json` is
+/// the path for those bytes, and it is deliberately not escaped — the JSON
+/// document is read by a machine, which is a different boundary with a different
+/// answer. [`OKF_ESCAPED_NOTE`] is printed when, and only when, some value on
+/// the report was changed by being shown, so a reader meets the caveat on the
+/// run where it applies instead of learning it from documentation.
+///
+/// # Why a `Cell` and not a second escaper
+///
+/// `escaped` records a call; it does not perform one. The single escape is
+/// [`rto_graph::screen::escape_for_diagnostic`] and there is no other. The
+/// `Cell` is what lets several of these appear in one `format!` — two `&mut`
+/// borrows in one expression do not compile, and threading a flag out by hand
+/// across forty call sites is how one gets missed.
+fn shown_field(raw: &str, escaped: &std::cell::Cell<bool>) -> rto_graph::screen::Diagnostic {
+    let shown = rto_graph::screen::escape_for_diagnostic(raw);
+    escaped.set(escaped.get() || shown.as_str() != raw);
+    shown
+}
+
+/// What a report says when showing a value changed it.
+///
+/// Printed only when [`shown_field`] altered something, because a caveat on
+/// every run is a caveat nobody reads. The wording names both escapes, since the
+/// doubled backslash is the one an operator meets on Windows without any hostile
+/// bundle being involved.
+const OKF_ESCAPED_NOTE: &str = "  note: a value above is shown escaped — `\\\\` is one \
+     backslash, and `\\u{…}` names a character that puts no mark on the page. Those are \
+     not the literal bytes; `--json` carries those.";
+
+/// Append [`OKF_ESCAPED_NOTE`] when some field on this report was altered by
+/// being shown.
+fn push_escaped_note(out: &mut Vec<String>, escaped: &std::cell::Cell<bool>) {
+    if escaped.get() {
+        out.push(OKF_ESCAPED_NOTE.to_owned());
+    }
+}
+
+/// A check report as report lines.
+///
+/// Returning lines rather than printing them follows [`okf_report_lines`], and
+/// for the same reason: the escaping here has to be checkable by a test, and a
+/// `println!` is not. [`shown_field`] carries which fields are foreign and why.
+fn okf_findings_lines(report: &rto_render::okf::conform::CheckReport) -> Vec<String> {
+    let escaped = std::cell::Cell::new(false);
+    // `report.check` is `validate` or `lint`, a `&'static str` this workspace
+    // chose; the counts are ours. The root is the peer's.
+    let mut out = vec![format!(
+        "{}: {} concept(s), {} finding(s) [{}]",
+        shown_field(&report.root, &escaped),
+        report.concepts,
+        report.findings.len(),
+        report.check
+    )];
+    if report.concepts == 0 {
+        // Nothing was examined, so "no findings" would be a green that means
+        // "could not look". Say which it is — but say it and carry on, because
+        // a bundle with no *concepts* can still have errors: a root `index.md`
+        // that does not parse produces one, and returning here would have
+        // exited zero on it.
+        out.push("  no concepts examined — the bundle contains none".to_owned());
+    }
+    for finding in &report.findings {
+        // `severity` and `code` are this crate's own vocabulary. `where_` is a
+        // concept id or a bundle-relative path, and `message` was assembled
+        // upstream around the bundle's own words — it has never been escaped, so
+        // escaping it here is its first pass and not a second.
+        let code = finding.code.map_or_else(String::new, |c| format!("[{c}] "));
+        let where_ = finding
+            .concept
+            .as_deref()
+            .or(finding.path.as_deref())
+            .unwrap_or("-");
+        out.push(format!(
+            "  {:<7} {}: {code}{}",
+            finding.severity,
+            shown_field(where_, &escaped),
+            shown_field(&finding.message, &escaped)
+        ));
+    }
+    if report.findings.is_empty() {
+        out.push(format!(
+            "  no findings across {} concept(s)",
+            report.concepts
+        ));
+    } else {
+        out.push(format!(
+            "  {} error(s), {} warning(s), {} info",
+            report.errors,
+            report.warnings,
+            report.findings.len() - report.errors - report.warnings
+        ));
+    }
+    push_escaped_note(&mut out, &escaped);
+    out
+}
+
 /// Print a check report, and gate on its errors when the caller is a gate.
 ///
 /// `gates` is passed rather than derived from `report.errors`, because the two
@@ -7081,47 +7227,77 @@ fn print_okf_findings(
         return Ok(());
     }
 
-    println!(
-        "{}: {} concept(s), {} finding(s) [{}]",
-        report.root,
-        report.concepts,
-        report.findings.len(),
-        report.check
-    );
-    if report.concepts == 0 {
-        // Nothing was examined, so "no findings" would be a green that means
-        // "could not look". Say which it is — but say it and carry on, because
-        // a bundle with no *concepts* can still have errors: a root `index.md`
-        // that does not parse produces one, and returning here would have
-        // exited zero on it.
-        println!("  no concepts examined — the bundle contains none");
-    }
-    for finding in &report.findings {
-        let code = finding.code.map_or_else(String::new, |c| format!("[{c}] "));
-        let where_ = finding
-            .concept
-            .as_deref()
-            .or(finding.path.as_deref())
-            .unwrap_or("-");
-        println!(
-            "  {:<7} {where_}: {code}{}",
-            finding.severity, finding.message
-        );
-    }
-    if report.findings.is_empty() {
-        println!("  no findings across {} concept(s)", report.concepts);
-    } else {
-        println!(
-            "  {} error(s), {} warning(s), {} info",
-            report.errors,
-            report.warnings,
-            report.findings.len() - report.errors - report.warnings
-        );
+    for line in okf_findings_lines(report) {
+        println!("{line}");
     }
     if gates && !report.passed() {
         exit_gate_failure();
     }
     Ok(())
+}
+
+/// A syntax report as report lines. See [`shown_field`] for the classification.
+fn okf_syntax_lines(
+    report: &rto_render::okf::inspect::SyntaxReport,
+    all_blocks: bool,
+) -> Vec<String> {
+    let escaped = std::cell::Cell::new(false);
+    let mut out = vec![format!(
+        "{}: {} block(s) checked, {} skipped [{}]",
+        shown_field(&report.root, &escaped),
+        report.checked,
+        report.skipped,
+        report.scope
+    )];
+    // `report.languages` is `rto_okf_syntax::checkable_languages()` rendered
+    // through `Language::as_str`, which returns `&'static str`: this build's
+    // capability, not anything the bundle chose. Joined raw, deliberately.
+    out.push(format!(
+        "  this build checks: {}",
+        report.languages.join(", ")
+    ));
+    if report.checked == 0 {
+        // Nothing was looked at, so "no findings" would be a green that means
+        // "could not look". Say which it is.
+        out.push(format!(
+            "  nothing to check — no block carried a language this build can parse{}",
+            if all_blocks {
+                ""
+            } else {
+                "; `--all-blocks` widens beyond Attested Computations"
+            }
+        ));
+    }
+    for f in &report.findings {
+        // An unknown line prints as `?`, not as a plausible-looking number. A
+        // reader who is sent to line 1 and finds nothing wrong there stops
+        // trusting every other line in the report.
+        //
+        // `at` is a `usize` this crate counted, so it is ours even though the
+        // bundle's own code block decided what it counted to. The other three
+        // are the peer's: a bundle-relative path, a concept id, and the
+        // parser's message, which quotes the bundle's bytes and names the
+        // language tag the bundle wrote.
+        let at = f.line.map_or_else(|| "?".to_owned(), |l| l.to_string());
+        out.push(format!(
+            "  {}:{at} [{}] {}",
+            shown_field(&f.path, &escaped),
+            shown_field(&f.concept, &escaped),
+            shown_field(&f.message, &escaped)
+        ));
+    }
+    if report.findings.is_empty() {
+        if report.checked > 0 {
+            out.push(format!("  all {} block(s) parse", report.checked));
+        }
+    } else {
+        out.push(format!(
+            "  {} block(s) did not parse",
+            report.findings.len()
+        ));
+    }
+    push_escaped_note(&mut out, &escaped);
+    out
 }
 
 /// `roteiro okf syntax` — do the bundle's code blocks parse?
@@ -7139,39 +7315,92 @@ fn run_okf_syntax(path: &str, all_blocks: bool, json: bool) -> anyhow::Result<()
         }
         return Ok(());
     }
-    println!(
-        "{}: {} block(s) checked, {} skipped [{}]",
-        report.root, report.checked, report.skipped, report.scope
-    );
-    println!("  this build checks: {}", report.languages.join(", "));
-    if report.checked == 0 {
-        // Nothing was looked at, so "no findings" would be a green that means
-        // "could not look". Say which it is.
-        println!(
-            "  nothing to check — no block carried a language this build can parse{}",
-            if all_blocks {
-                ""
-            } else {
-                "; `--all-blocks` widens beyond Attested Computations"
-            }
-        );
+    for line in okf_syntax_lines(&report, all_blocks) {
+        println!("{line}");
     }
-    for f in &report.findings {
-        // An unknown line prints as `?`, not as a plausible-looking number. A
-        // reader who is sent to line 1 and finds nothing wrong there stops
-        // trusting every other line in the report.
-        let at = f.line.map_or_else(|| "?".to_owned(), |l| l.to_string());
-        println!("  {}:{at} [{}] {}", f.path, f.concept, f.message);
-    }
-    if report.findings.is_empty() {
-        if report.checked > 0 {
-            println!("  all {} block(s) parse", report.checked);
-        }
-    } else {
-        println!("  {} block(s) did not parse", report.findings.len());
+    if !report.passed() {
         exit_gate_failure();
     }
     Ok(())
+}
+
+/// A trust summary as report lines. See [`shown_field`] for the classification.
+fn okf_trust_lines(report: &rto_render::okf::inspect::TrustSummary) -> Vec<String> {
+    let escaped = std::cell::Cell::new(false);
+    let mut out = vec![format!(
+        "{}: {} concept(s){}",
+        shown_field(&report.root, &escaped),
+        report.total,
+        report.okf_version.as_ref().map_or_else(String::new, |v| {
+            // The bundle declares this string; §4 does not constrain it to a
+            // shape, so it is as foreign as the path above it.
+            format!(", okf_version {}", shown_field(v, &escaped))
+        })
+    )];
+    out.push(format!(
+        "  human-reviewed {}, machine-confirmed {}, unverified {}",
+        report.human_reviewed, report.machine_confirmed, report.unverified
+    ));
+    // The date is printed whether or not `--today` was given. A tiered count
+    // with no date beside it cannot be compared with the same bundle read a
+    // month later, and staleness is the one number here that moves on its own.
+    //
+    // `today` is an `okf_core::Date` rendered back out, so it has already been
+    // parsed as `YYYY-MM-DD` — a shape, not a string somebody chose.
+    out.push(format!("  stale {} (as of {})", report.stale, report.today));
+    for c in &report.concepts {
+        // Each actor is escaped **before** the join, not after: the separator is
+        // ours and joining first would hand a hostile name the chance to look
+        // like two entries, or to reverse the ones after it.
+        let by = if c.verified_by.is_empty() {
+            String::new()
+        } else {
+            let names: Vec<String> = c
+                .verified_by
+                .iter()
+                .map(|n| shown_field(n, &escaped).to_string())
+                .collect();
+            format!(" — verified by {}", names.join(", "))
+        };
+        // Marked on the tier line rather than listed separately: "human-reviewed
+        // and stale" is the combination worth seeing, and splitting it into two
+        // lists is what lets a reader see the tier and stop reading.
+        //
+        // `stale_after` is the timestamp **exactly as the document wrote it**,
+        // which its own doc comment says — so it is the bundle's bytes, not a
+        // parsed date, and it is escaped.
+        let stale = if c.stale {
+            c.stale_after.as_ref().map_or_else(
+                || " [STALE]".to_owned(),
+                |after| format!(" [STALE since {}]", shown_field(after, &escaped)),
+            )
+        } else {
+            String::new()
+        };
+        // `{:<18}` pads `c.tier`, which is a `&'static str` from §5.3's fixed
+        // vocabulary — so the width and the printed value are the same string
+        // and no bundle can change either. `c.id` follows the padding rather
+        // than sitting inside it, which is what keeps the column honest: a
+        // widened id pushes nothing, because nothing is aligned after it. It is
+        // escaped all the same, because `{by}` and `{stale}` come after it and
+        // `[STALE]` is the one marker on this line worth reversing.
+        out.push(format!(
+            "  {:<18} {}{by}{stale}",
+            c.tier,
+            shown_field(&c.id, &escaped)
+        ));
+    }
+    // The tier is a claim the *bundle* makes, and `--trust` is what adopts it.
+    // Saying so here keeps the two commands legible as one decision.
+    if report.human_reviewed > 0 || report.machine_confirmed > 0 {
+        out.push(
+            "these are the peer's claims, not this graph's: `import --from okf --trust` \
+             adopts them, and without --trust every concept arrives as external-inferred"
+                .to_owned(),
+        );
+    }
+    push_escaped_note(&mut out, &escaped);
+    out
 }
 
 /// `roteiro okf trust` — §5.3's tier per concept.
@@ -7181,49 +7410,8 @@ fn run_okf_trust(path: &str, today: Option<&str>, check: bool, json: bool) -> an
         emit_json(&summary)?;
         return gate_stale(check, summary.stale);
     }
-    println!(
-        "{}: {} concept(s){}",
-        summary.root,
-        summary.total,
-        summary
-            .okf_version
-            .as_ref()
-            .map_or_else(String::new, |v| format!(", okf_version {v}"))
-    );
-    println!(
-        "  human-reviewed {}, machine-confirmed {}, unverified {}",
-        summary.human_reviewed, summary.machine_confirmed, summary.unverified
-    );
-    // The date is printed whether or not `--today` was given. A tiered count
-    // with no date beside it cannot be compared with the same bundle read a
-    // month later, and staleness is the one number here that moves on its own.
-    println!("  stale {} (as of {})", summary.stale, summary.today);
-    for c in &summary.concepts {
-        let by = if c.verified_by.is_empty() {
-            String::new()
-        } else {
-            format!(" — verified by {}", c.verified_by.join(", "))
-        };
-        // Marked on the tier line rather than listed separately: "human-reviewed
-        // and stale" is the combination worth seeing, and splitting it into two
-        // lists is what lets a reader see the tier and stop reading.
-        let stale = if c.stale {
-            c.stale_after.as_ref().map_or_else(
-                || " [STALE]".to_owned(),
-                |after| format!(" [STALE since {after}]"),
-            )
-        } else {
-            String::new()
-        };
-        println!("  {:<18} {}{by}{stale}", c.tier, c.id);
-    }
-    // The tier is a claim the *bundle* makes, and `--trust` is what adopts it.
-    // Saying so here keeps the two commands legible as one decision.
-    if summary.human_reviewed > 0 || summary.machine_confirmed > 0 {
-        println!(
-            "these are the peer's claims, not this graph's: `import --from okf --trust` \
-             adopts them, and without --trust every concept arrives as external-inferred"
-        );
+    for line in okf_trust_lines(&summary) {
+        println!("{line}");
     }
     gate_stale(check, summary.stale)
 }
@@ -7240,72 +7428,121 @@ fn gate_stale(check: bool, stale: usize) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A computation report as report lines. See [`shown_field`].
+fn okf_computations_lines(report: &rto_render::okf::inspect::ComputationReport) -> Vec<String> {
+    let escaped = std::cell::Cell::new(false);
+    let mut out = vec![format!(
+        "{}: {} concept(s), {} computation(s)",
+        shown_field(&report.root, &escaped),
+        report.concepts,
+        report.computations
+    )];
+    if report.computations == 0 {
+        // Said plainly, because §10 is optional and "none" is a conformant
+        // answer. Three of the four published bundles declare none, and a
+        // silent empty listing reads as a command that failed.
+        out.push("  this bundle declares no attested computations".to_owned());
+        push_escaped_note(&mut out, &escaped);
+        return out;
+    }
+    out.push(format!(
+        // `missing` is only *one* of the three ways a contract is
+        // incomplete, so calling it "incomplete" here contradicted the gate:
+        // a bundle whose sole contract declares no runtime printed
+        // "incomplete 0" and then failed `--check`. The line now names what
+        // it counts, and the total the gate uses is printed separately.
+        "  inline {}, by file {}, no code {}",
+        report.inline, report.file, report.missing
+    ));
+    if !report.runtimes.is_empty() {
+        // `runtimes` is collected from the bundle's own `runtime:` keys, not
+        // from a vocabulary this crate defines — so each one is escaped, and
+        // each one before the join.
+        let runtimes: Vec<String> = report
+            .runtimes
+            .iter()
+            .map(|r| shown_field(r, &escaped).to_string())
+            .collect();
+        out.push(format!("  runtimes: {}", runtimes.join(", ")));
+    }
+    for e in &report.entries {
+        // `e.source` is `inline`, `file` or neither — this crate's own tag — and
+        // `e.lines` is a count. The runtime, the language tag and the referenced
+        // filename are all the bundle's.
+        let runtime = e.runtime.as_ref().map_or_else(
+            || "(no runtime)".to_owned(),
+            |r| shown_field(r, &escaped).to_string(),
+        );
+        // `where_` is **assembled** from values already escaped above, so it is
+        // interpolated below as itself and never escaped a second time — the
+        // rule `rto_graph::screen::Diagnostic` states.
+        let where_ = match e.source {
+            "inline" => e.lines.map_or_else(
+                || "inline".to_owned(),
+                |n| {
+                    let lang = e.language.as_ref().map_or_else(
+                        || "untagged".to_owned(),
+                        |l| shown_field(l, &escaped).to_string(),
+                    );
+                    format!("inline {lang}, {n} line(s)")
+                },
+            ),
+            "file" => e.file.as_ref().map_or_else(
+                || "file".to_owned(),
+                |f| format!("file {}", shown_field(f, &escaped)),
+            ),
+            _ => "no code".to_owned(),
+        };
+        out.push(format!(
+            "  {} — {runtime}, {where_}",
+            shown_field(&e.concept, &escaped)
+        ));
+        if !e.parameters.is_empty() {
+            // Escaped per parameter, before the join. A joined list is where one
+            // hostile entry reorders the rest of them.
+            let parameters: Vec<String> = e
+                .parameters
+                .iter()
+                .map(|p| shown_field(p, &escaped).to_string())
+                .collect();
+            out.push(format!("      parameters: {}", parameters.join(", ")));
+        }
+        // Every note is this workspace's own sentence about a missing key.
+        let mut notes = Vec::new();
+        if !e.has_executor {
+            notes.push("no executor");
+        }
+        if !e.has_attester {
+            notes.push("no attester");
+        }
+        if e.redundant_inline {
+            notes.push("both an inline block and a computation: file");
+        }
+        if !notes.is_empty() {
+            out.push(format!("      {}", notes.join("; ")));
+        }
+    }
+    let incomplete = report.incomplete();
+    if incomplete > 0 {
+        out.push(format!("  {incomplete} contract(s) incomplete"));
+    }
+    push_escaped_note(&mut out, &escaped);
+    out
+}
+
 /// `roteiro okf computations` — the bundle's Attested Computations (§10).
 fn run_okf_computations(path: &str, check: bool, json: bool) -> anyhow::Result<()> {
     let report = rto_render::okf::inspect::computation_report(okf_bundle_root(path)?)?;
     if json {
         emit_json(&report)?;
     } else {
-        println!(
-            "{}: {} concept(s), {} computation(s)",
-            report.root, report.concepts, report.computations
-        );
+        for line in okf_computations_lines(&report) {
+            println!("{line}");
+        }
         if report.computations == 0 {
-            // Said plainly, because §10 is optional and "none" is a conformant
-            // answer. Three of the four published bundles declare none, and a
-            // silent empty listing reads as a command that failed.
-            println!("  this bundle declares no attested computations");
+            // Returns before `--check`, as the printing version did: a bundle
+            // that declares none has no contract to be incomplete.
             return Ok(());
-        }
-        println!(
-            // `missing` is only *one* of the three ways a contract is
-            // incomplete, so calling it "incomplete" here contradicted the gate:
-            // a bundle whose sole contract declares no runtime printed
-            // "incomplete 0" and then failed `--check`. The line now names what
-            // it counts, and the total the gate uses is printed separately.
-            "  inline {}, by file {}, no code {}",
-            report.inline, report.file, report.missing
-        );
-        if !report.runtimes.is_empty() {
-            println!("  runtimes: {}", report.runtimes.join(", "));
-        }
-        for e in &report.entries {
-            let runtime = e.runtime.as_deref().unwrap_or("(no runtime)");
-            let where_ = match e.source {
-                "inline" => e.lines.map_or_else(
-                    || "inline".to_owned(),
-                    |n| {
-                        let lang = e.language.as_deref().unwrap_or("untagged");
-                        format!("inline {lang}, {n} line(s)")
-                    },
-                ),
-                "file" => e
-                    .file
-                    .as_ref()
-                    .map_or_else(|| "file".to_owned(), |f| format!("file {f}")),
-                _ => "no code".to_owned(),
-            };
-            println!("  {} — {runtime}, {where_}", e.concept);
-            if !e.parameters.is_empty() {
-                println!("      parameters: {}", e.parameters.join(", "));
-            }
-            let mut notes = Vec::new();
-            if !e.has_executor {
-                notes.push("no executor");
-            }
-            if !e.has_attester {
-                notes.push("no attester");
-            }
-            if e.redundant_inline {
-                notes.push("both an inline block and a computation: file");
-            }
-            if !notes.is_empty() {
-                println!("      {}", notes.join("; "));
-            }
-        }
-        let incomplete = report.incomplete();
-        if incomplete > 0 {
-            println!("  {incomplete} contract(s) incomplete");
         }
     }
     if check && !report.is_clean() {
@@ -7314,41 +7551,55 @@ fn run_okf_computations(path: &str, check: bool, json: bool) -> anyhow::Result<(
     Ok(())
 }
 
-/// `roteiro okf info` — what this bundle is, in one answer.
-fn run_okf_info(path: &str, today: Option<&str>, json: bool) -> anyhow::Result<()> {
-    let info = rto_render::okf::inspect::bundle_info(okf_bundle_root(path)?, today)?;
-    if json {
-        emit_json(&info)?;
-        return Ok(());
-    }
-    println!("{}", info.root);
+/// A bundle summary as report lines. See [`shown_field`].
+fn okf_info_lines(info: &rto_render::okf::inspect::BundleInfo) -> Vec<String> {
+    let escaped = std::cell::Cell::new(false);
+    let mut out = vec![shown_field(&info.root, &escaped).to_string()];
     if let Some(title) = &info.title {
-        println!("  title: {title}");
+        // The bundle's own declared title: the most directly peer-chosen string
+        // in this family, and the one a reader is most likely to read as a name
+        // rather than as data.
+        out.push(format!("  title: {}", shown_field(title, &escaped)));
     }
-    println!(
+    out.push(format!(
         "  okf_version: {}",
-        info.okf_version.as_deref().unwrap_or("(not declared)")
-    );
-    println!("  concepts: {}", info.concepts);
-    println!(
+        info.okf_version.as_ref().map_or_else(
+            || "(not declared)".to_owned(),
+            |v| shown_field(v, &escaped).to_string()
+        )
+    ));
+    out.push(format!("  concepts: {}", info.concepts));
+    out.push(format!(
         "  trust: human-reviewed {}, machine-confirmed {}, unverified {}",
         info.trust.human_reviewed, info.trust.machine_confirmed, info.trust.unverified
-    );
-    println!("  stale: {} (as of {})", info.trust.stale, info.trust.today);
+    ));
+    out.push(format!(
+        "  stale: {} (as of {})",
+        info.trust.stale, info.trust.today
+    ));
     if !info.statuses.is_empty() {
+        // The status key is §5.4's lifecycle value **as the bundle wrote it**,
+        // so it is escaped; the count beside it is ours.
         let statuses: Vec<String> = info
             .statuses
             .iter()
-            .map(|(s, n)| format!("{s} {n}"))
+            .map(|(s, n)| format!("{} {n}", shown_field(s, &escaped)))
             .collect();
-        println!("  status: {}", statuses.join(", "));
+        out.push(format!("  status: {}", statuses.join(", ")));
     }
     let (links, broken) = info.links;
-    println!("  internal links: {links}, broken {broken}");
+    out.push(format!("  internal links: {links}, broken {broken}"));
     let (computations, incomplete) = info.computations;
-    println!("  computations: {computations}, incomplete {incomplete}");
+    out.push(format!(
+        "  computations: {computations}, incomplete {incomplete}"
+    ));
     if !info.runtimes.is_empty() {
-        println!("  runtimes: {}", info.runtimes.join(", "));
+        let runtimes: Vec<String> = info
+            .runtimes
+            .iter()
+            .map(|r| shown_field(r, &escaped).to_string())
+            .collect();
+        out.push(format!("  runtimes: {}", runtimes.join(", ")));
     }
     // Always printed, including the zero. A bundle is not markdown — `okf-core`
     // resolves a frontmatter path to any file — so a conformant bundle can cite a
@@ -7357,22 +7608,24 @@ fn run_okf_info(path: &str, today: Option<&str>, json: bool) -> anyhow::Result<(
     // (ADR-0024). Nothing is opened: path, size and extension come from the
     // directory entry.
     if info.files.files.is_empty() {
-        println!("  other files: none — every file in this bundle is markdown");
+        out.push("  other files: none — every file in this bundle is markdown".to_owned());
     } else {
         // A size that could not be read contributes nothing to the total rather
         // than being counted as zero — the file is still listed, and its own line
         // says the size is unknown.
         let total: u64 = info.files.files.iter().filter_map(|f| f.bytes).sum();
-        println!(
+        out.push(format!(
             "  other files: {} ({}), not markdown and not screened:",
             info.files.files.len(),
             human_bytes(total)
-        );
+        ));
         for f in &info.files.files {
+            // `size` is `human_bytes` over a `u64` from the directory entry, so
+            // it is ours; the path is the peer's.
             let size = f
                 .bytes
                 .map_or_else(|| "size unreadable".to_owned(), human_bytes);
-            println!("      {} ({size})", f.path);
+            out.push(format!("      {} ({size})", shown_field(&f.path, &escaped)));
         }
     }
     // Said even when the list above was empty, and said as a warning rather than
@@ -7380,14 +7633,14 @@ fn run_okf_info(path: &str, today: Option<&str>, json: bool) -> anyhow::Result<(
     // and printing the first when the second holds recreates the very gap this
     // inventory exists to close.
     if !info.files.is_complete() {
-        println!(
+        out.push(format!(
             "  warning: {} {} could not be inspected, so the inventory above is \
              incomplete:",
             info.files.unreadable.len(),
             plural(info.files.unreadable.len(), "entry", "entries")
-        );
+        ));
         for dir in &info.files.unreadable {
-            println!("      {dir}");
+            out.push(format!("      {}", shown_field(dir, &escaped)));
         }
     }
     // Named rather than implied: this command reports, and which one to reach
@@ -7398,11 +7651,72 @@ fn run_okf_info(path: &str, today: Option<&str>, json: bool) -> anyhow::Result<(
     // does, contradicting `docs/OKF_BUNDLE.md`'s table inside the same change.
     // It is pinned by `the_named_gates_are_the_commands_that_actually_gate`,
     // which runs the commands rather than reading this line.
-    println!(
+    out.push(
         "  gates: `okf validate`, `okf syntax`, and `--check` on `links`, `trust`, `computations`"
+            .to_owned(),
     );
-    println!("  reports only: `okf lint`, `okf diff`, and this command");
+    out.push("  reports only: `okf lint`, `okf diff`, and this command".to_owned());
+    push_escaped_note(&mut out, &escaped);
+    out
+}
+
+/// `roteiro okf info` — what this bundle is, in one answer.
+fn run_okf_info(path: &str, today: Option<&str>, json: bool) -> anyhow::Result<()> {
+    let info = rto_render::okf::inspect::bundle_info(okf_bundle_root(path)?, today)?;
+    if json {
+        emit_json(&info)?;
+        return Ok(());
+    }
+    for line in okf_info_lines(&info) {
+        println!("{line}");
+    }
     Ok(())
+}
+
+/// A link report as report lines. See [`shown_field`].
+fn okf_links_lines(
+    report: &rto_render::okf::inspect::LinkReport,
+    broken_only: bool,
+) -> Vec<String> {
+    let escaped = std::cell::Cell::new(false);
+    let mut out = Vec::new();
+    if !broken_only {
+        out.push(format!(
+            "{}: {} concept(s), {} internal link(s)",
+            shown_field(&report.root, &escaped),
+            report.concepts,
+            report.links
+        ));
+    }
+    for link in &report.broken {
+        // Both ends are concept ids the bundle chose, and the arrow between them
+        // is the whole meaning of the line.
+        out.push(format!(
+            "  broken: {} -> {}",
+            shown_field(&link.from, &escaped),
+            shown_field(&link.target, &escaped)
+        ));
+    }
+    // Reported, not gated (issue #778): the bundle contains these, they are
+    // simply not concepts. Named separately rather than folded in with the
+    // dead links, because the whole point is that a reader can tell the two
+    // apart — and suppressed under `--broken-only`, which asks for the
+    // failures alone.
+    if !broken_only {
+        for link in &report.non_concept {
+            out.push(format!(
+                "  not a concept (in the bundle): {} -> {} [{}]",
+                shown_field(&link.from, &escaped),
+                shown_field(&link.target, &escaped),
+                shown_field(&link.path, &escaped)
+            ));
+        }
+    }
+    if report.is_clean() && !broken_only {
+        out.push("  every internal link names something the bundle contains".to_owned());
+    }
+    push_escaped_note(&mut out, &escaped);
+    out
 }
 
 /// `roteiro okf links` — resolve a bundle's internal links.
@@ -7411,30 +7725,8 @@ fn run_okf_links(path: &str, broken_only: bool, check: bool, json: bool) -> anyh
     if json {
         emit_json(&report)?;
     } else {
-        if !broken_only {
-            println!(
-                "{}: {} concept(s), {} internal link(s)",
-                report.root, report.concepts, report.links
-            );
-        }
-        for link in &report.broken {
-            println!("  broken: {} -> {}", link.from, link.target);
-        }
-        // Reported, not gated (issue #778): the bundle contains these, they are
-        // simply not concepts. Named separately rather than folded in with the
-        // dead links, because the whole point is that a reader can tell the two
-        // apart — and suppressed under `--broken-only`, which asks for the
-        // failures alone.
-        if !broken_only {
-            for link in &report.non_concept {
-                println!(
-                    "  not a concept (in the bundle): {} -> {} [{}]",
-                    link.from, link.target, link.path
-                );
-            }
-        }
-        if report.is_clean() && !broken_only {
-            println!("  every internal link names something the bundle contains");
+        for line in okf_links_lines(&report, broken_only) {
+            println!("{line}");
         }
     }
     // `--check` is what makes this a gate; without it a broken link is reported
@@ -7446,6 +7738,85 @@ fn run_okf_links(path: &str, broken_only: bool, check: bool, json: bool) -> anyh
     Ok(())
 }
 
+/// A diff as report lines. See [`shown_field`].
+///
+/// This is the family's worst case and the reason the copy-back question had to
+/// be settled rather than deferred: **every** line here is two peer-chosen
+/// values with an arrow or a verb between them, and `added` reading as `removed`
+/// is a wrong answer rather than a mangled one.
+fn okf_diff_lines(diff: &rto_render::okf::inspect::DiffReport) -> Vec<String> {
+    let escaped = std::cell::Cell::new(false);
+    let mut out = vec![format!(
+        "{} -> {}",
+        shown_field(&diff.before, &escaped),
+        shown_field(&diff.after, &escaped)
+    )];
+    if diff.is_unchanged() {
+        out.push("  no semantic change".to_owned());
+        push_escaped_note(&mut out, &escaped);
+        return out;
+    }
+    for (from, to) in &diff.renamed {
+        out.push(format!(
+            "  renamed  {} -> {}",
+            shown_field(from, &escaped),
+            shown_field(to, &escaped)
+        ));
+    }
+    for id in &diff.added {
+        out.push(format!("  added    {}", shown_field(id, &escaped)));
+    }
+    for id in &diff.removed {
+        out.push(format!("  removed  {}", shown_field(id, &escaped)));
+    }
+    for id in &diff.content_changed {
+        out.push(format!("  changed  {}", shown_field(id, &escaped)));
+    }
+    for id in &diff.frontmatter_changed {
+        out.push(format!("  frontmatter {}", shown_field(id, &escaped)));
+    }
+    // Listed last and labelled, because a tier that moved *down* between two
+    // renders is the one change here that is a problem rather than an update.
+    //
+    // `was` and `now` are `String` on `TrustMove` rather than the `&'static str`
+    // `ConceptTrust::tier` carries, because a status is §5.4's value as the
+    // bundle wrote it. Both are escaped.
+    for t in &diff.trust_changed {
+        if let Some((was, now)) = &t.tier {
+            out.push(format!(
+                "  trust    {} {} -> {}",
+                shown_field(&t.id, &escaped),
+                shown_field(was, &escaped),
+                shown_field(now, &escaped)
+            ));
+        }
+        if let Some((was, now)) = &t.status {
+            out.push(format!(
+                "  status   {} {} -> {}",
+                shown_field(&t.id, &escaped),
+                shown_field(was, &escaped),
+                shown_field(now, &escaped)
+            ));
+        }
+    }
+    for (from, target) in &diff.links_broken {
+        out.push(format!(
+            "  link broken {} -> {}",
+            shown_field(from, &escaped),
+            shown_field(target, &escaped)
+        ));
+    }
+    for (from, target) in &diff.links_mended {
+        out.push(format!(
+            "  link mended {} -> {}",
+            shown_field(from, &escaped),
+            shown_field(target, &escaped)
+        ));
+    }
+    push_escaped_note(&mut out, &escaped);
+    out
+}
+
 /// `roteiro okf diff` — compare two bundles semantically.
 fn run_okf_diff(before: &str, after: &str, json: bool) -> anyhow::Result<()> {
     let diff =
@@ -7454,43 +7825,662 @@ fn run_okf_diff(before: &str, after: &str, json: bool) -> anyhow::Result<()> {
         emit_json(&diff)?;
         return Ok(());
     }
-    println!("{} -> {}", diff.before, diff.after);
-    if diff.is_unchanged() {
-        println!("  no semantic change");
-        return Ok(());
-    }
-    for (from, to) in &diff.renamed {
-        println!("  renamed  {from} -> {to}");
-    }
-    for id in &diff.added {
-        println!("  added    {id}");
-    }
-    for id in &diff.removed {
-        println!("  removed  {id}");
-    }
-    for id in &diff.content_changed {
-        println!("  changed  {id}");
-    }
-    for id in &diff.frontmatter_changed {
-        println!("  frontmatter {id}");
-    }
-    // Listed last and labelled, because a tier that moved *down* between two
-    // renders is the one change here that is a problem rather than an update.
-    for t in &diff.trust_changed {
-        if let Some((was, now)) = &t.tier {
-            println!("  trust    {} {was} -> {now}", t.id);
-        }
-        if let Some((was, now)) = &t.status {
-            println!("  status   {} {was} -> {now}", t.id);
-        }
-    }
-    for (from, target) in &diff.links_broken {
-        println!("  link broken {from} -> {target}");
-    }
-    for (from, target) in &diff.links_mended {
-        println!("  link mended {from} -> {target}");
+    for line in okf_diff_lines(&diff) {
+        println!("{line}");
     }
     Ok(())
+}
+
+/// Every `okf` report line, against a hostile bundle and against an honest one.
+///
+/// # The two directions, and why both are equalities
+///
+/// A guard that only checks the hostile direction passes on an escaper that
+/// mangles every path on macOS; a guard that only checks the honest one passes
+/// on no escaper at all. So each command is driven twice.
+///
+/// Both directions assert **equality over the whole line vector**, never
+/// `contains`. `contains` is satisfied by two escaping passes as happily as by
+/// one — which is how the double-escape defect reached #865's merge — and it is
+/// also satisfied by a line that dropped the field entirely, which is how a
+/// guard goes vacuous. The expected text is written out by hand rather than
+/// produced by `escape_for_diagnostic`, because a fixture built from the code
+/// under test agrees with it however wrong both are.
+#[cfg(test)]
+mod okf_report_tests {
+    use super::{
+        OKF_ESCAPED_NOTE, okf_computations_lines, okf_diff_lines, okf_findings_lines,
+        okf_info_lines, okf_links_lines, okf_syntax_lines, okf_trust_lines,
+    };
+    use rto_render::okf::{conform, inspect};
+
+    /// A name carrying one of each kind of character a bundle can hide behind:
+    /// an override that reverses what follows it, a zero-width space, and an
+    /// isolate pair no reader can see either end of.
+    const HOSTILE: &str = "okf-\u{202E}dnab\u{200B}\u{2066}x\u{2069}";
+
+    /// The same name as a report must show it, written out by hand.
+    const SHOWN: &str = "okf-\\u{202e}dnab\\u{200b}\\u{2066}x\\u{2069}";
+
+    /// `Müller-Schröder` **decomposed** — `u` + U+0308, `o` + U+0308 — because
+    /// that is the form macOS hands out, and escaping a combining mark would
+    /// mangle every accented path on the platform this is developed on.
+    const NFD: &str = "Mu\u{308}ller-Schro\u{308}der";
+
+    /// A CJK path, which an allowlist narrow enough to feel safe would garble.
+    const CJK: &str = "/データ/概念";
+
+    /// A Windows path, the case where showing a value legitimately changes it:
+    /// the encoding has to double a separator or a path spelling `\u{202e}`
+    /// could not be told apart from one carrying the character.
+    const WINDOWS: &str = r"C:\okf\bundle";
+
+    /// The same path, doubled **once** — the whole bar for legitimate output.
+    const WINDOWS_SHOWN: &str = r"C:\\okf\\bundle";
+
+    /// Nothing in these lines renders as something other than itself.
+    ///
+    /// Asserted with this workspace's own detector rather than a list of
+    /// characters written here: a list of characters to *check for* is the same
+    /// mistake as a list of characters to escape.
+    fn assert_nothing_invisible(what: &str, lines: &[String]) {
+        let joined = lines.join("\n");
+        if let Some(name) = joined.chars().find_map(rto_graph::screen::invisible_name) {
+            panic!("{what} carries {name} raw: {joined:?}");
+        }
+    }
+
+    /// The trust block `okf info` prints, with no concept list of its own.
+    fn info_trust() -> inspect::TrustSummary {
+        inspect::TrustSummary {
+            root: "/repo".to_owned(),
+            okf_version: None,
+            total: 1,
+            human_reviewed: 1,
+            machine_confirmed: 0,
+            unverified: 0,
+            stale: 0,
+            today: "2026-09-16".to_owned(),
+            concepts: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_bundle_cannot_rewrite_the_lint_report() {
+        let lines = okf_findings_lines(&conform::CheckReport {
+            root: format!("/repo/{HOSTILE}/okf"),
+            check: "lint",
+            concepts: 1,
+            findings: vec![conform::Finding {
+                severity: "warning",
+                code: Some("L3"),
+                concept: Some(format!("concepts/{HOSTILE}")),
+                path: None,
+                message: format!("links to deprecated concept `{HOSTILE}`"),
+            }],
+            errors: 0,
+            warnings: 1,
+        });
+        assert_nothing_invisible("okf lint", &lines);
+        assert_eq!(
+            lines,
+            vec![
+                format!("/repo/{SHOWN}/okf: 1 concept(s), 1 finding(s) [lint]"),
+                format!("  warning concepts/{SHOWN}: [L3] links to deprecated concept `{SHOWN}`"),
+                "  0 error(s), 1 warning(s), 0 info".to_owned(),
+                OKF_ESCAPED_NOTE.to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_bundle_cannot_rewrite_the_syntax_report() {
+        let lines = okf_syntax_lines(
+            &inspect::SyntaxReport {
+                root: format!("/repo/{HOSTILE}"),
+                scope: "computations",
+                checked: 1,
+                skipped: 0,
+                languages: vec!["sql".to_owned()],
+                findings: vec![inspect::SyntaxFinding {
+                    concept: format!("concepts/{HOSTILE}"),
+                    path: format!("/c/{HOSTILE}.md"),
+                    line: Some(4),
+                    language: "sql".to_owned(),
+                    message: format!("sql syntax error at 4:1: near `{HOSTILE}`"),
+                }],
+            },
+            false,
+        );
+        assert_nothing_invisible("okf syntax", &lines);
+        assert_eq!(
+            lines,
+            vec![
+                format!("/repo/{SHOWN}: 1 block(s) checked, 0 skipped [computations]"),
+                "  this build checks: sql".to_owned(),
+                format!(
+                    "  /c/{SHOWN}.md:4 [concepts/{SHOWN}] sql syntax error at 4:1: near `{SHOWN}`"
+                ),
+                "  1 block(s) did not parse".to_owned(),
+                OKF_ESCAPED_NOTE.to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_bundle_cannot_rewrite_the_trust_report() {
+        let lines = okf_trust_lines(&inspect::TrustSummary {
+            root: format!("/repo/{HOSTILE}"),
+            okf_version: Some(format!("0.2-{HOSTILE}")),
+            total: 1,
+            human_reviewed: 1,
+            machine_confirmed: 0,
+            unverified: 0,
+            stale: 1,
+            today: "2026-09-16".to_owned(),
+            concepts: vec![inspect::ConceptTrust {
+                id: format!("concepts/{HOSTILE}"),
+                tier: "human-reviewed",
+                status: format!("active-{HOSTILE}"),
+                verified_by: vec![format!("Dr {HOSTILE}")],
+                stale_after: Some(format!("2020-01-01-{HOSTILE}")),
+                stale: true,
+            }],
+        });
+        assert_nothing_invisible("okf trust", &lines);
+        assert_eq!(
+            lines,
+            vec![
+                format!("/repo/{SHOWN}: 1 concept(s), okf_version 0.2-{SHOWN}"),
+                "  human-reviewed 1, machine-confirmed 0, unverified 0".to_owned(),
+                "  stale 1 (as of 2026-09-16)".to_owned(),
+                // `human-reviewed` is 14 columns padded to 18, then the format's
+                // own space: five spaces before the id, every one of them ours.
+                // `[STALE]` sits *after* the id, which is why the id is escaped
+                // even though it is the field a reader copies.
+                format!(
+                    "  human-reviewed     concepts/{SHOWN} — verified by Dr {SHOWN} \
+                     [STALE since 2020-01-01-{SHOWN}]"
+                ),
+                "these are the peer's claims, not this graph's: `import --from okf --trust` \
+                 adopts them, and without --trust every concept arrives as external-inferred"
+                    .to_owned(),
+                OKF_ESCAPED_NOTE.to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_bundle_cannot_rewrite_the_computations_report() {
+        let lines = okf_computations_lines(&inspect::ComputationReport {
+            root: format!("/repo/{HOSTILE}"),
+            concepts: 1,
+            computations: 1,
+            inline: 1,
+            file: 0,
+            missing: 0,
+            runtimes: vec![format!("rt-{HOSTILE}")],
+            entries: vec![inspect::ComputationEntry {
+                concept: format!("concepts/{HOSTILE}"),
+                path: "/c/x.md".to_owned(),
+                runtime: Some(format!("rt-{HOSTILE}")),
+                source: "inline",
+                file: None,
+                language: Some(format!("lang-{HOSTILE}")),
+                lines: Some(3),
+                parameters: vec![format!("p-{HOSTILE}")],
+                has_executor: false,
+                has_attester: true,
+                redundant_inline: false,
+            }],
+        });
+        assert_nothing_invisible("okf computations", &lines);
+        assert_eq!(
+            lines,
+            vec![
+                format!("/repo/{SHOWN}: 1 concept(s), 1 computation(s)"),
+                "  inline 1, by file 0, no code 0".to_owned(),
+                format!("  runtimes: rt-{SHOWN}"),
+                format!("  concepts/{SHOWN} — rt-{SHOWN}, inline lang-{SHOWN}, 3 line(s)"),
+                format!("      parameters: p-{SHOWN}"),
+                "      no executor".to_owned(),
+                OKF_ESCAPED_NOTE.to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_bundle_cannot_rewrite_the_info_report() {
+        let lines = okf_info_lines(&inspect::BundleInfo {
+            root: format!("/repo/{HOSTILE}"),
+            okf_version: None,
+            title: Some(format!("A bundle called {HOSTILE}")),
+            concepts: 1,
+            trust: info_trust(),
+            statuses: vec![(format!("active-{HOSTILE}"), 1)],
+            links: (2, 1),
+            computations: (0, 0),
+            runtimes: vec![format!("rt-{HOSTILE}")],
+            files: inspect::BundleContents {
+                files: vec![inspect::BundleFile {
+                    path: format!("/x/{HOSTILE}.bin"),
+                    bytes: Some(3),
+                    extension: "bin".to_owned(),
+                }],
+                unreadable: vec![format!("/d/{HOSTILE}")],
+            },
+        });
+        assert_nothing_invisible("okf info", &lines);
+        assert_eq!(
+            lines,
+            vec![
+                format!("/repo/{SHOWN}"),
+                format!("  title: A bundle called {SHOWN}"),
+                "  okf_version: (not declared)".to_owned(),
+                "  concepts: 1".to_owned(),
+                "  trust: human-reviewed 1, machine-confirmed 0, unverified 0".to_owned(),
+                "  stale: 0 (as of 2026-09-16)".to_owned(),
+                format!("  status: active-{SHOWN} 1"),
+                "  internal links: 2, broken 1".to_owned(),
+                "  computations: 0, incomplete 0".to_owned(),
+                format!("  runtimes: rt-{SHOWN}"),
+                "  other files: 1 (3 B), not markdown and not screened:".to_owned(),
+                format!("      /x/{SHOWN}.bin (3 B)"),
+                "  warning: 1 entry could not be inspected, so the inventory above is \
+                 incomplete:"
+                    .to_owned(),
+                format!("      /d/{SHOWN}"),
+                "  gates: `okf validate`, `okf syntax`, and `--check` on `links`, `trust`, \
+                 `computations`"
+                    .to_owned(),
+                "  reports only: `okf lint`, `okf diff`, and this command".to_owned(),
+                OKF_ESCAPED_NOTE.to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_bundle_cannot_rewrite_the_links_report() {
+        let lines = okf_links_lines(
+            &inspect::LinkReport {
+                root: format!("/repo/{HOSTILE}"),
+                concepts: 1,
+                links: 2,
+                broken: vec![inspect::BrokenLink {
+                    from: format!("from-{HOSTILE}"),
+                    target: format!("to-{HOSTILE}"),
+                }],
+                non_concept: vec![inspect::NonConceptLink {
+                    from: format!("from2-{HOSTILE}"),
+                    target: format!("to2-{HOSTILE}"),
+                    path: format!("/f/{HOSTILE}.txt"),
+                }],
+            },
+            false,
+        );
+        assert_nothing_invisible("okf links", &lines);
+        assert_eq!(
+            lines,
+            vec![
+                format!("/repo/{SHOWN}: 1 concept(s), 2 internal link(s)"),
+                format!("  broken: from-{SHOWN} -> to-{SHOWN}"),
+                format!(
+                    "  not a concept (in the bundle): from2-{SHOWN} -> to2-{SHOWN} \
+                     [/f/{SHOWN}.txt]"
+                ),
+                OKF_ESCAPED_NOTE.to_owned(),
+            ]
+        );
+    }
+
+    /// The family's worst case: every line is two peer-chosen values with an
+    /// arrow between them, and the arrow is what an override reverses. `added X`
+    /// reading as `removed X` is a wrong answer, not a mangled one.
+    #[test]
+    fn a_bundle_cannot_rewrite_the_diff_report() {
+        let lines = okf_diff_lines(&inspect::DiffReport {
+            before: format!("/before/{HOSTILE}"),
+            after: format!("/after/{HOSTILE}"),
+            added: vec![format!("added-{HOSTILE}")],
+            removed: vec![format!("removed-{HOSTILE}")],
+            renamed: vec![(format!("old-{HOSTILE}"), format!("new-{HOSTILE}"))],
+            content_changed: vec![format!("body-{HOSTILE}")],
+            frontmatter_changed: vec![format!("front-{HOSTILE}")],
+            trust_changed: vec![inspect::TrustMove {
+                id: format!("moved-{HOSTILE}"),
+                tier: Some((format!("was-{HOSTILE}"), format!("now-{HOSTILE}"))),
+                status: Some((format!("swas-{HOSTILE}"), format!("snow-{HOSTILE}"))),
+            }],
+            links_broken: vec![(format!("bf-{HOSTILE}"), format!("bt-{HOSTILE}"))],
+            links_mended: vec![(format!("mf-{HOSTILE}"), format!("mt-{HOSTILE}"))],
+        });
+        assert_nothing_invisible("okf diff", &lines);
+        assert_eq!(
+            lines,
+            vec![
+                format!("/before/{SHOWN} -> /after/{SHOWN}"),
+                format!("  renamed  old-{SHOWN} -> new-{SHOWN}"),
+                format!("  added    added-{SHOWN}"),
+                format!("  removed  removed-{SHOWN}"),
+                format!("  changed  body-{SHOWN}"),
+                format!("  frontmatter front-{SHOWN}"),
+                format!("  trust    moved-{SHOWN} was-{SHOWN} -> now-{SHOWN}"),
+                format!("  status   moved-{SHOWN} swas-{SHOWN} -> snow-{SHOWN}"),
+                format!("  link broken bf-{SHOWN} -> bt-{SHOWN}"),
+                format!("  link mended mf-{SHOWN} -> mt-{SHOWN}"),
+                OKF_ESCAPED_NOTE.to_owned(),
+            ]
+        );
+    }
+
+    /// The Windows separator is doubled **once**, and the note says so.
+    ///
+    /// This is the report that carries [`WINDOWS`], so it is also the one that
+    /// demonstrates the other half of [`OKF_ESCAPED_NOTE`]'s claim: showing this
+    /// root genuinely changed it, with no hostile bundle involved.
+    #[test]
+    fn an_honest_bundle_survives_the_lint_report() {
+        let lines = okf_findings_lines(&conform::CheckReport {
+            root: WINDOWS.to_owned(),
+            check: "validate",
+            concepts: 1,
+            findings: vec![conform::Finding {
+                severity: "error",
+                code: None,
+                concept: Some(format!("{CJK}/café")),
+                path: None,
+                message: format!("`verified[0].by` names {NFD}"),
+            }],
+            errors: 1,
+            warnings: 0,
+        });
+        assert_eq!(
+            lines,
+            vec![
+                format!("{WINDOWS_SHOWN}: 1 concept(s), 1 finding(s) [validate]"),
+                format!("  error   {CJK}/café: `verified[0].by` names {NFD}"),
+                "  1 error(s), 0 warning(s), 0 info".to_owned(),
+                OKF_ESCAPED_NOTE.to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_honest_bundle_survives_the_syntax_report() {
+        let lines = okf_syntax_lines(
+            &inspect::SyntaxReport {
+                root: WINDOWS.to_owned(),
+                scope: "all-blocks",
+                checked: 1,
+                skipped: 0,
+                languages: vec!["sql".to_owned()],
+                findings: vec![inspect::SyntaxFinding {
+                    concept: format!("{CJK}/café"),
+                    path: format!("{CJK}/café.md"),
+                    line: None,
+                    language: "sql".to_owned(),
+                    message: format!("sql syntax error: {NFD} wrote it"),
+                }],
+            },
+            true,
+        );
+        assert_eq!(
+            lines,
+            vec![
+                format!("{WINDOWS_SHOWN}: 1 block(s) checked, 0 skipped [all-blocks]"),
+                "  this build checks: sql".to_owned(),
+                format!("  {CJK}/café.md:? [{CJK}/café] sql syntax error: {NFD} wrote it"),
+                "  1 block(s) did not parse".to_owned(),
+                OKF_ESCAPED_NOTE.to_owned(),
+            ]
+        );
+    }
+
+    /// Nothing but ink, so nothing is altered and **no note is printed** — the
+    /// other half of the claim the note makes.
+    #[test]
+    fn an_honest_bundle_survives_the_trust_report() {
+        let lines = okf_trust_lines(&inspect::TrustSummary {
+            root: CJK.to_owned(),
+            okf_version: Some("0.2".to_owned()),
+            total: 1,
+            human_reviewed: 1,
+            machine_confirmed: 0,
+            unverified: 0,
+            stale: 0,
+            today: "2026-09-16".to_owned(),
+            concepts: vec![inspect::ConceptTrust {
+                id: format!("{CJK}/café"),
+                tier: "human-reviewed",
+                status: "active".to_owned(),
+                verified_by: vec![NFD.to_owned(), "Ünal".to_owned()],
+                stale_after: None,
+                stale: false,
+            }],
+        });
+        assert_eq!(
+            lines,
+            vec![
+                format!("{CJK}: 1 concept(s), okf_version 0.2"),
+                "  human-reviewed 1, machine-confirmed 0, unverified 0".to_owned(),
+                "  stale 0 (as of 2026-09-16)".to_owned(),
+                format!("  human-reviewed     {CJK}/café — verified by {NFD}, Ünal"),
+                "these are the peer's claims, not this graph's: `import --from okf --trust` \
+                 adopts them, and without --trust every concept arrives as external-inferred"
+                    .to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_honest_bundle_survives_the_computations_report() {
+        let lines = okf_computations_lines(&inspect::ComputationReport {
+            root: CJK.to_owned(),
+            concepts: 1,
+            computations: 1,
+            inline: 0,
+            file: 1,
+            missing: 0,
+            runtimes: vec!["bigquery".to_owned()],
+            entries: vec![inspect::ComputationEntry {
+                concept: format!("{CJK}/café"),
+                path: format!("{CJK}/café.md"),
+                runtime: Some("bigquery".to_owned()),
+                source: "file",
+                file: Some(format!("{CJK}/{NFD}.sql")),
+                language: None,
+                lines: None,
+                parameters: vec!["café".to_owned(), NFD.to_owned()],
+                has_executor: true,
+                has_attester: true,
+                redundant_inline: false,
+            }],
+        });
+        assert_eq!(
+            lines,
+            vec![
+                format!("{CJK}: 1 concept(s), 1 computation(s)"),
+                "  inline 0, by file 1, no code 0".to_owned(),
+                "  runtimes: bigquery".to_owned(),
+                format!("  {CJK}/café — bigquery, file {CJK}/{NFD}.sql"),
+                format!("      parameters: café, {NFD}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_honest_bundle_survives_the_info_report() {
+        let lines = okf_info_lines(&inspect::BundleInfo {
+            root: CJK.to_owned(),
+            okf_version: Some("0.2".to_owned()),
+            title: Some(format!("{NFD}'s notes")),
+            concepts: 1,
+            trust: info_trust(),
+            statuses: vec![("active".to_owned(), 1)],
+            links: (3, 0),
+            computations: (1, 0),
+            runtimes: vec!["bigquery".to_owned()],
+            files: inspect::BundleContents {
+                files: vec![inspect::BundleFile {
+                    path: format!("{CJK}/{NFD}.sql"),
+                    bytes: Some(2048),
+                    extension: "sql".to_owned(),
+                }],
+                unreadable: Vec::new(),
+            },
+        });
+        assert_eq!(
+            lines,
+            vec![
+                CJK.to_owned(),
+                format!("  title: {NFD}'s notes"),
+                "  okf_version: 0.2".to_owned(),
+                "  concepts: 1".to_owned(),
+                "  trust: human-reviewed 1, machine-confirmed 0, unverified 0".to_owned(),
+                "  stale: 0 (as of 2026-09-16)".to_owned(),
+                "  status: active 1".to_owned(),
+                "  internal links: 3, broken 0".to_owned(),
+                "  computations: 1, incomplete 0".to_owned(),
+                "  runtimes: bigquery".to_owned(),
+                "  other files: 1 (2.0 KiB), not markdown and not screened:".to_owned(),
+                format!("      {CJK}/{NFD}.sql (2.0 KiB)"),
+                "  gates: `okf validate`, `okf syntax`, and `--check` on `links`, `trust`, \
+                 `computations`"
+                    .to_owned(),
+                "  reports only: `okf lint`, `okf diff`, and this command".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_honest_bundle_survives_the_links_and_diff_reports() {
+        let links = okf_links_lines(
+            &inspect::LinkReport {
+                root: CJK.to_owned(),
+                concepts: 1,
+                links: 1,
+                broken: vec![inspect::BrokenLink {
+                    from: format!("{CJK}/café"),
+                    target: format!("{CJK}/{NFD}"),
+                }],
+                non_concept: Vec::new(),
+            },
+            false,
+        );
+        assert_eq!(
+            links,
+            vec![
+                format!("{CJK}: 1 concept(s), 1 internal link(s)"),
+                format!("  broken: {CJK}/café -> {CJK}/{NFD}"),
+            ]
+        );
+
+        let diff = okf_diff_lines(&inspect::DiffReport {
+            before: format!("{CJK}/v1"),
+            after: format!("{CJK}/v2"),
+            added: vec![format!("{CJK}/{NFD}")],
+            removed: Vec::new(),
+            renamed: Vec::new(),
+            content_changed: Vec::new(),
+            frontmatter_changed: Vec::new(),
+            trust_changed: Vec::new(),
+            links_broken: Vec::new(),
+            links_mended: Vec::new(),
+        });
+        assert_eq!(
+            diff,
+            vec![
+                format!("{CJK}/v1 -> {CJK}/v2"),
+                format!("  added    {CJK}/{NFD}"),
+            ]
+        );
+    }
+
+    /// Each command's `*_lines` function is named by the one that prints it.
+    ///
+    /// The seven pairs the two source scans below walk, so a command added to
+    /// the family without a line builder is a compile error here rather than an
+    /// unguarded surface nobody notices.
+    const REPORT_COMMANDS: [&str; 7] = [
+        "fn print_okf_findings(",
+        "fn run_okf_syntax(",
+        "fn run_okf_trust(",
+        "fn run_okf_computations(",
+        "fn run_okf_info(",
+        "fn run_okf_links(",
+        "fn run_okf_diff(",
+    ];
+
+    /// One command's body, from its definition at column 0 to its closing brace.
+    fn command_body(src: &str, name: &str) -> String {
+        src.split(&format!("\n{name}"))
+            .nth(1)
+            .unwrap_or_else(|| panic!("{name} should still be defined at column 0"))
+            .split("\n}\n")
+            .next()
+            .expect("its end")
+            .to_owned()
+    }
+
+    /// The `--json` path carries the literal bytes, and that is the decision
+    /// rather than an omission.
+    ///
+    /// Escaping is for a **terminal**, where a format character rewrites what a
+    /// person reads. A JSON document is read by a program, and `serde_json`
+    /// already has an encoding for every byte in it — escaping there would
+    /// corrupt the one copy of the literal id this change tells an operator to
+    /// reach for when the report shows them a `\u{…}`.
+    ///
+    /// Asserted on the shape of the code, because the alternative is a test that
+    /// runs seven commands over seven fixtures to prove a negative: every `okf`
+    /// report command reaches `emit_json` with the report itself, and no
+    /// `shown_field` call stands between them.
+    #[test]
+    fn the_json_path_carries_the_literal_bytes() {
+        let src = include_str!("main.rs");
+        for name in REPORT_COMMANDS {
+            let body = command_body(src, name);
+            assert!(
+                body.contains("emit_json("),
+                "{name} should still have a --json path"
+            );
+            assert!(
+                !body.contains("shown_field("),
+                "{name} escapes a field itself — the escape belongs in its \
+                 `*_lines` function, where `--json` cannot reach it"
+            );
+        }
+    }
+
+    /// Nothing in the printing half of these commands interpolates a field.
+    ///
+    /// The `*_lines` functions are the seam every foreign value has to pass
+    /// through, and a `println!` in a `run_okf_*` that named a field directly
+    /// would go round it — silently, and without failing any output test,
+    /// because an honest bundle looks identical either way. This is the guard
+    /// that a later field is added to a line rather than beside one.
+    #[test]
+    fn the_okf_report_commands_print_nothing_but_assembled_lines() {
+        let src = include_str!("main.rs");
+        for name in REPORT_COMMANDS {
+            let body = command_body(src, name);
+            let printed: Vec<&str> = body
+                .lines()
+                .map(str::trim)
+                .filter(|l| l.starts_with("println!"))
+                .collect();
+            // The premise: this really is still a command that prints.
+            assert!(
+                !printed.is_empty(),
+                "{name} no longer prints anything — this test is not checking it"
+            );
+            assert!(
+                printed.iter().all(|l| *l == "println!(\"{line}\");"),
+                "{name} prints a value of its own: {printed:?}. Every field belongs \
+                 in its `*_lines` function, which is where `shown_field` is."
+            );
+        }
+    }
 }
 
 /// Every markdown file under an OKF bundle root, keyed by its bundle-relative

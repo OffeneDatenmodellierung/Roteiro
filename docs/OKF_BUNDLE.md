@@ -313,6 +313,42 @@ Start with `info`; it composes the others' reports rather than deriving anything
 of its own, so it cannot disagree with the command that reports a number in
 detail.
 
+### Every report is escaped, and a shown id may not be the literal id
+
+These are the commands an operator runs **to decide whether to trust a bundle**,
+which makes them the worst place for that bundle to choose what the terminal
+shows. A concept id, a path, a title, a status, an actor's name and a parser's
+quotation of the bundle's own bytes are all text somebody else wrote, and
+U+202E RIGHT-TO-LEFT OVERRIDE reverses everything after it while U+200B and the
+tag block occupy no width at all. `added X` and `removed X` reading as each
+other's opposite is a wrong answer, not a mangled one.
+
+So every bundle-derived field on every `okf` report goes through
+`rto_graph::screen::escape_for_diagnostic` — the same allowlist #865 established,
+stated as a property rather than as a list of characters: a character reaches
+you unchanged exactly when Unicode says it puts a mark on the page. A CJK path,
+an NFD-decomposed accent (which is what macOS hands out) and an emoji are all
+untouched. Counts, severities, lint codes, trust tiers and the words of the
+report itself are this workspace's own and are not escaped.
+
+Two consequences worth knowing before they surprise you:
+
+- **A `\` is doubled.** The encoding has to be unambiguous, or a bundle whose
+  path spells the seven characters `\u{202e}` could not be told apart from one
+  carrying the character. So `C:\okf\bundle` reads back as `C:\\okf\\bundle` —
+  doubled exactly once, never twice.
+- **An id that had to be escaped cannot be pasted into the next command.** The
+  fields you copy back — a finding's concept, a trust line's id, a link's two
+  ends, every id in `okf diff` — are escaped along with everything else. That is
+  deliberate: the escape is a no-op on every id you could actually have pasted,
+  and for the ids it does change the raw form was not pasteable either, because
+  what the terminal showed you was not what the bytes were. The id is also the
+  value that can reverse the rest of its own line, so leaving it raw to protect
+  the paste puts the guard everywhere except where it is needed.
+
+When either happened, the report says so on its last line and points at
+`--json`, which is **not** escaped and carries the exact bytes.
+
 That promise was broken once and is worth knowing about, because the shape
 recurs. Issue #778: `links --check` gated on "resolves to a **concept**", so a
 link to a diagram sitting in the bundle was reported broken and failed CI, while
