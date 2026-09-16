@@ -809,26 +809,24 @@ fn info_inventories_the_files_that_are_not_concepts() {
 /// A bundle that puts one hostile character into every field class the human
 /// report escapes.
 ///
-/// Built once and reused, because the point is coverage rather than a scenario:
-/// a concept id, a bundle-relative path, a title, an `okf_version`, a `status`,
-/// a `runtime`, a `verified.by` actor, a `stale_after`, a link target, a
-/// heading `L4` echoes verbatim, a non-markdown file and a code block that does
-/// not parse. Each of those reaches a different field on a different report
-/// struct.
+/// Built twice by the caller — `okf diff` needs two — because the point is
+/// coverage rather than a scenario: a concept id, a bundle-relative path, a
+/// title, an `okf_version`, a `status`, a `runtime`, a `verified.by` actor, a
+/// parameter name, a link target, a heading `L4` echoes verbatim, a
+/// non-markdown filename, and the bundle root itself. Each reaches a different
+/// field on a different report struct.
 fn hostile_bundle(tag: &str) -> PathBuf {
     let h = "\u{202E}";
     bundle(
-        // The tag lands in the directory name, which is `report.root` on every
-        // one of these reports — so the root is covered by the same fixture.
+        // The tag lands in the directory name, which is `root` on every one of
+        // these reports — so the root is covered by the same fixture.
         &format!("{tag}-{h}"),
         &[
             (
                 "index.md",
-                // `okf_version`, and a title. Both are strings the bundle picks.
                 "---\nokf_version: \"0.2-\u{202E}\"\ntitle: Bundle \u{202E}\n---\n\n# Bundle \u{202E}\n",
             ),
             (
-                // A concept id and a bundle-relative path, both carrying it.
                 "c/rev\u{202E}enue.md",
                 "---\ntype: Metric\ntitle: Revenue \u{202E}\nstatus: active-\u{202E}\n\
                  verified: { by: human:alice\u{202E}, at: 2026-08-01T10:00:00Z }\n\
@@ -836,109 +834,184 @@ fn hostile_bundle(tag: &str) -> PathBuf {
                  # Definition\n\nSee [cost](/c/miss\u{202E}ing.md).\n\n## Empty \u{202E}\n",
             ),
             (
-                "c/total.md",
-                // A runtime, a language tag, and SQL that does not parse.
-                "---\ntype: Attested Computation\ntitle: Total\nruntime: bq-\u{202E}\n\
+                // The computation concept carries it too, so `okf syntax`'s
+                // findings are about a hostile concept rather than only a
+                // hostile root.
+                "c/tot\u{202E}al.md",
+                "---\ntype: Attested Computation\ntitle: Total \u{202E}\nruntime: bq-\u{202E}\n\
                  parameters:\n  - name: p\u{202E}\n    type: STRING\n---\n\n\
                  # Computation\n\n```sql\nSELECT FROM WHERE (\n```\n",
             ),
-            // A file the inventory lists but does not read.
-            ("assets/logo\u{202E}.bin", "\u{0}\u{1}"),
+            ("assets/logo\u{202E}.bin", "x"),
         ],
     )
 }
 
-/// `--json` carries the bundle's **literal bytes**, on every `okf` report.
+/// Every JSON pointer in `doc` whose string value carries `needle`.
+fn paths_carrying(doc: &serde_json::Value, needle: char) -> Vec<String> {
+    fn walk(v: &serde_json::Value, at: &str, needle: char, out: &mut Vec<String>) {
+        match v {
+            serde_json::Value::String(s) => {
+                if s.contains(needle) {
+                    out.push(at.to_owned());
+                }
+            }
+            serde_json::Value::Object(m) => {
+                for (k, v) in m {
+                    walk(v, &format!("{at}/{k}"), needle, out);
+                }
+            }
+            serde_json::Value::Array(a) => {
+                for (i, v) in a.iter().enumerate() {
+                    walk(v, &format!("{at}/{i}"), needle, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(doc, "", needle, &mut out);
+    out
+}
+
+/// `--json` carries the bundle's **literal bytes**, field by field.
 ///
 /// # Why this test decides a versioning question
 ///
 /// The human reports now escape every bundle-derived field, which changes what
-/// `roteiro okf …` prints. Whether that is a *breaking* change under
-/// `AGENTS.md`'s rule turns on one fact: that the **machine-readable** surface
-/// is unaffected. If any field were escaped on the way into the report struct
-/// rather than on the way out of it, `--json` would carry the escaped spelling,
-/// a consumer parsing it would see different bytes, and the conclusion would
-/// flip.
+/// `roteiro okf …` prints. Whether that is *breaking* under `AGENTS.md`'s rule
+/// turns on one fact: the **machine-readable** surface is unaffected. If any
+/// field were escaped on the way into the report struct rather than on the way
+/// out of it, `--json` would carry the escaped spelling, a consumer parsing it
+/// would see different bytes, and the conclusion would flip.
 ///
-/// The structural half of that is asserted in `main.rs` by
+/// The structural half is asserted in `main.rs` by
 /// `the_json_path_carries_the_literal_bytes`, which reads the source and finds
-/// no `shown_field` call in any command. This is the end-to-end half, and it is
-/// the one that would catch an escape added *upstream* in `rto-render` — where
-/// the structural scan cannot see.
+/// no `shown_field` call in any command. That scan cannot see across a crate
+/// boundary; this is the half that catches an escape added upstream in
+/// `rto-render`.
 ///
-/// # The assertion, both ways
+/// # Per field, because the first version of this was existential
 ///
-/// One character, U+202E, placed in twelve field classes by
-/// [`hostile_bundle`]. For every command:
+/// It asserted only that each document contained the character *somewhere* and
+/// this repository's escape spelling *nowhere*. The second half is genuinely
+/// universal — a substring search over the whole document finds an escape in
+/// any leaf. The first half was not: a document in which only `root` stayed raw
+/// while `title` had been escaped would still have contained the character, and
+/// the test would still have passed while the claim it exists to support was
+/// false.
 ///
-/// - the raw character is **present** in the JSON — `serde_json` escapes only
-///   `"`, `\` and the C0 controls, so a format character is emitted as itself
-///   and a consumer gets what the bundle wrote;
-/// - the spelling `\u{202e}` is **absent**. Those braces are this repository's
-///   escape, not JSON's — `serde_json` emits the character itself, with no
-///   braces anywhere — so that spelling appearing means a report escape
-///   reached the machine surface. (Not written out here: rustc's own
-///   `text_direction_codepoint_in_literal` lint rejects a raw override in a
-///   doc comment, which is this change's own objection one layer down.)
-///   finding it means a report escape reached the machine surface.
-///
-/// Both directions matter. Presence alone would pass on a document that had
-/// dropped the field; absence alone would pass on an empty one.
+/// So each command now names the **fields** that must carry it, and the check
+/// is by trailing key rather than by index — `/findings/3/concept` and
+/// `/findings/0/concept` both satisfy `concept`, so the assertion survives a
+/// change in finding order without going blind to a field that disappeared.
 #[test]
 fn the_json_surface_carries_the_bundles_literal_bytes() {
-    let root = hostile_bundle("json-literal");
+    let root = hostile_bundle("json-literal-a");
     let path = root.to_string_lossy().into_owned();
     let other = hostile_bundle("json-literal-b");
+    // The second bundle is the first minus its computation concept, so `okf
+    // diff` has a `removed` id to report — and that id is the hostile one.
+    // Built identical at first, which the per-field assertion below caught:
+    // `removed` was empty and the existential version of this test passed
+    // anyway, which is the whole reason it is per field now.
+    std::fs::remove_file(other.join("c/tot\u{202E}al.md")).expect("remove the computation");
     let other_path = other.to_string_lossy().into_owned();
 
-    let runs: [(&str, Vec<&str>); 8] = [
-        ("validate", vec!["okf", "validate", &path, "--json"]),
-        ("lint", vec!["okf", "lint", &path, "--json"]),
-        ("syntax", vec!["okf", "syntax", &path, "--json"]),
+    // Per command: the arguments, and the field names whose value must reach
+    // `--json` with the bundle's own bytes in it.
+    let runs: [(&str, Vec<&str>, &[&str]); 8] = [
+        (
+            "validate",
+            vec!["okf", "validate", &path, "--json"],
+            &["root", "concept", "path"],
+        ),
+        (
+            "lint",
+            vec!["okf", "lint", &path, "--json"],
+            &["root", "concept", "path", "message"],
+        ),
+        (
+            "syntax",
+            vec!["okf", "syntax", &path, "--json"],
+            &["root", "concept", "path"],
+        ),
         (
             "trust",
             vec!["okf", "trust", &path, "--today", "2026-09-16", "--json"],
+            &["root", "okf_version", "id", "status", "verified_by/0"],
         ),
-        ("computations", vec!["okf", "computations", &path, "--json"]),
+        (
+            "computations",
+            vec!["okf", "computations", &path, "--json"],
+            &[
+                "root",
+                "runtimes/0",
+                "concept",
+                "path",
+                "runtime",
+                "parameters/0",
+            ],
+        ),
         (
             "info",
             vec!["okf", "info", &path, "--today", "2026-09-16", "--json"],
+            &["root", "okf_version", "title", "runtimes/0", "files/0/path"],
         ),
-        ("links", vec!["okf", "links", &path, "--json"]),
-        ("diff", vec!["okf", "diff", &path, &other_path, "--json"]),
+        (
+            "links",
+            vec!["okf", "links", &path, "--json"],
+            &["root", "from", "target"],
+        ),
+        (
+            "diff",
+            vec!["okf", "diff", &path, &other_path, "--json"],
+            &["before", "after", "removed/0"],
+        ),
     ];
 
-    for (name, args) in runs {
+    for (name, args, fields) in runs {
         let out = roteiro(&args);
-        let json = String::from_utf8_lossy(&out.stdout).into_owned();
-        // The premise: the command produced a document at all. `syntax` exits
-        // non-zero when a block does not parse, which this bundle intends, so
-        // the status is deliberately not asserted.
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        // `syntax` exits non-zero when a block does not parse, which this
+        // bundle intends, so the status is deliberately not asserted.
+        let doc: serde_json::Value = serde_json::from_str(&text)
+            .unwrap_or_else(|e| panic!("`okf {name} --json` is not JSON ({e}):\n{text}"));
+
+        // Universal: no leaf anywhere carries this repository's *report*
+        // escape. A substring search over the document is exactly that, since
+        // the spelling cannot occur outside a string value.
         assert!(
-            json.trim_start().starts_with('{'),
-            "`okf {name} --json` produced no JSON document:\n{json}"
-        );
-        assert!(
-            json.contains('\u{202E}'),
-            "`okf {name} --json` does not carry the bundle's literal character, so \
-             either the field was escaped on the machine surface or it never \
-             reached the document:\n{json}"
-        );
-        assert!(
-            !json.contains("\\u{202e}"),
-            "`okf {name} --json` carries this repository's *report* escape. The \
+            !text.contains("\\u{202e}"),
+            "`okf {name} --json` carries this repository's report escape. The \
              JSON surface is the one copy of the literal bytes an operator is \
              told to reach for, and escaping it would make this change breaking \
-             under AGENTS.md's CLI output-contract rule:\n{json}"
+             under AGENTS.md's CLI output-contract rule:\n{text}"
         );
+
+        // Per field: every named field reached the document with the bundle's
+        // own bytes. Matched on the trailing key so finding order may change.
+        let carrying = paths_carrying(&doc, '\u{202E}');
+        for field in fields {
+            assert!(
+                carrying.iter().any(|p| p.ends_with(&format!("/{field}"))),
+                "`okf {name} --json` has no `{field}` carrying the bundle's \
+                 literal character. Either that field was escaped on the machine \
+                 surface or it never reached the document. Raw-carrying paths \
+                 were {carrying:?}"
+            );
+        }
     }
 
     // And the same bundle through the human path really is escaped, or the
     // contrast above is between two identical things.
     let human = roteiro(&["okf", "lint", &path]);
-    let text = String::from_utf8_lossy(&human.stdout).into_owned();
+    let shown = String::from_utf8_lossy(&human.stdout).into_owned();
     assert!(
-        text.contains("\\u{202e}") && !text.contains('\u{202E}'),
-        "the human report must escape what the JSON leaves alone; got:\n{text}"
+        shown.contains("\\u{202e}") && !shown.contains('\u{202E}'),
+        "the human report must escape what the JSON leaves alone; got:\n{shown}"
     );
+
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&other);
 }

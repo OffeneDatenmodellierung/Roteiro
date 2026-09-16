@@ -7161,11 +7161,12 @@ fn shown_field(raw: &str, escaped: &std::cell::Cell<bool>) -> rto_graph::screen:
 ///
 /// The doubled backslash is named explicitly all the same, because it is the one
 /// an operator meets on Windows with no hostile bundle involved.
-const OKF_ESCAPED_NOTE: &str = "  note: a value above is shown escaped — every character \
-     that puts no mark on the page is replaced by a backslash escape naming it \
-     (`\\n` a line break, `\\t` a tab, `\\u{202e}` an invisible or reordering \
-     character), and a literal backslash is doubled to `\\\\` so an escape cannot be forged. \
-     Those are not the literal bytes; `--json` carries those.";
+const OKF_ESCAPED_NOTE: &str = "  note: a value above is shown escaped — apart from an \
+     ordinary space, every character that puts no mark on the page is replaced by a \
+     backslash escape naming it (`\\n` a line break, `\\t` a tab, `\\u{202e}` an \
+     invisible or reordering character), and a literal backslash is doubled to `\\\\` \
+     so an escape cannot be forged. Those are not the literal bytes; `--json` carries \
+     those.";
 
 /// Append [`OKF_ESCAPED_NOTE`] when some field on this report was altered by
 /// being shown.
@@ -7823,8 +7824,8 @@ fn run_okf_links(path: &str, broken_only: bool, check: bool, json: bool) -> anyh
 
 /// A diff as report lines. See [`shown_field`].
 ///
-/// This is the family's worst case and the reason the copy-back question had to
-/// be settled rather than deferred: **every** line here is two peer-chosen
+/// This is the family's worst case, and the reason the copy-back question had to
+/// be settled here rather than left open: **every** line here is two peer-chosen
 /// values with an arrow or a verb between them, and `added` reading as `removed`
 /// is a wrong answer rather than a mangled one.
 fn okf_diff_lines(diff: &rto_render::okf::inspect::DiffReport) -> Vec<String> {

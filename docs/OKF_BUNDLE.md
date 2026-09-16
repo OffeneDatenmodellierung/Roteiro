@@ -326,8 +326,11 @@ other's opposite is a wrong answer, not a mangled one.
 So every bundle-derived field on every `okf` report goes through
 `rto_graph::screen::escape_for_diagnostic` — the same allowlist #865 established,
 stated as a property rather than as a list of characters: a character reaches
-you unchanged exactly when Unicode says it puts a mark on the page — and is not
-a `Default_Ignorable_Code_Point`. A CJK path and an NFD-decomposed accent (which
+you unchanged exactly when it is an ordinary space, or Unicode says it puts a
+mark on the page and does not call it a `Default_Ignorable_Code_Point`. (The
+space is named because it is a real exception: it puts no mark on the page and
+is kept anyway, being the one separator a single report line may contain. A
+no-break or ideographic space is *not* that space, and is escaped.) A CJK path and an NFD-decomposed accent (which
 is what macOS hands out) are untouched. An emoji's base character is too, but
 **its joiners and selectors are not** — and they are caught by different halves
 of the rule, which is worth keeping straight: U+200D ZERO WIDTH JOINER is `Cf`,
