@@ -7230,7 +7230,7 @@ fn push_escaped_note(out: &mut Vec<String>, escaped: &std::cell::Cell<bool>) {
 /// larger allocations exactly as they are while making "no further findings" and
 /// "further findings not shown" the same output — the silence-taken-for-absence
 /// ADR-0024 exists to remove. The bound belongs on the message, and is filed as
-/// its own issue rather than papered over here.
+/// issue #877 rather than papered over here.
 ///
 /// [`okf_screen_lines`]'s cap is not the precedent it resembles either: it is
 /// `5`, which is no kind of memory bound, and its own comment gives the reason —
