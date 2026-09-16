@@ -328,32 +328,37 @@ So every bundle-derived field on every `okf` report goes through
 stated as a property rather than as a list of characters: a character reaches
 you unchanged exactly when Unicode says it puts a mark on the page — and is not
 a `Default_Ignorable_Code_Point`. A CJK path and an NFD-decomposed accent (which
-is what macOS hands out) are untouched. An emoji's base character is too, but a
-**variation selector or zero-width joiner is not**: U+FE0F and U+200D are
-default-ignorables living inside ink categories, so a heart-plus-VS16 shows as
-the heart followed by a visible `\u{fe0f}`. That cost is accepted rather than
-overlooked — passing an invisible character through silently is the bug this
-exists to close. Counts, severities, lint codes, trust tiers and the words of the
-report itself are this workspace's own and are not escaped.
+is what macOS hands out) are untouched. An emoji's base character is too, but
+**its joiners and selectors are not** — and they are caught by different halves
+of the rule, which is worth keeping straight: U+200D ZERO WIDTH JOINER is `Cf`,
+an `Other` category, so it is not ink at all, while U+FE0F VARIATION SELECTOR-16
+is `Mn`, an ink category, caught only because Unicode marks it
+`Default_Ignorable_Code_Point`. So a heart-plus-VS16 shows as the heart followed
+by a visible `\u{fe0f}`. That cost is accepted rather than overlooked — passing
+an invisible character through silently is the bug this exists to close. Counts,
+severities, lint codes, trust tiers and the words of the report itself are this
+workspace's own and are not escaped.
 
-Two consequences worth knowing before they surprise you:
+Three consequences worth knowing before they surprise you:
 
 - **A `\` is doubled.** The encoding has to be unambiguous, or a bundle whose
   path spells the eight characters `\u{202e}` could not be told apart from one
   carrying the character. So `C:\okf\bundle` reads back as `C:\\okf\\bundle` —
   doubled exactly once, never twice.
+- **A line break or a tab inside a field gets its short name**, `\n`, `\r` or
+  `\t`. A report is one line per fact, and a field that could open a line of its
+  own could forge one.
 - **An id whose shown form differs cannot be pasted into the next command.** The
   fields you copy back — a finding's concept, a trust line's id, a link's two
   ends, every id in `okf diff` — are escaped along with everything else. That is
   deliberate. Almost every id you could actually have pasted is untouched; the
-  ones that are not are the two cases above (a literal backslash, a
-  default-ignorable) plus the hostile case, and for the hostile case the raw form
-  was not pasteable either, because what the terminal showed you was not what the
-  bytes were. The id is also the value that can reverse the rest of its own line,
-  so leaving it raw to protect the paste puts the guard everywhere except where
-  it is needed.
+  ones that are not are the cases above plus the hostile case, and for the
+  hostile case the raw form was not pasteable either, because what the terminal
+  showed you was not what the bytes were. The id is also the value that can
+  reverse the rest of its own line, so leaving it raw to protect the paste puts
+  the guard everywhere except where it is needed.
 
-When either happened, the report says so on its last line and points at
+When any of that happened, the report says so on its last line and points at
 `--json`, which is **not** escaped and carries the exact bytes.
 
 That promise was broken once and is worth knowing about, because the shape

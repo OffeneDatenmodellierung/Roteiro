@@ -7102,13 +7102,19 @@ fn run_okf_lint(path: &str, json: bool) -> anyhow::Result<()> {
 ///   id, a CJK id and an NFD-accented id all survive unchanged and stay
 ///   pasteable.
 /// - It is **not** a no-op everywhere, and claiming so would be the same
-///   overstatement this repository has already paid for. Two visible things do
-///   change, both stated on
-///   [`rto_graph::screen::escape_for_diagnostic`] rather than discovered:
-///   a literal `\` doubles, because the encoding has to be unambiguous; and a
-///   `Default_Ignorable_Code_Point` inside an ink category is escaped, so a
-///   variation-selector-qualified or ZWJ emoji shows its base character beside
-///   a visible `\u{…}`. An id carrying either is one the note below covers.
+///   overstatement this repository has already paid for. Three things change
+///   without any hostility involved, all of them consequences of
+///   [`rto_graph::screen::escape_for_diagnostic`]'s stated rule rather than
+///   exceptions to it: a literal `\` doubles, because the encoding has to be
+///   unambiguous; a real line break or tab gets its short name; and an emoji
+///   keeps its base character but loses its **joiners and selectors**. Those
+///   last two are escaped by *different* halves of the rule and the distinction
+///   is worth keeping — U+200D ZERO WIDTH JOINER is `Cf`, an `Other` category,
+///   so it is not ink at all, while U+FE0F VARIATION SELECTOR-16 is `Mn`, an
+///   ink category, caught only because Unicode marks it
+///   `Default_Ignorable_Code_Point`. (Both confirmed against the independent UCD
+///   oracle `screen`'s own sweep uses, not from memory.) An id carrying any of
+///   these is one [`OKF_ESCAPED_NOTE`] covers.
 /// - For the ids the escape alters *because they were hostile*, **the raw form
 ///   is not pasteable either**. What the terminal shows is not what the bytes
 ///   are, so selecting the visible text copies something else — and the operator
@@ -7142,12 +7148,24 @@ fn shown_field(raw: &str, escaped: &std::cell::Cell<bool>) -> rto_graph::screen:
 /// What a report says when showing a value changed it.
 ///
 /// Printed only when [`shown_field`] altered something, because a caveat on
-/// every run is a caveat nobody reads. The wording names both escapes, since the
-/// doubled backslash is the one an operator meets on Windows without any hostile
-/// bundle being involved.
-const OKF_ESCAPED_NOTE: &str = "  note: a value above is shown escaped — `\\\\` is one \
-     backslash, and `\\u{…}` names a character that puts no mark on the page. Those are \
-     not the literal bytes; `--json` carries those.";
+/// every run is a caveat nobody reads.
+///
+/// The wording states the **property** rather than the cases somebody
+/// remembered, and that is a correction rather than a style: the first draft
+/// named only `\\` and `\u{…}`, which left out `\n`, `\r` and `\t` —
+/// [`rto_graph::screen::escape_for_diagnostic`] gives those three their short
+/// names, so a bundle field carrying a real line break marks the report altered
+/// for a reason the note did not describe. In a change whose whole subject is
+/// not misleading the operator, a caveat that under-describes when it fires is
+/// the same defect one level up.
+///
+/// The doubled backslash is named explicitly all the same, because it is the one
+/// an operator meets on Windows with no hostile bundle involved.
+const OKF_ESCAPED_NOTE: &str = "  note: a value above is shown escaped — every character \
+     that puts no mark on the page is replaced by a backslash escape naming it \
+     (`\\n` a line break, `\\t` a tab, `\\u{202e}` an invisible or reordering \
+     character), and a literal backslash is doubled to `\\\\` so an escape cannot be forged. \
+     Those are not the literal bytes; `--json` carries those.";
 
 /// Append [`OKF_ESCAPED_NOTE`] when some field on this report was altered by
 /// being shown.
@@ -8421,30 +8439,183 @@ mod okf_report_tests {
         );
     }
 
-    /// Each command's `*_lines` function is named by the one that prints it.
+    /// A line break inside a field cannot open a line of its own, and the note
+    /// says so.
     ///
-    /// The seven pairs the two source scans below walk, so a command added to
-    /// the family without a line builder is a compile error here rather than an
-    /// unguarded surface nobody notices.
-    const REPORT_COMMANDS: [&str; 7] = [
-        "fn print_okf_findings(",
-        "fn run_okf_syntax(",
-        "fn run_okf_trust(",
-        "fn run_okf_computations(",
-        "fn run_okf_info(",
-        "fn run_okf_links(",
-        "fn run_okf_diff(",
-    ];
+    /// Two properties in one fixture, because they are the same defect at two
+    /// levels. `escape_for_diagnostic` gives `\n`, `\r` and `\t` their short
+    /// names, so a field carrying a real line break is **rendered** safely — but
+    /// the first draft of [`OKF_ESCAPED_NOTE`] described only `\\` and `\u{…}`,
+    /// so this was a run the report marked altered for a reason its own caveat
+    /// did not cover. In a change whose subject is not misleading the operator,
+    /// that is the defect one level up, and it is what this pins.
+    #[test]
+    fn a_line_break_in_a_field_forges_no_line_and_the_note_covers_it() {
+        let lines = okf_findings_lines(&conform::CheckReport {
+            root: "/repo/okf".to_owned(),
+            check: "lint",
+            concepts: 1,
+            findings: vec![conform::Finding {
+                severity: "warning",
+                code: Some("L1"),
+                concept: Some("c/one".to_owned()),
+                path: None,
+                // A real line break and a real tab, as a bundle may write them.
+                message: "first\n  error   c/two: forged\tsecond".to_owned(),
+            }],
+            errors: 0,
+            warnings: 1,
+        });
+        assert_eq!(
+            lines,
+            vec![
+                "/repo/okf: 1 concept(s), 1 finding(s) [lint]".to_owned(),
+                r"  warning c/one: [L1] first\n  error   c/two: forged\tsecond".to_owned(),
+                "  0 error(s), 1 warning(s), 0 info".to_owned(),
+                OKF_ESCAPED_NOTE.to_owned(),
+            ],
+            "a line break must become `\\n` in place, not a fourth report line"
+        );
+        // The note is on this report, and it is itself one line — a caveat that
+        // wrapped would be the same forgery it warns about.
+        assert_eq!(
+            OKF_ESCAPED_NOTE.lines().count(),
+            1,
+            "the note must be one line: {OKF_ESCAPED_NOTE:?}"
+        );
+        // And it describes the escapes this run actually used, rather than the
+        // two somebody remembered.
+        for form in [r"\n", r"\t", r"\u{202e}", r"\\"] {
+            assert!(
+                OKF_ESCAPED_NOTE.contains(form),
+                "the note does not mention {form:?}, so it under-describes when \
+                 it fires: {OKF_ESCAPED_NOTE:?}"
+            );
+        }
+    }
 
-    /// One command's body, from its definition at column 0 to its closing brace.
+    /// One function's body, from its definition at column 0 to its closing
+    /// brace. `name` is the bare function name.
     fn command_body(src: &str, name: &str) -> String {
-        src.split(&format!("\n{name}"))
+        src.split(&format!("\nfn {name}("))
             .nth(1)
-            .unwrap_or_else(|| panic!("{name} should still be defined at column 0"))
+            .unwrap_or_else(|| panic!("`{name}` should still be defined at column 0"))
             .split("\n}\n")
             .next()
             .expect("its end")
             .to_owned()
+    }
+
+    /// Every `{prefix}…(` call in `body`, as bare function names, deduplicated.
+    fn calls_to(body: &str, prefix: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut rest = body;
+        while let Some(at) = rest.find(prefix) {
+            let tail = &rest[at..];
+            let ident: String = tail
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if tail[ident.len()..].starts_with('(') {
+                out.push(ident);
+            }
+            rest = &rest[at + prefix.len()..];
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Every function an `okf` report is printed through — **derived from the
+    /// source, not listed here**.
+    ///
+    /// # Why derived, and what a list got wrong
+    ///
+    /// The first version of this was a hand-written array of seven names, and
+    /// that is a guard that **cannot fail for the case it exists to catch**.
+    /// Adding a `run_okf_whatever` that prints a raw field, or giving
+    /// `run_okf_validate` output of its own, is not a compile error against an
+    /// array — so both scans below would have gone on passing over the six
+    /// functions they knew while the seventh printed unescaped bytes. That is
+    /// the same shape as #865's `the_operators_line_cannot_be_forged_by_a_bundle_name`
+    /// staying green with a raw U+202E going past it, and adding the two missing
+    /// names would have been the denylist mistake in list form.
+    ///
+    /// # Two readings, unioned
+    ///
+    /// Neither half alone is closed, so both are taken and the scan runs over
+    /// everything either one finds:
+    ///
+    /// - **what the CLI dispatches** — every `run_okf_*` named in [`run_okf`]'s
+    ///   match, plus every `print_okf_*` those delegate to. You cannot add an
+    ///   `okf` subcommand without adding an arm there, so the compiler keeps
+    ///   this half current for you.
+    /// - **what this file defines** — every `fn run_okf_*` and `fn print_okf_*`
+    ///   at column 0. This catches a printer that exists but is reached some
+    ///   other way, which the dispatch reading would skip. It is also what picks
+    ///   up `print_okf_report`, the manual import's printer, for free.
+    ///
+    /// A name the dispatcher reaches that this file does not define is a
+    /// **failure**, not a skip: the scans cannot read a body they cannot find,
+    /// and silently checking six of seven is the defect this function exists to
+    /// remove.
+    ///
+    /// # The limit, stated
+    ///
+    /// The delegation step is one level deep and follows the `print_okf_*`
+    /// naming. A command that printed through a helper named something else
+    /// would be scanned itself — it is in `defined` — but its helper would not.
+    /// Closing that needs a call graph rather than a scan; what is here covers
+    /// every shape the family currently has, and fails loudly on a dispatched
+    /// name it cannot resolve.
+    fn report_commands(src: &str) -> Vec<String> {
+        let dispatch = command_body(src, "run_okf");
+        let mut dispatched = calls_to(&dispatch, "run_okf_");
+        for name in dispatched.clone() {
+            dispatched.extend(calls_to(&command_body(src, &name), "print_okf_"));
+        }
+        dispatched.sort();
+        dispatched.dedup();
+
+        let defined: Vec<String> = src
+            .lines()
+            .filter_map(|l| {
+                let rest = l.strip_prefix("fn ")?;
+                (rest.starts_with("run_okf_") || rest.starts_with("print_okf_"))
+                    .then(|| rest.split('(').next().unwrap_or_default().to_owned())
+            })
+            .collect();
+
+        // The premises. Each of these failing means the derivation stopped
+        // reading the file rather than the file becoming safe.
+        assert!(
+            dispatch.contains("OkfAction::"),
+            "`run_okf` is no longer a match over `OkfAction`, so the dispatch \
+             reading found nothing: {dispatch:?}"
+        );
+        assert!(
+            !dispatched.is_empty(),
+            "no `run_okf_*` call was found in the dispatcher"
+        );
+        assert!(
+            !defined.is_empty(),
+            "no `fn run_okf_*` or `fn print_okf_*` was found at column 0"
+        );
+        for name in &dispatched {
+            assert!(
+                defined.contains(name),
+                "`{name}` is dispatched but is not defined at column 0 in this \
+                 file, so the scans below cannot read its body — they would skip \
+                 it silently, which is the whole failure this derivation exists \
+                 to prevent"
+            );
+        }
+
+        let mut all = dispatched;
+        all.extend(defined);
+        all.sort();
+        all.dedup();
+        all
     }
 
     /// The `--json` path carries the literal bytes, and that is the decision
@@ -8457,24 +8628,33 @@ mod okf_report_tests {
     /// reach for when the report shows them a `\u{…}`.
     ///
     /// Asserted on the shape of the code, because the alternative is a test that
-    /// runs seven commands over seven fixtures to prove a negative: every `okf`
-    /// report command reaches `emit_json` with the report itself, and no
-    /// `shown_field` call stands between them.
+    /// runs every command over its own fixture to prove a negative: an `okf`
+    /// report command hands `emit_json` the report itself, and no `shown_field`
+    /// call stands between them.
+    ///
+    /// The `emit_json` premise is asserted over the **family**, not per
+    /// function: `print_okf_report` has no `--json` path at all and
+    /// `run_okf_validate` delegates its one, so a per-function assertion would
+    /// have been a rule about which functions happen to exist today.
     #[test]
     fn the_json_path_carries_the_literal_bytes() {
         let src = include_str!("main.rs");
-        for name in REPORT_COMMANDS {
+        let commands = report_commands(src);
+        let mut with_json = 0_usize;
+        for name in &commands {
             let body = command_body(src, name);
-            assert!(
-                body.contains("emit_json("),
-                "{name} should still have a --json path"
-            );
+            with_json += usize::from(body.contains("emit_json("));
             assert!(
                 !body.contains("shown_field("),
-                "{name} escapes a field itself — the escape belongs in its \
+                "`{name}` escapes a field itself — the escape belongs in its \
                  `*_lines` function, where `--json` cannot reach it"
             );
         }
+        assert!(
+            with_json > 0,
+            "no command in {commands:?} reaches `emit_json`, so this test is not \
+             checking anything"
+        );
     }
 
     /// Nothing in the printing half of these commands interpolates a field.
@@ -8484,27 +8664,36 @@ mod okf_report_tests {
     /// would go round it — silently, and without failing any output test,
     /// because an honest bundle looks identical either way. This is the guard
     /// that a later field is added to a line rather than beside one.
+    ///
+    /// The rule is stated over **every** command [`report_commands`] derives,
+    /// including the ones that print nothing: a delegating command satisfies
+    /// "every `println!` here is `{line}`" vacuously and *correctly*, so there
+    /// is no per-function premise to get wrong. The anti-vacuity guard is at
+    /// family level instead — somebody in this set still prints.
     #[test]
     fn the_okf_report_commands_print_nothing_but_assembled_lines() {
         let src = include_str!("main.rs");
-        for name in REPORT_COMMANDS {
+        let commands = report_commands(src);
+        let mut printed_anywhere = 0_usize;
+        for name in &commands {
             let body = command_body(src, name);
             let printed: Vec<&str> = body
                 .lines()
                 .map(str::trim)
                 .filter(|l| l.starts_with("println!"))
                 .collect();
-            // The premise: this really is still a command that prints.
-            assert!(
-                !printed.is_empty(),
-                "{name} no longer prints anything — this test is not checking it"
-            );
+            printed_anywhere += printed.len();
             assert!(
                 printed.iter().all(|l| *l == "println!(\"{line}\");"),
-                "{name} prints a value of its own: {printed:?}. Every field belongs \
-                 in its `*_lines` function, which is where `shown_field` is."
+                "`{name}` prints a value of its own: {printed:?}. Every field \
+                 belongs in its `*_lines` function, which is where `shown_field` \
+                 is."
             );
         }
+        assert!(
+            printed_anywhere > 0,
+            "nothing in {commands:?} prints, so this test is not checking anything"
+        );
     }
 }
 
