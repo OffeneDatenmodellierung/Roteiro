@@ -16629,8 +16629,12 @@ fn announce_worktree_only_roots(
     }
 }
 
-/// The `[standalone]` table, when its roots are part of what is about to be
-/// served — and `None` otherwise.
+/// The config tables a scan diagnostic reads, for this scope.
+///
+/// Always returns a [`ScanTables`]; it is the *standalone half* that is optional,
+/// not the result. The two halves are gated differently and for different reasons.
+///
+/// # `standalone`: scope-gated
 ///
 /// `[standalone] roots` are resolved to concrete `repos` before any
 /// [`rto_graph::ResolvedWorkspace`] exists, so the scan they came from cannot be
@@ -16638,11 +16642,18 @@ fn announce_worktree_only_roots(
 /// [`scanned_roots_note`] and [`worktree_hint`] only through this table (issue
 /// #837).
 ///
-/// **Only under [`WorkspaceScope::All`].** That is the one scope under which the
+/// Carried **only under [`WorkspaceScope::All`]**, the one scope under which the
 /// whole table is what is being served. [`WorkspaceScope::Named`] has already
 /// named a single group, so reporting every standalone root would describe scans
 /// that are not in play — over-reporting in a diagnostic is how a note stops being
 /// read — and [`WorkspaceScope::Here`] consults no configured list at all.
+///
+/// # `named`: never gated
+///
+/// This half only *classifies* groups already present in `effective`, deciding
+/// whether one came from a `[[workspaces]]` entry or from the legacy `[workspace]`
+/// table ([`ScanTables::owner_of`]). Narrowing it would hide nothing — it would
+/// only make a named group's remedy name the wrong table.
 #[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
 fn scan_tables<'c>(cfg: &'c config::Config, scope: &WorkspaceScope) -> ScanTables<'c> {
     ScanTables {
