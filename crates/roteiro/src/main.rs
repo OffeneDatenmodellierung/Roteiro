@@ -7995,23 +7995,35 @@ mod okf_report_tests {
             root: format!("/repo/{HOSTILE}/okf"),
             check: "lint",
             concepts: 1,
-            findings: vec![conform::Finding {
-                severity: "warning",
-                code: Some("L3"),
-                concept: Some(format!("concepts/{HOSTILE}")),
-                path: None,
-                message: format!("links to deprecated concept `{HOSTILE}`"),
-            }],
-            errors: 0,
+            findings: vec![
+                conform::Finding {
+                    severity: "warning",
+                    code: Some("L3"),
+                    concept: Some(format!("concepts/{HOSTILE}")),
+                    path: None,
+                    message: format!("links to deprecated concept `{HOSTILE}`"),
+                },
+                // `where_` falls back to `path` when there is no concept, and a
+                // finding about a *file* is the only way to reach that arm.
+                conform::Finding {
+                    severity: "error",
+                    code: None,
+                    concept: None,
+                    path: Some(format!("/f/{HOSTILE}.md")),
+                    message: "not a readable OKF document".to_owned(),
+                },
+            ],
+            errors: 1,
             warnings: 1,
         });
         assert_nothing_invisible("okf lint", &lines);
         assert_eq!(
             lines,
             vec![
-                format!("/repo/{SHOWN}/okf: 1 concept(s), 1 finding(s) [lint]"),
+                format!("/repo/{SHOWN}/okf: 1 concept(s), 2 finding(s) [lint]"),
                 format!("  warning concepts/{SHOWN}: [L3] links to deprecated concept `{SHOWN}`"),
-                "  0 error(s), 1 warning(s), 0 info".to_owned(),
+                format!("  error   /f/{SHOWN}.md: not a readable OKF document"),
+                "  1 error(s), 1 warning(s), 0 info".to_owned(),
                 OKF_ESCAPED_NOTE.to_owned(),
             ]
         );
@@ -8104,19 +8116,39 @@ mod okf_report_tests {
             file: 0,
             missing: 0,
             runtimes: vec![format!("rt-{HOSTILE}")],
-            entries: vec![inspect::ComputationEntry {
-                concept: format!("concepts/{HOSTILE}"),
-                path: "/c/x.md".to_owned(),
-                runtime: Some(format!("rt-{HOSTILE}")),
-                source: "inline",
-                file: None,
-                language: Some(format!("lang-{HOSTILE}")),
-                lines: Some(3),
-                parameters: vec![format!("p-{HOSTILE}")],
-                has_executor: false,
-                has_attester: true,
-                redundant_inline: false,
-            }],
+            entries: vec![
+                inspect::ComputationEntry {
+                    concept: format!("concepts/{HOSTILE}"),
+                    path: "/c/x.md".to_owned(),
+                    runtime: Some(format!("rt-{HOSTILE}")),
+                    source: "inline",
+                    file: None,
+                    language: Some(format!("lang-{HOSTILE}")),
+                    lines: Some(3),
+                    parameters: vec![format!("p-{HOSTILE}")],
+                    has_executor: false,
+                    has_attester: true,
+                    redundant_inline: false,
+                },
+                // The `file` arm is a **separate** `shown_field` call site, and
+                // the inline entry above cannot reach it — its `file` is `None`.
+                // Without this second entry a regression there would be caught
+                // only by the honest fixture, whose CJK and NFD values are
+                // unchanged by escaping and so pass raw or escaped alike.
+                inspect::ComputationEntry {
+                    concept: format!("byfile/{HOSTILE}"),
+                    path: "/c/y.md".to_owned(),
+                    runtime: Some(format!("rt2-{HOSTILE}")),
+                    source: "file",
+                    file: Some(format!("/sql/q-{HOSTILE}.sql")),
+                    language: None,
+                    lines: None,
+                    parameters: Vec::new(),
+                    has_executor: true,
+                    has_attester: true,
+                    redundant_inline: false,
+                },
+            ],
         });
         assert_nothing_invisible("okf computations", &lines);
         assert_eq!(
@@ -8128,6 +8160,7 @@ mod okf_report_tests {
                 format!("  concepts/{SHOWN} — rt-{SHOWN}, inline lang-{SHOWN}, 3 line(s)"),
                 format!("      parameters: p-{SHOWN}"),
                 "      no executor".to_owned(),
+                format!("  byfile/{SHOWN} — rt2-{SHOWN}, file /sql/q-{SHOWN}.sql"),
                 OKF_ESCAPED_NOTE.to_owned(),
             ]
         );
@@ -8137,7 +8170,10 @@ mod okf_report_tests {
     fn a_bundle_cannot_rewrite_the_info_report() {
         let lines = okf_info_lines(&inspect::BundleInfo {
             root: format!("/repo/{HOSTILE}"),
-            okf_version: None,
+            // Hostile rather than `None`: `okf_info_lines` escapes this through
+            // its own `shown_field` call, which the trust report's copy cannot
+            // stand in for.
+            okf_version: Some(format!("0.2-{HOSTILE}")),
             title: Some(format!("A bundle called {HOSTILE}")),
             concepts: 1,
             trust: info_trust(),
@@ -8160,7 +8196,7 @@ mod okf_report_tests {
             vec![
                 format!("/repo/{SHOWN}"),
                 format!("  title: A bundle called {SHOWN}"),
-                "  okf_version: (not declared)".to_owned(),
+                format!("  okf_version: 0.2-{SHOWN}"),
                 "  concepts: 1".to_owned(),
                 "  trust: human-reviewed 1, machine-confirmed 0, unverified 0".to_owned(),
                 "  stale: 0 (as of 2026-09-16)".to_owned(),
@@ -8659,14 +8695,38 @@ mod okf_report_tests {
 
     /// One function's body, from its definition at column 0 to its closing
     /// brace. `name` is the bare function name.
+    ///
+    /// # Why the end is asserted rather than assumed
+    ///
+    /// The split ends at the first `}` **at column 0**, which cannot occur
+    /// inside a function body — `rustfmt` indents every nested brace, so an
+    /// `if json { … }` closes with four spaces in front of it. But a scan that
+    /// silently returned a *prefix* would make both guards below inspect part
+    /// of a function while reporting on all of it, which is the failure they
+    /// exist to prevent, one level up.
+    ///
+    /// So completeness is checked, and cheaply: a complete extraction has
+    /// **exactly one more `{` than `}`** — the signature's opening brace is
+    /// inside the slice and the closing one was consumed as the delimiter. A
+    /// truncated extraction loses a nested `}` and the difference grows.
     fn command_body(src: &str, name: &str) -> String {
-        src.split(&format!("\nfn {name}("))
+        let body = src
+            .split(&format!("\nfn {name}("))
             .nth(1)
             .unwrap_or_else(|| panic!("`{name}` should still be defined at column 0"))
             .split("\n}\n")
             .next()
             .expect("its end")
-            .to_owned()
+            .to_owned();
+        let (open, close) = (body.matches('{').count(), body.matches('}').count());
+        assert_eq!(
+            open,
+            close + 1,
+            "`{name}`'s body was extracted incomplete ({open} `{{` against {close} \
+             `}}`), so the guards below would inspect a prefix and report on the \
+             whole function"
+        );
+        body
     }
 
     /// Every `{prefix}…(` call in `body`, as bare function names, deduplicated.
