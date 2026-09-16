@@ -180,13 +180,13 @@ fn source_eq(a: &Source, b: &Source) -> bool {
 /// would rebuild the wrong repository's graph and write it to the wrong store,
 /// silently (issue #837).
 ///
-/// The registry already knows the answer — [`build_registry`] records
+/// The registry already knows the answer — `build_registry` records
 /// `repo.workdir()` beside the db path it derived from `repo.git_dir()` — so this
 /// hands the value over instead of asking the callee to reconstruct it.
 /// `None` whenever the source has **no working-tree root** to record. Two cases,
 /// not one: a [`Workspace::from_named_dbs`] source, which records no root at all,
 /// and a **bare** repository passed to [`Workspace::from_repo_paths`], because
-/// [`build_registry`] records `repo.workdir()` and a bare repo has none. A hook
+/// `build_registry` records `repo.workdir()` and a bare repo has none. A hook
 /// that assumed `from_named_dbs` were the only nameless case would be wrong about
 /// the second, so it is named here.
 ///
