@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v5.15.1...rto-graph-v6.0.0) - 2026-09-16
+
+### Added
+
+- *(serve)* `--scope here` inside a worktree serves that worktree
+- *(workspace)* [**breaking**] a `roots` scan skips linked git worktrees
+
+### Fixed
+
+- *(docs)* drop two private intra-doc links from `OnOpen`
+- *(serve)* attribute each scanned-roots note, and stop calling a hosted worktree lost
+- *(workspace)* selection sees worktrees; sync-on-access resolves them
+
+### Other
+
+- *(837)* record the amendment in ADR-0008, the site and both changelogs
+
 ### Changed
 
 - *(workspace)* `scan_root` and `discover_repos_under` take a `Worktrees` argument

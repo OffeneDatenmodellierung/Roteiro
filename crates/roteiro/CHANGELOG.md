@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.15.1...roteiro-v6.0.0) - 2026-09-16
+
+### Added
+
+- *(serve)* `--scope here` inside a worktree serves that worktree
+- *(workspace)* [**breaking**] a `roots` scan skips linked git worktrees
+
+### Fixed
+
+- *(serve)* attribute each scanned-roots note, and stop calling a hosted worktree lost
+- *(ci)* gate the help-contract test on its subcommands; resolve the doc link
+- *(workspace)* selection sees worktrees; sync-on-access resolves them
+- *(workspace)* announce a worktree-only root before the cwd fallback
+- *(workspace)* close four paths the worktree decision did not reach
+- *(explorer)* announce the worktree from explorer's own single-repo path too
+
+### Other
+
+- *(config)* one overlay for `[workspace]` and `[standalone]`
+- *(837)* record the amendment in ADR-0008, the site and both changelogs
+
 ### Changed
 
 - *(workspace)* **A `roots` scan no longer hosts linked git worktrees.** A second
