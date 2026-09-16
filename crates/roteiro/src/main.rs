@@ -14190,7 +14190,7 @@ fn run_explorer(
         // `[standalone] roots` entry holding only worktrees resolves to no groups,
         // so `from_config` is false and this path quietly hosts the current
         // directory instead of what was configured. Silent under `--scope here` by
-        // construction — `standalone_table` returns `None` for any scope that did
+        // construction — `scan_tables` leaves the standalone half `None` for any scope that did
         // not consult the configured list.
         announce_worktree_only_roots("explorer", &resolved, scan_tables(cfg, &ws_scope));
         match explorer_cwd_set() {
@@ -15907,7 +15907,7 @@ fn build_serve_workspaces(
         // is a reasonable thing to do and is what happens today; what was missing
         // is being told that the roots you declared contributed nothing, and why.
         // Silent under `--scope here`, without a special case here, because
-        // `standalone_table` already returns `None` for any scope that did not
+        // `scan_tables` already leaves the standalone half `None` for any scope that did not
         // consult the configured list.
         announce_worktree_only_roots(cmd, &resolved, scan_tables(cfg, scope));
         let (repo, mut store, cache) = match open_graph() {
@@ -16605,7 +16605,7 @@ fn wants_solo_workspace(
 /// worth taking twice in one change.
 ///
 /// Silent for any scope that did not consult the configured list, because
-/// [`standalone_table`] hands back `None` there.
+/// [`scan_tables`] leaves the standalone half `None` there.
 #[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
 fn announce_worktree_only_roots(
     cmd: &str,
