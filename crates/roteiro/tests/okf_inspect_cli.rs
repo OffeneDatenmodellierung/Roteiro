@@ -841,7 +841,7 @@ fn hostile_bundle(tag: &str) -> PathBuf {
                 "c/tot\u{202E}al.md",
                 "---\ntype: Attested Computation\ntitle: Total \u{202E}\nruntime: bq-\u{202E}\n\
                  parameters:\n  - name: p\u{202E}\n    type: STRING\n---\n\n\
-                 # Computation\n\n```sql\nSELECT FROM WHERE (\n```\n",
+                 # Computation\n\n```sql\nSELECT 1 FROM t WHERE x = \u{202E}bad\u{202E};\n```\n",
             ),
             (
                 // A **file-backed** computation (`computation:` in frontmatter)
@@ -969,6 +969,7 @@ const CONCEPT_MD: &str = "c/rev\u{202E}enue.md";
 const COMP: &str = "c/tot\u{202E}al";
 const COMP_MD: &str = "c/tot\u{202E}al.md";
 const ASSET: &str = "assets/logo\u{202E}.bin";
+const ASSET_LINK: &str = "/assets/logo\u{202E}.bin";
 const VERSION: &str = "0.2-\u{202E}";
 const STATUS: &str = "active-\u{202E}";
 const RUNTIME: &str = "bq-\u{202E}";
@@ -979,7 +980,15 @@ const FIELDS_FINDINGS: &[(&str, &str)] = &[
     ("path", CONCEPT_MD),
     ("message", ""),
 ];
-const FIELDS_SYNTAX: &[(&str, &str)] = &[("root", ""), ("concept", COMP), ("path", COMP_MD)];
+const FIELDS_SYNTAX: &[(&str, &str)] = &[
+    ("root", ""),
+    ("concept", COMP),
+    ("path", COMP_MD),
+    // The parser quotes the offending token, so a bundle reaches its own
+    // diagnostic: `… Expected: an expression, found: <U+202E> at Line 1 …`.
+    // Present and raw is asserted; the wording is `sqlparser`'s, not ours.
+    ("message", ""),
+];
 const FIELDS_TRUST: &[(&str, &str)] = &[
     ("root", ""),
     ("okf_version", VERSION),
@@ -1020,9 +1029,20 @@ const FIELDS_LINKS: &[(&str, &str)] = &[
 const FIELDS_DIFF: &[(&str, &str)] = &[
     ("before", ""),
     ("after", ""),
+    ("added/0", "c/add\u{202E}ed"),
     ("removed/0", COMP),
+    ("renamed/0/0", "c/lang\u{202E}"),
+    ("renamed/0/1", "c/moved\u{202E}"),
     ("content_changed/0", CONCEPT),
-    ("id", CONCEPT),
+    ("frontmatter_changed/0", "c/byfile\u{202E}"),
+    ("id", "c/byfile\u{202E}"),
+    ("status/1", "retired-\u{202E}"),
+    ("links_mended/0/1", ASSET_LINK),
+    // `trust_changed[].tier` is deliberately absent: `TrustMove` carries it as
+    // `String`, so `okf_diff_lines` escapes it, but §5.3 fixes the vocabulary to
+    // three tokens and no bundle can put anything else there. There is nothing
+    // hostile to assert, and a fixture that pretended otherwise would be
+    // asserting a state the format cannot reach.
 ];
 
 /// The eight `--json` runs, paired with the fields each must carry.
@@ -1104,17 +1124,40 @@ fn the_json_surface_carries_the_bundles_literal_bytes() {
     // Built identical at first, which the per-field assertion below caught:
     // `removed` was empty and the existential version of this test passed
     // anyway, which is the whole reason it is per field now.
+    // The "after" bundle differs from "before" in **every way `okf diff`
+    // reports**, so each collection has a hostile id in it and none of them is
+    // named in the matrix below without being produced here.
+    //
+    //   removed             a concept only "before" has
+    //   added               a concept only "after" has
+    //   renamed             the same content at a different path
+    //   content_changed     same frontmatter, different body
+    //   frontmatter_changed same body, different frontmatter
+    //   trust_changed       a status move, and a tier move
     std::fs::remove_file(other.join("c/tot\u{202E}al.md")).expect("remove the computation");
-    // …and the surviving concept differs in body and in status, so `diff` has
-    // `content_changed` and a `trust_changed` status move to report as well —
-    // each a separate leaf, and each an id the bundle chose.
+    std::fs::write(
+        other.join("c/add\u{202E}ed.md"),
+        "---\ntype: Metric\ntitle: Added \u{202E}\n---\n\n# Added\n",
+    )
+    .expect("add a concept");
+    let renamed = std::fs::read_to_string(other.join("c/lang\u{202E}.md")).expect("read it");
+    std::fs::write(other.join("c/moved\u{202E}.md"), renamed).expect("rename a concept");
+    std::fs::remove_file(other.join("c/lang\u{202E}.md")).expect("drop the old path");
+    // Body rewritten and `verified` dropped: `content_changed`, and a tier move
+    // from human-reviewed down to unverified.
     std::fs::write(
         other.join("c/rev\u{202E}enue.md"),
-        "---\ntype: Metric\ntitle: Revenue \u{202E}\nstatus: retired-\u{202E}\n\
-         verified: { by: human:alice\u{202E}, at: 2026-08-01T10:00:00Z }\n\
+        "---\ntype: Metric\ntitle: Revenue \u{202E}\nstatus: active-\u{202E}\n\
          stale_after: 2020-01-01T00:00:00Z\n---\n\n# Definition\n\nRewritten.\n",
     )
     .expect("rewrite the concept");
+    // Frontmatter only: a status move with the body untouched.
+    std::fs::write(
+        other.join("c/byfile\u{202E}.md"),
+        "---\ntype: Attested Computation\ntitle: By file\nruntime: bq2-\u{202E}\n\
+         status: retired-\u{202E}\ncomputation: /sql/q-\u{202E}.sql\n---\n\n# Computation\n",
+    )
+    .expect("change frontmatter only");
     let other_path = other.to_string_lossy().into_owned();
 
     let runs = json_runs(&path, &other_path);
