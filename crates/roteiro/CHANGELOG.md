@@ -100,6 +100,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   being skipped, and now names `include_worktrees` as the way back. A false
   statement in `--help` is the one place a user looks to find out why a project
   vanished.
+- *(serve)* the worktree diagnostics name a config table that **exists and works**,
+  and treat two spellings of one path as one repository. Naming the *group* meant
+  the legacy `[workspace]` table was advertised under its resolved group name,
+  `default` — a string that appears in no config file — so an operator following
+  the advice wrote a `[default]` table and got a parse error or a silently ignored
+  key. The remedy is now derived from which table declared the scan, classified
+  exactly as `roteiro config` classifies it, and every spelling a diagnostic can
+  emit is round-tripped through the real parser in test. Separately, the cross-scan
+  view compared a scan's path against whatever the config file wrote, so a `repos`
+  entry spelling the same location differently (a `..` component, say) did not
+  match and the worktree was reported lost again; it now uses the same canonical
+  identity `resolved_repo_paths` already uses.
 - *(serve)* the worktree diagnostics know about **both** escape hatches and name
   the table that actually governs the scan they describe. The cross-scan view was
   built from root-scan results alone, so it could not see a worktree hosted by an
