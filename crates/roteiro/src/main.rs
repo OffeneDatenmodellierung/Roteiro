@@ -7097,14 +7097,22 @@ fn run_okf_lint(path: &str, json: bool) -> anyhow::Result<()> {
 /// The argument is that the round trip an unescaped id preserves is one that was
 /// already broken:
 ///
-/// - The escape is a **no-op on every id a person could actually paste**. The
-///   allowlist passes anything that puts a mark on the page through
-///   byte-identical, so an ASCII id, a CJK id and an NFD-accented id all survive
-///   unchanged and stay pasteable. The only ids the escape alters are ones
-///   carrying characters that render as nothing or render as their own reverse.
-/// - For exactly those ids, **the raw form is not pasteable either**. What the
-///   terminal shows is not what the bytes are, so selecting the visible text
-///   copies something else — and the operator cannot see which part.
+/// - The escape **leaves almost every pasteable id alone**. The allowlist passes
+///   anything that puts a mark on the page through byte-identical, so an ASCII
+///   id, a CJK id and an NFD-accented id all survive unchanged and stay
+///   pasteable.
+/// - It is **not** a no-op everywhere, and claiming so would be the same
+///   overstatement this repository has already paid for. Two visible things do
+///   change, both stated on
+///   [`rto_graph::screen::escape_for_diagnostic`] rather than discovered:
+///   a literal `\` doubles, because the encoding has to be unambiguous; and a
+///   `Default_Ignorable_Code_Point` inside an ink category is escaped, so a
+///   variation-selector-qualified or ZWJ emoji shows its base character beside
+///   a visible `\u{…}`. An id carrying either is one the note below covers.
+/// - For the ids the escape alters *because they were hostile*, **the raw form
+///   is not pasteable either**. What the terminal shows is not what the bytes
+///   are, so selecting the visible text copies something else — and the operator
+///   cannot see which part.
 /// - Leaving the id raw to protect the paste puts the one value that can reverse
 ///   the rest of the line outside the guard. In `okf diff` that is the whole
 ///   line's meaning: `added` and `removed` sit either side of an arrow a single
@@ -7154,6 +7162,23 @@ fn push_escaped_note(out: &mut Vec<String>, escaped: &std::cell::Cell<bool>) {
 /// Returning lines rather than printing them follows [`okf_report_lines`], and
 /// for the same reason: the escaping here has to be checkable by a test, and a
 /// `println!` is not. [`shown_field`] carries which fields are foreign and why.
+///
+/// # What the vector costs, since a hostile bundle chooses its length
+///
+/// Every `okf_*_lines` function here materialises the whole report before any of
+/// it is printed, where the `println!` version streamed. That is a **constant
+/// factor on an allocation the caller has already made**, not a new unbounded
+/// one: `CheckReport::findings`, `ComputationReport::entries`,
+/// `LinkReport::broken` and the rest are `Vec<String>` already held in full by
+/// the time a printer is called, so the peak is roughly two copies of a report
+/// that was one.
+///
+/// Deliberately **not** capped the way [`okf_screen_lines`] caps its rows. That
+/// cap exists because a screening row is a *sample* of a verdict and the
+/// decision must not scroll away; a lint report is the answer itself, and
+/// truncating it would make "no further findings" and "further findings not
+/// shown" the same output — the silence-taken-for-absence this family exists to
+/// remove. `--json` remains the path for a report too large to read.
 fn okf_findings_lines(report: &rto_render::okf::conform::CheckReport) -> Vec<String> {
     let escaped = std::cell::Cell::new(false);
     // `report.check` is `validate` or `lint`, a `&'static str` this workspace

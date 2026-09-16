@@ -342,7 +342,7 @@ pub fn invisible_name(c: char) -> Option<&'static str> {
 ///
 /// [`escape_for_diagnostic`] is deliberately **not idempotent**, and it cannot
 /// be: its encoding has to be unambiguous, so a `\` in the input becomes `\\` in
-/// the output, or a bundle whose path spells the seven characters `\u{202e}`
+/// the output, or a bundle whose path spells the eight characters `\u{202e}`
 /// would be indistinguishable from one carrying the character. Correctness
 /// therefore depends on *how many times* the escaper has run over a value —
 /// once is right, twice is wrong, and both look identical at the call site.
@@ -519,7 +519,7 @@ impl std::fmt::Display for Diagnostic {
 /// can act on it, where a silently-cleaned name reads as an ordinary one and
 /// sends them looking in the wrong place. `\` is escaped to `\\` so the encoding
 /// is unambiguous — `\u{202e}` in the output always means an escaped U+202E and
-/// never a bundle whose path spells those seven characters. `\n`, `\r` and `\t`
+/// never a bundle whose path spells those eight characters. `\n`, `\r` and `\t`
 /// get their short names; everything else is `\u{...}` naming the code point,
 /// and every escape is ASCII, so the output can introduce nothing it was written
 /// to remove.
@@ -1812,7 +1812,7 @@ mod tests {
         //
         // One exception, and it is the encoding's own: `\` must double, or a
         // path spelling `\u{202e}` and the character it names would be the same
-        // seven output characters.
+        // eight output characters.
         let mut survived = 0_u32;
         for c in all_code_points() {
             if !oracle_says_ink(c) {
@@ -1895,7 +1895,7 @@ mod tests {
 
     #[test]
     fn the_escape_encoding_is_unambiguous_and_one_line() {
-        // A path that spells the seven characters of an escape must not read as
+        // A path that spells the eight characters of an escape must not read as
         // one, or the encoding tells the operator something false — which is
         // the failure mode, in miniature, of escaping at all.
         assert_eq!(
