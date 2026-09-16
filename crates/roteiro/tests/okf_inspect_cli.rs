@@ -831,7 +831,8 @@ fn hostile_bundle(tag: &str) -> PathBuf {
                 "---\ntype: Metric\ntitle: Revenue \u{202E}\nstatus: active-\u{202E}\n\
                  verified: { by: human:alice\u{202E}, at: 2026-08-01T10:00:00Z }\n\
                  stale_after: 2020-01-01T00:00:00Z\n---\n\n\
-                 # Definition\n\nSee [cost](/c/miss\u{202E}ing.md).\n\n## Empty \u{202E}\n",
+                 # Definition\n\nSee [cost](/c/miss\u{202E}ing.md) and \
+                 [the logo](/assets/logo\u{202E}.bin).\n\n## Empty \u{202E}\n",
             ),
             (
                 // The computation concept carries it too, so `okf syntax`'s
@@ -847,13 +848,26 @@ fn hostile_bundle(tag: &str) -> PathBuf {
     )
 }
 
-/// Every JSON pointer in `doc` whose string value carries `needle`.
-fn paths_carrying(doc: &serde_json::Value, needle: char) -> Vec<String> {
-    fn walk(v: &serde_json::Value, at: &str, needle: char, out: &mut Vec<String>) {
+/// One command's `--json` run: a label, its arguments, and the
+/// `(field, expected)` pairs its document must carry raw.
+///
+/// Named because the tuple is what a reviewer reads first, and because the
+/// expectations are data: adding a field to a report means adding a row here,
+/// not editing an assertion.
+type JsonRun<'a> = (&'a str, Vec<&'a str>, &'a [(&'a str, &'a str)]);
+
+/// Every `(pointer, value)` string leaf in `doc` whose value carries `needle`.
+///
+/// The **value** is returned, not only the path, because "a leaf under this key
+/// contains the character somewhere" is a weaker claim than the test makes: a
+/// document that truncated or substituted a field while keeping the override in
+/// it would satisfy the first and violate the second.
+fn leaves_carrying(doc: &serde_json::Value, needle: char) -> Vec<(String, String)> {
+    fn walk(v: &serde_json::Value, at: &str, needle: char, out: &mut Vec<(String, String)>) {
         match v {
             serde_json::Value::String(s) => {
                 if s.contains(needle) {
-                    out.push(at.to_owned());
+                    out.push((at.to_owned(), s.clone()));
                 }
             }
             serde_json::Value::Object(m) => {
@@ -872,6 +886,157 @@ fn paths_carrying(doc: &serde_json::Value, needle: char) -> Vec<String> {
     let mut out = Vec::new();
     walk(doc, "", needle, &mut out);
     out
+}
+
+/// Run one command and assert its `--json` document carries the bundle's own
+/// bytes, field by field.
+///
+/// Split out so the matrix above stays readable as data — and so a failure
+/// names one command rather than one long test.
+fn assert_json_is_literal(run: &JsonRun<'_>) {
+    let (name, args, fields) = (run.0, &run.1, run.2);
+    let out = roteiro(args);
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    // `syntax` exits non-zero when a block does not parse, which this
+    // bundle intends, so the status is deliberately not asserted.
+    let doc: serde_json::Value = serde_json::from_str(&text)
+        .unwrap_or_else(|e| panic!("`okf {name} --json` is not JSON ({e}):\n{text}"));
+
+    // Universal: no leaf anywhere carries this repository's *report*
+    // escape. A substring search over the document is exactly that, since
+    // the spelling cannot occur outside a string value.
+    assert!(
+        !text.contains("\\u{202e}"),
+        "`okf {name} --json` carries this repository's report escape. The \
+         JSON surface is the one copy of the literal bytes an operator is \
+         told to reach for, and escaping it would make this change breaking \
+         under AGENTS.md's CLI output-contract rule:\n{text}"
+    );
+
+    // Per field: every named field reached the document, and where the
+    // value is ours to predict, it arrived **whole**. Matched on the
+    // trailing key so finding order may change.
+    let carrying = leaves_carrying(&doc, '\u{202E}');
+    for (field, expected) in fields {
+        let suffix = format!("/{field}");
+        let found: Vec<&String> = carrying
+            .iter()
+            .filter(|(p, _)| p.ends_with(&suffix))
+            .map(|(_, v)| v)
+            .collect();
+        assert!(
+            !found.is_empty(),
+            "`okf {name} --json` has no `{field}` carrying the bundle's \
+             literal character. Either that field was escaped on the machine \
+             surface or it never reached the document. Raw-carrying leaves \
+             were {carrying:?}"
+        );
+        if !expected.is_empty() {
+            assert!(
+                found.iter().any(|v| v.as_str() == *expected),
+                "`okf {name} --json`'s `{field}` carries the override but is \
+                 not the bundle's value {expected:?} — a truncation or \
+                 substitution would keep the character and lose the bytes. \
+                 Got {found:?}"
+            );
+        }
+    }
+}
+
+/// What each command's `--json` document must carry, as `(field, expected)`.
+///
+/// `const` rather than inline, because a slice literal inside a function cannot
+/// outlive it — and because the expectations read better as a table than as an
+/// argument. `""` means "present and raw, but no exact value asserted": the
+/// bundle root is a temp path chosen at run time, and a parser's message is
+/// `okf-core`'s wording rather than ours to pin.
+const CONCEPT: &str = "c/rev\u{202E}enue";
+const CONCEPT_MD: &str = "c/rev\u{202E}enue.md";
+const COMP: &str = "c/tot\u{202E}al";
+const COMP_MD: &str = "c/tot\u{202E}al.md";
+const ASSET: &str = "assets/logo\u{202E}.bin";
+const VERSION: &str = "0.2-\u{202E}";
+const STATUS: &str = "active-\u{202E}";
+const RUNTIME: &str = "bq-\u{202E}";
+
+const FIELDS_FINDINGS: &[(&str, &str)] = &[
+    ("root", ""),
+    ("concept", CONCEPT),
+    ("path", CONCEPT_MD),
+    ("message", ""),
+];
+const FIELDS_SYNTAX: &[(&str, &str)] = &[("root", ""), ("concept", COMP), ("path", COMP_MD)];
+const FIELDS_TRUST: &[(&str, &str)] = &[
+    ("root", ""),
+    ("okf_version", VERSION),
+    ("id", CONCEPT),
+    ("status", STATUS),
+    ("verified_by/0", "human:alice\u{202E}"),
+];
+const FIELDS_COMPUTATIONS: &[(&str, &str)] = &[
+    ("root", ""),
+    ("runtimes/0", RUNTIME),
+    ("concept", COMP),
+    ("path", COMP_MD),
+    ("runtime", RUNTIME),
+    ("parameters/0", "p\u{202E}"),
+];
+const FIELDS_INFO: &[(&str, &str)] = &[
+    ("root", ""),
+    ("okf_version", VERSION),
+    ("title", "Bundle \u{202E}"),
+    // `status` matches the nested trust block; `statuses/0/0` is `okf info`'s
+    // own histogram key and is a different leaf.
+    ("status", STATUS),
+    ("statuses/0/0", STATUS),
+    ("runtimes/0", RUNTIME),
+    ("files/0/path", ASSET),
+];
+const FIELDS_LINKS: &[(&str, &str)] = &[
+    ("root", ""),
+    ("from", CONCEPT),
+    ("target", "/c/miss\u{202E}ing.md"),
+    // A third leaf on this report, distinct from the two ends of the link.
+    ("non_concept/0/path", ASSET),
+];
+const FIELDS_DIFF: &[(&str, &str)] = &[("before", ""), ("after", ""), ("removed/0", COMP)];
+
+/// The eight `--json` runs, paired with the fields each must carry.
+fn json_runs<'a>(path: &'a str, other_path: &'a str) -> [JsonRun<'a>; 8] {
+    [
+        (
+            "validate",
+            vec!["okf", "validate", path, "--json"],
+            FIELDS_FINDINGS,
+        ),
+        ("lint", vec!["okf", "lint", path, "--json"], FIELDS_FINDINGS),
+        (
+            "syntax",
+            vec!["okf", "syntax", path, "--json"],
+            FIELDS_SYNTAX,
+        ),
+        (
+            "trust",
+            vec!["okf", "trust", path, "--today", "2026-09-16", "--json"],
+            FIELDS_TRUST,
+        ),
+        (
+            "computations",
+            vec!["okf", "computations", path, "--json"],
+            FIELDS_COMPUTATIONS,
+        ),
+        (
+            "info",
+            vec!["okf", "info", path, "--today", "2026-09-16", "--json"],
+            FIELDS_INFO,
+        ),
+        ("links", vec!["okf", "links", path, "--json"], FIELDS_LINKS),
+        (
+            "diff",
+            vec!["okf", "diff", path, other_path, "--json"],
+            FIELDS_DIFF,
+        ),
+    ]
 }
 
 /// `--json` carries the bundle's **literal bytes**, field by field.
@@ -918,89 +1083,10 @@ fn the_json_surface_carries_the_bundles_literal_bytes() {
     std::fs::remove_file(other.join("c/tot\u{202E}al.md")).expect("remove the computation");
     let other_path = other.to_string_lossy().into_owned();
 
-    // Per command: the arguments, and the field names whose value must reach
-    // `--json` with the bundle's own bytes in it.
-    let runs: [(&str, Vec<&str>, &[&str]); 8] = [
-        (
-            "validate",
-            vec!["okf", "validate", &path, "--json"],
-            &["root", "concept", "path"],
-        ),
-        (
-            "lint",
-            vec!["okf", "lint", &path, "--json"],
-            &["root", "concept", "path", "message"],
-        ),
-        (
-            "syntax",
-            vec!["okf", "syntax", &path, "--json"],
-            &["root", "concept", "path"],
-        ),
-        (
-            "trust",
-            vec!["okf", "trust", &path, "--today", "2026-09-16", "--json"],
-            &["root", "okf_version", "id", "status", "verified_by/0"],
-        ),
-        (
-            "computations",
-            vec!["okf", "computations", &path, "--json"],
-            &[
-                "root",
-                "runtimes/0",
-                "concept",
-                "path",
-                "runtime",
-                "parameters/0",
-            ],
-        ),
-        (
-            "info",
-            vec!["okf", "info", &path, "--today", "2026-09-16", "--json"],
-            &["root", "okf_version", "title", "runtimes/0", "files/0/path"],
-        ),
-        (
-            "links",
-            vec!["okf", "links", &path, "--json"],
-            &["root", "from", "target"],
-        ),
-        (
-            "diff",
-            vec!["okf", "diff", &path, &other_path, "--json"],
-            &["before", "after", "removed/0"],
-        ),
-    ];
+    let runs = json_runs(&path, &other_path);
 
-    for (name, args, fields) in runs {
-        let out = roteiro(&args);
-        let text = String::from_utf8_lossy(&out.stdout).into_owned();
-        // `syntax` exits non-zero when a block does not parse, which this
-        // bundle intends, so the status is deliberately not asserted.
-        let doc: serde_json::Value = serde_json::from_str(&text)
-            .unwrap_or_else(|e| panic!("`okf {name} --json` is not JSON ({e}):\n{text}"));
-
-        // Universal: no leaf anywhere carries this repository's *report*
-        // escape. A substring search over the document is exactly that, since
-        // the spelling cannot occur outside a string value.
-        assert!(
-            !text.contains("\\u{202e}"),
-            "`okf {name} --json` carries this repository's report escape. The \
-             JSON surface is the one copy of the literal bytes an operator is \
-             told to reach for, and escaping it would make this change breaking \
-             under AGENTS.md's CLI output-contract rule:\n{text}"
-        );
-
-        // Per field: every named field reached the document with the bundle's
-        // own bytes. Matched on the trailing key so finding order may change.
-        let carrying = paths_carrying(&doc, '\u{202E}');
-        for field in fields {
-            assert!(
-                carrying.iter().any(|p| p.ends_with(&format!("/{field}"))),
-                "`okf {name} --json` has no `{field}` carrying the bundle's \
-                 literal character. Either that field was escaped on the machine \
-                 surface or it never reached the document. Raw-carrying paths \
-                 were {carrying:?}"
-            );
-        }
+    for run in runs {
+        assert_json_is_literal(&run);
     }
 
     // And the same bundle through the human path really is escaped, or the

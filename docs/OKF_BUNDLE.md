@@ -346,8 +346,12 @@ is `Mn`, an ink category, caught only because Unicode marks it
 `Default_Ignorable_Code_Point`. So a heart-plus-VS16 shows as the heart followed
 by a visible `\u{fe0f}`. That cost is accepted rather than overlooked — passing
 an invisible character through silently is the bug this exists to close. Counts,
-severities, lint codes, trust tiers and the words of the report itself are this
-workspace's own and are not escaped.
+severities, lint codes and the words of the report itself are this workspace's
+own and are not escaped. A **trust tier** is ours on `okf trust`, where
+`ConceptTrust::tier` is one of §5.3's three fixed tokens — but not on `okf
+diff`, where `TrustMove` carries the two tiers as `String`, so they are escaped
+there. Same word, two provenances: the field's type is what decides, not its
+name.
 
 Three consequences worth knowing before they surprise you:
 
