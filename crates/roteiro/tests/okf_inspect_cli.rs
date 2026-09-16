@@ -972,6 +972,7 @@ const ASSET: &str = "assets/logo\u{202E}.bin";
 const ASSET_LINK: &str = "/assets/logo\u{202E}.bin";
 const VERSION: &str = "0.2-\u{202E}";
 const STATUS: &str = "active-\u{202E}";
+const ALICE: &str = "human:alice\u{202E}";
 const RUNTIME: &str = "bq-\u{202E}";
 
 const FIELDS_FINDINGS: &[(&str, &str)] = &[
@@ -994,7 +995,7 @@ const FIELDS_TRUST: &[(&str, &str)] = &[
     ("okf_version", VERSION),
     ("id", CONCEPT),
     ("status", STATUS),
-    ("verified_by/0", "human:alice\u{202E}"),
+    ("verified_by/0", ALICE),
 ];
 const FIELDS_COMPUTATIONS: &[(&str, &str)] = &[
     ("root", ""),
@@ -1018,6 +1019,11 @@ const FIELDS_INFO: &[(&str, &str)] = &[
     ("statuses/0/0", STATUS),
     ("runtimes/0", RUNTIME),
     ("files/0/path", ASSET),
+    // `okf info` serialises a whole `TrustSummary` under `trust`, so its
+    // concept rows are leaves of *this* document too — the trust report's own
+    // copy is a different document and cannot stand in for them.
+    ("id", CONCEPT),
+    ("verified_by/0", ALICE),
 ];
 const FIELDS_LINKS: &[(&str, &str)] = &[
     ("root", ""),
@@ -1037,6 +1043,8 @@ const FIELDS_DIFF: &[(&str, &str)] = &[
     ("frontmatter_changed/0", "c/byfile\u{202E}"),
     ("id", "c/byfile\u{202E}"),
     ("status/1", "retired-\u{202E}"),
+    ("links_broken/0/0", "c/add\u{202E}ed"),
+    ("links_broken/0/1", "/c/never\u{202E}.md"),
     ("links_mended/0/1", ASSET_LINK),
     // `trust_changed[].tier` is deliberately absent: `TrustMove` carries it as
     // `String`, so `okf_diff_lines` escapes it, but §5.3 fixes the vocabulary to
@@ -1137,7 +1145,11 @@ fn the_json_surface_carries_the_bundles_literal_bytes() {
     std::fs::remove_file(other.join("c/tot\u{202E}al.md")).expect("remove the computation");
     std::fs::write(
         other.join("c/add\u{202E}ed.md"),
-        "---\ntype: Metric\ntitle: Added \u{202E}\n---\n\n# Added\n",
+        // Its link names nothing the bundle contains, and the concept is new, so
+        // the pair is broken in "after" and absent from "before" — which is what
+        // `links_broken` reports.
+        "---\ntype: Metric\ntitle: Added \u{202E}\n---\n\n\
+         # Added\n\nSee [gone](/c/never\u{202E}.md).\n",
     )
     .expect("add a concept");
     let renamed = std::fs::read_to_string(other.join("c/lang\u{202E}.md")).expect("read it");
