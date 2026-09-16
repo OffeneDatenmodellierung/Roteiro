@@ -100,6 +100,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   being skipped, and now names `include_worktrees` as the way back. A false
   statement in `--help` is the one place a user looks to find out why a project
   vanished.
+- *(serve)* a worktree hosted by `[standalone] repos` is attributed to the
+  `[standalone]` table rather than to `[workspace]`. A standalone group is an
+  unlinked singleton named after the repo's directory, so it is in neither the
+  declared `[[workspaces]]` array nor the legacy table, and classifying on the
+  array alone sent it to the legacy arm.
 - *(serve)* the worktree diagnostics name a config table that **exists and works**,
   and treat two spellings of one path as one repository. Naming the *group* meant
   the legacy `[workspace]` table was advertised under its resolved group name,

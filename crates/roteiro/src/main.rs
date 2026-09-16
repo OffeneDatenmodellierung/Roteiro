@@ -16337,7 +16337,19 @@ impl ScanTables<'_> {
 
     /// Which table declared `ws`, by the same test `roteiro config` uses.
     fn owner_of(&self, ws: &rto_graph::ResolvedWorkspace) -> ScanOwner {
-        if self.named.iter().any(|w| w.name == ws.name) {
+        // **`linked` first**, exactly as `roteiro config`'s `declared_in` tests it.
+        //
+        // A `[standalone]` group is materialised as an *unlinked singleton* whose
+        // name comes from the repo's directory, so it is in neither the declared
+        // `[[workspaces]]` array nor the legacy table. Testing the array first sent
+        // it to the `Legacy` arm, and a worktree hosted by `[standalone] repos` was
+        // then attributed to the `[workspace]` table — a false statement about
+        // where a project comes from, and a second wrong table to send an operator
+        // to. Porting the inner branch of the established classifier without its
+        // outer `if rw.linked` is what dropped the case.
+        if !ws.linked {
+            ScanOwner::Standalone
+        } else if self.named.iter().any(|w| w.name == ws.name) {
             ScanOwner::Named(ws.name.clone())
         } else {
             ScanOwner::Legacy
@@ -25781,6 +25793,63 @@ mod worktree_discovery_tests {
             );
             std::fs::remove_dir_all(&base).ok();
         }
+    }
+
+    /// **A worktree hosted by `[standalone] repos` is attributed to the
+    /// `[standalone]` table, not to `[workspace]`** (issue #837).
+    ///
+    /// A `[standalone]` group is materialised as an unlinked singleton whose name
+    /// is the repo's directory, so it appears in neither the declared
+    /// `[[workspaces]]` array nor the legacy table. Classifying on the array alone
+    /// therefore sent it to the legacy arm, and the note said a worktree the
+    /// `[standalone]` table hosts was hosted by `[workspace]` — a false statement
+    /// about where a project comes from, and the second wrong table this round.
+    ///
+    /// Both directions matter: the named group that *skipped* it must still be
+    /// named as itself, or a fix that simply said "standalone" everywhere would
+    /// pass.
+    #[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+    #[test]
+    fn a_worktree_hosted_by_standalone_repos_is_attributed_to_that_table() {
+        let (base, root) = fixture("saattrib");
+        let cfg = config::Config {
+            // Names the worktree outright, from the standalone table.
+            standalone: config::WorkspaceConfig {
+                roots: None,
+                repos: Some(vec![root.join("checkout").to_string_lossy().into_owned()]),
+                include_worktrees: None,
+            },
+            // …and a named group scans the same root, walking past it.
+            workspaces: vec![config::NamedWorkspace {
+                name: "scanner".to_owned(),
+                roots: Some(vec![root.to_string_lossy().into_owned()]),
+                ..config::NamedWorkspace::default()
+            }],
+            ..config::Config::default()
+        };
+        let resolved = cfg.resolved_workspaces().expect("resolve");
+        assert!(
+            hosted(&resolved_repo_paths(&resolved, &[]).expect("paths"))
+                .contains(&"checkout".to_owned()),
+            "fixture precondition: `[standalone] repos` must host the worktree"
+        );
+
+        let notes = super::scanned_roots_note(
+            &resolved,
+            super::scan_tables(&cfg, &super::WorkspaceScope::All),
+        )
+        .join("\n");
+        assert!(
+            notes.contains("HOSTED by the `[standalone]` table"),
+            "a worktree hosted by `[standalone] repos` must be attributed to that \
+             table, not to `[workspace]`:\n{notes}"
+        );
+        // The scanning group is still named as itself.
+        assert!(
+            notes.contains("for workspace `scanner`"),
+            "the group that walked past it must still be named as itself:\n{notes}"
+        );
+        std::fs::remove_dir_all(&base).ok();
     }
 
     /// **Two spellings of one path are one repository** (issue #501's notion,
