@@ -88,7 +88,11 @@ pdf-extract = { version = "0.12", optional = true }
 ocrs = { version = "0.13", optional = true }
 rten = { version = "0.26", optional = true }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"], optional = true }
-yaml-rust2 = "0.13.0"
+# `default-features = false`: the `encoding` feature gates only `YamlDecoder`'s
+# bytes API, which `config_keys` does not use, and its `encoding_rs = "< 0.8.40"`
+# bound duplicates `encoding_rs`/`cfg-if` in the lock (#849). Keep in step with
+# `crates/roteiro/Cargo.toml`.
+yaml-rust2 = { version = "0.13.0", default-features = false }
 
 # `audio-metadata` only (ADR-0016): the *format* layer of a decoding library, used
 # for a container read and nothing else — codec, rate, bit depth, channels,
