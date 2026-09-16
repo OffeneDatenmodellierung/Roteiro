@@ -7184,50 +7184,59 @@ fn push_escaped_note(out: &mut Vec<String>, escaped: &std::cell::Cell<bool>) {
 /// # What the vector costs, since a hostile bundle chooses its length
 ///
 /// Every `okf_*_lines` function here materialises the whole report before any of
-/// it is printed, where the `println!` version streamed. The question that
-/// raises — a hostile bundle picks the length — was **measured** rather than
-/// waved at, because "probably fine" is not a position.
+/// it is printed, where the `println!` version streamed. Measured rather than
+/// waved at — and the **first measurement was wrong**, which is why the input
+/// classes are named: it used printable text, and the whole point of an escaper
+/// is that it expands what is not.
 ///
-/// Peak RSS of `okf lint` over one bundle built to maximise the report: 200
-/// concepts, each a 50 KB empty heading, which `conform`'s `L8` echoes verbatim
-/// into a finding message. 11 MB of bundle, 10 MB of report.
+/// One bundle per row, each 200 concepts whose heading is 50 KB of the same
+/// character — 10.0 MB of text that `conform`'s **`L4`** echoes verbatim into a
+/// finding message (`heading `{}` has no content`). Attributed by counting
+/// bytes per lint code in the output rather than by reading the rules: of the
+/// 10,047,606 bytes `okf lint` prints for the printable row, **L4 carries
+/// 10,009,800** — 99.6% — with L9 and L11 accounting for the remainder. Peak
+/// RSS, `/usr/bin/time -l`:
 ///
-/// | path | stdout | peak RSS |
+/// | heading fill | `okf lint` | `okf lint --json` |
 /// | --- | --- | --- |
-/// | `okf links` — parses the same bundle, prints 225 bytes | 225 B | 25 MiB |
-/// | `okf lint` — this vector, holding the whole 10 MB report | 10.0 MB | 40 MiB |
-/// | `okf lint --json` — `emit_json`, which predates this change | 10.1 MB | 49 MiB |
+/// | `H` — printable, 1 byte in, 1 out | 10.0 MB, **40 MiB** | 10.1 MB, 50 MiB |
+/// | U+202E — 3 bytes in, 8 out | 26.7 MB, **55 MiB** | 10.1 MB, 49 MiB |
+/// | U+0001 — 1 byte in, 8 out | 80.0 MB, **106 MiB** | 60.1 MB, 97 MiB |
 ///
-/// Three things follow, and together they are the argument for leaving it
-/// uncapped:
+/// `okf links`, which parses the same bundle and prints 224 bytes, peaks at
+/// 25 MiB — so that is the floor everything above sits on.
 ///
-/// - **A bundle cannot amplify.** The report is ~0.9× the text the bundle
-///   shipped, because the only way to lengthen it is to write more bytes that
-///   get echoed. Costing a gigabyte of lines means shipping a gigabyte of
-///   bundle, and by then the parsed `Bundle` and the report struct — which hold
-///   those same bytes and predate this change — cost more than the lines do.
-/// - **The delta is one copy of an allocation the caller already made.**
-///   `CheckReport::findings`, `ComputationReport::entries` and the rest are
-///   `Vec<String>` held in full before any printer is called; the 15 MiB between
-///   rows one and two above is that copy plus allocator slack.
-/// - **`--json` is already more expensive**, by 9 MiB on the same input, because
-///   [`emit_json`] builds the entire document as one `String` before printing
-///   it. The exposure added here is strictly smaller than one that already
-///   existed on the same command, on the same bundle, and was not capped.
+/// # What that says, including the two things it contradicts
 ///
-/// Deliberately **not** capped the way [`okf_screen_lines`] caps its rows, and
-/// that cap is not the precedent it looks like: it is `5`, which is no kind of
-/// memory bound, and its own comment says why — a screening row is a *sample*
-/// shown beside a consent question, and a report that scrolls the decision off
-/// the screen is a report nobody reads. A lint report is the answer itself.
-/// Truncating it would make "no further findings" and "further findings not
-/// shown" the same output, which is the silence-taken-for-absence ADR-0024
-/// exists to remove.
+/// **Amplification is linear and bounded at 8×.** The ceiling is arithmetic, not
+/// luck: the largest expansion any escape can produce is one input byte becoming
+/// the eight ASCII characters of `\u{007f}`, so a bundle must ship a byte to
+/// buy eight. There is no super-linear case.
 ///
-/// What would change this: an `okf` report whose length stops tracking the
-/// bundle's own bytes — a rule that emitted a line per *pair* of concepts, say,
-/// or a message that repeated a field. That is a quadratic, and it would want
-/// bounding at the rule rather than at the printer.
+/// Two claims an earlier draft made from the printable row alone were false at
+/// the extreme, and are corrected rather than quietly dropped: `--json` is *not*
+/// always the more expensive path (106 MiB against 97 on the last row), and the
+/// parsed `Bundle` plus the report struct do *not* always dominate the lines —
+/// on that row the lines are the largest single allocation.
+///
+/// # Why it is still not capped here
+///
+/// Because the cap would be in the wrong place. Every row above is driven by
+/// `L4` interpolating an **unbounded bundle value** — a whole 50 KB heading —
+/// into a finding message. That message is already held by `CheckReport`, is
+/// already emitted in full by `--json`, and both predate this change; the
+/// screening path deliberately never quotes offending text at all, which is the
+/// contrast worth noticing. Truncating the printed line would leave the two
+/// larger allocations exactly as they are while making "no further findings" and
+/// "further findings not shown" the same output — the silence-taken-for-absence
+/// ADR-0024 exists to remove. The bound belongs on the message, and is filed as
+/// its own issue rather than papered over here.
+///
+/// [`okf_screen_lines`]'s cap is not the precedent it resembles either: it is
+/// `5`, which is no kind of memory bound, and its own comment gives the reason —
+/// a screening row is a *sample* beside a consent question, and the question
+/// must not scroll off the screen.
+///
 fn okf_findings_lines(report: &rto_render::okf::conform::CheckReport) -> Vec<String> {
     let escaped = std::cell::Cell::new(false);
     // `report.check` is `validate` or `lint`, a `&'static str` this workspace
@@ -8523,6 +8532,128 @@ mod okf_report_tests {
                  it fires: {OKF_ESCAPED_NOTE:?}"
             );
         }
+    }
+
+    /// Every scalar [`rto_graph::screen::escape_for_diagnostic`] transforms, as
+    /// one field, **swept rather than listed**.
+    ///
+    /// # Why the fixtures above are not the coverage claim
+    ///
+    /// The per-command fixtures carry one hostile name and assert the whole line
+    /// by equality. That proves the *shape* of each report, and it is what the
+    /// injections go red on — but its coverage is whatever characters somebody
+    /// put in the name, and [`assert_nothing_invisible`]'s second reading is
+    /// scoped by `invisible_name`, a detector written for a **different job**.
+    /// That detector deliberately excludes variation selectors, so a field that
+    /// bypassed [`shown_field`] carrying U+FE0F would render invisibly and the
+    /// detector would say nothing.
+    ///
+    /// #868 measured what that costs: **267 code points changed verdict** once
+    /// `Default_Ignorable_Code_Point` was modelled, and **265 of them were
+    /// covered by nothing else**. A fixture scoped by a detector cannot exercise
+    /// those, and adding U+FE0F to the hostile name would be the denylist
+    /// mistake in fixture form — the next reviewer would ask for U+3164, and
+    /// Unicode assigns more every year.
+    ///
+    /// So the set is asked of the escaper: sweep all 1,114,112 code points and
+    /// keep every one whose escape differs from itself. A scalar the escaper
+    /// touches is a scalar this fixture exercises, by construction, and a change
+    /// to the escaper cannot outrun it.
+    ///
+    /// # `\` is excluded, and that is the encoding's doing
+    ///
+    /// It is the one scalar whose escape **contains itself** — `\` becomes
+    /// `\\`, because a path spelling `\u{202e}` has to be distinguishable from
+    /// the character. So "it did not survive into the line" cannot be phrased
+    /// over it. `an_honest_bundle_survives_the_lint_report` asserts it by
+    /// equality instead, which is the right shape for the one case that is not
+    /// about absence.
+    fn every_transformed_scalar() -> String {
+        (0..=0x0010_FFFF_u32)
+            .filter_map(char::from_u32)
+            .filter(|c| *c != '\\')
+            .filter(|c| {
+                let raw = c.to_string();
+                rto_graph::screen::escape_for_diagnostic(&raw).as_str() != raw
+            })
+            .collect()
+    }
+
+    /// No scalar the escaper transforms reaches a report line, for any report.
+    ///
+    /// # The property, and why it is one cheap pass
+    ///
+    /// The field is every transformed scalar and nothing else, and every escape
+    /// this encoding emits is **printable ASCII** — `\`, `u`, `{`, four or more
+    /// hex digits, `}`, or one of `n`/`r`/`t`. The words around it are ours and
+    /// are printable ASCII too. So "nothing leaked" is exactly "every character
+    /// on this line is printable ASCII or a space", which is a single pass over
+    /// the output and needs no second detector to define it.
+    ///
+    /// That phrasing catches the three things a scoped detector misses together:
+    /// a surviving C0 control (ASCII, but not printable), a surviving variation
+    /// selector, and a surviving override.
+    ///
+    /// # Anti-vacuity
+    ///
+    /// Asserted rather than assumed, because a field that was dropped entirely
+    /// would satisfy the property above perfectly:
+    ///
+    /// - the sweep found more than half of Unicode, so it really ran;
+    /// - U+FE0F is in the field **and** `invisible_name` cannot see it, which is
+    ///   the finding this test exists to answer, stated as a premise;
+    /// - the rendered line is at least as long as the field, which it cannot be
+    ///   unless the field reached it — every escape is one character or more.
+    #[test]
+    fn no_scalar_the_escaper_transforms_reaches_a_report_line() {
+        let field = every_transformed_scalar();
+        let scalars = field.chars().count();
+        assert!(
+            scalars > 0x0010_FFFF / 2,
+            "the sweep found only {scalars} transformed scalars, so it did not run"
+        );
+        assert!(
+            field.contains('\u{FE0F}') && rto_graph::screen::invisible_name('\u{FE0F}').is_none(),
+            "the premise: the escaper transforms U+FE0F and `invisible_name` is \
+             blind to it, which is why coverage cannot be scoped by that detector"
+        );
+
+        // Driven through the copy-back field, which is the one the design
+        // argument is about, on the report that carries the most classes.
+        let lines = okf_findings_lines(&conform::CheckReport {
+            root: "/repo/okf".to_owned(),
+            check: "lint",
+            concepts: 1,
+            findings: vec![conform::Finding {
+                severity: "warning",
+                code: None,
+                concept: Some(field.clone()),
+                path: None,
+                message: "m".to_owned(),
+            }],
+            errors: 0,
+            warnings: 1,
+        });
+        let rendered = &lines[1];
+        assert!(
+            rendered.len() >= scalars,
+            "the field did not reach the line, so this test is checking nothing: \
+             {} characters rendered from {scalars} scalars",
+            rendered.len()
+        );
+        let leaked: Vec<char> = rendered
+            .chars()
+            .filter(|c| !matches!(*c, ' '..='~'))
+            .take(8)
+            .collect();
+        assert_eq!(
+            leaked,
+            Vec::<char>::new(),
+            "these reached the operator's line unescaped (first 8 of possibly \
+             more): {leaked:?}"
+        );
+        // And the note fired, because something on this report was altered.
+        assert_eq!(lines.last().map(String::as_str), Some(OKF_ESCAPED_NOTE));
     }
 
     /// One function's body, from its definition at column 0 to its closing
