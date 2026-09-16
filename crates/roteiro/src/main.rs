@@ -16101,6 +16101,24 @@ fn scanned_roots_note(
     let hosted_elsewhere: std::collections::BTreeMap<&std::path::Path, &str> = scans
         .iter()
         .flat_map(|(name, scan)| scan.repos.iter().map(move |p| (p.as_path(), name.as_str())))
+        // **Explicit `repos` entries too, not just what a scan discovered.**
+        //
+        // The decision has two escape hatches, and this map knew about one. A
+        // worktree named in `repos = [...]` is hosted without any opt-in — an
+        // explicit path is never *discovered*, so it appears in no `RootScan` —
+        // and a scan of the same root still lists it as walked past. The note then
+        // called it NOT hosted and recommended `include_worktrees`, directly below
+        // a project list containing it, and recommending the *other* remedy for
+        // something the first remedy had already solved (issue #837).
+        //
+        // Chained last so an explicit entry wins the attribution on a collision:
+        // between "discovered by A" and "named outright by B", the deliberate act
+        // is the more useful thing to put in front of the reader.
+        .chain(effective.iter().flat_map(|ws| {
+            ws.repos
+                .iter()
+                .map(move |r| (std::path::Path::new(r.as_str()), ws.name.as_str()))
+        }))
         .collect();
     scans
         .iter()
@@ -16313,13 +16331,23 @@ fn worktree_hint(
 
     let mut named: Vec<String> = Vec::new();
     let mut roots: Vec<String> = Vec::new();
+    // **Who to tell the operator to configure.** Kept rather than discarded,
+    // because "that workspace" is a wrong instruction for half the cases this
+    // hint covers: a `[standalone] roots` scan is governed by
+    // `[standalone] include_worktrees` and by nothing else, and its effective
+    // groups are unnamed standalone singletons — so sending the reader to a named
+    // or legacy `[workspace]` table points them at a key that cannot affect the
+    // scan being described. A hint that names the wrong TOML table is a wrong
+    // instruction, not a wording nit (issue #837).
+    let mut owners: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut total = 0usize;
-    for (_, scan) in scanned_roots(effective, standalone) {
+    for (owner, scan) in scanned_roots(effective, standalone) {
         if scan.worktrees.is_empty() {
             continue;
         }
         total += scan.worktrees.len();
         roots.push(scan.root.display().to_string());
+        owners.insert(workspace_label(&owner));
         named.extend(scan.worktrees.iter().map(|p| p.display().to_string()));
     }
     if total == 0 {
@@ -16333,7 +16361,7 @@ fn worktree_hint(
         // agreement without a second sentence.
         "\n\n{} {} under {} {} — a second checkout of a \
          repository rather than a project — so {} NOT hosted: {}{}. Set \
-         `include_worktrees = true` on that workspace to host them, or name one \
+         `include_worktrees = true` on {} to host them, or name one \
          directly in `repos = [...]`, which is always honoured.",
         total,
         plural(total, "subdirectory", "subdirectories"),
@@ -16346,6 +16374,7 @@ fn worktree_hint(
         plural(total, "it was", "they were"),
         named[..shown].join(", "),
         if named.len() > shown { ", …" } else { "" },
+        owners.into_iter().collect::<Vec<_>>().join(", "),
     )
 }
 
@@ -25414,6 +25443,139 @@ mod worktree_discovery_tests {
             ),
             "the note still advises enabling a key for a worktree that is \
              already hosted:\n{notes}"
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// **A worktree hosted through an explicit `repos` entry is not reported as
+    /// lost** (issue #837).
+    ///
+    /// The decision has two escape hatches — `include_worktrees` and an explicit
+    /// `repos = [...]` entry — and the reporting layer knew about one. The
+    /// cross-scan map was built from `RootScan::repos` alone, and an explicit path
+    /// is never *discovered*, so it appears in no scan. A worktree named outright
+    /// by one group and walked past by another group's scan was therefore listed
+    /// as NOT hosted, directly below a flat project list containing it, and the
+    /// remedy offered was `include_worktrees` — the *other* hatch, for something
+    /// the first had already solved.
+    ///
+    /// Both halves are asserted: a fix that merely dropped the clause would stop
+    /// the false claim while also losing the true one.
+    #[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+    #[test]
+    fn a_worktree_named_in_repos_is_not_reported_as_lost_by_another_groups_scan() {
+        let (base, root) = fixture("explicitrepos");
+        let cfg = config::Config {
+            workspaces: vec![
+                // Names the worktree outright. No opt-in, and no roots at all.
+                config::NamedWorkspace {
+                    name: "lister".to_owned(),
+                    repos: Some(vec![root.join("checkout").to_string_lossy().into_owned()]),
+                    ..config::NamedWorkspace::default()
+                },
+                // Scans the same root under the DEFAULT rule, so it walks past it.
+                config::NamedWorkspace {
+                    name: "scanner".to_owned(),
+                    roots: Some(vec![root.to_string_lossy().into_owned()]),
+                    ..config::NamedWorkspace::default()
+                },
+            ],
+            ..config::Config::default()
+        };
+        let resolved = cfg.resolved_workspaces().expect("resolve");
+        // The precondition: it really is hosted, via the explicit entry.
+        assert!(
+            hosted(&resolved_repo_paths(&resolved, &[]).expect("paths"))
+                .contains(&"checkout".to_owned()),
+            "fixture does not reproduce the case: the worktree is not hosted at all"
+        );
+
+        let notes = super::scanned_roots_note(&resolved, None).join("\n");
+        assert!(
+            notes.contains("HOSTED by workspace `lister`"),
+            "the note must name the workspace whose explicit `repos` entry hosts \
+             it:\n{notes}"
+        );
+        // The skip is still reported — the true fact survives.
+        assert!(
+            notes.contains("skipped here for being a linked git worktree"),
+            "the skip itself must still be reported:\n{notes}"
+        );
+        // …and the false remedy for it is gone.
+        assert!(
+            !notes.contains("not a project (set `include_worktrees = true`"),
+            "the note still recommends `include_worktrees` for a worktree that an \
+             explicit `repos` entry already hosts:\n{notes}"
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// **The empty-set hint names the table that actually governs the scan it is
+    /// describing** (issue #837).
+    ///
+    /// A `[standalone] roots` scan is governed by `[standalone] include_worktrees`
+    /// and by nothing else, and its effective groups are unnamed standalone
+    /// singletons — so "set `include_worktrees = true` on that workspace" sent the
+    /// operator to a named or legacy `[workspace]` table that cannot affect it.
+    /// That is a wrong instruction rather than a wording nit: following it changes
+    /// nothing and the projects stay missing.
+    #[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+    #[test]
+    fn the_empty_set_hint_names_the_standalone_table_not_a_workspace() {
+        let base = std::env::temp_dir().join(format!("rto-sahint-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        let main = repo(&base.join("elsewhere"));
+        let pool = base.join("pool");
+        std::fs::create_dir_all(&pool).expect("mkdir");
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                pool.join("task-one").to_str().expect("utf-8"),
+                "-b",
+                "task-one",
+            ],
+        );
+
+        let cfg = config::Config {
+            standalone: config::WorkspaceConfig {
+                roots: Some(vec![pool.to_string_lossy().into_owned()]),
+                repos: None,
+                include_worktrees: None,
+            },
+            ..config::Config::default()
+        };
+        let resolved = cfg.resolved_workspaces().expect("resolve");
+        let hint = super::worktree_hint(
+            &resolved,
+            super::standalone_table(&cfg, &super::WorkspaceScope::All),
+        );
+
+        assert!(
+            hint.contains("the `[standalone]` table"),
+            "the hint must name the table that governs this scan; got: {hint}"
+        );
+        assert!(
+            !hint.contains("that workspace"),
+            "the hint still sends the operator to a workspace table that cannot \
+             affect a `[standalone]` scan: {hint}"
+        );
+        // A named group's scan still reads as a workspace, so the label is chosen
+        // per owner rather than replaced wholesale.
+        let named = config::Config {
+            workspaces: vec![config::NamedWorkspace {
+                name: "pool".to_owned(),
+                roots: Some(vec![pool.to_string_lossy().into_owned()]),
+                ..config::NamedWorkspace::default()
+            }],
+            ..config::Config::default()
+        };
+        let hint = super::worktree_hint(&named.resolved_workspaces().expect("resolve"), None);
+        assert!(
+            hint.contains("workspace `pool`"),
+            "a named group's scan must still be named as a workspace: {hint}"
         );
         std::fs::remove_dir_all(&base).ok();
     }

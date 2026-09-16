@@ -100,6 +100,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   being skipped, and now names `include_worktrees` as the way back. A false
   statement in `--help` is the one place a user looks to find out why a project
   vanished.
+- *(serve)* the worktree diagnostics know about **both** escape hatches and name
+  the table that actually governs the scan they describe. The cross-scan view was
+  built from root-scan results alone, so it could not see a worktree hosted by an
+  explicit `repos = [...]` entry — an explicit path is never *discovered* — and
+  reported it as NOT hosted while recommending `include_worktrees`, the other
+  hatch, for something the first had already solved. Separately, the "no
+  workspaces to serve" hint said to set `include_worktrees` "on that workspace"
+  even when describing a `[standalone] roots` scan, which is governed by
+  `[standalone] include_worktrees` and by nothing else — following that
+  instruction changed nothing and the projects stayed missing.
 - *(serve)* the scanned-roots note **names the workspace whose scan it describes**,
   and no longer calls a worktree "NOT hosted" when another workspace hosts it. Two
   groups may name one root and disagree about `include_worktrees`; the startup line
