@@ -1081,6 +1081,37 @@ pub struct WorkspaceConfig {
     pub roots: Option<Vec<String>>,
     /// Explicit repo paths to host, in addition to anything found under `roots`.
     pub repos: Option<Vec<String>>,
+    /// Host the **linked git worktrees** a `roots` scan finds, rather than walking
+    /// past them. Default `false` (issue #837).
+    ///
+    /// A `roots` entry is discovery, and a second checkout of a repository is not a
+    /// discovery: without this, one repository under a scanned root appears as N
+    /// peer projects at N revisions, tripling its symbols in every coupling,
+    /// hotspot and debt figure and letting a workspace-scoped retrieval present one
+    /// file on three branches as three independent sources.
+    ///
+    /// Governs `roots` **only**. A worktree named directly in `repos` is hosted
+    /// either way: an explicit path is a deliberate act by the operator and is
+    /// never discovered, so it never reaches the scan this key configures. That is
+    /// the escape hatch for the one-off case, and it is why this key is not needed
+    /// to host a single worktree.
+    ///
+    /// Shaped as `Option<bool>` to match its `roots`/`repos` siblings — the three
+    /// fields of this table, which [`Config::overlaid_with`] merges **per field**,
+    /// project layer over user. An unset key means the same "not declared here"
+    /// for all three, and leaves a lower layer's answer standing rather than
+    /// resetting it to the built-in default.
+    ///
+    /// `includes` is **not** a sibling of these: it belongs to [`NamedWorkspace`],
+    /// whose `[[workspaces]]` array is overlaid *wholesale* — a project layer
+    /// declaring any entry replaces the user layer's entirely — so it is neither
+    /// a field of this table nor merged by this path.
+    ///
+    /// Note that a table declaring **only** this key names no members, so
+    /// [`WorkspaceConfig::is_empty`] reads it as empty and no group is built from
+    /// it. The rule is still honoured: `fold_cli_roots` carries it into the group
+    /// a `--workspace <ROOT>` root creates, so the opt-in is not silently lost.
+    pub include_worktrees: Option<bool>,
 }
 
 impl WorkspaceConfig {
@@ -1089,6 +1120,29 @@ impl WorkspaceConfig {
     fn is_empty(&self) -> bool {
         self.roots.as_ref().is_none_or(Vec::is_empty)
             && self.repos.as_ref().is_none_or(Vec::is_empty)
+    }
+
+    /// Overlay `over` on top of `self` per field (the project layer over the user
+    /// layer), taking `over`'s value wherever set.
+    ///
+    /// **One method for both tables of this shape.** `[workspace]` and
+    /// `[standalone]` are the same three keys under the same rule, and
+    /// [`Config::overlaid_with`] spelled that rule out twice — so adding
+    /// `include_worktrees` (issue #837) meant adding it in two places, and a rule
+    /// written twice is a rule that can come to disagree with itself. Extracted
+    /// here rather than inlined once more, in the shape the five other tables in
+    /// that overlay already use.
+    ///
+    /// **Per field, not wholesale**: a project layer that declares a key wins, and
+    /// one silent about it leaves the user layer's answer standing rather than
+    /// resetting it to the default. The `[[workspaces]]` *array* deliberately does
+    /// not work this way — see [`Config::overlaid_with`], which overlays it whole.
+    fn overlaid_with(&self, over: &Self) -> Self {
+        Self {
+            roots: over.roots.clone().or_else(|| self.roots.clone()),
+            repos: over.repos.clone().or_else(|| self.repos.clone()),
+            include_worktrees: over.include_worktrees.or(self.include_worktrees),
+        }
     }
 }
 
@@ -1106,6 +1160,15 @@ pub struct NamedWorkspace {
     pub roots: Option<Vec<String>>,
     /// Explicit member repo paths, in addition to anything found under `roots`.
     pub repos: Option<Vec<String>>,
+    /// Host the linked git worktrees this workspace's `roots` scan finds, as
+    /// `[workspace] include_worktrees` (issue #837).
+    ///
+    /// **Not folded by `includes`.** An included workspace contributes its
+    /// `roots`/`repos` to the includer, and those roots are then scanned under the
+    /// *includer's* rule, because the includer is the workspace being served and is
+    /// the one whose startup note reports what was skipped. A workspace that needs
+    /// a pool of worktrees hosted declares the key itself.
+    pub include_worktrees: Option<bool>,
     /// Names of other **named** workspaces whose members fold into this one,
     /// transitively (ADR-0008 v1.3 nested workspaces): every `roots`/`repos` entry
     /// of each included workspace — and of everything *it* includes — joins this
@@ -1931,18 +1994,7 @@ impl Config {
                 opaque: merge_patterns(self.paths.opaque.as_deref(), over.paths.opaque.as_deref()),
             },
             telemetry: self.telemetry.overlaid_with(&over.telemetry),
-            workspace: WorkspaceConfig {
-                roots: over
-                    .workspace
-                    .roots
-                    .clone()
-                    .or(self.workspace.roots.clone()),
-                repos: over
-                    .workspace
-                    .repos
-                    .clone()
-                    .or(self.workspace.repos.clone()),
-            },
+            workspace: self.workspace.overlaid_with(&over.workspace),
             // `[[workspaces]]` overlay like `links`: the project layer wins outright
             // when it declares any, else the user layer's survive.
             workspaces: if over.workspaces.is_empty() {
@@ -1950,19 +2002,9 @@ impl Config {
             } else {
                 over.workspaces.clone()
             },
-            // `[standalone]` merges per field (project over user), like `workspace`.
-            standalone: WorkspaceConfig {
-                roots: over
-                    .standalone
-                    .roots
-                    .clone()
-                    .or(self.standalone.roots.clone()),
-                repos: over
-                    .standalone
-                    .repos
-                    .clone()
-                    .or(self.standalone.repos.clone()),
-            },
+            // `[standalone]` merges per field (project over user), like `workspace`
+            // — literally so: both go through `WorkspaceConfig::overlaid_with`.
+            standalone: self.standalone.overlaid_with(&over.standalone),
             // Links are per-repo (a spoke declares its own); the project layer wins
             // outright when it has any, else the user layer's (rare).
             links: if over.links.is_empty() {
@@ -2030,6 +2072,7 @@ impl Config {
                 roots: expand_tilde_all(self.workspace.roots.clone().unwrap_or_default()),
                 repos: expand_tilde_all(self.workspace.repos.clone().unwrap_or_default()),
                 linked: true,
+                include_worktrees: self.workspace.include_worktrees.unwrap_or(false),
             });
         }
 
@@ -2048,6 +2091,7 @@ impl Config {
                 roots: expand_tilde_all(nw.roots.clone().unwrap_or_default()),
                 repos: expand_tilde_all(nw.repos.clone().unwrap_or_default()),
                 linked: true,
+                include_worktrees: nw.include_worktrees.unwrap_or(false),
             });
         }
 
@@ -2067,6 +2111,12 @@ impl Config {
                 roots: Vec::new(),
                 repos: vec![repo.to_string_lossy().into_owned()],
                 linked: false,
+                // A standalone group's `roots` are expanded to concrete `repos`
+                // above, by `standalone_repo_paths`, which applies
+                // `[standalone] include_worktrees` there. By this point every
+                // member is an explicit path and there is no scan left to
+                // configure, so the flag would have nothing to govern.
+                include_worktrees: false,
             });
         }
 
@@ -2209,8 +2259,13 @@ impl Config {
         use std::collections::HashSet;
         let mut seen: HashSet<PathBuf> = HashSet::new();
         let mut out: Vec<PathBuf> = Vec::new();
+        let worktrees = if self.standalone.include_worktrees.unwrap_or(false) {
+            rto_graph::Worktrees::Include
+        } else {
+            rto_graph::Worktrees::Skip
+        };
         for root in self.standalone.roots.iter().flatten() {
-            for repo in rto_graph::discover_repos_under(&expand_tilde(root))? {
+            for repo in rto_graph::discover_repos_under(&expand_tilde(root), worktrees)? {
                 if seen.insert(repo.clone()) {
                     out.push(repo);
                 }
@@ -3251,6 +3306,7 @@ mod tests {
             workspace: WorkspaceConfig {
                 roots: Some(vec!["/code".to_owned()]),
                 repos: Some(vec!["/code/extra".to_owned()]),
+                include_worktrees: None,
             },
             ..Default::default()
         };
@@ -3298,6 +3354,7 @@ mod tests {
             workspace: WorkspaceConfig {
                 roots: Some(vec!["/legacy".to_owned()]),
                 repos: None,
+                include_worktrees: None,
             },
             workspaces: vec![
                 NamedWorkspace {
@@ -3305,17 +3362,20 @@ mod tests {
                     roots: Some(vec!["/api".to_owned()]),
                     repos: None,
                     includes: None,
+                    include_worktrees: None,
                 },
                 NamedWorkspace {
                     name: "web".to_owned(),
                     roots: None,
                     repos: Some(vec!["/web/app".to_owned()]),
                     includes: None,
+                    include_worktrees: None,
                 },
             ],
             standalone: WorkspaceConfig {
                 roots: Some(vec![base.join("solo").to_string_lossy().into_owned()]),
                 repos: None,
+                include_worktrees: None,
             },
             ..Default::default()
         };
@@ -3355,10 +3415,12 @@ mod tests {
             workspace: WorkspaceConfig {
                 roots: Some(vec!["/legacy".to_owned()]),
                 repos: None,
+                include_worktrees: None,
             },
             standalone: WorkspaceConfig {
                 roots: None,
                 repos: Some(vec![repo.to_string_lossy().into_owned()]),
+                include_worktrees: None,
             },
             ..Default::default()
         };
@@ -3466,12 +3528,14 @@ mod tests {
                     roots: Some(vec!["/a".to_owned()]),
                     repos: None,
                     includes: None,
+                    include_worktrees: None,
                 },
                 NamedWorkspace {
                     name: "api".to_owned(),
                     roots: Some(vec!["/b".to_owned()]),
                     repos: None,
                     includes: None,
+                    include_worktrees: None,
                 },
             ],
             ..Default::default()
@@ -3491,12 +3555,14 @@ mod tests {
             workspace: WorkspaceConfig {
                 roots: Some(vec!["/legacy".to_owned()]),
                 repos: None,
+                include_worktrees: None,
             },
             workspaces: vec![NamedWorkspace {
                 name: "default".to_owned(),
                 roots: Some(vec!["/x".to_owned()]),
                 repos: None,
                 includes: None,
+                include_worktrees: None,
             }],
             ..Default::default()
         };
@@ -3514,6 +3580,7 @@ mod tests {
             name: name.to_owned(),
             roots: (!roots.is_empty()).then(|| roots.iter().map(|r| (*r).to_owned()).collect()),
             repos: (!repos.is_empty()).then(|| repos.iter().map(|r| (*r).to_owned()).collect()),
+            include_worktrees: None,
             includes: None,
         }
     }
@@ -3552,6 +3619,7 @@ mod tests {
             workspace: WorkspaceConfig {
                 roots: Some(vec!["/legacy/root".to_owned()]),
                 repos: Some(vec!["/legacy/repo".to_owned()]),
+                include_worktrees: None,
             },
             workspaces: vec![
                 ws("api", &["/api/root"], &["/api/one", "/api/two"]),
@@ -3569,12 +3637,14 @@ mod tests {
                 roots: vec!["/legacy/root".to_owned()],
                 repos: vec!["/legacy/repo".to_owned()],
                 linked: true,
+                include_worktrees: false,
             },
             rto_graph::ResolvedWorkspace {
                 name: "api".to_owned(),
                 roots: vec!["/api/root".to_owned()],
                 repos: vec!["/api/one".to_owned(), "/api/two".to_owned()],
                 linked: true,
+                include_worktrees: false,
             },
             rto_graph::ResolvedWorkspace {
                 name: "web".to_owned(),
@@ -3585,6 +3655,7 @@ mod tests {
                     "/api/one".to_owned(),
                 ],
                 linked: true,
+                include_worktrees: false,
             },
         ];
         assert_eq!(
@@ -3811,6 +3882,7 @@ mod tests {
                 // Resolves to a standalone workspace *named* `docs` — and still not
                 // includable, which is the point.
                 repos: Some(vec!["/solo/docs".to_owned()]),
+                include_worktrees: None,
             },
             ..Default::default()
         };
@@ -3834,6 +3906,7 @@ mod tests {
             workspace: WorkspaceConfig {
                 roots: None,
                 repos: Some(vec!["/legacy".to_owned()]),
+                include_worktrees: None,
             },
             workspaces: vec![composed("platform", &["default"], &[], &["/shared"])],
             ..Default::default()
@@ -3864,6 +3937,7 @@ mod tests {
             standalone: WorkspaceConfig {
                 roots: Some(vec![base.join("pool").to_string_lossy().into_owned()]),
                 repos: None,
+                include_worktrees: None,
             },
             ..Default::default()
         };
@@ -3930,12 +4004,14 @@ mod tests {
             workspace: WorkspaceConfig {
                 roots: Some(vec!["~/legacy/root".to_owned()]),
                 repos: Some(vec!["~/legacy/repo".to_owned()]),
+                include_worktrees: None,
             },
             workspaces: vec![NamedWorkspace {
                 name: "api".to_owned(),
                 roots: Some(vec!["~/api/root".to_owned()]),
                 repos: Some(vec!["~/api/repo".to_owned()]),
                 includes: None,
+                include_worktrees: None,
             }],
             standalone: WorkspaceConfig {
                 roots: None,
@@ -3944,6 +4020,7 @@ mod tests {
                 // observable. `~` roots share the identical `expand_tilde` call
                 // (covered by the pure-function test above).
                 repos: Some(vec!["~/solo/repo".to_owned(), "/abs/solo".to_owned()]),
+                include_worktrees: None,
             },
             ..Default::default()
         };
