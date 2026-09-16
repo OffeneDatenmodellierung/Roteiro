@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.15.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v5.14.3...rto-llama-v5.15.0) - 2026-09-15
+
+### Fixed
+
+- *(serve)* do not bill a caller for a turn Roteiro added
+- *(llama)* carry a chat template's own refusal to the caller
+
 ## [5.12.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v5.12.0...rto-llama-v5.12.1) - 2026-09-12
 
 ### Other

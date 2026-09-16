@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.15.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.14.3...roteiro-v5.15.0) - 2026-09-15
+
+### Fixed
+
+- *(paths)* gate the declaring file too, and make ADR-0007 v1.9 self-consistent
+
+### Other
+
+- Merge pull request #843 from OffeneDatenmodellierung/polly/okf-viewer-chrome
+- Merge pull request #852 from OffeneDatenmodellierung/polly/raise-exception
+- Merge pull request #860 from OffeneDatenmodellierung/release-plz-2026-09-15T06-09-37Z
+
 ## [5.14.3](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.14.2...roteiro-v5.14.3) - 2026-09-15
 
 ### Other

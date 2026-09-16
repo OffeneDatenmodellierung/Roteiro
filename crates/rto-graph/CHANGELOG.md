@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.15.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v5.14.3...rto-graph-v5.15.0) - 2026-09-15
+
+### Added
+
+- *(paths)* exclude a path from extraction, in three states, at every reader
+
+### Fixed
+
+- *(paths)* gate the declaring file too, and make ADR-0007 v1.9 self-consistent
+- *(paths)* close the readers and the freshness checks Copilot found
+- *(paths)* restore with_paths' independent lifetime, and pin the cache rule
+
+### Other
+
+- release v5.14.3
+- *(paths)* prove the policy on the four surfaces the export test cannot see
+- cargo fmt the new path-policy code
+
 ## [5.14.3](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v5.14.2...rto-graph-v5.14.3) - 2026-09-15
 
 ### Added
