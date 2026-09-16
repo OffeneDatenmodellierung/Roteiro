@@ -345,9 +345,13 @@ Three consequences worth knowing before they surprise you:
   path spells the eight characters `\u{202e}` could not be told apart from one
   carrying the character. So `C:\okf\bundle` reads back as `C:\\okf\\bundle` —
   doubled exactly once, never twice.
-- **A line break or a tab inside a field gets its short name**, `\n`, `\r` or
-  `\t`. A report is one line per fact, and a field that could open a line of its
-  own could forge one.
+- **A field cannot open a line of its own.** A report is one line per fact, so a
+  field that could break the line could forge one. All five of Unicode's line
+  breaks are outside the ink set and none survives — but they are not spelled
+  alike, and only three are special-cased: LF, CR and tab become `\n`, `\r` and
+  `\t`, while U+0085 NEL, U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR
+  take the general `\u{...}` form. Do not read a short name as the contract for
+  every break.
 - **An id whose shown form differs cannot be pasted into the next command.** The
   fields you copy back — a finding's concept, a trust line's id, a link's two
   ends, every id in `okf diff` — are escaped along with everything else. That is
