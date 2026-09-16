@@ -274,9 +274,16 @@ impl Viewer {
                         .reported
                         .swap(true, std::sync::atomic::Ordering::Relaxed)
                     {
+                        // `e.shown()`, not `one_line(&e.to_string())`. The
+                        // error escapes its own fields where it interpolates
+                        // them, so a second pass here added nothing and doubled
+                        // every backslash the first wrote — an ordinary
+                        // `C:\okf` reached the operator as `C:\\\\okf`. The
+                        // return type is what now refuses the second pass; see
+                        // `rto_graph::screen::Diagnostic`.
                         (self.report)(&format!(
                             "roteiro: OKF bundle is not readable: {}",
-                            one_line(&e.to_string())
+                            e.shown()
                         ));
                     }
                     return Err(e);
@@ -886,49 +893,6 @@ fn escape(raw: &str) -> String {
         }
     }
     out
-}
-
-/// `raw` as a single log line the operator can trust to read as itself.
-///
-/// **The text is not ours and reaching this is not our decision.** It carries a
-/// bundle path and `okf-core`'s parser detail, which quotes the bundle's own
-/// bytes — a directory or a malformed file is somebody else's, per ADR-0022 —
-/// and a remote client chooses *when* it is written by asking for a route. A
-/// newline would let that text forge whole log lines; an `ESC` would let it
-/// write colour, move the cursor, or clear the screen of whatever terminal is
-/// tailing the log; and a U+202E RIGHT-TO-LEFT OVERRIDE would let it reverse
-/// the rest of the sentence describing it. All three are escaped rather than
-/// stripped, so the operator can still see that something strange was in the
-/// name instead of reading a silently-edited one.
-///
-/// # Why this is no longer a list of the characters to escape
-///
-/// The first version of this function escaped `char::is_control`, which is
-/// Rust's name for `Cc` plus the C1 range. That let every `Cf` **format**
-/// character through raw — U+202E, U+200B, U+2066..U+2069, U+061C,
-/// U+206A..U+206F and whatever Unicode assigns next — and its own comment
-/// admitted an allowlist was the stronger shape, declining it because "a path
-/// is legitimately any printable Unicode". That is true, and it is the reason
-/// the allowlist is stated in Unicode's own categories rather than in ASCII:
-/// see [`rto_graph::screen::escape_for_diagnostic`] for the rule and the
-/// argument that a list of the bad cannot be finished.
-///
-/// # A second pass over text `InspectError` has already escaped
-///
-/// Deliberate. [`InspectError`] escapes its own interpolated fields, but it is
-/// `#[non_exhaustive]` and lives in another crate: it *will* grow variants, and
-/// one whose `Display` forgot to escape would otherwise reach this line
-/// unguarded. An operator boundary should not rest on another crate's promise.
-///
-/// The cost is that a backslash the inner pass introduced is doubled here, so a
-/// hostile name reads `\\u{202e}` rather than `\u{202e}`. That is visible,
-/// still names the code point, and only ever happens to input that was already
-/// pathological — where silently passing an invisible character through is the
-/// failure this exists to prevent.
-///
-/// [`InspectError`]: rto_render::okf::inspect::InspectError
-fn one_line(raw: &str) -> String {
-    rto_graph::screen::escape_for_diagnostic(raw)
 }
 
 /// A bundle this server cannot read — whether it never could, or stopped.
@@ -3197,39 +3161,78 @@ mod tests {
         );
     }
 
-    /// `one_line` holds on text **no other layer has touched**.
+    /// The operator's line escapes a bundle path **exactly once**.
     ///
-    /// # Why this test exists beside the two end-to-end ones
+    /// # What this replaces, and why the old shape could not have caught it
     ///
-    /// On the viewer's path `one_line` and `InspectError`'s `Display` see the
-    /// same string, so the two guards overlap completely and no input separates
-    /// them: reverting either one alone leaves the operator's line safe, and a
-    /// fault injection against either would come back green and "prove" the
-    /// other unnecessary. An injection that cannot fail is worse than none,
-    /// because it is read as evidence.
+    /// There used to be a `one_line` here that escaped whatever it was handed,
+    /// on the argument that `InspectError` is `#[non_exhaustive]` and in another
+    /// crate, so this side should not rest on its promise. The argument was
+    /// wrong in a way its own test could not see: `InspectError` escapes its
+    /// fields at the leaf, so the second pass added no protection and doubled
+    /// every backslash the first had written. `Path::display()` emits `\` as the
+    /// separator on Windows, so an ordinary `C:\okf\bundle` reached the operator
+    /// as `C:\\\\okf\\\\bundle` — a real path damaged by the guard meant to
+    /// protect it, which is the `GivenName` separator defect in a new place.
     ///
-    /// So the function's own contract is asserted directly. This is also the
-    /// case that will really arise: `InspectError` is `#[non_exhaustive]` and in
-    /// another crate, so the day it grows a variant whose `Display` interpolates
-    /// something raw, this function is what stands between that variant and the
-    /// operator's terminal.
-    #[test]
-    fn one_line_escapes_text_no_other_layer_has_seen() {
-        let line = one_line("okf-\u{202E}dnab\u{200B}\u{2066}x\u{2069}\u{061C}\u{1B}[2J\nfine");
-        if let Some(name) = line.chars().find_map(rto_graph::screen::invisible_name) {
-            panic!("{name} survived: {line:?}");
-        }
-        assert_eq!(line.lines().count(), 1, "{line:?} is not one line");
-        assert_eq!(
-            line, "okf-\\u{202e}dnab\\u{200b}\\u{2066}x\\u{2069}\\u{061c}\\u{001b}[2J\\nfine",
-            "every character should be named rather than removed"
+    /// The old test asserted the escaper's behaviour on text nothing else had
+    /// touched, which is a true statement about a function and says nothing
+    /// about how many times it runs on the path that matters. This one measures
+    /// the whole path, from the directory name to the string the sink receives,
+    /// and it is an **equality**: `contains("okf")` is satisfied by one pass,
+    /// two, or five.
+    ///
+    /// Backslashes in a directory name are not a Windows-only curiosity here —
+    /// a POSIX filename may hold anything but `/` and NUL, so this exact name is
+    /// legal on the machine running the test.
+    #[tokio::test]
+    async fn the_operators_line_escapes_a_bundle_path_exactly_once() {
+        let root = std::env::temp_dir().join(format!(
+            "roteiro-okf-sep-{}-C:\\okf\\bundle",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&log);
+        let v = Viewer {
+            root: Arc::new(root.clone()),
+            base: Arc::new(String::new()),
+            nav: Arc::new(Nav::default()),
+            cache: Arc::new(Mutex::new(None)),
+            reported: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            report: Arc::new(move |line: &str| {
+                sink.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(line.to_owned());
+            }),
+        };
+        assert!(
+            v.overview().is_err(),
+            "the path does not exist, so it fails"
         );
-        // And ordinary text is left alone, including the non-ASCII a real bundle
-        // path carries. An escaper that garbled this would be a worse bug than
-        // the one it fixes.
-        assert_eq!(
-            one_line("/データ/概念/Cafe\u{301}"),
-            "/データ/概念/Cafe\u{301}"
+
+        let written = log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(written.len(), 1, "one outage, one line");
+        let line = &written[0];
+        // One pass doubles each separator. Two would quadruple them, and that is
+        // the only difference the assertion has to be able to see.
+        assert!(
+            line.contains(r"C:\\okf\\bundle"),
+            "the separators should be doubled exactly once: {line:?}"
+        );
+        assert!(
+            !line.contains(r"C:\\\\okf\\\\bundle"),
+            "the bundle path was escaped twice: {line:?}"
+        );
+        // And the non-ASCII half of an honest path is untouched entirely — no
+        // doubling to reason about, just the bytes that were there.
+        assert!(
+            !line.contains("\\u{"),
+            "an honest path should carry no escape sequence at all: {line:?}"
         );
     }
     /// The operator's line cannot be **reordered or hidden** by a bundle name

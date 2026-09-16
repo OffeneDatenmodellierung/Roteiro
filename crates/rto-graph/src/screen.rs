@@ -336,6 +336,101 @@ pub fn invisible_name(c: char) -> Option<&'static str> {
     None
 }
 
+/// Text that has been escaped for an operator's terminal, **exactly once**.
+///
+/// # Why this is a type and not a convention
+///
+/// [`escape_for_diagnostic`] is deliberately **not idempotent**, and it cannot
+/// be: its encoding has to be unambiguous, so a `\` in the input becomes `\\` in
+/// the output, or a bundle whose path spells the seven characters `\u{202e}`
+/// would be indistinguishable from one carrying the character. Correctness
+/// therefore depends on *how many times* the escaper has run over a value —
+/// once is right, twice is wrong, and both look identical at the call site.
+///
+/// Running it twice is not a cosmetic problem. `Path::display()` emits `\` as
+/// the separator on Windows, so an ordinary `C:\okf\bundle` escaped twice
+/// reaches the operator as `C:\\\\okf\\\\bundle`. Damaging legitimate output is
+/// the same defect as the `GivenName` separator rule that refused seven real
+/// author names — an escaper that garbles the honest case is not a safer
+/// diagnostic, it is an unreadable one.
+///
+/// So the fact is carried in the type rather than in somebody's memory. This
+/// struct holds no `Deref<Target = str>`, no `AsRef<str>` and no
+/// `From<Diagnostic> for String`, which is the whole design: `escape_for_diagnostic`
+/// takes `&str`, so **feeding an escaped value back into the escaper does not
+/// compile**. It implements [`Display`](std::fmt::Display), so the one thing it
+/// is for — being interpolated into a message — stays a plain `{}`.
+///
+/// # The boundary the type marks
+///
+/// The rule this repository follows, stated once here because the four defects
+/// Copilot found against #865 were two of it being broken in each direction:
+///
+/// > A **foreign scalar** — a peer's bundle path, their name, a filename
+/// > extension, a parser's quotation of their bytes — is escaped at the moment
+/// > it is interpolated into text a person reads. **Assembled** human-readable
+/// > text is never escaped again.
+///
+/// Escaping at the leaf rather than at the sink is the load-bearing half of
+/// that, and it is chosen rather than assumed. `roteiro`'s `main` returns
+/// `anyhow::Result<()>`, so the last thing that prints an error is Rust's own
+/// `Termination`, which is not ours to wrap: a rule of "the sink escapes" has an
+/// unguarded terminus at the exit of every command. A rule of "the leaf escapes"
+/// does not, because the value was already escaped before it entered the error.
+///
+/// The cost is that an outer layer must not escape again, and that is what this
+/// type is for.
+///
+/// # The one hole, named
+///
+/// [`Display`](std::fmt::Display) erases the type: `d.to_string()` is a `String`
+/// again, and nothing stops a later reader escaping *that*. Rust cannot close
+/// it. Two things make it detectable instead of remembered:
+///
+/// - [`Diagnostic::already_escaped`] is the only way to re-adopt such a string,
+///   so `grep already_escaped` enumerates every place the claim is made — three,
+///   at the time of writing.
+/// - The property is observable in output. A Windows-style path escaped twice
+///   has four backslashes where it should have two, so a test that renders
+///   `C:\okf\bundle` through a real sink detects an extra layer anywhere on the
+///   path, including one added later.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Diagnostic(String);
+
+impl Diagnostic {
+    /// Adopt text that **has already been escaped**, without escaping it again.
+    ///
+    /// The escape hatch, and named so it is greppable rather than quiet. Every
+    /// call is a claim that each foreign scalar inside `text` was escaped where
+    /// it was interpolated — which is true of an error type whose `Display`
+    /// escapes its own fields, and false of anything else.
+    ///
+    /// Reach for it only when a `Display` impl has already erased a
+    /// [`Diagnostic`] back into a `String`. If the text has *not* been through
+    /// [`escape_for_diagnostic`], this is the wrong function and the bug it
+    /// creates is invisible.
+    #[must_use]
+    pub fn already_escaped(text: String) -> Self {
+        Self(text)
+    }
+
+    /// The escaped text.
+    ///
+    /// Deliberately a method rather than a `Deref`: an implicit conversion to
+    /// `&str` would make `escape_for_diagnostic(&escaped)` compile again, which
+    /// is the one thing this type exists to prevent.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for Diagnostic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// `raw` as one line of diagnostic an operator can trust to read as itself.
 ///
 /// # A list of the bad cannot be finished, so this states the good
@@ -417,8 +512,16 @@ pub fn invisible_name(c: char) -> Option<&'static str> {
 /// The result is genuinely one line: `\n`, `\r`, U+0085 NEL, U+2028 LINE
 /// SEPARATOR and U+2029 PARAGRAPH SEPARATOR are all outside the ink set, so none
 /// of them can forge a log line of its own.
+///
+/// # Exactly once, at the leaf
+///
+/// The return type is [`Diagnostic`] rather than `String`, and that is not
+/// decoration: this function is **not idempotent**, so a value escaped twice is
+/// corrupted rather than merely over-protected. Call it where a foreign scalar
+/// is interpolated into a human-readable message, and never on a message that
+/// has already been assembled. [`Diagnostic`] carries the argument in full.
 #[must_use]
-pub fn escape_for_diagnostic(raw: &str) -> String {
+pub fn escape_for_diagnostic(raw: &str) -> Diagnostic {
     use std::fmt::Write as _;
 
     let mut out = String::with_capacity(raw.len());
@@ -439,7 +542,7 @@ pub fn escape_for_diagnostic(raw: &str) -> String {
             }
         }
     }
-    out
+    Diagnostic(out)
 }
 
 /// Does Unicode say `c` puts a mark on the page? The rule, and why it is asked
@@ -1503,8 +1606,49 @@ mod tests {
 
     /// Does the UCD oracle — not std, and not us — say `c` puts a mark on the
     /// page?
+    ///
+    /// # Both clauses, because the second is the one that carries the weight
+    ///
+    /// The first version of this oracle asked only `General_Category`, and so
+    /// modelled only half of [`escape_for_diagnostic`]'s rule. The half it left
+    /// out is the subtle one: `Default_Ignorable_Code_Point` is what removes the
+    /// invisible characters that hide **inside** the ink categories, where a
+    /// category test cannot see them. U+3164 HANGUL FILLER is an `Lo`
+    /// **letter**; U+FE0F VARIATION SELECTOR-16 and U+E0100 VARIATION
+    /// SELECTOR-17 are `Mn` **marks**; U+034F COMBINING GRAPHEME JOINER is
+    /// another. An oracle that called all of those ink accepted them as output
+    /// in `no_code_point_reaches_a_diagnostic_invisibly` and `continue`d past
+    /// them in `a_character_the_ucd_calls_other_or_separator_is_always_escaped`
+    /// — so the sweep that exists to prove the rule was silent over exactly the
+    /// part of the rule that is hard to get right.
+    ///
+    /// **267 code points changed verdict when this clause was added**: U+034F,
+    /// U+115F..U+1160, U+17B4..U+17B5, U+180B..U+180D, U+180F, U+3164,
+    /// U+FE00..U+FE0F, U+FFA0 and U+E0100..U+E01EF. Three of them were covered
+    /// by the hand-written samples in
+    /// `a_default_ignorable_is_escaped_even_inside_an_ink_category`; the other
+    /// 264 were covered by nothing, which is the shape a denylist of what
+    /// somebody had heard of always has.
+    ///
+    /// # Which way an error in the oracle fails
+    ///
+    /// Loudly in one direction and silently in the other, so it is worth saying
+    /// which. An oracle that is too **permissive** — calling something ink that
+    /// is not — weakens both sweeps invisibly, which is the defect above. One
+    /// that is too **strict** makes them demand an escape for a real character
+    /// and fails the run. The clause below is therefore stated as a subtraction
+    /// from the categories rather than as an addition to them.
+    ///
+    /// # Two databases, not one
+    ///
+    /// `unicode-properties` answers the category half and `icu_properties` the
+    /// default-ignorable half, because neither exposes both: `unicode-properties`
+    /// has no `Default_Ignorable_Code_Point` at all. That is an accident of the
+    /// crates, and a welcome one — the implementation asks std's table, and the
+    /// oracle now asks two *other* generated readings of the same database, so a
+    /// guarantee is not being tested through its own code.
     fn oracle_says_ink(c: char) -> bool {
-        c == ' '
+        let category = c == ' '
             || matches!(
                 c.general_category_group(),
                 GeneralCategoryGroup::Letter
@@ -1512,7 +1656,18 @@ mod tests {
                     | GeneralCategoryGroup::Number
                     | GeneralCategoryGroup::Punctuation
                     | GeneralCategoryGroup::Symbol
-            )
+            );
+        category && !oracle_says_default_ignorable(c)
+    }
+
+    /// Does the UCD oracle say `c` is a `Default_Ignorable_Code_Point`?
+    ///
+    /// A renderer is *entitled* to draw nothing for these, which is precisely
+    /// what makes them dangerous in a diagnostic: the text on the page and the
+    /// bytes in the log differ, and the reader has no way to tell.
+    fn oracle_says_default_ignorable(c: char) -> bool {
+        icu_properties::CodePointSetData::new::<icu_properties::props::DefaultIgnorableCodePoint>()
+            .contains(c)
     }
 
     /// Every `char` there is, in ascending order.
@@ -1530,7 +1685,7 @@ mod tests {
         let mut passed_through = 0_u32;
         for c in all_code_points() {
             let escaped = escape_for_diagnostic(&c.to_string());
-            for out in escaped.chars() {
+            for out in escaped.as_str().chars() {
                 assert!(
                     oracle_says_ink(out),
                     "U+{:04X} produced U+{:04X}, which the UCD calls {:?} — a \
@@ -1540,7 +1695,7 @@ mod tests {
                     out.general_category()
                 );
             }
-            if escaped == c.to_string() {
+            if escaped.as_str() == c.to_string() {
                 passed_through += 1;
             }
         }
@@ -1569,14 +1724,14 @@ mod tests {
             checked += 1;
             let escaped = escape_for_diagnostic(&c.to_string());
             assert_ne!(
-                escaped,
+                escaped.as_str(),
                 c.to_string(),
                 "U+{:04X} ({:?}) passed through raw",
                 u32::from(c),
                 c.general_category()
             );
             assert!(
-                escaped.is_ascii(),
+                escaped.as_str().is_ascii(),
                 "U+{:04X} escaped to non-ASCII {escaped:?}",
                 u32::from(c)
             );
@@ -1585,7 +1740,7 @@ mod tests {
             // of a code point, which is the same information in fewer glyphs.
             let named = matches!(c, '\n' | '\r' | '\t');
             assert!(
-                named || escaped == format!("\\u{{{:04x}}}", u32::from(c)),
+                named || escaped.as_str() == format!("\\u{{{:04x}}}", u32::from(c)),
                 "U+{:04X} escaped to {escaped:?}, which does not name it",
                 u32::from(c)
             );
@@ -1618,11 +1773,93 @@ mod tests {
             "concept `a/b` is not readable: expected a mapping at line 3",
         ] {
             assert_eq!(
-                escape_for_diagnostic(real),
+                escape_for_diagnostic(real).as_str(),
                 real,
                 "a legitimate path or parser detail was altered"
             );
         }
+    }
+
+    #[test]
+    fn every_ink_code_point_survives_byte_identical() {
+        // The **third** direction, and the one neither sweep covered. The two
+        // above say "nothing invisible gets out" and "nothing non-ink gets
+        // through"; an implementation that escaped every CJK character would
+        // satisfy both — its output is ASCII ink, and it escapes everything the
+        // oracle calls non-ink. Only the `passed_through > 150_000` counter
+        // stood against it, and a counter cannot say *which* 150,000.
+        //
+        // This is the over-escaping direction, which is the failure the
+        // allowlist was designed to avoid and the class two of #865's four
+        // findings belonged to. `GivenName`'s separator rule refused seven real
+        // author names, six of them along a demographic line; garbling a CJK or
+        // NFD path here would be the same defect wearing Unicode categories.
+        //
+        // One exception, and it is the encoding's own: `\` must double, or a
+        // path spelling `\u{202e}` and the character it names would be the same
+        // seven output characters.
+        let mut survived = 0_u32;
+        for c in all_code_points() {
+            if !oracle_says_ink(c) {
+                continue;
+            }
+            let escaped = escape_for_diagnostic(&c.to_string());
+            if c == '\\' {
+                assert_eq!(escaped.as_str(), "\\\\", "the encoding's own exception");
+                continue;
+            }
+            assert_eq!(
+                escaped.as_str(),
+                c.to_string(),
+                "U+{:04X} ({:?}) puts a mark on the page and was altered anyway",
+                u32::from(c),
+                c.general_category()
+            );
+            survived += 1;
+        }
+        // Anti-vacuity from the other side: an oracle that called nothing ink
+        // would make the loop above assert nothing at all.
+        assert!(
+            survived > 150_000,
+            "only {survived} ink code points were checked; the oracle is not \
+             seeing the page"
+        );
+    }
+
+    #[test]
+    fn escaping_twice_is_not_escaping_once_and_a_real_path_is_what_it_costs() {
+        // The class-B invariant, stated where the rule lives. This function is
+        // **not idempotent** and cannot be — the encoding has to distinguish a
+        // path that spells `\u{202e}` from the character — so "escape once" is a
+        // correctness requirement rather than a tidiness one, and a second pass
+        // is a defect and not a belt-and-braces.
+        //
+        // The witness is an ordinary Windows path, because that is where it bit:
+        // `Path::display()` emits `\` as the separator, so the honest case is
+        // the one a doubled escaper damages. Two layers turn two separators into
+        // eight characters.
+        let real = r"C:\okf\bundle";
+        let once = escape_for_diagnostic(real);
+        assert_eq!(
+            once.as_str(),
+            r"C:\\okf\\bundle",
+            "one pass doubles each separator, and that is the whole encoding"
+        );
+        let twice = escape_for_diagnostic(once.as_str());
+        assert_eq!(
+            twice.as_str(),
+            r"C:\\\\okf\\\\bundle",
+            "a second pass quadruples them — this is the damage, pinned"
+        );
+        assert_ne!(
+            once, twice,
+            "if these were ever equal, nothing downstream would have to count \
+             the passes and `Diagnostic` would be unnecessary"
+        );
+        // And the type is what stops the second pass being written by accident:
+        // `escape_for_diagnostic(&once)` does not compile, because `Diagnostic`
+        // has no `Deref<Target = str>` and no `AsRef<str>`. The line above has
+        // to reach through `as_str()`, which is visible at a review.
     }
 
     #[test]
@@ -1634,11 +1871,11 @@ mod tests {
         // rule, and the consequence is that a variation-selector-qualified
         // emoji shows its base character beside a visible escape.
         assert_eq!(
-            escape_for_diagnostic("\u{2764}\u{FE0F}"),
+            escape_for_diagnostic("\u{2764}\u{FE0F}").as_str(),
             "\u{2764}\\u{fe0f}"
         );
-        assert_eq!(escape_for_diagnostic("a\u{3164}b"), "a\\u{3164}b");
-        assert_eq!(escape_for_diagnostic("a\u{200D}b"), "a\\u{200d}b");
+        assert_eq!(escape_for_diagnostic("a\u{3164}b").as_str(), "a\\u{3164}b");
+        assert_eq!(escape_for_diagnostic("a\u{200D}b").as_str(), "a\\u{200d}b");
     }
 
     #[test]
@@ -1647,7 +1884,7 @@ mod tests {
         // one, or the encoding tells the operator something false — which is
         // the failure mode, in miniature, of escaping at all.
         assert_eq!(
-            escape_for_diagnostic("\\u{202e}"),
+            escape_for_diagnostic("\\u{202e}").as_str(),
             "\\\\u{202e}",
             "a literal backslash must not be able to forge an escape"
         );
@@ -1659,7 +1896,11 @@ mod tests {
         // One line, whichever of Unicode's five line breaks is tried.
         for breaker in ['\n', '\r', '\u{0085}', '\u{2028}', '\u{2029}'] {
             let escaped = escape_for_diagnostic(&format!("before{breaker}after"));
-            assert_eq!(escaped.lines().count(), 1, "{escaped:?} is not one line");
+            assert_eq!(
+                escaped.as_str().lines().count(),
+                1,
+                "{escaped:?} is not one line"
+            );
         }
     }
 }

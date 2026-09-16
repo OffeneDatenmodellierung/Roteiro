@@ -84,6 +84,22 @@ use serde::Serialize;
 /// The fields themselves stay **raw**, and are documented as such: what was
 /// wrong was one presentation boundary, not the error's own record of what
 /// happened. A caller that wants the path to open it still gets the path.
+///
+/// # Escaped here, and therefore nowhere else
+///
+/// At the **leaf**, deliberately, and the alternative was tried. `roteiro`'s
+/// `main` returns `anyhow::Result<()>`, so an error that propagates out of
+/// `roteiro okf lint` is rendered last by Rust's own `Termination` impl — a
+/// sink this workspace does not own and cannot wrap. A rule of "whatever prints
+/// it escapes it" therefore has an unguarded terminus at the exit of every
+/// command; a rule of "whatever builds it escapes it" does not.
+///
+/// The price is that **no outer layer may escape this message again**, because
+/// the escape is not idempotent: a `\` doubles every pass, so a second pass
+/// turns a Windows path into four separators where the operator should see two.
+/// [`InspectError::shown`] is the sanctioned renderer and returns a
+/// [`rto_graph::screen::Diagnostic`], which a second pass cannot take.
+/// [`rto_graph::screen::Diagnostic`] carries the rule in full.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum InspectError {
@@ -122,6 +138,33 @@ pub enum InspectError {
     /// The host clock could not be read and no `--today` was given.
     #[error("cannot read the current date; pass --today YYYY-MM-DD")]
     NoClock,
+}
+
+impl InspectError {
+    /// This error as one line of operator diagnostic, **escaped exactly once**.
+    ///
+    /// The sanctioned way to put it in front of a person, and it exists for a
+    /// defect rather than for tidiness. `Display` already escapes every field it
+    /// interpolates — but `Display` erases that fact into a `String`, and the
+    /// OKF viewer, seeing an untyped `String` about to reach an operator's
+    /// terminal, escaped it a second time. On Windows that turned an ordinary
+    /// `C:\okf` into `C:\\\\okf`: a real path damaged by the guard meant to
+    /// protect it, which is the failure mode
+    /// [`rto_graph::screen::escape_for_diagnostic`]'s allowlist design exists to
+    /// avoid.
+    ///
+    /// Returning [`rto_graph::screen::Diagnostic`] puts the claim back in the
+    /// type. `escape_for_diagnostic` takes `&str` and `Diagnostic` offers no
+    /// `Deref` or `AsRef`, so escaping this again **does not compile** — where
+    /// escaping `e.to_string()` again compiles happily and is wrong.
+    #[must_use]
+    pub fn shown(&self) -> rto_graph::screen::Diagnostic {
+        // `already_escaped`, not `escape_for_diagnostic`: every variant's
+        // `Display` escapes its own fields at the point of interpolation, which
+        // is what makes this claim true. The exhaustive-match test below is what
+        // keeps it true when a variant is added.
+        rto_graph::screen::Diagnostic::already_escaped(self.to_string())
+    }
 }
 
 /// Load a bundle, naming the path in the error rather than only the cause.
@@ -1232,6 +1275,46 @@ mod tests {
         assert_eq!(
             shown[2],
             "cannot read the current date; pass --today YYYY-MM-DD"
+        );
+    }
+
+    /// A legitimate path reaches the operator escaped **exactly once**.
+    ///
+    /// The Windows separator is the whole point. `Path::display()` emits `\`
+    /// there — see `relative` in this file — one pass doubles it, and a second
+    /// pass quadruples it. `InspectError` escapes at the leaf, so `shown` must
+    /// not escape again; if it ever did, `C:\okf` would read as `C:\\\\okf`
+    /// and an ordinary path would be damaged by the guard protecting it.
+    ///
+    /// Asserted on the exact spelling rather than on "contains the path",
+    /// because a `contains("okf")` check passes on every number of passes. That
+    /// is the difference between a test that would have caught this class and
+    /// one that sat beside it: #865's
+    /// `the_operators_line_cannot_be_forged_by_a_bundle_name` was green with a
+    /// raw U+202E going past it.
+    #[test]
+    fn a_legitimate_path_is_escaped_exactly_once() {
+        let e = InspectError::Unreadable {
+            path: r"C:\okf\bundle".to_owned(),
+            detail: "index.md: expected a mapping at line 3".to_owned(),
+        };
+        assert_eq!(
+            e.shown().to_string(),
+            r"`C:\\okf\\bundle` is not a readable OKF bundle: index.md: expected a mapping at line 3",
+            "an ordinary Windows path was escaped more than once, or not at all"
+        );
+
+        // Non-ASCII survives byte-identical, including NFD — macOS hands out
+        // decomposed paths, so `e` + U+0301 is the ordinary case here.
+        let e = InspectError::Unreadable {
+            path: "/Volumes/Cafe\u{301}/データ/概念/okf".to_owned(),
+            detail: "概念/a.md: expected a mapping".to_owned(),
+        };
+        assert_eq!(
+            e.shown().to_string(),
+            "`/Volumes/Cafe\u{301}/データ/概念/okf` is not a readable OKF bundle: \
+             概念/a.md: expected a mapping",
+            "a legitimate non-ASCII path was altered"
         );
     }
 }
