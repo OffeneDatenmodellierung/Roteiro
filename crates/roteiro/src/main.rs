@@ -7184,19 +7184,50 @@ fn push_escaped_note(out: &mut Vec<String>, escaped: &std::cell::Cell<bool>) {
 /// # What the vector costs, since a hostile bundle chooses its length
 ///
 /// Every `okf_*_lines` function here materialises the whole report before any of
-/// it is printed, where the `println!` version streamed. That is a **constant
-/// factor on an allocation the caller has already made**, not a new unbounded
-/// one: `CheckReport::findings`, `ComputationReport::entries`,
-/// `LinkReport::broken` and the rest are `Vec<String>` already held in full by
-/// the time a printer is called, so the peak is roughly two copies of a report
-/// that was one.
+/// it is printed, where the `println!` version streamed. The question that
+/// raises — a hostile bundle picks the length — was **measured** rather than
+/// waved at, because "probably fine" is not a position.
 ///
-/// Deliberately **not** capped the way [`okf_screen_lines`] caps its rows. That
-/// cap exists because a screening row is a *sample* of a verdict and the
-/// decision must not scroll away; a lint report is the answer itself, and
-/// truncating it would make "no further findings" and "further findings not
-/// shown" the same output — the silence-taken-for-absence this family exists to
-/// remove. `--json` remains the path for a report too large to read.
+/// Peak RSS of `okf lint` over one bundle built to maximise the report: 200
+/// concepts, each a 50 KB empty heading, which `conform`'s `L8` echoes verbatim
+/// into a finding message. 11 MB of bundle, 10 MB of report.
+///
+/// | path | stdout | peak RSS |
+/// | --- | --- | --- |
+/// | `okf links` — parses the same bundle, prints 225 bytes | 225 B | 25 MiB |
+/// | `okf lint` — this vector, holding the whole 10 MB report | 10.0 MB | 40 MiB |
+/// | `okf lint --json` — `emit_json`, which predates this change | 10.1 MB | 49 MiB |
+///
+/// Three things follow, and together they are the argument for leaving it
+/// uncapped:
+///
+/// - **A bundle cannot amplify.** The report is ~0.9× the text the bundle
+///   shipped, because the only way to lengthen it is to write more bytes that
+///   get echoed. Costing a gigabyte of lines means shipping a gigabyte of
+///   bundle, and by then the parsed `Bundle` and the report struct — which hold
+///   those same bytes and predate this change — cost more than the lines do.
+/// - **The delta is one copy of an allocation the caller already made.**
+///   `CheckReport::findings`, `ComputationReport::entries` and the rest are
+///   `Vec<String>` held in full before any printer is called; the 15 MiB between
+///   rows one and two above is that copy plus allocator slack.
+/// - **`--json` is already more expensive**, by 9 MiB on the same input, because
+///   [`emit_json`] builds the entire document as one `String` before printing
+///   it. The exposure added here is strictly smaller than one that already
+///   existed on the same command, on the same bundle, and was not capped.
+///
+/// Deliberately **not** capped the way [`okf_screen_lines`] caps its rows, and
+/// that cap is not the precedent it looks like: it is `5`, which is no kind of
+/// memory bound, and its own comment says why — a screening row is a *sample*
+/// shown beside a consent question, and a report that scrolls the decision off
+/// the screen is a report nobody reads. A lint report is the answer itself.
+/// Truncating it would make "no further findings" and "further findings not
+/// shown" the same output, which is the silence-taken-for-absence ADR-0024
+/// exists to remove.
+///
+/// What would change this: an `okf` report whose length stops tracking the
+/// bundle's own bytes — a rule that emitted a line per *pair* of concepts, say,
+/// or a message that repeated a field. That is a quadratic, and it would want
+/// bounding at the rule rather than at the printer.
 fn okf_findings_lines(report: &rto_render::okf::conform::CheckReport) -> Vec<String> {
     let escaped = std::cell::Cell::new(false);
     // `report.check` is `validate` or `lint`, a `&'static str` this workspace
