@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v5.15.1...rto-render-v6.0.0) - 2026-09-16
+
+### Fixed
+
+- *(okf)* escape peer-derived diagnostics exactly once, at the leaf
+
 ## [5.15.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v5.15.0...rto-render-v5.15.1) - 2026-09-16
 
 ### Fixed
