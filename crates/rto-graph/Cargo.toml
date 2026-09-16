@@ -126,6 +126,24 @@ symphonia = { version = "0.6.1", default-features = false, features = [
 # Also needed by the integration tests in `tests/`, which don't inherit the
 # crate's normal dependencies.
 serde_json = { workspace = true }
+# The independent oracle for `screen::escape_for_diagnostic`'s property sweep,
+# and a **dev**-dependency on purpose.
+#
+# That function answers "does this character put a mark on the page?" from the
+# Unicode Character Database via `str::escape_debug`, whose printable table std
+# generates from the UCD. A test that asked the same table the same question
+# would prove nothing — it is the shape where a guarantee is tested through its
+# own code and the defect cancels on both sides. So the sweep checks std's
+# answer against a *second*, separately generated reading of the same database:
+# `unicode-properties` exposes `General_Category` from its own tables, and the
+# two agreeing across all 1,114,112 code points is a real result.
+#
+# Not a normal dependency, because production needs none: std already carries
+# the table, and these crates are published, so a runtime edge would be one
+# every consumer pays for a question std answers for free. Costs one crate in
+# the dev tree, MIT OR Apache-2.0, zero transitive dependencies of its own, and
+# it is already in this lockfile via `pdf-extract` -> `lopdf` -> `stringprep`.
+unicode-properties = "0.1.4"
 
 [features]
 # Offline similarity inference (the `inferred` provenance class). Adds no
