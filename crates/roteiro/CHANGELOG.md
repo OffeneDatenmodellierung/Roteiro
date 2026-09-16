@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.15.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.15.0...roteiro-v5.15.1) - 2026-09-16
+
+### Fixed
+
+- *(okf)* escape the import path's diagnostics too, which the first sweep missed
+- *(okf)* state what a diagnostic character is, and escape everything else
+
+### Other
+
+- Merge pull request #865 from OffeneDatenmodellierung/polly/diagnostic-escape-allowlist
+
 ## [5.15.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.14.3...roteiro-v5.15.0) - 2026-09-15
 
 ### Fixed
