@@ -843,6 +843,20 @@ fn hostile_bundle(tag: &str) -> PathBuf {
                  parameters:\n  - name: p\u{202E}\n    type: STRING\n---\n\n\
                  # Computation\n\n```sql\nSELECT FROM WHERE (\n```\n",
             ),
+            (
+                // A **file-backed** computation (`computation:` in frontmatter)
+                // and a hostile language tag: `entries[].file` and
+                // `entries[].language` are separate leaves from the inline
+                // entry's, and neither was reachable from it.
+                "c/byfile\u{202E}.md",
+                "---\ntype: Attested Computation\ntitle: By file\nruntime: bq2-\u{202E}\n\
+                 computation: /sql/q-\u{202E}.sql\n---\n\n# Computation\n",
+            ),
+            (
+                "c/lang\u{202E}.md",
+                "---\ntype: Attested Computation\ntitle: Tagged\nruntime: bq3-\u{202E}\n---\n\n\
+                 # Computation\n\n```lang-\u{202E}\nSELECT 1\n```\n",
+            ),
             ("assets/logo\u{202E}.bin", "x"),
         ],
     )
@@ -975,11 +989,15 @@ const FIELDS_TRUST: &[(&str, &str)] = &[
 ];
 const FIELDS_COMPUTATIONS: &[(&str, &str)] = &[
     ("root", ""),
-    ("runtimes/0", RUNTIME),
+    ("runtimes/0", ""),
     ("concept", COMP),
     ("path", COMP_MD),
     ("runtime", RUNTIME),
     ("parameters/0", "p\u{202E}"),
+    // Separate leaves, reachable only from the file-backed and language-tagged
+    // concepts — the inline entry has `file: None` and a clean `sql` tag.
+    ("file", "/sql/q-\u{202E}.sql"),
+    ("language", "lang-\u{202E}"),
 ];
 const FIELDS_INFO: &[(&str, &str)] = &[
     ("root", ""),
@@ -999,7 +1017,13 @@ const FIELDS_LINKS: &[(&str, &str)] = &[
     // A third leaf on this report, distinct from the two ends of the link.
     ("non_concept/0/path", ASSET),
 ];
-const FIELDS_DIFF: &[(&str, &str)] = &[("before", ""), ("after", ""), ("removed/0", COMP)];
+const FIELDS_DIFF: &[(&str, &str)] = &[
+    ("before", ""),
+    ("after", ""),
+    ("removed/0", COMP),
+    ("content_changed/0", CONCEPT),
+    ("id", CONCEPT),
+];
 
 /// The eight `--json` runs, paired with the fields each must carry.
 fn json_runs<'a>(path: &'a str, other_path: &'a str) -> [JsonRun<'a>; 8] {
@@ -1081,6 +1105,16 @@ fn the_json_surface_carries_the_bundles_literal_bytes() {
     // `removed` was empty and the existential version of this test passed
     // anyway, which is the whole reason it is per field now.
     std::fs::remove_file(other.join("c/tot\u{202E}al.md")).expect("remove the computation");
+    // …and the surviving concept differs in body and in status, so `diff` has
+    // `content_changed` and a `trust_changed` status move to report as well —
+    // each a separate leaf, and each an id the bundle chose.
+    std::fs::write(
+        other.join("c/rev\u{202E}enue.md"),
+        "---\ntype: Metric\ntitle: Revenue \u{202E}\nstatus: retired-\u{202E}\n\
+         verified: { by: human:alice\u{202E}, at: 2026-08-01T10:00:00Z }\n\
+         stale_after: 2020-01-01T00:00:00Z\n---\n\n# Definition\n\nRewritten.\n",
+    )
+    .expect("rewrite the concept");
     let other_path = other.to_string_lossy().into_owned();
 
     let runs = json_runs(&path, &other_path);

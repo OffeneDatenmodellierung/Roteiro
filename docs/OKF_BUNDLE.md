@@ -361,11 +361,13 @@ Three consequences worth knowing before they surprise you:
   doubled exactly once, never twice.
 - **A field cannot open a line of its own.** A report is one line per fact, so a
   field that could break the line could forge one. All five of Unicode's line
-  breaks are outside the ink set and none survives — but they are not spelled
-  alike, and only three are special-cased: LF, CR and tab become `\n`, `\r` and
-  `\t`, while U+0085 NEL, U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR
-  take the general `\u{...}` form. Do not read a short name as the contract for
-  every break.
+  breaks — LF, CR, U+0085 NEL, U+2028 LINE SEPARATOR and U+2029 PARAGRAPH
+  SEPARATOR — are outside the ink set, and none survives. They are not spelled
+  alike, though: **LF and CR** get the short names `\n` and `\r`, while the
+  other three take the general `\u{...}` form. **Tab** gets `\t` for the same
+  reason, and is not a line break at all — it is the third character with a
+  short name, not the third line break. Do not read a short name as the contract
+  for every break.
 - **An id whose shown form differs cannot be pasted into the next command.** The
   fields you copy back — a finding's concept, a trust line's id, a link's two
   ends, every id in `okf diff` — are escaped along with everything else. That is
