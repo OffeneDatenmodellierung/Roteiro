@@ -309,11 +309,38 @@ pub struct OkfImport {
 /// and that set is open by construction — OKF is a vendor-neutral format, so the
 /// producers are not ours to enumerate. A caller wants the message, not an
 /// exhaustive match; adding a way to fail should not be a breaking change.
+///
+/// # Its `Display` is an operator's diagnostic, so every field is escaped
+///
+/// The subject of every variant here is **somebody else's directory**, and the
+/// values interpolated are theirs: the bundle root they chose, and `detail`,
+/// which quotes their own filenames back. The message is then read by a person
+/// in a terminal — inside the consent question `okf_discovery` asks before a
+/// stranger's prose enters this graph, and on the stderr of `roteiro links`
+/// when an import will not read. Rendered raw, a U+202E in a directory name
+/// reverses the rest of the sentence *describing that directory*.
+///
+/// So each field goes through [`rto_graph::screen::escape_for_diagnostic`],
+/// which states what a printable diagnostic character is rather than listing
+/// the characters that are not one.
+///
+/// Escaped **here**, at the leaf, and not by whoever prints it: `roteiro`'s
+/// `main` returns `anyhow::Result<()>`, so the last thing to render an error
+/// that propagated out of a command is Rust's own `Termination` impl, which no
+/// sink of ours can wrap. See [`rto_graph::screen::Diagnostic`] for the rule in
+/// full — and for why nothing downstream may escape this message a second time.
+///
+/// The fields themselves stay **raw**, and are documented as such: what is a
+/// presentation concern is presentation's, and a caller that wants the path in
+/// order to open it still gets the path.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum OkfError {
-    /// The directory holds no markdown at all.
-    #[error("no markdown files under {0}: an OKF bundle is a directory of concept documents")]
+    /// The directory holds no markdown at all. Raw; `Display` escapes it.
+    #[error(
+        "no markdown files under {}: an OKF bundle is a directory of concept documents",
+        rto_graph::screen::escape_for_diagnostic(.0)
+    )]
     Empty(String),
     /// Markdown was found, and none of it was a concept.
     ///
@@ -323,15 +350,18 @@ pub enum OkfError {
     /// read badly — it is not a bundle, and importing zero concepts while
     /// exiting zero would report success for having done nothing.
     #[error(
-        "{path} holds {files} markdown file(s) and no readable concept among them, so it is \
-         not an OKF bundle. First failures: {detail}"
+        "{} holds {files} markdown file(s) and no readable concept among them, so it is \
+         not an OKF bundle. First failures: {}",
+        rto_graph::screen::escape_for_diagnostic(.path),
+        rto_graph::screen::escape_for_diagnostic(.detail)
     )]
     NoConcepts {
-        /// The bundle root, as given.
+        /// The bundle root, as given. Raw; `Display` escapes it.
         path: String,
         /// How many markdown files were considered.
         files: usize,
-        /// Up to three `path: reason` pairs.
+        /// Up to three `path: reason` pairs — the bundle's own filenames, so
+        /// the most peer-controlled string here. Raw; `Display` escapes it.
         detail: String,
     },
     /// Every concept that parsed was refused by the screen.
@@ -341,13 +371,14 @@ pub enum OkfError {
     /// language model is not a bundle with a problem in it. Importing nothing
     /// while exiting zero would report success for having refused everything.
     #[error(
-        "{path}: every concept was refused by the content screen ({blocked} blocked). A \
+        "{}: every concept was refused by the content screen ({blocked} blocked). A \
          concept is blocked when it carries text addressed to a language model that was \
          *hidden* — inside an HTML comment, behind `display:none`, or spelled with \
-         zero-width characters. Nothing was imported."
+         zero-width characters. Nothing was imported.",
+        rto_graph::screen::escape_for_diagnostic(.path)
     )]
     AllBlocked {
-        /// The bundle root, as given.
+        /// The bundle root, as given. Raw; `Display` escapes it.
         path: String,
         /// How many concepts were blocked.
         blocked: usize,
@@ -1393,6 +1424,109 @@ mod tests {
     use super::*;
     use crate::okf::{Concept as RenderConcept, Frontmatter, OKF_VERSION, assemble, origin_for};
     use rto_graph::{EdgeRef, Explanation, NodeSummary};
+
+    /// No `OkfError` variant can put a character the operator cannot see into
+    /// the sentence describing a stranger's bundle.
+    ///
+    /// # Why this exists, and why the match below is the completeness argument
+    ///
+    /// This type was **missed** by #865. That sweep walked forward from
+    /// `InspectError` and found every diagnostic that type reaches; `OkfError`
+    /// is the import path's own error, reaches the same terminal by a different
+    /// route — `okf_discovery::screen_bundle` stores its message, and the
+    /// consent prompt reads it — and nothing named it. Walking backwards from
+    /// the sinks instead is what found it.
+    ///
+    /// `OkfError` is `#[non_exhaustive]`, which binds other crates and not this
+    /// one, so the match here is exhaustive: a variant added later **fails this
+    /// test to compile** until somebody has decided what its `Display` does with
+    /// the text it carries. A test that listed the three variants that existed
+    /// when it was written would go green past the fourth.
+    ///
+    /// The invariant over all 1,114,112 code points is swept in
+    /// `rto_graph::screen`. This is the wiring: that *this* type's `Display`
+    /// asks for it.
+    #[test]
+    fn no_okf_error_variant_can_put_an_invisible_character_in_a_diagnostic() {
+        // A POSIX filename may hold anything but `/` and NUL, so every character
+        // here is legal in a directory somebody hands this crate.
+        let hostile = "bundle\u{202E}drowssap\u{200B}\u{2066}x\u{2069}\u{1B}[2J\nfine".to_owned();
+
+        let shown: Vec<String> = [
+            OkfError::Empty(hostile.clone()),
+            OkfError::NoConcepts {
+                path: hostile.clone(),
+                files: 3,
+                detail: hostile.clone(),
+            },
+            OkfError::AllBlocked {
+                path: hostile.clone(),
+                blocked: 2,
+            },
+        ]
+        .iter()
+        .map(|e| match e {
+            // Exhaustive on purpose — see this test's doc comment.
+            OkfError::Empty(_) | OkfError::NoConcepts { .. } | OkfError::AllBlocked { .. } => {
+                e.to_string()
+            }
+        })
+        .collect();
+
+        for line in &shown {
+            // Asserted with this workspace's own invisible-character detector
+            // rather than a list written here: a list of the characters to check
+            // for is the same mistake as a list of the characters to escape.
+            if let Some(name) = line.chars().find_map(rto_graph::screen::invisible_name) {
+                panic!("an OKF read failure carries {name} raw: {line:?}");
+            }
+            assert!(
+                !line.chars().any(char::is_control),
+                "a control character reached the operator raw: {line:?}"
+            );
+            assert_eq!(line.lines().count(), 1, "{line:?} is not one line");
+            // The premise, and the anti-vacuity guard: the hostile text must
+            // really have been interpolated, or every assertion above holds on a
+            // message that never saw it.
+            assert!(
+                line.contains("bundle") && line.contains("drowssap"),
+                "the hostile text should reach the diagnostic, escaped: {line:?}"
+            );
+            // Escaped, not stripped — the operator learns *which* character was
+            // in the name rather than that something was.
+            assert!(
+                line.contains("\\u{202e}"),
+                "the strange character should be named, not removed: {line:?}"
+            );
+        }
+    }
+
+    /// And an ordinary bundle path is not damaged on the way through, which is
+    /// the constraint that makes this an allowlist rather than a refusal.
+    ///
+    /// The Windows separator is the case that matters: `Path::display()` emits
+    /// `\` there, one pass doubles it, and a second pass would quadruple it. So
+    /// this asserts the exact spelling rather than "contains the path" — an
+    /// assertion that only looked for `okf` would pass on `C:\\\\okf`.
+    #[test]
+    fn a_legitimate_path_reaches_the_diagnostic_escaped_exactly_once() {
+        let line = OkfError::Empty(r"C:\okf\bundle".to_owned()).to_string();
+        assert!(
+            line.starts_with(r"no markdown files under C:\\okf\\bundle:"),
+            "a real Windows path was escaped more than once, or not at all: {line:?}"
+        );
+        // Non-ASCII, and NFD — macOS hands out decomposed paths, so `e` plus
+        // U+0301 is the ordinary case and not an exotic one.
+        let line = OkfError::AllBlocked {
+            path: "/Volumes/Cafe\u{301}/データ/概念".to_owned(),
+            blocked: 1,
+        }
+        .to_string();
+        assert!(
+            line.starts_with("/Volumes/Cafe\u{301}/データ/概念:"),
+            "a legitimate non-ASCII path was altered: {line:?}"
+        );
+    }
 
     fn opts(trust: Trust, extref_keys: &[String]) -> ReadOptions<'_> {
         ReadOptions {

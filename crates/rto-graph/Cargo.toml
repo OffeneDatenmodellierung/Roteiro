@@ -144,6 +144,22 @@ serde_json = { workspace = true }
 # the dev tree, MIT OR Apache-2.0, zero transitive dependencies of its own, and
 # it is already in this lockfile via `pdf-extract` -> `lopdf` -> `stringprep`.
 unicode-properties = "0.1.4"
+# The other half of that oracle, for the other half of the rule.
+#
+# `escape_for_diagnostic` states two clauses: a General_Category test, and a
+# `Default_Ignorable_Code_Point` test that removes the invisible characters
+# hiding **inside** the ink categories — U+3164 HANGUL FILLER is a letter,
+# U+FE0F a mark. `unicode-properties` exposes no default-ignorable property at
+# all, so an oracle built on it alone was silent over 267 code points: exactly
+# the clause the function most depends on and the one hardest to get right.
+#
+# `icu_properties` has it, from ICU4X's own generated tables — a third reading
+# of the UCD, independent of both std's printable table and
+# `unicode-properties`. A **dev**-dependency for the same reason as its sibling:
+# production asks std, which already carries the answer, and these crates are
+# published. It is already in this lockfile via `idna`, with the same
+# `compiled_data` default, so the dev tree gains no crate that was not there.
+icu_properties = "2.3"
 
 [features]
 # Offline similarity inference (the `inferred` provenance class). Adds no

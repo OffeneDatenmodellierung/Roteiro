@@ -4458,6 +4458,7 @@ name = "rto-graph"
 version = "5.15.1"
 dependencies = [
  "gix",
+ "icu_properties",
  "image",
  "ocrs",
  "pdf-extract",

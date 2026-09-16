@@ -106,7 +106,16 @@ pub struct Discovered {
     pub state: ConsentState,
     /// What reading the bundle found — including what the screen decided, which
     /// is the information the person answering most needs.
-    pub screened: Result<read::OkfReport, String>,
+    ///
+    /// The `Err` arm is a [`rto_graph::screen::Diagnostic`] and not a `String`,
+    /// which is the type saying something true: the message inside has
+    /// **already been escaped**, by whichever error built it — `OkfError`'s
+    /// `Display` or `read_bundle_files`'s, both of which escape the peer's path
+    /// where they interpolate it. Held as a `String` it was escaped a second
+    /// time in [`Discovered::summary`], which turns one real U+202E into a
+    /// doubled `\\u{202e}` and an ordinary Windows path into four separators.
+    /// Held as this type, that line does not compile.
+    pub screened: Result<read::OkfReport, rto_graph::screen::Diagnostic>,
 }
 
 impl Discovered {
@@ -155,14 +164,23 @@ impl Discovered {
     /// bundle?" is not a question anyone can answer well; "this bundle contains
     /// 3 concepts with hidden control characters" is.
     ///
-    /// # Two of its three sources are the bundle's, so they are escaped
+    /// # One of its three sources is escaped here, and one was already
     ///
-    /// The `Err` string is the OKF reader's, and that reader quotes the file it
-    /// choked on. The extension list is built from the bundle's own filenames.
-    /// Both go through [`rto_graph::screen::escape_for_diagnostic`]: this
-    /// sentence is the one a person reads while deciding whether to trust a
-    /// stranger, and a bundle able to reorder or hide part of it could make
-    /// "3 concepts blocked" read as something reassuring.
+    /// The extension list is built from the bundle's own filenames, and those
+    /// are **foreign scalars** arriving raw — so they go through
+    /// [`rto_graph::screen::escape_for_diagnostic`] at the point they are
+    /// interpolated. This sentence is the one a person reads while deciding
+    /// whether to trust a stranger, and a bundle able to reorder or hide part of
+    /// it could make "3 concepts blocked" read as something reassuring.
+    ///
+    /// The `Err` arm is **not** escaped here, and that is the correction. It is
+    /// a [`rto_graph::screen::Diagnostic`] — assembled text whose own leaves
+    /// were escaped where they were interpolated, by `OkfError`'s `Display` or
+    /// by `read_bundle_files`. Escaping it again does not add protection; it
+    /// doubles every backslash the first pass wrote, so a real U+202E reads as
+    /// `\\u{202e}` and a Windows path arrives with four separators. The rule,
+    /// and why it is stated at the leaf rather than at the sink, is on
+    /// [`rto_graph::screen::Diagnostic`].
     ///
     /// The screening classes in between are this workspace's own tokens — see
     /// [`rto_graph::screen_fingerprint`] — so there is nothing there for a
@@ -170,12 +188,7 @@ impl Discovered {
     #[must_use]
     pub fn summary(&self) -> String {
         let concepts = match &self.screened {
-            Err(e) => {
-                return format!(
-                    "unreadable: {}",
-                    rto_graph::screen::escape_for_diagnostic(e)
-                );
-            }
+            Err(e) => return format!("unreadable: {e}"),
             Ok(r) if r.concepts_quarantined > 0 || r.concepts_blocked > 0 => format!(
                 "{} concept(s), {} quarantined, {} blocked by the content screen [{}]",
                 r.concepts_read,
@@ -220,7 +233,7 @@ impl Discovered {
                 if f.extension.is_empty() {
                     "no extension".to_owned()
                 } else {
-                    rto_graph::screen::escape_for_diagnostic(&f.extension)
+                    rto_graph::screen::escape_for_diagnostic(&f.extension).to_string()
                 }
             })
             .collect();
@@ -304,8 +317,18 @@ pub fn discovered(store: &Store, bundles: &[OkfBundle]) -> anyhow::Result<Vec<Di
 /// this read exists only to produce the summary the question is asked with. The
 /// real import re-reads with the answer that was given and with the placeholder
 /// keys to fill, which this read deliberately does not have.
-fn screen_bundle(root: &Path) -> Result<read::OkfReport, String> {
-    let files = crate::read_bundle_files(root).map_err(|e| e.to_string())?;
+///
+/// # The error is a `Diagnostic`, and both arms have earned the name
+///
+/// Every message this can return was escaped by whoever built it —
+/// [`crate::read_bundle_files`] escapes each path it names, and
+/// [`read::OkfError`]'s `Display` escapes its `path` and `detail`. Adopting
+/// them with [`rto_graph::screen::Diagnostic::already_escaped`] is therefore a
+/// claim that is true, and it is written that way rather than left implicit so
+/// that `grep already_escaped` finds every place the claim is made.
+fn screen_bundle(root: &Path) -> Result<read::OkfReport, rto_graph::screen::Diagnostic> {
+    let files = crate::read_bundle_files(root)
+        .map_err(|e| rto_graph::screen::Diagnostic::already_escaped(e.to_string()))?;
     read::read_bundle(
         &root.display().to_string(),
         &files,
@@ -316,7 +339,7 @@ fn screen_bundle(root: &Path) -> Result<read::OkfReport, String> {
         },
     )
     .map(|i| i.report)
-    .map_err(|e| e.to_string())
+    .map_err(|e| rto_graph::screen::Diagnostic::already_escaped(e.to_string()))
 }
 
 /// Whether there is a human to ask.
@@ -553,7 +576,18 @@ mod tests {
             state: rto_graph::ConsentState::Moved {
                 was: format!("/old/{hostile}"),
             },
-            screened: Err(format!("could not parse {hostile}/index.md")),
+            // Built the way `screen_bundle` builds it — through `OkfError`'s
+            // `Display`, which escapes its own fields — rather than by wrapping
+            // a raw string in `already_escaped`. A fixture that made that claim
+            // falsely would test the fixture rather than the path.
+            screened: Err(rto_graph::screen::Diagnostic::already_escaped(
+                read::OkfError::NoConcepts {
+                    path: format!("/repo/{hostile}/okf"),
+                    files: 1,
+                    detail: format!("{hostile}/index.md: expected a mapping"),
+                }
+                .to_string(),
+            )),
         };
 
         for (what, text) in [
@@ -588,6 +622,16 @@ mod tests {
             assert!(
                 text.contains("\\u{202e}"),
                 "{what} should show the strange character rather than remove it: {text:?}"
+            );
+            // And escaped exactly **once**. A second pass over an already
+            // escaped message doubles the backslash the first pass wrote, so
+            // `\\\\u{202e}` is the signature of the layer that should not be
+            // there. Asserted as an absence because the presence assertion above
+            // is satisfied by *any* number of passes — which is how the doubled
+            // escape shipped.
+            assert!(
+                !text.contains("\\\\u{202e}"),
+                "{what} escaped an already-escaped message a second time: {text:?}"
             );
         }
     }
@@ -640,5 +684,67 @@ mod tests {
             summary.contains("\\u{202e}"),
             "the strange character in the extension should be shown: {summary:?}"
         );
+    }
+
+    /// An honest bundle reaches the question **unaltered**, which is the half of
+    /// this that an escaper is most likely to get wrong.
+    ///
+    /// Over-escaping is not a milder failure than under-escaping, it is the same
+    /// failure pointed the other way: `GivenName`'s separator rule refused seven
+    /// real author names, six of them along a demographic line, and it looked
+    /// safe while doing it. A consent prompt that garbles a peer's path is one
+    /// the reader cannot act on, about the peer whose path it garbled.
+    ///
+    /// Three cases, each chosen because something in this tree gets it wrong if
+    /// a layer is added:
+    ///
+    /// - a Windows path, whose `\` separators one pass doubles and two passes
+    ///   quadruple — the defect this test was written for;
+    /// - CJK, which an ASCII-shaped allowlist refuses outright;
+    /// - an NFD-decomposed accent, which is what macOS hands out for every
+    ///   accented path, so escaping combining marks would mangle the platform
+    ///   the developers here work on.
+    ///
+    /// # "Unchanged" means one pass, not zero, and only for `\`
+    ///
+    /// Two of the three are asserted **byte-identical**. The Windows path
+    /// cannot be, and that is a property of the encoding rather than a
+    /// concession: `\` has to double, or a bundle whose path spells the seven
+    /// characters `\u{202e}` would be indistinguishable from one carrying the
+    /// character — the guarantee
+    /// `screen::tests::the_escape_encoding_is_unambiguous_and_one_line` pins.
+    /// So the expectation here is the exact one-pass spelling, which is what
+    /// separates a correct render from the doubled one that shipped.
+    #[test]
+    fn an_honest_bundle_reaches_the_question_unaltered() {
+        for (real, expected) in [
+            (r"C:\okf\bundle", r"C:\\okf\\bundle"),
+            ("/Users/mark/データ/概念/okf", "/Users/mark/データ/概念/okf"),
+            ("/Volumes/Cafe\u{301}/okf", "/Volumes/Cafe\u{301}/okf"),
+        ] {
+            let d = Discovered {
+                bundle: rto_graph::OkfBundle {
+                    repo: std::path::PathBuf::from(real),
+                    bundle: std::path::PathBuf::from(real),
+                    peer: "Müller-Schröder".to_owned(),
+                },
+                state: rto_graph::ConsentState::Unasked,
+                screened: Ok(read::OkfReport::default()),
+            };
+            for (what, text) in [
+                ("the prompt", prompt_text(&d)),
+                ("the note", note_text(&d, Unasked::NoTerminal)),
+            ] {
+                assert!(
+                    text.contains(expected),
+                    "{what} altered a legitimate bundle path: {expected:?} is not \
+                     in {text:?} (the path given was {real:?})"
+                );
+                assert!(
+                    text.contains("Müller-Schröder"),
+                    "{what} altered a legitimate peer name: {text:?}"
+                );
+            }
+        }
     }
 }

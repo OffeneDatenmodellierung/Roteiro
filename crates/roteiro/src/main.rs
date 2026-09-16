@@ -6566,10 +6566,47 @@ fn print_okf_report(
     r: &rto_render::okf::read::OkfReport,
     applied: &rto_graph::ImportApplied,
 ) {
-    println!(
-        "imported okf from {root} as `{peer}` ({}): {} concept(s), {} edge(s) \
+    for line in okf_report_lines(root, peer, src_ref, mode, r, applied) {
+        println!("{line}");
+    }
+}
+
+/// That report as lines, so the escaping in it can be asserted.
+///
+/// # Every peer-chosen value here is escaped, and the rest are named
+///
+/// `apply_okf_decision` — automatic discovery's equivalent of this report — was
+/// escaped by #865. This one, the report of the **manual** `roteiro import
+/// --from okf`, was not looked at: the same peer name, the same bundle path and
+/// the same layer key, printed by the other of the two commands that import a
+/// stranger's concepts. Walking backwards from the sinks found it; a forward
+/// walk from `InspectError` cannot reach it, because no error is involved.
+///
+/// Four values here are **this workspace's own words** and are deliberately
+/// left alone: `mode`, every count, `skipped.reason` — `SkipReason::as_str`
+/// returns a `&'static str` — and the screen's `field`/`verdict`/`detail`,
+/// which [`okf_screen_lines`] documents.
+///
+/// `src_ref` is the one that reads as ours and is not: `read::import_ref`
+/// builds it as `import:okf/<peer>`.
+///
+/// Returning lines rather than printing them follows [`okf_screen_lines`], and
+/// for the reason that function's own comment gives one paragraph down: a
+/// diagnostic nothing can run is a diagnostic nothing checks.
+fn okf_report_lines(
+    root: &str,
+    peer: &str,
+    src_ref: &str,
+    mode: rto_render::okf::read::Trust,
+    r: &rto_render::okf::read::OkfReport,
+    applied: &rto_graph::ImportApplied,
+) -> Vec<String> {
+    let mut out = vec![format!(
+        "imported okf from {} as `{}` ({}): {} concept(s), {} edge(s) \
          ({} unresolved, {} reciprocal, {} pruned stale), {} placeholder(s) filled, \
-         {} node(s) removed as withdrawn — persisted under {src_ref} (durable)",
+         {} node(s) removed as withdrawn — persisted under {} (durable)",
+        rto_graph::screen::escape_for_diagnostic(root),
+        rto_graph::screen::escape_for_diagnostic(peer),
         mode.as_str(),
         r.concepts_read,
         applied.edges_applied,
@@ -6578,34 +6615,40 @@ fn print_okf_report(
         applied.edges_pruned,
         r.extrefs_filled.len(),
         applied.nodes_removed,
-    );
+        rto_graph::screen::escape_for_diagnostic(src_ref),
+    )];
     // Loud about what it declined. A partly readable bundle that said nothing
     // would leave the graph missing concepts nobody knows to look for.
     for skipped in &r.skipped {
-        println!("  skipped {}: {}", skipped.path, skipped.reason);
+        out.push(format!(
+            "  skipped {}: {}",
+            rto_graph::screen::escape_for_diagnostic(&skipped.path),
+            skipped.reason
+        ));
     }
     for stub in &r.extrefs_ambiguous {
-        println!(
-            "  left {stub} unfilled: more than one concept could be it, and a wrong \
-             fill is worse than a stub"
-        );
+        out.push(format!(
+            "  left {} unfilled: more than one concept could be it, and a wrong \
+             fill is worse than a stub",
+            rto_graph::screen::escape_for_diagnostic(stub)
+        ));
     }
     if r.links_outside_relationships > 0 {
-        println!(
+        out.push(format!(
             "  {} markdown link(s) outside a `## Relationships` heading were read as \
              citations, not imported as edges",
             r.links_outside_relationships
-        );
+        ));
     }
-    for line in okf_screen_lines(r) {
-        println!("{line}");
-    }
+    out.extend(okf_screen_lines(r));
     if mode == rto_render::okf::read::Trust::Acknowledge {
-        println!(
+        out.push(
             "  every concept is `external-inferred`: their information without their \
              confirmation. Re-run with --trust to adopt the tiers they claimed."
+                .to_owned(),
         );
     }
+    out
 }
 
 /// What the content screen decided, as report lines (#706 phase 2).
@@ -7508,13 +7551,19 @@ fn read_bundle_files(root: &std::path::Path) -> anyhow::Result<Vec<(String, Stri
 /// terminal. So it is escaped, and the rule is stated rather than listed: see
 /// [`rto_graph::screen::escape_for_diagnostic`] for why a denylist of the
 /// invisible cannot be finished.
-fn shown(p: &std::path::Path) -> String {
+///
+/// Returns a [`rto_graph::screen::Diagnostic`], so the escaped value cannot be
+/// handed back to the escaper: the path this produces travels into an
+/// `anyhow::Error` that `okf_discovery::screen_bundle` stores and the consent
+/// prompt reads, and escaping it a second time there is the defect Copilot
+/// found against #865.
+fn shown(p: &std::path::Path) -> rto_graph::screen::Diagnostic {
     rto_graph::screen::escape_for_diagnostic(&p.display().to_string())
 }
 
 #[cfg(test)]
 mod okf_diagnostic_tests {
-    use super::{okf_screen_lines, read_bundle_files, shown};
+    use super::{okf_report_lines, okf_screen_lines, read_bundle_files, shown};
 
     /// The peer's own names cannot reorder or hide part of the import's output.
     ///
@@ -7631,6 +7680,227 @@ mod okf_diagnostic_tests {
         );
     }
 
+    /// The import's closing line never interpolates the layer key bare.
+    ///
+    /// # The third name in this scan, and the one that shows why it is a scan
+    ///
+    /// `src_ref` looks like this workspace's own token — it is the key
+    /// `apply_import_layer` writes — and it reads like one at the call site:
+    /// `(under {src_ref})`. It is not. `read::import_ref` builds it as
+    /// `import:okf/{peer}`, so the peer's name is inside it, and #865 escaped
+    /// that same name in the *first* field of the *same* `eprintln!` while
+    /// leaving it raw in the suffix. A reviewer reading the diff found it;
+    /// nothing in the tree could have.
+    ///
+    /// Stated over the whole file rather than one function: `src_ref` is a
+    /// binding name, so a second command that built one and printed it would
+    /// have the same defect, and this catches that one too.
+    ///
+    /// The **raw** value is still used, deliberately, and this test must not
+    /// forbid that: `apply_import_layer(&src_ref, …)` writes a store key, and
+    /// escaping a key would change what is recorded rather than what is read.
+    /// So the assertion is about **format strings**, which is exactly the
+    /// difference between the two uses.
+    #[test]
+    fn the_import_line_never_interpolates_the_layer_key_bare() {
+        let src = include_str!("main.rs");
+        // `"{src_ref}"` as a *captured* placeholder — the spelling the defect
+        // had, and the one `rustfmt` produces. Written split so this test's own
+        // source does not match itself.
+        let needle = ["{src", "_ref}"].concat();
+        let offenders: Vec<&str> = src
+            .lines()
+            .filter(|l| l.contains(&needle) && !l.trim_start().starts_with("//"))
+            .collect();
+        assert_eq!(
+            offenders,
+            Vec::<&str>::new(),
+            "`src_ref` is `import:okf/<peer>`, so a peer chooses part of it — \
+             interpolate `rto_graph::screen::escape_for_diagnostic(&src_ref)` \
+             instead, and leave the raw value for the store key"
+        );
+        // The premise: this file really does still build and print one.
+        assert!(
+            src.contains("let src_ref = rto_render::okf::read::import_ref("),
+            "apply_okf_decision should still build a layer key from the peer"
+        );
+    }
+
+    /// A bundle directory's own name cannot rewrite the server's startup line.
+    ///
+    /// The line names the address the operator is about to open, and the bundle
+    /// list sits next to it. Driven through [`okf_mount_names`] rather than
+    /// through `serve_okf_only`, which binds a socket.
+    #[cfg(all(feature = "explorer", feature = "okf-viewer"))]
+    #[test]
+    fn a_bundle_directorys_name_cannot_rewrite_the_startup_line() {
+        let hostile = "okf-\u{202E}dnab\u{200B}\u{2066}x\u{2069}";
+        let names = super::okf_mount_names(&[crate::okf_viewer::Mount {
+            slug: "b".to_owned(),
+            label: hostile.to_owned(),
+            origin: "/repo/okf".to_owned(),
+            root: std::path::PathBuf::from("/repo/okf"),
+        }]);
+        let line = names.join(", ");
+        if let Some(name) = line.chars().find_map(rto_graph::screen::invisible_name) {
+            panic!("a bundle directory put {name} in the startup line: {line:?}");
+        }
+        // The premise, and the anti-vacuity guard.
+        assert!(
+            line.contains("okf-") && line.contains("dnab"),
+            "the label should still be named, escaped: {line:?}"
+        );
+        assert!(
+            line.contains("\\u{202e}"),
+            "the strange character should be shown, not removed: {line:?}"
+        );
+        // An honest label is untouched, including the NFD macOS hands out.
+        assert_eq!(
+            super::okf_mount_names(&[crate::okf_viewer::Mount {
+                slug: "b".to_owned(),
+                label: "データ/Cafe\u{301}".to_owned(),
+                origin: "/repo/okf".to_owned(),
+                root: std::path::PathBuf::from("/repo/okf"),
+            }]),
+            vec!["データ/Cafe\u{301}".to_owned()],
+            "a legitimate directory name was altered"
+        );
+    }
+
+    /// `--scope bundle`'s refusal cannot be rewritten by the path it names.
+    ///
+    /// This one propagates out of `main` as an `anyhow::Error`, so what prints
+    /// it is Rust's own `Termination` impl — there is no sink of ours after it,
+    /// which is why the escape is at the leaf and why this test asserts on the
+    /// error's `Display` rather than on a captured line.
+    #[cfg(all(feature = "explorer", feature = "okf-viewer"))]
+    #[test]
+    fn the_scope_bundle_refusal_cannot_be_rewritten_by_the_path_it_names() {
+        let hostile = "okf-\u{202E}dnab\u{200B}\u{2066}x\u{2069}";
+        let missing = std::env::temp_dir().join(format!("roteiro-scope-absent-{hostile}"));
+        let err = super::bundle_mount_at(&missing).expect_err("there is no bundle there");
+        let text = format!("{err}");
+        if let Some(name) = text.chars().find_map(rto_graph::screen::invisible_name) {
+            panic!("the refusal carries {name} raw: {text:?}");
+        }
+        assert!(
+            text.contains("roteiro-scope-absent-okf-"),
+            "the refusal should still name the path: {text:?}"
+        );
+        assert!(
+            text.contains("\\u{202e}"),
+            "the strange character should be shown, not removed: {text:?}"
+        );
+    }
+
+    /// The **manual** import's report cannot be rewritten by the bundle it
+    /// reports on.
+    ///
+    /// `roteiro import --from okf` is the other of the two commands that bring a
+    /// stranger's concepts into this graph, and its report was missed by #865
+    /// entirely — the sweep there followed `InspectError`, and no error passes
+    /// through here. One fixture carries all four peer-chosen values (the
+    /// bundle path, the peer name, the layer key built from that name, and a
+    /// skipped file's bundle-relative path) so a leaf that stopped escaping
+    /// cannot hide behind a sibling that still does.
+    #[test]
+    fn the_manual_imports_report_cannot_be_rewritten_by_the_bundle() {
+        use rto_render::okf::read;
+
+        let hostile = "okf-\u{202E}dnab\u{200B}\u{2066}x\u{2069}";
+        let report = read::OkfReport {
+            concepts_read: 2,
+            skipped: vec![read::SkippedRow {
+                path: format!("/c/{hostile}.md"),
+                reason: "no YAML frontmatter block".to_owned(),
+            }],
+            extrefs_ambiguous: vec![format!("extref:{hostile}/thing")],
+            ..Default::default()
+        };
+        let lines = okf_report_lines(
+            &format!("/repo/{hostile}/okf"),
+            hostile,
+            &read::import_ref(hostile),
+            read::Trust::Acknowledge,
+            &report,
+            &rto_graph::ImportApplied::default(),
+        )
+        .join("\n");
+
+        if let Some(name) = lines.chars().find_map(rto_graph::screen::invisible_name) {
+            panic!("the import report carries {name} raw: {lines:?}");
+        }
+        // The premise, and the anti-vacuity guard: all four values must really
+        // have reached the report, or the assertion above holds on a report that
+        // carried none of them.
+        for expected in [
+            "imported okf from /repo/okf-",    // the bundle path
+            "as `okf-",                        // the peer name
+            "persisted under import:okf/okf-", // the layer key built from it
+            "skipped /c/okf-",                 // a bundle-relative path
+            "left extref:okf-",                // an ambiguous stub
+        ] {
+            assert!(
+                lines.contains(expected),
+                "{expected:?} is missing, so this test is not checking it: {lines:?}"
+            );
+        }
+        assert!(
+            lines.contains("\\u{202e}"),
+            "escaped, not stripped — the operator must learn which character was \
+             in the name: {lines:?}"
+        );
+        // Escaped once. The header names the bundle path, and a second pass
+        // would double the backslash the first wrote.
+        assert!(
+            !lines.contains("\\\\u{202e}"),
+            "a value was escaped twice: {lines:?}"
+        );
+    }
+
+    /// And the same report leaves an honest bundle alone.
+    #[test]
+    fn the_manual_imports_report_leaves_an_honest_bundle_alone() {
+        use rto_render::okf::read;
+
+        let report = read::OkfReport {
+            concepts_read: 1,
+            skipped: vec![read::SkippedRow {
+                path: "/データ/Cafe\u{301}.md".to_owned(),
+                reason: "no YAML frontmatter block".to_owned(),
+            }],
+            ..Default::default()
+        };
+        let lines = okf_report_lines(
+            r"C:\okf\bundle",
+            "Müller-Schröder",
+            &read::import_ref("Müller-Schröder"),
+            read::Trust::Trust,
+            &report,
+            &rto_graph::ImportApplied::default(),
+        )
+        .join("\n");
+
+        // CJK and NFD byte-identical; the Windows separators doubled exactly
+        // once, which is the most an unambiguous encoding can leave alone.
+        assert!(
+            lines.contains("/データ/Cafe\u{301}.md"),
+            "a legitimate non-ASCII path was altered: {lines:?}"
+        );
+        assert!(
+            lines.contains("Müller-Schröder"),
+            "a legitimate peer name was altered: {lines:?}"
+        );
+        assert!(
+            lines.contains(r"C:\\okf\\bundle") && !lines.contains(r"C:\\\\okf\\\\bundle"),
+            "the separators should be doubled exactly once: {lines:?}"
+        );
+        assert!(
+            !lines.contains("\\u{"),
+            "an honest bundle should produce no code-point escape at all: {lines:?}"
+        );
+    }
+
     /// And a real bundle path survives unchanged, which is the constraint that
     /// makes this an allowlist rather than a refusal.
     #[test]
@@ -7641,7 +7911,7 @@ mod okf_diagnostic_tests {
             "/Volumes/Cafe\u{301}/okf",
         ] {
             assert_eq!(
-                shown(std::path::Path::new(real)),
+                shown(std::path::Path::new(real)).as_str(),
                 real,
                 "a legitimate bundle path was altered"
             );
@@ -10512,15 +10782,23 @@ fn apply_okf_decision(
 
     // stderr, not stdout: this is a diagnostic about a peer, and under `--json`
     // stdout carries a document a program parses.
+    // `src_ref` is escaped too, and it is the one this line got wrong. It looks
+    // like this workspace's own token, but `import_ref` builds it as
+    // `import:okf/{peer}` — so the peer's name reaches the terminal through the
+    // suffix even though the same name is escaped in the first field of the same
+    // `eprintln!`. Escaped here only: the raw `src_ref` above is the layer key
+    // `apply_import_layer` writes, and escaping a store key would change what is
+    // recorded rather than what is read.
     eprintln!(
         "  okf: {} {} — {} concept(s), {} edge(s), {} placeholder(s) filled, \
-         {} removed as withdrawn (under {src_ref})",
+         {} removed as withdrawn (under {})",
         rto_graph::screen::escape_for_diagnostic(&d.bundle.peer),
         decision.as_str(),
         report.concepts_read,
         applied.edges_applied,
         report.extrefs_filled.len(),
         applied.nodes_removed,
+        rto_graph::screen::escape_for_diagnostic(&src_ref),
     );
     for line in okf_screen_lines(&report) {
         eprintln!("{line}");
@@ -14045,6 +14323,31 @@ fn run_explorer(
 /// #810). It is only the startup line's wording: a person reading "no repository
 /// here" on a server they explicitly pointed at a path would reasonably think
 /// something had gone wrong.
+/// The mounted bundles' names, as the startup line may print them.
+///
+/// # A `Mount::label` is a directory name, so it is somebody else's
+///
+/// On the `--scope bundle` path it is `root.file_name()` for whatever path was
+/// named; on the workspace path it is a project directory's own name. A bundle
+/// somebody sent you is somebody else's directory, and this list is the **first
+/// line the server prints** — beside the address the operator is about to open.
+/// A U+202E in a directory name would reverse the rest of it.
+///
+/// Found by walking backwards from the sinks rather than forwards from the error
+/// type, which is the method issue #866 records: #865's forward walk from
+/// `InspectError` did not reach this line, because no error is involved in it.
+///
+/// A named function rather than an inline `map` so that it can be tested: the
+/// sink it feeds starts a server, and a guard nothing can run is a guard
+/// nothing checks.
+#[cfg(all(feature = "explorer", feature = "okf-viewer"))]
+fn okf_mount_names(mounts: &[okf_viewer::Mount]) -> Vec<String> {
+    mounts
+        .iter()
+        .map(|m| rto_graph::screen::escape_for_diagnostic(&m.label).to_string())
+        .collect()
+}
+
 #[cfg(all(feature = "explorer", feature = "okf-viewer"))]
 fn serve_okf_only(
     cfg: &config::Config,
@@ -14064,7 +14367,7 @@ fn serve_okf_only(
     // otherwise terminate it.
     register_no_reload("this server hosts one OKF bundle; there is no configured set to re-scan");
 
-    let names: Vec<String> = mounts.iter().map(|m| m.label.clone()).collect();
+    let names = okf_mount_names(&mounts);
     let router = axum::Router::new()
         .route(
             "/",
@@ -15300,13 +15603,20 @@ fn bundle_mount_at(path: &std::path::Path) -> anyhow::Result<Vec<okf_viewer::Mou
             root,
         }]);
     }
+    // All three escaped. The argument is `--today`'s from #865, one step
+    // further: a path reaching `--scope bundle` from a script, a service file or
+    // a pasted command is no more the operator's own typing than a peer's is,
+    // and this refusal is read in the same terminal. `main` returns
+    // `anyhow::Result<()>`, so what prints this is Rust's `Termination` impl —
+    // there is no sink of ours downstream to do it instead, which is why the
+    // escape belongs here at the leaf.
     anyhow::bail!(
         "`--scope bundle {}`: no OKF bundle there. A bundle is a directory holding an \
          `index.md` FILE, and neither `{}` nor `{}` does — render one with \
          `roteiro render okf`, or name the directory that holds the `index.md`",
-        path.display(),
-        path.join("index.md").display(),
-        nested.join("index.md").display()
+        shown(path),
+        shown(&path.join("index.md")),
+        shown(&nested.join("index.md"))
     )
 }
 
