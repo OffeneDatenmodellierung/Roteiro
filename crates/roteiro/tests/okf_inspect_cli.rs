@@ -999,7 +999,10 @@ const FIELDS_TRUST: &[(&str, &str)] = &[
 ];
 const FIELDS_COMPUTATIONS: &[(&str, &str)] = &[
     ("root", ""),
-    ("runtimes/0", ""),
+    // Deterministic: `ComputationReport` collects runtimes into a `BTreeSet`, so
+    // `bq-…` sorts ahead of `bq2-…` and `bq3-…` and the exact value can be
+    // pinned. `""` here would have passed on a truncated runtime.
+    ("runtimes/0", RUNTIME),
     ("concept", COMP),
     ("path", COMP_MD),
     ("runtime", RUNTIME),
