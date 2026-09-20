@@ -342,7 +342,7 @@ pub fn invisible_name(c: char) -> Option<&'static str> {
 ///
 /// [`escape_for_diagnostic`] is deliberately **not idempotent**, and it cannot
 /// be: its encoding has to be unambiguous, so a `\` in the input becomes `\\` in
-/// the output, or a bundle whose path spells the seven characters `\u{202e}`
+/// the output, or a bundle whose path spells the eight characters `\u{202e}`
 /// would be indistinguishable from one carrying the character. Correctness
 /// therefore depends on *how many times* the escaper has run over a value —
 /// once is right, twice is wrong, and both look identical at the call site.
@@ -426,8 +426,23 @@ impl Diagnostic {
 }
 
 impl std::fmt::Display for Diagnostic {
+    /// # Why `pad` and not `write_str`
+    ///
+    /// A report is a **column**, and a column is a second way to lie about a
+    /// value. `write_str` ignores `width` outright, so `{:<18}` over a
+    /// `Diagnostic` pads nothing at all and every row after it slides — the
+    /// escaped value is printed but the width the caller asked for is silently
+    /// dropped. `pad` is what makes the width and the printed string the *same
+    /// string*: it measures what it writes, which is the escaped form, so a
+    /// value that grew by being escaped takes the column it actually occupies
+    /// rather than the one its raw bytes would have.
+    ///
+    /// `pad` also honours `precision`, which truncates. That cannot reintroduce
+    /// anything: every escape this type carries is ASCII, so a cut in the middle
+    /// of a `\u{202e}` leaves a shorter run of visible ASCII and never an
+    /// invisible character.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.pad(&self.0)
     }
 }
 
@@ -504,7 +519,7 @@ impl std::fmt::Display for Diagnostic {
 /// can act on it, where a silently-cleaned name reads as an ordinary one and
 /// sends them looking in the wrong place. `\` is escaped to `\\` so the encoding
 /// is unambiguous — `\u{202e}` in the output always means an escaped U+202E and
-/// never a bundle whose path spells those seven characters. `\n`, `\r` and `\t`
+/// never a bundle whose path spells those eight characters. `\n`, `\r` and `\t`
 /// get their short names; everything else is `\u{...}` naming the code point,
 /// and every escape is ASCII, so the output can introduce nothing it was written
 /// to remove.
@@ -1797,7 +1812,7 @@ mod tests {
         //
         // One exception, and it is the encoding's own: `\` must double, or a
         // path spelling `\u{202e}` and the character it names would be the same
-        // seven output characters.
+        // eight output characters.
         let mut survived = 0_u32;
         for c in all_code_points() {
             if !oracle_says_ink(c) {
@@ -1880,7 +1895,7 @@ mod tests {
 
     #[test]
     fn the_escape_encoding_is_unambiguous_and_one_line() {
-        // A path that spells the seven characters of an escape must not read as
+        // A path that spells the eight characters of an escape must not read as
         // one, or the encoding tells the operator something false — which is
         // the failure mode, in miniature, of escaping at all.
         assert_eq!(
@@ -1902,5 +1917,34 @@ mod tests {
                 "{escaped:?} is not one line"
             );
         }
+    }
+
+    /// A column's width is measured over what is printed, not over what came in.
+    ///
+    /// Alignment is a second surface, not decoration: a report that computes a
+    /// width from the raw bytes and prints the escaped ones — or, as this type
+    /// did, drops the width entirely — pushes every later column somewhere the
+    /// reader did not choose, and a bundle picks how far.
+    ///
+    /// The witness is the pair that makes the two rules visibly different: a
+    /// three-character raw value that escaping turns into ten. Padded on what is
+    /// printed, both rows are twelve columns wide and line up; padded on what
+    /// arrived, the escaped row would run seven columns long.
+    #[test]
+    fn a_column_is_measured_over_the_escaped_form() {
+        let honest = escape_for_diagnostic("abc");
+        let hostile = escape_for_diagnostic("a\u{202E}c");
+        assert_eq!(hostile.as_str(), "a\\u{202e}c", "the premise of the widths");
+
+        let honest_row = format!("[{honest:<12}]");
+        let hostile_row = format!("[{hostile:<12}]");
+        assert_eq!(honest_row, "[abc         ]");
+        assert_eq!(hostile_row, "[a\\u{202e}c  ]");
+        assert_eq!(
+            honest_row.chars().count(),
+            hostile_row.chars().count(),
+            "the two rows must occupy the same columns, or the table is a lie: \
+             {honest_row:?} against {hostile_row:?}"
+        );
     }
 }
