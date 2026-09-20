@@ -100,6 +100,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   being skipped, and now names `include_worktrees` as the way back. A false
   statement in `--help` is the one place a user looks to find out why a project
   vanished.
+- *(serve)* a worktree hosted by `[standalone] repos` is attributed to the
+  `[standalone]` table rather than to `[workspace]`. A standalone group is an
+  unlinked singleton named after the repo's directory, so it is in neither the
+  declared `[[workspaces]]` array nor the legacy table, and classifying on the
+  array alone sent it to the legacy arm.
+- *(serve)* the worktree diagnostics name a config table that **exists and works**,
+  and treat two spellings of one path as one repository. Naming the *group* meant
+  the legacy `[workspace]` table was advertised under its resolved group name,
+  `default` — a string that appears in no config file — so an operator following
+  the advice wrote a `[default]` table and got a parse error or a silently ignored
+  key. The remedy is now derived from which table declared the scan, classified
+  exactly as `roteiro config` classifies it, and every spelling a diagnostic can
+  emit is round-tripped through the real parser in test. Separately, the cross-scan
+  view compared a scan's path against whatever the config file wrote, so a `repos`
+  entry spelling the same location differently (a `..` component, say) did not
+  match and the worktree was reported lost again; it now uses the same canonical
+  identity `resolved_repo_paths` already uses.
+- *(serve)* the worktree diagnostics know about **both** escape hatches and name
+  the table that actually governs the scan they describe. The cross-scan view was
+  built from root-scan results alone, so it could not see a worktree hosted by an
+  explicit `repos = [...]` entry — an explicit path is never *discovered* — and
+  reported it as NOT hosted while recommending `include_worktrees`, the other
+  hatch, for something the first had already solved. Separately, the "no
+  workspaces to serve" hint said to set `include_worktrees` "on that workspace"
+  even when describing a `[standalone] roots` scan, which is governed by
+  `[standalone] include_worktrees` and by nothing else — following that
+  instruction changed nothing and the projects stayed missing.
 - *(serve)* the scanned-roots note **names the workspace whose scan it describes**,
   and no longer calls a worktree "NOT hosted" when another workspace hosts it. Two
   groups may name one root and disagree about `include_worktrees`; the startup line
