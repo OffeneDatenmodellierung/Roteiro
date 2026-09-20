@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.0.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v6.0.0...rto-graph-v6.0.1) - 2026-09-20
+
+### Fixed
+
+- *(okf)* escape every bundle-derived field in the okf report family
+- *(okf)* escape peer-derived diagnostics exactly once, at the leaf
+
+### Other
+
+- *(okf)* correct three overstatements the review found
+- Merge pull request #870 from OffeneDatenmodellierung/release-plz-2026-09-16T06-19-38Z
+- Merge pull request #869 from OffeneDatenmodellierung/polly/yaml-rust2-no-encoding
+- Merge pull request #868 from OffeneDatenmodellierung/polly/escape-once
+
 ## [6.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v5.15.1...rto-graph-v6.0.0) - 2026-09-16
 
 ### Added

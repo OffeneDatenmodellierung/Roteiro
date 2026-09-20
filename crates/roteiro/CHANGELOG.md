@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.0.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.15.1...roteiro-v6.0.1) - 2026-09-20
+
+### Fixed
+
+- *(okf)* derive the scanned command set instead of listing it
+- *(okf)* escape every bundle-derived field in the okf report family
+- *(okf)* escape peer-derived diagnostics exactly once, at the leaf
+
+### Other
+
+- Merge pull request #875 from OffeneDatenmodellierung/polly/worktree-diagnostics
+- *(okf)* pin runtimes[0], which was deterministic all along
+- *(okf)* the last two uncovered leaves, so the matrix is actually complete
+- *(okf)* close the JSON matrix instead of extending it a row at a time
+- *(okf)* reach the leaves the JSON fixture could not, and fix a line-break claim
+- *(okf)* compare JSON leaves with the bundle's value, not just for a character
+- *(okf)* cover three escape sites the hostile fixtures could not reach
+- *(okf)* assert JSON fidelity per field, and name the space the allowlist keeps
+- *(okf)* pin the JSON surface as byte-faithful, end to end
+- *(okf)* name the issue the message bound is filed as
+- *(okf)* derive the fixture's coverage from the escaper, and redo the measurement
+- *(okf)* measure what the lines vector costs instead of asserting it
+- *(okf)* correct three overstatements the review found
+- Merge pull request #870 from OffeneDatenmodellierung/release-plz-2026-09-16T06-19-38Z
+- Merge pull request #869 from OffeneDatenmodellierung/polly/yaml-rust2-no-encoding
+- Merge pull request #868 from OffeneDatenmodellierung/polly/escape-once
+
 ## [6.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v5.15.1...roteiro-v6.0.0) - 2026-09-16
 
 ### Added
