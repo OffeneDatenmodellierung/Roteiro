@@ -2234,10 +2234,31 @@ fn chooser_rows(addr: &str) -> Vec<(String, PathBuf)> {
     for row in body.split("<li>").skip(1) {
         let label = between(row, "\">", "</a>");
         let origin = between(row, "<span class=\"deg\">", "</span>");
-        rows.push((unescape(&label), canon(Path::new(&unescape(&origin)))));
+        rows.push((
+            unescape(&unisolate(&label)),
+            canon(Path::new(&unescape(&unisolate(&origin)))),
+        ));
     }
     assert!(!rows.is_empty(), "no chooser rows parsed out of: {body}");
     rows
+}
+
+/// The value inside the viewer's isolation, which is markup and not content.
+///
+/// Every bundle- or mount-controlled string the chooser writes is wrapped in a
+/// `<bdi>`, so that a label carrying a directional override cannot reorder the
+/// row it sits in (#874). That belongs to the page rather than to the label, so
+/// it is peeled off here instead of being written into every expectation — and
+/// it **panics** when it is missing, so this stays a second, end-to-end witness
+/// that the isolation is there at all rather than a way of not noticing.
+#[cfg(feature = "okf-viewer")]
+fn unisolate(raw: &str) -> String {
+    raw.strip_prefix("<bdi>")
+        .and_then(|r| r.strip_suffix("</bdi>"))
+        .unwrap_or_else(|| {
+            panic!("the chooser wrote `{raw}` with nothing isolating it from the row around it")
+        })
+        .to_owned()
 }
 
 /// Resolve a path the way a comparison here has to: macOS puts the scratch

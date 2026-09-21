@@ -2220,7 +2220,10 @@ mod tests {
         // are interchangeable at the type level. They were in fact swapped once
         // (#785 review): the page named the mount path as the missing concept and
         // linked to the concept id, and "no concept" alone could not see it.
-        assert!(body.contains("<code><bdi>metrics/nope</bdi></code>"), "{body}");
+        assert!(
+            body.contains("<code><bdi>metrics/nope</bdi></code>"),
+            "{body}"
+        );
         assert!(body.contains("<a href=\"/\">Back to the bundle"), "{body}");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -3003,7 +3006,9 @@ mod tests {
         let (_, body, _) = get_mounted(&app, "/okf/folded-slug").await;
         let head = header_of(&body);
         assert!(
-            head.contains("<span class=\"p-crumb-current\"><bdi>Ops/&lt;b&gt;alpha&lt;/b&gt;</bdi></span>"),
+            head.contains(
+                "<span class=\"p-crumb-current\"><bdi>Ops/&lt;b&gt;alpha&lt;/b&gt;</bdi></span>"
+            ),
             "{head}"
         );
         assert!(!head.contains("<b>alpha</b>"), "{head}");
@@ -3940,7 +3945,10 @@ mod tests {
         let app = host().merge(mounts_router("/okf", mounts, None));
         let (status, body, _) = get_mounted(&app, "/okf/one/c/metrics/nope").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
-        assert!(body.contains("<code><bdi>metrics/nope</bdi></code>"), "{body}");
+        assert!(
+            body.contains("<code><bdi>metrics/nope</bdi></code>"),
+            "{body}"
+        );
         let links = hrefs(&body);
         assert!(
             links.iter().any(|h| h == "/okf/one"),
@@ -4034,7 +4042,6 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&root);
     }
-
 
     // ---- direction -------------------------------------------------------
     //
@@ -4169,8 +4176,14 @@ mod tests {
                     .strip_suffix(" — OKF viewer")
                     .expect("the title's constant tail");
                 let (floor, open) = isolate_depth(value);
-                assert!(floor >= 1, "part of the title is outside every isolate: {value:?}");
-                assert_eq!(open, 0, "the title leaves an isolate open over its tail: {value:?}");
+                assert!(
+                    floor >= 1,
+                    "part of the title is outside every isolate: {value:?}"
+                );
+                assert_eq!(
+                    open, 0,
+                    "the title leaves an isolate open over its tail: {value:?}"
+                );
             }
         }
         let _ = std::fs::remove_dir_all(&root);
@@ -4194,7 +4207,10 @@ mod tests {
         ));
         for uri in ["/okf", "/okf/a"] {
             let (_, body, _) = get_mounted(&app, uri).await;
-            assert!(body.contains(PROBE), "{uri}: the label never reached the page");
+            assert!(
+                body.contains(PROBE),
+                "{uri}: the label never reached the page"
+            );
             let (_, rest) = split_title(&body);
             let (_, rest) = split_doc(&rest);
             assert!(
@@ -4225,7 +4241,9 @@ mod tests {
         // is the honest-content half of #874 in one string.
         const PERSIAN: &str = "می\u{200C}رود";
 
-        let arabic = format!("---\ntype: Metric\ntitle: \"{ARABIC}\"\n---\n\n# {ARABIC}\n\nالإيرادات هي المقياس المركزي.\n");
+        let arabic = format!(
+            "---\ntype: Metric\ntitle: \"{ARABIC}\"\n---\n\n# {ARABIC}\n\nالإيرادات هي المقياس المركزي.\n"
+        );
         let others = format!("---\ntype: Metric\ntitle: \"{HEBREW}\"\n---\n\n# {HEBREW}\n");
         let latin = format!("---\ntype: Metric\ntitle: \"{NFD}\"\n---\n\n# {NFD}\n");
         let cjk = format!("---\ntype: Metric\ntitle: \"{CJK}\"\n---\n\n# {CJK}\n");
@@ -4250,7 +4268,9 @@ mod tests {
             "the Arabic title is not carried through unchanged and isolated:\n{page}"
         );
         assert!(
-            page.contains(&format!("<title>\u{2068}{ARABIC}\u{2069} — OKF viewer</title>")),
+            page.contains(&format!(
+                "<title>\u{2068}{ARABIC}\u{2069} — OKF viewer</title>"
+            )),
             "the tab title neither carries the value unchanged nor isolates it:\n{page}"
         );
         assert!(
@@ -4292,11 +4312,26 @@ mod tests {
         ] {
             let out = isolate(hostile);
             let (floor, open) = isolate_depth(&out);
-            assert!(floor >= 1, "{hostile:?} leaves text outside every isolate: {out:?}");
-            assert_eq!(open, 0, "{hostile:?} leaves an isolate open past its own end: {out:?}");
-            let kept: String = out.chars().filter(|c| !matches!(c, '\u{2066}'..='\u{2069}')).collect();
-            let given: String = hostile.chars().filter(|c| !matches!(c, '\u{2066}'..='\u{2069}')).collect();
-            assert_eq!(kept, given, "{hostile:?} lost or gained ordinary text: {out:?}");
+            assert!(
+                floor >= 1,
+                "{hostile:?} leaves text outside every isolate: {out:?}"
+            );
+            assert_eq!(
+                open, 0,
+                "{hostile:?} leaves an isolate open past its own end: {out:?}"
+            );
+            let kept: String = out
+                .chars()
+                .filter(|c| !matches!(c, '\u{2066}'..='\u{2069}'))
+                .collect();
+            let given: String = hostile
+                .chars()
+                .filter(|c| !matches!(c, '\u{2066}'..='\u{2069}'))
+                .collect();
+            assert_eq!(
+                kept, given,
+                "{hostile:?} lost or gained ordinary text: {out:?}"
+            );
         }
     }
 
