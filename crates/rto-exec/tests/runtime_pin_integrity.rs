@@ -42,18 +42,6 @@ use std::process::Command;
 /// own. Used only to decide whether the checkout assertions may speak.
 const REPOSITORY_PATH: &str = "OffeneDatenmodellierung/Roteiro";
 
-/// The workspace manifest's **own** `repository =` line, matched whole.
-///
-/// Searched-for rather than matched whole is the defect #831 fixed in the
-/// corpus guards, and it is the reason `[workspace]` alone is not the marker: a
-/// consumer that depends on Roteiro by git URL carries that URL in their
-/// manifest too, and a crate vendored two levels under their root would then be
-/// called *our* checkout. The guards below would read *their* `Cargo.lock`,
-/// find no `boxlite` in it, and fail their `cargo test` over a repository that
-/// is not theirs.
-const REPOSITORY_FIELD: &str =
-    "repository = \"https://github.com/OffeneDatenmodellierung/Roteiro\"";
-
 /// A skip that can be found in a log, written to **real** stderr.
 ///
 /// `eprintln!` is captured by libtest and discarded for a test that *passes*,
@@ -93,8 +81,8 @@ fn workspace_root() -> PathBuf {
     workspace_root_of(Path::new(env!("CARGO_MANIFEST_DIR")))
 }
 
-/// The workspace `Cargo.lock` under `root`, or `None` when `root` is not a
-/// checkout of **this** repository.
+/// The workspace `Cargo.lock` that describes the crate at `manifest_dir`, or
+/// `None` when no workspace above it claims that crate as a member.
 ///
 /// # Why this can be absent at all
 ///
@@ -105,6 +93,30 @@ fn workspace_root() -> PathBuf {
 /// workspace lockfile. The crate's own packaged `Cargo.lock` sits at its root
 /// and describes a different graph, so reading that instead would assert
 /// against the wrong thing rather than decline.
+///
+/// # Why membership, and not "is this our repository"
+///
+/// The question that licenses these assertions is **not** "is this Roteiro".
+/// It is "does the workspace above this crate resolve this crate's
+/// dependencies" — because that, and only that, is what makes its `Cargo.lock`
+/// the right file to read. Those two come apart in both directions, and the
+/// identity question gets both wrong:
+///
+/// - A **fork** is a genuine checkout with a genuine workspace lockfile, and
+///   its `repository =` is its own. Deciding on the URL would have skipped the
+///   lockfile guards in every fork, silently — a guard that reads as coverage
+///   and is not, which is the defect this whole file is about.
+/// - A crate **vendored under a consumer's workspace** sits in their `vendor/`,
+///   which their `members` list does not name. Their lockfile does not resolve
+///   it, so these guards must stay quiet — and do.
+///
+/// Membership is derived from the relationship rather than from an identity
+/// string, so it needs no constant that can go stale, and it survives a rename.
+/// Where a consumer really has adopted this crate as a first-class member, the
+/// guards speak *and are right*: their resolver had to honour this manifest's
+/// `=` requirements, so their lockfile carries the same matched pair. A
+/// lockfile records optional dependencies whether or not their feature is on,
+/// so `boxlite` is in it even with `exec-boxlite` off, as it is in ours.
 ///
 /// # Why the marker is the manifest and not the lockfile
 ///
@@ -119,42 +131,109 @@ fn workspace_root() -> PathBuf {
 /// read `false` on a permission error would turn "cannot read the repository"
 /// into "this is not a repository" and skip in silence, which is the failure
 /// these guards exist to prevent wearing the guard's own clothes.
-fn workspace_lockfile_at(root: &Path) -> Option<PathBuf> {
+fn workspace_lockfile_for(manifest_dir: &Path) -> Option<PathBuf> {
+    let root = workspace_root_of(manifest_dir);
     let manifest = root.join("Cargo.toml");
-    let ours = match std::fs::read_to_string(&manifest) {
-        Ok(text) => manifest_is_ours(&text),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+    let text = match std::fs::read_to_string(&manifest) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
         Err(e) => panic!(
             "cannot read {} ({:?}: {e}). Without it these guards cannot tell a packaged \
-             crate from a repository checkout, and guessing would make them skip in \
+             crate from a workspace member, and guessing would make them skip in \
              silence — which is the failure they exist to rule out.",
             manifest.display(),
             e.kind(),
         ),
     };
-    ours.then(|| root.join("Cargo.lock"))
+    let relative = manifest_dir
+        .strip_prefix(&root)
+        .expect("the workspace root is an ancestor of the crate directory")
+        .to_string_lossy()
+        .replace('\\', "/");
+    declares_member(&text, &relative).then(|| root.join("Cargo.lock"))
 }
 
 /// The workspace lockfile for the crate these tests were compiled from.
 fn workspace_lockfile() -> Option<PathBuf> {
-    workspace_lockfile_at(&workspace_root())
+    workspace_lockfile_for(Path::new(env!("CARGO_MANIFEST_DIR")))
 }
 
-/// Whether this manifest is **this repository's** workspace manifest.
+/// Whether a workspace manifest names `relative` in its `[workspace] members`.
 ///
-/// Both conditions are whole-line matches, and the second is the one that does
-/// the work — see [`REPOSITORY_FIELD`].
-fn manifest_is_ours(text: &str) -> bool {
-    text.lines().any(|line| line.trim() == "[workspace]")
-        && text.lines().any(|line| line.trim() == REPOSITORY_FIELD)
+/// A scan rather than a TOML parse, for the same reason as everything else
+/// here. Only the `members` array inside `[workspace]` counts: `exclude`,
+/// `default-members` and any other table's array of paths are not claims that
+/// this crate's dependencies are resolved above.
+///
+/// Both forms our own manifest could take are read — the literal
+/// `"crates/rto-exec"` it uses today, and the single-segment glob
+/// `"crates/*"` it could be reformatted into. An `exclude` entry is not
+/// subtracted: a path cannot be both, and reading one array is what keeps this
+/// honest about what it does and does not know.
+///
+/// **A workspace with no `members` array reads as "not a member".** Cargo
+/// infers members from path dependencies when the root is itself a package, and
+/// this cannot see that. The direction of that unknown is a skip, which is why
+/// [`the_workspace_marker_tells_a_packaged_crate_from_a_member`] asserts that
+/// our own live manifest still satisfies this rule — a reformat that this could
+/// not read would fail there rather than quietly stop checking.
+fn declares_member(manifest: &str, relative: &str) -> bool {
+    let mut in_workspace = false;
+    let mut in_members = false;
+    for line in manifest.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') && !line.starts_with("[[") {
+            in_workspace = line == "[workspace]";
+            in_members = false;
+            continue;
+        }
+        if !in_workspace {
+            continue;
+        }
+        let body = if let Some(rest) = line.strip_prefix("members") {
+            let Some(rest) = rest.trim_start().strip_prefix('=') else {
+                continue;
+            };
+            in_members = !rest.contains(']');
+            rest
+        } else if in_members {
+            if line.starts_with(']') {
+                in_members = false;
+            }
+            line
+        } else {
+            continue;
+        };
+        for entry in body.split(',') {
+            let Some(entry) = quoted(entry.trim().trim_start_matches('[')) else {
+                continue;
+            };
+            if entry == relative {
+                return true;
+            }
+            if let Some(prefix) = entry.strip_suffix("/*")
+                && let Some(tail) = relative.strip_prefix(prefix)
+                && let Some(tail) = tail.strip_prefix('/')
+                && !tail.is_empty()
+                && !tail.contains('/')
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
-/// Whether the tree at `workspace_root()` was cloned from this repository.
+/// Whether the tree above this crate was cloned from this repository.
 ///
-/// Independent of the marker being held: not the manifest (a vendored crate
-/// sits under a consumer's) and not the layout (this file ships in the
-/// package). A fork reports its own path and so declines to assert, which is
-/// the right way for a guard to fail.
+/// **Not the marker** — membership is. This is the independent signal that lets
+/// the one assertion which must not be wrong in *our* tree know it is looking
+/// at our tree. A fork reports its own path and so declines to assert, which is
+/// the right way for a guard to fail; a fork's lockfile guards still *run*,
+/// because membership does not care whose repository this is.
 fn cloned_from_this_repository() -> bool {
     Command::new("git")
         .arg("-C")
@@ -164,6 +243,34 @@ fn cloned_from_this_repository() -> bool {
         .is_ok_and(|o| {
             o.status.success() && String::from_utf8_lossy(&o.stdout).contains(REPOSITORY_PATH)
         })
+}
+
+/// A scratch directory nothing else can be holding, under the shared
+/// `CARGO_TARGET_TMPDIR`.
+///
+/// That root is shared by every test in this binary **and by every concurrent
+/// `cargo test` against the same target directory**, so a fixed leaf name is a
+/// race: one run's setup `remove_dir_all` can delete another's fixtures
+/// mid-assertion. A name built from the pid and a timestamp does not fix it —
+/// that has been tried in this repository and is not unique.
+///
+/// `create_dir` is, though: it fails with `AlreadyExists` rather than
+/// succeeding onto an existing directory, and that check-and-create is atomic
+/// in the kernel. Counting up until it succeeds is therefore unique by
+/// construction, across threads and across processes, with no clock in it. The
+/// shared root is never removed — only the leaf this call owns.
+fn exclusive_scratch(stem: &str) -> PathBuf {
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    std::fs::create_dir_all(root).expect("the target tmp dir should be creatable");
+    for attempt in 0u32.. {
+        let candidate = root.join(format!("{stem}-{attempt}"));
+        match std::fs::create_dir(&candidate) {
+            Ok(()) => return candidate,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (),
+            Err(e) => panic!("cannot create {}: {e}", candidate.display()),
+        }
+    }
+    unreachable!("u32 is not exhausted by concurrent test runs")
 }
 
 /// The exact (`=`) version a manifest requires for `name`.
@@ -415,27 +522,30 @@ fn the_requirement_rule_reads_both_manifest_shapes() {
     );
 }
 
-/// **The lockfile skip fires in a package and cannot fire in a checkout.**
+/// **The marker answers "is this crate a member above", in every shape.**
 ///
 /// A skip that never skips and a skip that always skips both look green from
-/// here, so both directions are laid out on disk and put through the same
-/// ancestor arithmetic the guards use. The vendored shape is the one #831
-/// settled and is why `[workspace]` alone is not the marker: a consumer's root
-/// says `[workspace]` too, and calling it ours would run these guards against
-/// their lockfile and fail their `cargo test`.
+/// here, so each shape is laid out on disk and put through the same ancestor
+/// arithmetic the guards use. The two that must speak and the two that must
+/// stay quiet are asserted together, because the interesting property is that
+/// the rule *separates* them.
+///
+/// The fork is the case the previous rule got wrong: it decided on this
+/// repository's `repository =` URL, so a fork — a genuine checkout, with a
+/// genuine workspace lockfile — would have skipped the lockfile guards in
+/// silence. Membership does not care whose repository this is.
 #[test]
-fn the_workspace_marker_tells_a_packaged_crate_from_this_checkout() {
-    let scratch = Path::new(env!("CARGO_TARGET_TMPDIR")).join("pin-guard-shapes");
-    let _ = std::fs::remove_dir_all(&scratch);
+fn the_workspace_marker_tells_a_packaged_crate_from_a_member() {
+    let scratch = exclusive_scratch("pin-guard-shapes");
 
-    // The published shape: …/registry/src/<index>/rto-exec-<version>, whose
-    // grandparent is the registry source directory and has no manifest at all.
+    // Quiet: the published shape. …/registry/src/<index>/rto-exec-<version>,
+    // whose grandparent is the registry source directory and has no manifest.
     let packaged = scratch
         .join("registry")
         .join("src")
         .join("index.crates.io-1949cf8c6b5b557f")
         .join(format!("rto-exec-{}", env!("CARGO_PKG_VERSION")));
-    std::fs::create_dir_all(&packaged).expect("the target tmp dir should be writable");
+    std::fs::create_dir_all(&packaged).expect("create the packaged layout");
     std::fs::write(
         packaged.join("Cargo.toml"),
         "[package]\nname = \"rto-exec\"\n",
@@ -447,62 +557,101 @@ fn the_workspace_marker_tells_a_packaged_crate_from_this_checkout() {
     )
     .expect("write the packaged lockfile");
     assert_eq!(
-        workspace_lockfile_at(&workspace_root_of(&packaged)),
+        workspace_lockfile_for(&packaged),
         None,
         "an unpacked crate has no workspace above it, so the lockfile guards must decline \
          rather than read a path that is not there — and must not fall back to the \
          package's own lockfile, which describes a different graph"
     );
 
-    // The vendored shape: our crate two levels under somebody else's workspace,
-    // whose manifest depends on Roteiro by git URL. This is #831's case.
+    // Quiet: vendored under a consumer. `cargo vendor` writes to `vendor/`,
+    // which their `members` list does not name, so their lockfile does not
+    // resolve this crate and these guards have nothing to say about it. Their
+    // manifest carries our URL, because they depend on us by git — which is
+    // exactly why the URL could never have been the question.
     let consumer = scratch.join("consumer");
     let vendored = consumer.join("vendor").join("rto-exec");
     std::fs::create_dir_all(&vendored).expect("create the vendored layout");
     std::fs::write(
         consumer.join("Cargo.toml"),
         format!(
-            "[workspace]\nmembers = [\"app\"]\n\n[workspace.package]\n\
-             repository = \"https://github.com/someone/their-app\"\n\n\
-             [dependencies]\nroteiro = {{ git = \"{}\" }}\n",
-            REPOSITORY_FIELD
-                .trim_start_matches("repository = ")
-                .trim_matches('"')
+            "[workspace]\nmembers = [\"app\", \"crates/their-lib\"]\n\n\
+             [workspace.package]\nrepository = \"https://github.com/someone/their-app\"\n\n\
+             [dependencies]\nroteiro = {{ git = \"https://github.com/{REPOSITORY_PATH}\" }}\n"
         ),
     )
     .expect("write the consumer manifest");
-    std::fs::write(consumer.join("Cargo.lock"), "# theirs\n").expect("write their lockfile");
+    std::fs::write(consumer.join("Cargo.lock"), "# theirs, no boxlite in it\n")
+        .expect("write their lockfile");
     assert_eq!(
-        workspace_lockfile_at(&workspace_root_of(&vendored)),
+        workspace_lockfile_for(&vendored),
         None,
-        "a workspace that DEPENDS on Roteiro is not Roteiro. Calling it ours would read \
-         their lockfile, find no boxlite in it, and fail their `cargo test` over a \
-         repository that is not theirs — which is the defect #831 fixed in the corpus \
-         guards, arriving here by the same route"
+        "a vendored copy is not a member of the workspace it sits under, so its lockfile \
+         does not resolve this crate. Reading it would find no boxlite and fail their \
+         `cargo test` over a repository that is not theirs"
     );
 
-    // And ours, synthesised rather than read, so the rule is held against the
-    // text and not against whatever happens to be on disk.
-    let ours = scratch.join("roteiro").join("crates").join("rto-exec");
-    std::fs::create_dir_all(&ours).expect("create our layout");
+    // Speaks: a fork. Different remote, different `repository =`, possibly a
+    // different name — and a real workspace that really does resolve this
+    // crate. The URL rule skipped every one of these.
+    let fork_root = scratch.join("their-fork");
+    let fork_crate = fork_root.join("crates").join("rto-exec");
+    std::fs::create_dir_all(&fork_crate).expect("create the fork layout");
     std::fs::write(
-        scratch.join("roteiro").join("Cargo.toml"),
-        format!(
-            "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.package]\n{REPOSITORY_FIELD}\n"
-        ),
+        fork_root.join("Cargo.toml"),
+        "[workspace]\nmembers = [\n    \"crates/rto-exec\",\n    \"crates/roteiro\",\n]\n\n\
+         [workspace.package]\nrepository = \"https://gitlab.example/someone/their-fork\"\n",
     )
-    .expect("write our manifest");
+    .expect("write the fork manifest");
     assert_eq!(
-        workspace_lockfile_at(&workspace_root_of(&ours)),
-        Some(scratch.join("roteiro").join("Cargo.lock")),
-        "our own workspace manifest must be recognised, or every run takes the packaged \
-         exemption and these guards skip in silence"
+        workspace_lockfile_for(&fork_crate),
+        Some(fork_root.join("Cargo.lock")),
+        "a fork is a genuine checkout with a genuine workspace lockfile. Deciding on this \
+         repository's URL skipped the lockfile guards in every fork, silently — a guard \
+         that reads as coverage and is not, which is the defect this file exists about"
     );
 
-    // The live tree, where two signals independent of the marker agree this is
-    // our checkout: the remote says so, and cargo compiled this file from a
-    // `crates/rto-exec` inside it. In a package this half is vacuous by
-    // construction, which is correct there and is said rather than hidden.
+    // Speaks, and rightly: a consumer who has adopted this crate as a
+    // first-class member. Their resolver had to honour this manifest's `=`
+    // requirements, so their lockfile carries the same matched pair, and the
+    // guards are answering a question their tree really does have an answer to.
+    let adopter_root = scratch.join("adopter");
+    let adopted = adopter_root.join("crates").join("rto-exec");
+    std::fs::create_dir_all(&adopted).expect("create the adopter layout");
+    std::fs::write(
+        adopter_root.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"crates/*\"]\n",
+    )
+    .expect("write the adopter manifest");
+    assert_eq!(
+        workspace_lockfile_for(&adopted),
+        Some(adopter_root.join("Cargo.lock")),
+        "a single-segment glob is the other form our own members list could be written in, \
+         and a workspace that really resolves this crate is one these guards can speak to"
+    );
+
+    // Quiet: `members` naming a sibling, not us. The glob arm must not widen
+    // into "some member exists".
+    let neighbour = scratch.join("neighbour");
+    let not_a_member = neighbour.join("vendor").join("rto-exec");
+    std::fs::create_dir_all(&not_a_member).expect("create the neighbour layout");
+    std::fs::write(
+        neighbour.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"crates/*\", \"tools/cli\"]\n",
+    )
+    .expect("write the neighbour manifest");
+    assert_eq!(
+        workspace_lockfile_for(&not_a_member),
+        None,
+        "`crates/*` does not match `vendor/rto-exec`; a glob that matched anything would \
+         put these guards back on every consumer's CI"
+    );
+
+    // The live tree. Two signals independent of the marker agree this is our
+    // own checkout — the remote says so, and cargo compiled this file from a
+    // `crates/rto-exec` inside it — so here the marker may not read "packaged".
+    // In a package, and in a fork, this half is vacuous by construction, which
+    // is correct and is said rather than hidden.
     if cloned_from_this_repository() && Path::new(env!("CARGO_MANIFEST_DIR")).ends_with("rto-exec")
     {
         let live = workspace_lockfile()
@@ -513,9 +662,110 @@ fn the_workspace_marker_tells_a_packaged_crate_from_this_checkout() {
              the marker is the workspace manifest precisely so that this fails here",
             live.display()
         );
+        // And the live manifest still satisfies the membership rule as written.
+        // A reformat of `members` into a shape this scan cannot read would
+        // otherwise turn every run into a silent skip; here it fails instead.
+        let root = workspace_root();
+        let text = std::fs::read_to_string(root.join("Cargo.toml"))
+            .expect("a checkout of this repository has a workspace manifest");
+        assert!(
+            declares_member(&text, "crates/rto-exec"),
+            "{}'s members list no longer names crates/rto-exec in a form this rule reads. \
+             That is this rule's problem, not this assertion's: left alone it would skip \
+             the lockfile guards on every run and say nothing",
+            root.display()
+        );
     }
 
-    let _ = std::fs::remove_dir_all(&scratch);
+    std::fs::remove_dir_all(&scratch).expect("the scratch leaf is ours to remove");
+}
+
+/// **A fork's lockfile guards run, and pass.**
+///
+/// The marker test above proves the fork shape is *selected*. This one proves
+/// the guards then do their job there, by putting a fork-shaped tree — a
+/// different `repository =`, a different remote — through the **same assertion
+/// bodies** the real guards call. Asserting only that nothing failed would not
+/// distinguish "ran and passed" from "never ran".
+#[test]
+fn the_lockfile_guards_run_in_a_fork() {
+    let scratch = exclusive_scratch("pin-guard-fork");
+    let fork_root = scratch.join("their-fork");
+    let fork_crate = fork_root.join("crates").join("rto-exec");
+    std::fs::create_dir_all(&fork_crate).expect("create the fork layout");
+    std::fs::write(
+        fork_root.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"crates/rto-exec\"]\n\n[workspace.package]\n\
+         repository = \"https://codeberg.org/someone/roteiro-fork\"\n",
+    )
+    .expect("write the fork manifest");
+
+    // A fork's lockfile is this repository's lockfile with their history on top,
+    // so the real one is what a fork would actually have. Copied rather than
+    // synthesised: a hand-written stub would prove the assertions run against a
+    // fixture, not that they run against a lockfile.
+    let ours = workspace_root().join("Cargo.lock");
+    if !ours.is_file() {
+        loud_skip(
+            "the_lockfile_guards_run_in_a_fork",
+            "There is no lockfile here to build a fork's tree from, so whether the guards \
+             run in a fork went unchecked.",
+        );
+        std::fs::remove_dir_all(&scratch).expect("the scratch leaf is ours to remove");
+        return;
+    }
+    let lockfile = fork_root.join("Cargo.lock");
+    std::fs::copy(&ours, &lockfile).expect("copy the lockfile into the fork");
+
+    let selected = workspace_lockfile_for(&fork_crate);
+    assert_eq!(
+        selected.as_deref(),
+        Some(lockfile.as_path()),
+        "the fork's own workspace lockfile is what these guards must read"
+    );
+
+    // The real bodies, not a re-implementation. Both must reach their
+    // assertions and pass; a skew planted in the fork's lockfile fails them,
+    // which is what `the_fork_guards_are_not_vacuous` below holds.
+    assert_locked_boxlite_matches_the_pins(&lockfile);
+    assert_locked_pair_agrees(&lockfile);
+
+    std::fs::remove_dir_all(&scratch).expect("the scratch leaf is ours to remove");
+}
+
+/// **And they would have failed there.** Running and passing is only evidence
+/// if the same code fails on a tree that deserves it, so the fork's lockfile is
+/// given the skew the guards exist to catch.
+#[test]
+fn the_fork_guards_are_not_vacuous() {
+    let scratch = exclusive_scratch("pin-guard-fork-skew");
+    let lockfile = scratch.join("Cargo.lock");
+    std::fs::write(
+        &lockfile,
+        "[[package]]\nname = \"boxlite\"\nversion = \"0.10.2\"\n\n\
+         [[package]]\nname = \"boxlite-shared\"\nversion = \"0.10.1\"\n",
+    )
+    .expect("write a skewed lockfile");
+
+    let skewed = std::panic::catch_unwind(|| assert_locked_pair_agrees(&lockfile));
+    assert!(
+        skewed.is_err(),
+        "a lockfile resolving boxlite 0.10.2 against boxlite-shared 0.10.1 is the exact \
+         pair that failed to compile on 6.0.1, so the assertion a fork runs must reject it"
+    );
+
+    std::fs::write(
+        &lockfile,
+        "[[package]]\nname = \"serde\"\nversion = \"1.0.0\"\n",
+    )
+    .expect("write a lockfile with no boxlite");
+    let absent = std::panic::catch_unwind(|| assert_locked_pair_agrees(&lockfile));
+    assert!(
+        absent.is_err(),
+        "finding no boxlite at all must fail loudly rather than pass as `no skew found`"
+    );
+
+    std::fs::remove_dir_all(&scratch).expect("the scratch leaf is ours to remove");
 }
 
 /// Every pinned archive has extracted-file pins, and nothing has pins without an
@@ -607,7 +857,16 @@ fn the_pins_are_for_the_boxlite_release_the_lockfile_resolves() {
         );
         return;
     };
-    let source = std::fs::read_to_string(&lockfile)
+    assert_locked_boxlite_matches_the_pins(&lockfile);
+}
+
+/// The body of the guard above, over whichever lockfile it was handed.
+///
+/// Separated so that [`the_lockfile_guards_run_in_a_fork`] can put a fork's
+/// lockfile through the **same code**, rather than through a re-implementation
+/// that could agree with a broken original.
+fn assert_locked_boxlite_matches_the_pins(lockfile: &Path) {
+    let source = std::fs::read_to_string(lockfile)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", lockfile.display()));
 
     let versions = locked_versions(&source, "boxlite");
@@ -678,7 +937,14 @@ fn boxlite_and_its_generated_api_sibling_resolve_together() {
         );
         return;
     };
-    let source = std::fs::read_to_string(&lockfile)
+    assert_locked_pair_agrees(&lockfile);
+}
+
+/// The body of the guard above, over whichever lockfile it was handed. Shared
+/// with [`the_lockfile_guards_run_in_a_fork`] for the same reason as
+/// [`assert_locked_boxlite_matches_the_pins`].
+fn assert_locked_pair_agrees(lockfile: &Path) {
+    let source = std::fs::read_to_string(lockfile)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", lockfile.display()));
 
     let parent = locked_versions(&source, "boxlite");
@@ -831,9 +1097,11 @@ fn the_pins_match_the_archive_they_were_derived_from() {
         path.display()
     );
 
-    let extracted = Path::new(env!("CARGO_TARGET_TMPDIR")).join("runtime-pin-integrity");
-    let _ = std::fs::remove_dir_all(&extracted);
-    std::fs::create_dir_all(&extracted).expect("the target tmp dir should be writable");
+    // Unique by construction, for the same reason as every other fixture here:
+    // this root is shared with every concurrent `cargo test` against the same
+    // target directory, and a fixed name lets one run's cleanup delete another
+    // run's extraction mid-comparison.
+    let extracted = exclusive_scratch("runtime-pin-integrity");
 
     // Extracted the way boxlite extracts it, `--strip-components=1` included, so
     // the names compared here are the names that land in its runtime directory.
@@ -877,7 +1145,7 @@ fn the_pins_match_the_archive_they_were_derived_from() {
         archive.target
     );
 
-    let _ = std::fs::remove_dir_all(&extracted);
+    std::fs::remove_dir_all(&extracted).expect("the scratch leaf is ours to remove");
 }
 
 /// The pinned archive for the machine running the test, if there is one.
