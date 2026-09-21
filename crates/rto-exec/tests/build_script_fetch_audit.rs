@@ -157,7 +157,7 @@ struct Reviewed {
 const REVIEWED: &[Reviewed] = &[
     Reviewed {
         name: "boxlite",
-        version: "0.10.0",
+        version: "0.10.2",
         reason: "Downloads the prebuilt sandbox runtime with an unverified `curl` and embeds \
                  the extracted files with include_bytes!. Governed at the point the bytes \
                  enter the artifact: `crates/rto-exec/src/runtime_file_pins.rs` pins the \
@@ -170,17 +170,22 @@ const REVIEWED: &[Reviewed] = &[
                  prefetch --analyzer sandbox --allow-download` additionally verifies the \
                  archive *before* extraction and keeps the curl off the network entirely; \
                  without it the fetch does happen, over TLS to the pinned release URL, and \
-                 the build says so on its own output. Re-reviewed for 0.10.0: the fetching \
-                 code is byte-identical to 0.9.7's, and the three v0.10.0 archive pins were \
-                 re-derived from the release assets rather than carried over — the runtime \
-                 now contributes two more files per platform (`guest-mke2fs`, \
-                 `guest-resize2fs`), which the per-file pins cover and \
-                 NOTICE-boxlite-runtime.md now lists. See that file for what the archive \
-                 contains and the licence duties it creates.",
+                 the build says so on its own output. Re-reviewed for 0.10.2: `build.rs` is \
+                 byte-identical to 0.10.0's (SHA-256 \
+                 de4bca25efad5e8d4235402aec18354ca83b26805d78c07def369546edb352d3 for both), \
+                 so it fetches the same one thing, from the same place, the same way — the \
+                 URL is still built from CARGO_PKG_VERSION against the pinned GitHub release \
+                 path, still over TLS, and still with no digest of its own, which is exactly \
+                 what the per-file pins exist to supply. The three v0.10.2 archive pins were \
+                 re-derived from the release assets rather than carried over, and the member \
+                 set is unchanged from 0.10.0 — same seven files on darwin, eight on linux, \
+                 same names — so only digests and sizes moved and \
+                 NOTICE-boxlite-runtime.md's listing still holds. See that file for what the \
+                 archive contains and the licence duties it creates.",
     },
     Reviewed {
         name: "libkrun-sys",
-        version: "0.10.0",
+        version: "0.10.2",
         reason: "Would download libkrunfw and build vendored libkrun, but the published package \
                  excludes those sources (`exclude = [\"vendor\"]`) and its build script detects \
                  a crates.io package by the `.cargo_vcs_info.json` cargo injects, sets \
@@ -191,7 +196,13 @@ const REVIEWED: &[Reviewed] = &[
                  libkrunfw tarball URL and its expected SHA-256 are both `const`s in that \
                  build script, and `Fetcher::fetch` verifies the digest before extracting — \
                  0.10.0 tightened this, verifying a *cached* tarball too where 0.9.7 checked \
-                 only a freshly downloaded one. Re-review if the crate ever ships its \
+                 only a freshly downloaded one. Re-reviewed for 0.10.2: `build.rs` is \
+                 byte-identical to 0.10.0's (SHA-256 shared by both), `exclude = [\"vendor\"]` \
+                 is still in the manifest and the published package still carries no \
+                 `vendor/` directory, the `.cargo_vcs_info.json` stub detection and its early \
+                 return are still there, and `LIBKRUNFW_SHA256` still guards `Fetcher::fetch` \
+                 before extraction for both the fresh and the cached path. All three \
+                 conditions below therefore still hold. Re-review if the crate ever ships its \
                  `vendor/` directory, if a feature that reaches `build()` is enabled, or if \
                  the digest constants stop guarding the extract.",
     },

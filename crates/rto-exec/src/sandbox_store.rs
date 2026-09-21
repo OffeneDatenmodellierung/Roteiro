@@ -1418,7 +1418,7 @@ mod tests {
     };
     use std::path::PathBuf;
 
-    /// The three `boxlite` 0.10.0 tables this module reads, declared as that
+    /// The three `boxlite` 0.10.2 tables this module reads, declared as that
     /// crate declares them.
     ///
     /// A restatement, and deliberately a literal one: issue #433's hand-clearing
