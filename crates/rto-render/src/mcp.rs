@@ -191,7 +191,7 @@ use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
         CallToolResult, ContentBlock, Implementation, ProtocolVersion, ServerCapabilities,
-        ServerInfo,
+        ServerConfig,
     },
     tool, tool_handler, tool_router,
     transport::{
@@ -1303,9 +1303,9 @@ impl GraphServer {
 #[allow(unknown_lints, clippy::unused_async_trait_impl)]
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for GraphServer {
-    fn get_info(&self) -> ServerInfo {
-        // `ServerInfo` is `#[non_exhaustive]`; build from default then set fields.
-        let mut info = ServerInfo::default();
+    fn get_info(&self) -> ServerConfig {
+        // `ServerConfig` is `#[non_exhaustive]`; build from default then set fields.
+        let mut info = ServerConfig::default();
         info.protocol_version = ProtocolVersion::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info = Implementation::new("roteiro", env!("CARGO_PKG_VERSION"));
@@ -3099,6 +3099,63 @@ mod tests {
         assert_eq!(
             in_build, declared,
             "with every feature on, `EVERY_TOOL` must be exactly what is routed",
+        );
+    }
+
+    /// The advertised tool set, named literally, in **both** feature shapes.
+    ///
+    /// [`every_tool_covers_this_build`] pins it exactly only under `execution`;
+    /// without that feature it asserts one direction only — that the router
+    /// offers nothing [`EVERY_TOOL`] lacks — so a tool *disappearing* from the
+    /// router passes it. That is the direction this file is most exposed to.
+    /// rmcp's `#[tool_router]` ignores `#[cfg]`, which is why the `security_*`
+    /// and `sandbox_*` pairs live in second and third **named** routers merged
+    /// by [`GraphServer::routes`] rather than being gated in place; an edit to
+    /// that funnel, or an rmcp upgrade that changes what the macro emits, can
+    /// drop a whole block and still compile. Compiling is not the acceptance
+    /// test for a change in this file — an unchanged advertised set is, and
+    /// that is a claim only a literal list can carry.
+    #[test]
+    fn advertised_tools_are_exactly_these() {
+        #[cfg(feature = "execution")]
+        let expected: &[&str] = &[
+            "check",
+            "config_secrets",
+            "context",
+            "coupling",
+            "debt",
+            "debt_density",
+            "explain",
+            "list_kind",
+            "list_projects",
+            "list_tool_classes",
+            "path",
+            "sandbox_clear",
+            "sandbox_status",
+            "search",
+            "security_list",
+            "security_status",
+        ];
+        #[cfg(not(feature = "execution"))]
+        let expected: &[&str] = &[
+            "check",
+            "config_secrets",
+            "context",
+            "coupling",
+            "debt",
+            "debt_density",
+            "explain",
+            "list_kind",
+            "list_projects",
+            "list_tool_classes",
+            "path",
+            "search",
+        ];
+        assert_eq!(
+            tool_names(),
+            expected,
+            "the advertised tool set changed; if that is deliberate it belongs in \
+             the commit message, and nothing else in this file will notice it",
         );
     }
 

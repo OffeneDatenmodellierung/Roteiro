@@ -24,7 +24,7 @@ rto-exec = { workspace = true, optional = true }
 # `mcp`-only: a default `rto-render` build renders documents and needs none of it.
 rto-spec = { workspace = true, optional = true }
 # MCP-only (feature `mcp`): the official Rust MCP SDK + async runtime + HTTP.
-rmcp = { version = "3.1.2", default-features = false, features = [
+rmcp = { version = "3.4.0", default-features = false, features = [
     "server",
     "macros",
     "transport-io",
