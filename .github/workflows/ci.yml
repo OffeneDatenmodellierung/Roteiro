@@ -262,7 +262,7 @@ jobs:
       #
       # A toolchain the canary has already flagged is a toolchain this bump is
       # overdue for; see `toolchain-canary.yml`.
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: "1.98"
           components: rustfmt, clippy
@@ -477,7 +477,7 @@ jobs:
       # why, and for what raising it involves. Bumped with the other six, in one
       # commit, never alone — three of them now live in `graph-artifact.yml` and
       # `release-plz.yml`, so the bump is not confined to this file.
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: "1.98"
           components: rustfmt, clippy
@@ -626,7 +626,7 @@ jobs:
       # why, and for what raising it involves. Bumped with the other six, in one
       # commit, never alone — three of them now live in `graph-artifact.yml` and
       # `release-plz.yml`, so the bump is not confined to this file.
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: "1.98"
           components: clippy
@@ -807,7 +807,7 @@ jobs:
       #
       # So all four sites are pinned, and the toolchain does not move anywhere
       # in this file without a commit.
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: "1.98"
           components: llvm-tools-preview
@@ -859,7 +859,7 @@ jobs:
       - name: Provision the pinned sandbox runtime (`exec-boxlite` feature)
         run: python3 scripts/provision-sandbox-runtime.py --github-env
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af # v2.87.11
+        uses: taiki-e/install-action@4076c08d76dba979c11a7285295b0716c1d67908 # v2.87.15
         with:
           tool: cargo-llvm-cov
       - name: Measure coverage (per file + workspace total)
@@ -901,7 +901,7 @@ jobs:
       # This job only runs `cargo check`, which reads none, so full history would
       # buy nothing. If a `cargo test` is ever added here, add the depth with it.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: "1.96"
       # A failed run must still save its cache, as above. Skipped on a release
