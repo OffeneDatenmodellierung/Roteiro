@@ -120,8 +120,135 @@ fn workspace_lockfile_for(manifest_dir: &Path) -> Option<PathBuf> {
 }
 
 /// The workspace lockfile for the crate these tests were compiled from.
+///
+/// # The one branch whose absence looks exactly like its success
+///
+/// Four places in this file act on `None` by skipping, and a `None` here turns
+/// all four into no-ops at once — leaving a suite that passes with only the
+/// manifest guard having run. That is this file's own subject one level up: a
+/// skip that can always skip is a guard whose absence cannot be told from its
+/// success, which is what the lockfile oracle was before this branch fixed it.
+///
+/// So `None` is not returned on trust. It is checked against a witness that
+/// shares no code with the thing being checked — not cargo, and not the marker,
+/// but the text of the lockfile two levels up. **A workspace member appears
+/// there with no `source` key**; anything resolved from a registry or a git
+/// remote carries one. If such an entry names this crate, a workspace really
+/// does resolve it and declining is a defect, so this refuses rather than
+/// skipping.
+///
+/// It is the right answer in every shape, not only ours: a packaged crate has
+/// no lockfile two levels up, a consumer's lockfile names this crate with a
+/// `source` or not at all, and an `exclude`d crate is absent from the lockfile
+/// of the workspace that excluded it. A fork is refused a skip exactly as this
+/// checkout is, which is correct — a fork's guards must run too.
 fn workspace_lockfile() -> Option<PathBuf> {
-    workspace_lockfile_for(Path::new(env!("CARGO_MANIFEST_DIR")))
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let resolved = workspace_lockfile_for(manifest_dir);
+    assert!(
+        resolved.is_some() || !a_lockfile_above_claims_this_crate(manifest_dir),
+        "declining to read a workspace lockfile for {}, but the lockfile two levels above \
+         it records `rto-exec` as one of its own members — with no `source`, which only a \
+         path member has. A workspace does resolve this crate, so every guard that acts \
+         on this answer would skip in a tree where it must not. Fix the resolver rather \
+         than this assertion: a skip that can always skip is a guard whose absence cannot \
+         be told from its success.",
+        manifest_dir.display()
+    );
+    resolved
+}
+
+/// Whether the lockfile two levels above `manifest_dir` records this crate as
+/// one of its **own** members.
+///
+/// Shares no code with [`workspace_lockfile_for`] on purpose — it asks the
+/// lockfile's text rather than cargo — so that a regression in the resolver is
+/// visible instead of agreeing with itself. `NotFound` is the only absence;
+/// every other IO error panics, for the same reason it does everywhere else
+/// here.
+fn a_lockfile_above_claims_this_crate(manifest_dir: &Path) -> bool {
+    let Some(above) = manifest_dir.ancestors().nth(2) else {
+        return false;
+    };
+    let lockfile = above.join("Cargo.lock");
+    let text = match std::fs::read_to_string(&lockfile) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(e) => panic!(
+            "cannot read {} ({:?}: {e}). Without it the skip below cannot be checked \
+             against anything, and an unchecked skip is the defect this witness exists \
+             to rule out.",
+            lockfile.display(),
+            e.kind(),
+        ),
+    };
+    lockfile_claims_as_member(&text, "rto-exec")
+}
+
+/// Whether `text` records `name` as a path member of the workspace it
+/// describes.
+///
+/// Split out from the IO so the rule can be held against lockfile text
+/// directly: a witness that silently became always-false would turn the skip
+/// refusal above back into the no-op it exists to replace, and nothing would
+/// say so. See [`the_member_witness_tells_a_path_member_from_a_dependency`].
+fn lockfile_claims_as_member(text: &str, name: &str) -> bool {
+    let named = format!("name = \"{name}\"");
+    text.split("[[package]]").any(|block| {
+        let mut names_this_crate = false;
+        let mut has_source = false;
+        for line in block.lines() {
+            let line = line.trim();
+            if line == named {
+                names_this_crate = true;
+            } else if line.starts_with("source = ") {
+                has_source = true;
+            }
+        }
+        names_this_crate && !has_source
+    })
+}
+
+/// **The witness is not always-false, and not always-true.**
+///
+/// It is the only thing standing between a resolver that regresses to `None`
+/// and a suite that passes with four guards silently not running, so "it
+/// returns false" must be a finding about the tree rather than a property of
+/// the function.
+#[test]
+fn the_member_witness_tells_a_path_member_from_a_dependency() {
+    // A workspace member: no `source` key. This is our own lockfile's shape.
+    let member = "[[package]]\nname = \"rto-exec\"\nversion = \"6.0.1\"\n\
+                  dependencies = [\n \"boxlite\",\n]\n";
+    assert!(
+        lockfile_claims_as_member(member, "rto-exec"),
+        "a path member carries no `source`, and that is the whole signal"
+    );
+
+    // A consumer who depends on this crate from the registry: `source` present.
+    let dependency = "[[package]]\nname = \"rto-exec\"\nversion = \"6.0.1\"\n\
+                      source = \"registry+https://github.com/rust-lang/crates.io-index\"\n\
+                      checksum = \"0000\"\n";
+    assert!(
+        !lockfile_claims_as_member(dependency, "rto-exec"),
+        "a consumer resolving this crate from a registry does not make their workspace \
+         the one that owns it — refusing their skip would fail their `cargo test`"
+    );
+
+    // Absent entirely: an `exclude`d crate, or a workspace that never heard of
+    // it.
+    let absent = "[[package]]\nname = \"serde\"\nversion = \"1.0.0\"\n\
+                  source = \"registry+https://github.com/rust-lang/crates.io-index\"\n";
+    assert!(
+        !lockfile_claims_as_member(absent, "rto-exec"),
+        "a lockfile that does not name this crate claims nothing about it"
+    );
+
+    // And the name is matched whole, not by prefix.
+    assert!(
+        !lockfile_claims_as_member(member, "rto-ex"),
+        "a prefix of the name is not the name"
+    );
 }
 
 /// The workspace root cargo resolves for the crate at `manifest_dir`.
