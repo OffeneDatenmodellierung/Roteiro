@@ -559,8 +559,8 @@ fn chooser(base: &str, mounts: &[Mount], explorer: Option<&str>) -> Response {
                 "<li><a href=\"{}/{}\">{}</a> <span class=\"deg\">{}</span></li>",
                 escape(base),
                 escape(&m.slug),
-                escape(&m.label),
-                escape(&m.origin)
+                bdi(&m.label),
+                bdi(&m.origin)
             );
         }
         body.push_str("</ol></article>");
@@ -765,7 +765,7 @@ fn header_for(nav: &Nav) -> String {
         // Standalone: v1.0's header, with the bundle's name where its path was.
         let mut out = "<span class=\"name\">OKF viewer</span>".to_owned();
         if let Some(label) = &nav.label {
-            let _ = write!(out, "<span class=\"root\">{}</span>", escape(label));
+            let _ = write!(out, "<span class=\"root\">{}</span>", bdi(label));
         }
         if let Some(bundles) = &nav.bundles {
             let _ = write!(
@@ -813,7 +813,7 @@ fn header_for(nav: &Nav) -> String {
                  <span class=\"p-sep\">▸</span>\
                  <span class=\"p-crumb-current\">{}</span>",
                 escape(bundles),
-                escape(label)
+                bdi(label)
             );
         }
         // A lone bundle: the chooser would redirect straight back here, so the
@@ -824,7 +824,7 @@ fn header_for(nav: &Nav) -> String {
                 "<span class=\"p-crumb-step\">OKF</span>\
                  <span class=\"p-sep\">▸</span>\
                  <span class=\"p-crumb-current\">{}</span>",
-                escape(label)
+                bdi(label)
             );
         }
         // The chooser itself: it shows every bundle, so it is named by none of
@@ -862,7 +862,7 @@ fn page(title: &str, base: &str, nav: &Nav, body: &str) -> Response {
          <footer>Read-only. Nothing here is imported into the graph — \
          <code>roteiro import --from okf</code> is still the only path that does, \
          and it asks first.</footer></body></html>",
-        escape(title),
+        isolate(&escape(title)),
     );
     (
         [
@@ -891,6 +891,89 @@ fn escape(raw: &str) -> String {
             '\'' => out.push_str("&#39;"),
             _ => out.push(c),
         }
+    }
+    out
+}
+
+/// Bundle-controlled text on its way into **element content**.
+///
+/// [`escape`] answers the markup question; this answers the *direction* one,
+/// and they are different questions with different answers at different places.
+/// A `&` in an attribute is a markup problem; a U+202E in an attribute is not a
+/// problem at all, because no attribute this module writes is rendered. In
+/// element content the reverse holds: the escaper has already made the value
+/// inert as markup, and what is left is that the value's own directional state
+/// leaks into the line around it.
+///
+/// **The property is isolation, not filtering.** `<bdi>` is the element HTML
+/// has for exactly this: its contents are ordered as their own bidirectional
+/// paragraph, and any directional state opened inside it is terminated at the
+/// element's end rather than at the end of the line. So the value cannot
+/// reorder the text beside it, and *every one of its own characters survives
+/// unchanged* — which is the half a filter cannot do. A bundle may legitimately
+/// carry an Arabic, Hebrew or Farsi title, and `<bdi>`'s implied `dir="auto"`
+/// renders it right-to-left as itself; a list of "characters somebody thought
+/// were dangerous" would have mangled it into escapes instead, and refusing
+/// honest content along a demographic line is a worse defect than the one being
+/// fixed.
+///
+/// This is therefore **not** a change to [`escape`]. The escaper is called in
+/// attribute position too (`href`, `class`), where emitting an element would be
+/// a defect rather than a fix; the split between the two functions is the
+/// distinction between the two positions, stated once.
+fn bdi(raw: &str) -> String {
+    format!("<bdi>{}</bdi>", escape(raw))
+}
+
+/// The same isolation, for the one sink that has no markup to do it with.
+///
+/// A `<title>` is drawn by the browser's chrome, not by the page, so `<bdi>`
+/// cannot reach it — and it is the one place the structural answer runs out.
+/// The character-level equivalent is U+2068 FIRST STRONG ISOLATE and U+2069 POP
+/// DIRECTIONAL ISOLATE: the isolate takes its direction from the value's first
+/// strong character, so an Arabic title is still right-to-left, and the closing
+/// PDI terminates every embedding or override opened inside it, so nothing the
+/// value carries can reorder the ` — OKF viewer` that follows.
+///
+/// **The one way a character-level isolate can be defeated is worth naming**,
+/// because it is the reason this is a walk and not a `format!`. Under UAX #9 a
+/// PDI matches the nearest unmatched isolate initiator — so a value carrying a
+/// PDI of its own would close *ours*, and everything after it would be outside
+/// the isolate again. The walk tracks that: a PDI that would close this
+/// function's isolate is emitted and a fresh one is opened behind it, and every
+/// isolate still open at the end is closed. Well-formed text of any language
+/// contains no unmatched PDI — it is ill-formed by UAX #9's own definition — so
+/// for honest content this is exactly `FSI` + the value, byte for byte + `PDI`,
+/// and nothing is added, removed or rewritten.
+fn isolate(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len() + 2);
+    out.push('\u{2068}');
+    // Isolates the **value** left open. This function's own is not counted: the
+    // re-opening below closes one and opens one, so exactly one of ours is open
+    // at every point, and the tail below closes it along with each of theirs.
+    let mut theirs = 0_usize;
+    for c in raw.chars() {
+        match c {
+            '\u{2066}' | '\u{2067}' | '\u{2068}' => {
+                theirs += 1;
+                out.push(c);
+            }
+            '\u{2069}' if theirs > 0 => {
+                theirs -= 1;
+                out.push(c);
+            }
+            // The value is closing an isolate it never opened, which is this
+            // one. It keeps its character; the text behind it is re-isolated so
+            // that it is still inside something when the suffix arrives.
+            '\u{2069}' => {
+                out.push(c);
+                out.push('\u{2068}');
+            }
+            _ => out.push(c),
+        }
+    }
+    for _ in 0..=theirs {
+        out.push('\u{2069}');
     }
     out
 }
@@ -932,7 +1015,7 @@ fn unreadable(nav: &Nav) -> Response {
     // would tell such a reader something untrue about what happened.
     let named = nav.label.as_ref().map_or_else(
         || "<p>This OKF bundle could not be read.</p>".to_owned(),
-        |label| format!("<p>OKF bundle {} could not be read.</p>", escape(label)),
+        |label| format!("<p>OKF bundle {} could not be read.</p>", bdi(label)),
     );
     (
         StatusCode::NOT_FOUND,
@@ -973,7 +1056,7 @@ async fn index(State(v): State<Viewer>) -> Response {
             body,
             "<li><a href=\"{base}/c/{}\">{}</a></li>",
             escape(&c.id),
-            escape(&c.title)
+            bdi(&c.title)
         );
     }
     body.push_str("</ol></aside><article>");
@@ -992,7 +1075,7 @@ async fn index(State(v): State<Viewer>) -> Response {
         view.broken_links,
         view.okf_version
             .as_deref()
-            .map_or_else(|| "not declared".to_owned(), escape),
+            .map_or_else(|| "not declared".to_owned(), bdi),
     );
 
     if !view.flagged.is_empty() {
@@ -1008,7 +1091,7 @@ async fn index(State(v): State<Viewer>) -> Response {
                 body,
                 "<li><a href=\"{base}/c/{}\">{}</a> — {} ({})</li>",
                 escape(&f.id),
-                escape(&f.id),
+                bdi(&f.id),
                 escape(&f.verdict),
                 f.classes
                     .iter()
@@ -1031,10 +1114,10 @@ async fn index(State(v): State<Viewer>) -> Response {
             body,
             "<tr><td><a href=\"{base}/c/{}\">{}</a></td><td>{}</td><td>{}</td><td{status_class}>{}</td></tr>",
             escape(&c.id),
-            escape(&c.title),
-            c.kind.as_deref().map_or_else(String::new, escape),
+            bdi(&c.title),
+            c.kind.as_deref().map_or_else(String::new, bdi),
             pill(c.trust, c.trust),
-            escape(&c.status),
+            bdi(&c.status),
         );
     }
     body.push_str("</table></article>");
@@ -1066,7 +1149,7 @@ async fn concept(State(v): State<Viewer>, UrlPath(id): UrlPath<String>) -> Respo
             Html(format!(
                 "<p>The bundle contains no concept <code>{}</code>. \
                  <a href=\"{}\">Back to the bundle</a>.</p>",
-                escape(&id),
+                bdi(&id),
                 index_href(base)
             )),
         )
@@ -1087,16 +1170,27 @@ async fn concept(State(v): State<Viewer>, UrlPath(id): UrlPath<String>) -> Respo
                 .join(", ")
         );
     }
+    // The rendered body is a **block** container of its own, with `dir="auto"`.
+    //
+    // Not `<bdi>`: the body is block content and `<bdi>` is phrasing, so it is
+    // the wrong element — and it does not need it, because a block box already
+    // ends a bidirectional paragraph and nothing the document opens can reach
+    // the `<p class="scope">` after it. What the wrapper adds is the *honest*
+    // direction: without it a document written in Arabic was laid out as a
+    // left-to-right paragraph, so its punctuation landed at the wrong end and it
+    // was aligned against the wrong margin. That is legitimate content rendering
+    // wrongly, which is the same defect as a hostile one rendering at all.
     let _ = write!(
         body,
-        "<h1>{}</h1><p class=\"meta\">{}{}{}<code>{}</code></p>{}",
-        escape(&c.title),
+        "<h1>{}</h1><p class=\"meta\">{}{}{}<code>{}</code></p>\
+         <div class=\"doc\" dir=\"auto\">{}</div>",
+        bdi(&c.title),
         pill(c.trust, c.trust),
         c.kind
             .as_deref()
-            .map_or_else(String::new, |k| format!("<span>{}</span>", escape(k))),
-        format_args!("<span>{}</span>", escape(&c.status)),
-        escape(&c.path),
+            .map_or_else(String::new, |k| format!("<span>{}</span>", bdi(k))),
+        format_args!("<span>{}</span>", bdi(&c.status)),
+        bdi(&c.path),
         c.body_html,
     );
 
@@ -1118,7 +1212,7 @@ async fn concept(State(v): State<Viewer>, UrlPath(id): UrlPath<String>) -> Respo
                     body,
                     "<li><a href=\"{base}/c/{}\">{}</a></li>",
                     escape(&l.target),
-                    escape(&l.target)
+                    bdi(&l.target)
                 );
             } else {
                 // §6 tells a consumer to tolerate a link whose target is not
@@ -1126,7 +1220,7 @@ async fn concept(State(v): State<Viewer>, UrlPath(id): UrlPath<String>) -> Respo
                 let _ = write!(
                     body,
                     "<li class=\"absent\">{} — not in this bundle</li>",
-                    escape(&l.target)
+                    bdi(&l.target)
                 );
             }
         }
@@ -1139,7 +1233,7 @@ async fn concept(State(v): State<Viewer>, UrlPath(id): UrlPath<String>) -> Respo
                 body,
                 "<li><a href=\"{base}/c/{}\">{}</a></li>",
                 escape(b),
-                escape(b)
+                bdi(b)
             );
         }
         body.push_str("</ul>");
@@ -1224,6 +1318,19 @@ async fn graph_page(State(v): State<Viewer>, Query(q): Query<GraphQuery>) -> Res
     // most of the way to being braces, and every one of them would have to be
     // doubled to survive a format string.
     //
+    // The scope line is built as **nodes**, not by concatenating a string: the
+    // focus id is the bundle's, and `textContent` is where a directional
+    // override would reorder the sentence around it. A `<bdi>` element carries
+    // it instead — the same answer as the rendered pages, reached through the
+    // DOM because this text is assembled in the browser. `appendChild`, not
+    // `textContent +=`, for the "most this page draws" tail as well: `+=` reads
+    // the element back as a flat string and would dissolve the `<bdi>` it had
+    // just been given.
+    //
+    // Node **labels** are not wrapped, and do not need to be: cytoscape draws
+    // each one with its own canvas text call, so a label's directional state
+    // ends with the label and cannot reach another node's.
+    //
     // `concentric`, not `cose`. A neighbourhood has a centre, so the layout that
     // draws one is the one that says what the picture means — and it is linear
     // where a force-directed layout is quadratic per tick, which is what made
@@ -1251,13 +1358,16 @@ async fn graph_page(State(v): State<Viewer>, Query(q): Query<GraphQuery>) -> Res
         var g=res.g,s=g.scope;\
         n.textContent='Showing '+s.shown_nodes+' of '+s.total_nodes+\
         ' concepts and '+s.shown_edges+' of '+s.total_edges+' links, '+\
-        s.depth+(s.depth==1?' hop':' hops')+' from '+s.focus+\
-        (s.beyond?'. '+s.beyond+' more connected concepts are not drawn.':'.');\
+        s.depth+(s.depth==1?' hop':' hops')+' from ';\
+        var fb=document.createElement('bdi');fb.textContent=s.focus;\
+        n.appendChild(fb);n.appendChild(document.createTextNode(\
+        (s.beyond?'. '+s.beyond+' more connected concepts are not drawn.':'.')));\
         if(s.beyond&&{CAN_EXPAND}){var a=document.createElement('a');\
         a.href='{BASE}/graph?focus='+encodeURIComponent(s.focus)+\
         '&depth={NEXT_DEPTH}&limit={NEXT_LIMIT}';\
         a.textContent=' Show more.';n.appendChild(a);}\
-        else if(s.beyond){n.textContent+=' This is the most this page draws.';}\
+        else if(s.beyond){n.appendChild(document.createTextNode(\
+        ' This is the most this page draws.'));}\
         var cy=cytoscape({container:document.getElementById('graph'),\
         elements:[...g.nodes.map(n=>({data:{id:n.id,label:n.label,trust:n.trust,\
         focus:n.id===s.focus?'yes':'no'}})),\
@@ -1370,7 +1480,7 @@ async fn graph_entry(v: &Viewer) -> Response {
             "<li><a href=\"{base}/graph?focus={}\">{}</a> \
              <span class=\"deg\">{} connected</span></li>",
             urlencode(&hub.id),
-            escape(&hub.label),
+            bdi(&hub.label),
             hub.degree
         );
     }
@@ -2110,7 +2220,7 @@ mod tests {
         // are interchangeable at the type level. They were in fact swapped once
         // (#785 review): the page named the mount path as the missing concept and
         // linked to the concept id, and "no concept" alone could not see it.
-        assert!(body.contains("<code>metrics/nope</code>"), "{body}");
+        assert!(body.contains("<code><bdi>metrics/nope</bdi></code>"), "{body}");
         assert!(body.contains("<a href=\"/\">Back to the bundle"), "{body}");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2776,7 +2886,7 @@ mod tests {
              <span class=\"p-sep\">▸</span>\
              <a class=\"p-crumb-link\" href=\"/okf\">OKF</a>\
              <span class=\"p-sep\">▸</span>\
-             <span class=\"p-crumb-current\">Acme/widgets</span></nav>\
+             <span class=\"p-crumb-current\"><bdi>Acme/widgets</bdi></span></nav>\
              <nav class=\"here\" aria-label=\"This bundle\">\
              <a href=\"/okf/one\">Concepts</a>\
              <a href=\"/okf/one/graph\">Graph</a></nav></header>"
@@ -2812,7 +2922,7 @@ mod tests {
              <span class=\"p-sep\">▸</span>\
              <span class=\"p-crumb-step\">OKF</span>\
              <span class=\"p-sep\">▸</span>\
-             <span class=\"p-crumb-current\">Acme/widgets</span></nav>\
+             <span class=\"p-crumb-current\"><bdi>Acme/widgets</bdi></span></nav>\
              <nav class=\"here\" aria-label=\"This bundle\">\
              <a href=\"/okf/only\">Concepts</a>\
              <a href=\"/okf/only/graph\">Graph</a></nav></header>"
@@ -2840,7 +2950,7 @@ mod tests {
         assert_eq!(
             header_of(&body),
             "<header><span class=\"name\">OKF viewer</span>\
-             <span class=\"root\">okf</span>\
+             <span class=\"root\"><bdi>okf</bdi></span>\
              <nav class=\"here\" aria-label=\"This bundle\">\
              <a href=\"/okf/bare\">Concepts</a>\
              <a href=\"/okf/bare/graph\">Graph</a></nav></header>"
@@ -2863,7 +2973,7 @@ mod tests {
         assert_eq!(
             header_of(&body),
             "<header><span class=\"name\">OKF viewer</span>\
-             <span class=\"root\">alpha</span>\
+             <span class=\"root\"><bdi>alpha</bdi></span>\
              <nav class=\"up\" aria-label=\"Bundle chooser\">\
              <a href=\"/okf\">All bundles</a></nav>\
              <nav class=\"here\" aria-label=\"This bundle\">\
@@ -2893,7 +3003,7 @@ mod tests {
         let (_, body, _) = get_mounted(&app, "/okf/folded-slug").await;
         let head = header_of(&body);
         assert!(
-            head.contains("<span class=\"p-crumb-current\">Ops/&lt;b&gt;alpha&lt;/b&gt;</span>"),
+            head.contains("<span class=\"p-crumb-current\"><bdi>Ops/&lt;b&gt;alpha&lt;/b&gt;</bdi></span>"),
             "{head}"
         );
         assert!(!head.contains("<b>alpha</b>"), "{head}");
@@ -3830,7 +3940,7 @@ mod tests {
         let app = host().merge(mounts_router("/okf", mounts, None));
         let (status, body, _) = get_mounted(&app, "/okf/one/c/metrics/nope").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
-        assert!(body.contains("<code>metrics/nope</code>"), "{body}");
+        assert!(body.contains("<code><bdi>metrics/nope</bdi></code>"), "{body}");
         let links = hrefs(&body);
         assert!(
             links.iter().any(|h| h == "/okf/one"),
@@ -3921,6 +4031,320 @@ mod tests {
         assert!(
             std::panic::catch_unwind(|| mounts_router(hostile, Vec::new(), None)).is_err(),
             "a mount layer was built on a hostile base"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+
+    // ---- direction -------------------------------------------------------
+    //
+    // What these guards state is **containment**, and deliberately not a list of
+    // characters: a bundle's bytes may say anything they like about their own
+    // direction and nothing at all about anybody else's. One probe is enough to
+    // demonstrate it, because `<bdi>` isolates by structure rather than by
+    // inspecting what it holds — a second probe would only re-exercise the same
+    // element boundary with a different codepoint.
+
+    /// A directional control, used **only** as a probe.
+    const PROBE: char = '\u{202E}';
+
+    /// Every bundle-controlled string this module can reach, all carrying it.
+    ///
+    /// Poisoning one field would leave the other sinks untested while the guard
+    /// still passed, which is the shape of guard this repository keeps finding.
+    fn hostile_bundle() -> PathBuf {
+        let index = format!("---\nokf_version: \"0.2{PROBE}\"\n---\n\n# Bundle\n");
+        let concept = format!(
+            "---\ntype: \"Metric{PROBE}\"\ntitle: \"Revenue{PROBE}\"\nstatus: \"stable{PROBE}\"\n---\n\n# doc\n\nBody text {PROBE} here.\n\n[gone](/c/missing{PROBE}.md)\n"
+        );
+        fixture(
+            "bidi-hostile",
+            &[("index.md", &index), ("c/hostile.md", &concept)],
+        )
+    }
+
+    /// `(inner, rest)` — the `<title>`'s text, and the page without it.
+    fn split_title(html: &str) -> (String, String) {
+        match html.split_once("<title>") {
+            Some((head, tail)) => {
+                let (inner, tail) = tail.split_once("</title>").expect("a closed <title>");
+                (inner.to_owned(), format!("{head}{tail}"))
+            }
+            None => (String::new(), html.to_owned()),
+        }
+    }
+
+    /// `(inner, rest)` — the rendered document, and the page without it.
+    ///
+    /// Accepted as isolating on its own: it is a block box, which ends a
+    /// bidirectional paragraph, and `dir="auto"` gives it the document's own
+    /// direction rather than the shell's.
+    fn split_doc(html: &str) -> (String, String) {
+        const OPEN: &str = "<div class=\"doc\" dir=\"auto\">";
+        match html.split_once(OPEN) {
+            Some((head, tail)) => {
+                let (inner, tail) = tail.split_once("</div>").expect("a closed document body");
+                assert!(
+                    !inner.contains("<div"),
+                    "a nested <div> means the first `</div>` is not the wrapper's, so this \
+                     split is lying about what it removed: {inner}"
+                );
+                (inner.to_owned(), format!("{head}{tail}"))
+            }
+            None => (String::new(), html.to_owned()),
+        }
+    }
+
+    /// The page with every `<bdi>`'s contents removed — what is *not* isolated.
+    fn outside_bdi(html: &str) -> String {
+        let mut out = String::new();
+        let mut rest = html;
+        while let Some((head, tail)) = rest.split_once("<bdi>") {
+            out.push_str(head);
+            let (inner, tail) = tail.split_once("</bdi>").expect("a closed <bdi>");
+            assert!(
+                !inner.contains("<bdi>"),
+                "nested isolation means the first `</bdi>` is not this one's: {inner}"
+            );
+            rest = tail;
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// Isolate depth over a run of text: the lowest depth any ordinary character
+    /// sits at, and what is still open when it ends.
+    fn isolate_depth(text: &str) -> (i32, i32) {
+        let mut depth = 0_i32;
+        let mut floor = i32::MAX;
+        for c in text.chars() {
+            match c {
+                '\u{2066}' | '\u{2067}' | '\u{2068}' => depth += 1,
+                '\u{2069}' => depth -= 1,
+                _ => floor = floor.min(depth),
+            }
+        }
+        (floor, depth)
+    }
+
+    /// A hostile field cannot reach past its own element, on any page it reaches.
+    ///
+    /// This is the containment half of #874. It asserts the *markup*: that no
+    /// bundle-controlled character is interpolated where the line around it
+    /// could be reordered by it. It cannot assert what a browser then draws —
+    /// see `the_stylesheet_does_not_undo_the_isolation` for the one edit in this
+    /// repository that could make correct markup render wrongly anyway.
+    #[tokio::test]
+    async fn a_directional_override_is_contained_by_the_field_that_carries_it() {
+        let root = hostile_bundle();
+        for uri in [
+            "/",
+            "/c/c/hostile",
+            "/c/%E2%80%AEnope",
+            "/graph",
+            // `/graph?focus=…` is deliberately absent: that page is the inline
+            // script and nothing else, and the concept it names arrives as JSON
+            // at request time. Its isolation is asserted by
+            // `the_graph_scope_line_isolates_the_concept_it_names`, and asking
+            // for the probe here would only fail for want of one.
+        ] {
+            let (_, body) = get_(&root, "", uri).await;
+            assert!(
+                body.contains(PROBE),
+                "{uri}: no bundle text carrying the probe reached this page, so nothing here \
+                 was tested — the fixture, not the page, is what failed"
+            );
+            let (title, rest) = split_title(&body);
+            let (_doc, rest) = split_doc(&rest);
+            let outside = outside_bdi(&rest);
+            assert!(
+                !outside.contains(PROBE),
+                "{uri}: bundle text is written into markup with nothing isolating it, so it \
+                 can reorder the text beside it:\n{outside}"
+            );
+            if title.contains(PROBE) {
+                // A `<title>` has no markup, so its isolation is the isolate
+                // pair — and the constant tail has to be left outside it.
+                let value = title
+                    .strip_suffix(" — OKF viewer")
+                    .expect("the title's constant tail");
+                let (floor, open) = isolate_depth(value);
+                assert!(floor >= 1, "part of the title is outside every isolate: {value:?}");
+                assert_eq!(open, 0, "the title leaves an isolate open over its tail: {value:?}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The same containment where the label is the **mount's**, not a concept's.
+    ///
+    /// `header_for` is the surface #874 names: the breadcrumb and the banner
+    /// saying the content is a stranger's are the text worth reversing, and they
+    /// are the one part of the page a concept never touches.
+    #[tokio::test]
+    async fn a_hostile_mount_label_cannot_reorder_the_breadcrumb() {
+        let root = named_bundle("bidi-label", "Revenue");
+        let app = host().merge(mounts_router(
+            "/okf",
+            vec![
+                labelled("a", &format!("Alpha{PROBE}"), root.clone()),
+                labelled("b", "Beta", named_bundle("bidi-label-b", "Cost")),
+            ],
+            Some("/".to_owned()),
+        ));
+        for uri in ["/okf", "/okf/a"] {
+            let (_, body, _) = get_mounted(&app, uri).await;
+            assert!(body.contains(PROBE), "{uri}: the label never reached the page");
+            let (_, rest) = split_title(&body);
+            let (_, rest) = split_doc(&rest);
+            assert!(
+                !outside_bdi(&rest).contains(PROBE),
+                "{uri}: the mount's label is written into the header unisolated:\n{body}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Legitimate right-to-left content survives, and renders as what it is.
+    ///
+    /// The other half, and the one an escaper fails: the fix has to leave an
+    /// Arabic title **byte for byte** and give it its own direction, or it has
+    /// refused honest content along a demographic line to stop a hostile one.
+    #[tokio::test]
+    async fn right_to_left_content_survives_byte_for_byte_and_renders_as_itself() {
+        const ARABIC: &str = "مؤشر الإيرادات";
+        const HEBREW: &str = "מדד הכנסות";
+        // Decomposed on purpose: the accents are separate codepoints, which a
+        // normaliser would recompose and an escaper would spell out.
+        const NFD: &str = "Zoe\u{301} Garci\u{301}a";
+        const CJK: &str = "収益指標";
+        // Persian, carrying a **zero-width non-joiner**: the character is
+        // invisible and it is also orthography — `\u{200c}` is what keeps
+        // می from joining رود. A fix that reached for a list of
+        // invisible characters would delete it and spell the word wrong, which
+        // is the honest-content half of #874 in one string.
+        const PERSIAN: &str = "می\u{200C}رود";
+
+        let arabic = format!("---\ntype: Metric\ntitle: \"{ARABIC}\"\n---\n\n# {ARABIC}\n\nالإيرادات هي المقياس المركزي.\n");
+        let others = format!("---\ntype: Metric\ntitle: \"{HEBREW}\"\n---\n\n# {HEBREW}\n");
+        let latin = format!("---\ntype: Metric\ntitle: \"{NFD}\"\n---\n\n# {NFD}\n");
+        let cjk = format!("---\ntype: Metric\ntitle: \"{CJK}\"\n---\n\n# {CJK}\n");
+        let persian = format!("---\ntype: Metric\ntitle: \"{PERSIAN}\"\n---\n\n# {PERSIAN}\n");
+        let root = fixture(
+            "bidi-honest",
+            &[
+                ("index.md", "---\nokf_version: \"0.2\"\n---\n\n# Bundle\n"),
+                ("c/ar.md", &arabic),
+                ("c/he.md", &others),
+                ("c/nfd.md", &latin),
+                ("c/cjk.md", &cjk),
+                ("c/fa.md", &persian),
+            ],
+        );
+
+        let (_, page) = get_(&root, "", "/c/c/ar").await;
+        // Byte-faithful, isolated, and `<bdi>`'s implied `dir="auto"` is what
+        // makes it right-to-left rather than an LTR paragraph of RTL letters.
+        assert!(
+            page.contains(&format!("<h1><bdi>{ARABIC}</bdi></h1>")),
+            "the Arabic title is not carried through unchanged and isolated:\n{page}"
+        );
+        assert!(
+            page.contains(&format!("<title>\u{2068}{ARABIC}\u{2069} — OKF viewer</title>")),
+            "the tab title neither carries the value unchanged nor isolates it:\n{page}"
+        );
+        assert!(
+            page.contains("<div class=\"doc\" dir=\"auto\">"),
+            "the rendered document takes its direction from the shell rather than from \
+             itself, so an Arabic body is laid out left-to-right:\n{page}"
+        );
+        assert!(
+            page.contains("الإيرادات هي المقياس المركزي."),
+            "the Arabic body is not in the page as written:\n{page}"
+        );
+
+        let (_, index) = get_(&root, "", "/").await;
+        for honest in [ARABIC, HEBREW, NFD, CJK, PERSIAN] {
+            assert!(
+                index.contains(&format!("<bdi>{honest}</bdi>")),
+                "{honest:?} was rewritten or left unisolated on its way into the list:\n{index}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The one sink that has no markup, exercised directly.
+    #[test]
+    fn the_title_isolate_holds_whatever_the_value_holds() {
+        for honest in ["Revenue", "مؤשר", "収益指標", "Zoe\u{301}", ""] {
+            assert_eq!(
+                isolate(honest),
+                format!("\u{2068}{honest}\u{2069}"),
+                "an honest value was rewritten on its way into the title"
+            );
+        }
+        for hostile in [
+            "a\u{202E}b",
+            "a\u{2069}b",
+            "\u{2069}\u{2069}\u{202E}tail",
+            "\u{2066}a",
+            "\u{2068}x\u{2069}\u{2069}y",
+        ] {
+            let out = isolate(hostile);
+            let (floor, open) = isolate_depth(&out);
+            assert!(floor >= 1, "{hostile:?} leaves text outside every isolate: {out:?}");
+            assert_eq!(open, 0, "{hostile:?} leaves an isolate open past its own end: {out:?}");
+            let kept: String = out.chars().filter(|c| !matches!(c, '\u{2066}'..='\u{2069}')).collect();
+            let given: String = hostile.chars().filter(|c| !matches!(c, '\u{2066}'..='\u{2069}')).collect();
+            assert_eq!(kept, given, "{hostile:?} lost or gained ordinary text: {out:?}");
+        }
+    }
+
+    /// Nothing in the stylesheet undoes what the markup asks for.
+    ///
+    /// **Vacuous today, and said so rather than dressed up**: the viewer's CSS
+    /// declares `unicode-bidi` nowhere, so there is nothing here to check. It is
+    /// a tripwire, because `bdi { unicode-bidi: normal }` is a one-line edit that
+    /// would leave every other guard in this module green and every page in it
+    /// reorderable again — the isolation is a user-agent default, and a
+    /// stylesheet can take it away.
+    #[test]
+    fn the_stylesheet_does_not_undo_the_isolation() {
+        for (at, _) in STYLE.match_indices("unicode-bidi") {
+            let tail = &STYLE[at + "unicode-bidi".len()..];
+            let value = tail
+                .trim_start()
+                .strip_prefix(':')
+                .map(|v| v.split([';', '}']).next().unwrap_or("").trim().to_owned())
+                .unwrap_or_default();
+            assert!(
+                matches!(value.as_str(), "isolate" | "isolate-override" | "plaintext"),
+                "the viewer's CSS sets `unicode-bidi: {value}`, which stops `<bdi>` isolating"
+            );
+        }
+    }
+
+    /// The graph page's scope line names a concept, so it builds it from nodes.
+    ///
+    /// A shape assertion, and worth saying so: it pins how the sentence is
+    /// assembled, not what a browser draws. The `textContent +=` clause is the
+    /// one that has already been wrong — it reads the element back as flat text
+    /// and would dissolve the `<bdi>` it had just been handed.
+    #[tokio::test]
+    async fn the_graph_scope_line_isolates_the_concept_it_names() {
+        let root = sample();
+        let (_, body) = get_(&root, "", "/graph?focus=metrics/revenue").await;
+        assert!(
+            body.contains("fb.textContent=s.focus;") && body.contains("n.appendChild(fb);"),
+            "the focus is not carried by an element of its own: {body}"
+        );
+        assert!(
+            !body.contains("+s.focus+"),
+            "the focus is concatenated into the sentence again: {body}"
+        );
+        assert!(
+            !body.contains("n.textContent+="),
+            "`textContent +=` flattens the scope line and dissolves the <bdi>: {body}"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
