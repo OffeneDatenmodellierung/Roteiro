@@ -18,10 +18,505 @@
 //!
 //! The last of those is the one that actually proves the generator. The others
 //! prove the two files are talking about the same release.
+//!
+//! # Two oracles, and which invariant belongs to which
+//!
+//! The `boxlite`/`boxlite-shared` pairing is held against
+//! **`crates/rto-exec/Cargo.toml`**, not against the lockfile. The break it
+//! exists for is `cargo install roteiro --features exec-boxlite`, which
+//! resolves the published manifest from scratch and consults no lockfile of
+//! ours, so the condition is a property of the declared *requirement*. A guard
+//! reading `Cargo.lock` watches the one axis that was never at risk.
+//!
+//! That manifest also travels with the package, so the requirement guard runs
+//! unchanged in a published crate. The lockfile guards cannot: this file ships
+//! inside `rto-exec-<version>.crate`, where there is no workspace above it.
+//! They say so out loud rather than failing in a tree that is not ours.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// This repository's path, as it appears in a clone's remote URL — the one
+/// signal a vendored copy cannot present, because a consumer's remote is their
+/// own. Used only to decide whether the checkout assertions may speak.
+const REPOSITORY_PATH: &str = "OffeneDatenmodellierung/Roteiro";
+
+/// The workspace manifest's **own** `repository =` line, matched whole.
+///
+/// Searched-for rather than matched whole is the defect #831 fixed in the
+/// corpus guards, and it is the reason `[workspace]` alone is not the marker: a
+/// consumer that depends on Roteiro by git URL carries that URL in their
+/// manifest too, and a crate vendored two levels under their root would then be
+/// called *our* checkout. The guards below would read *their* `Cargo.lock`,
+/// find no `boxlite` in it, and fail their `cargo test` over a repository that
+/// is not theirs.
+const REPOSITORY_FIELD: &str =
+    "repository = \"https://github.com/OffeneDatenmodellierung/Roteiro\"";
+
+/// A skip that can be found in a log, written to **real** stderr.
+///
+/// `eprintln!` is captured by libtest and discarded for a test that *passes*,
+/// so a skip written with it is invisible without `--nocapture`: it reaches
+/// nobody on CI and reads exactly like a pass. `std::io::stderr()` writes to
+/// the file descriptor, which the capture does not intercept. Same reasoning
+/// and same fix as `crates/rto-graph/tests/review_corpus.rs`.
+fn loud_skip(test: &str, what_went_unchecked: &str) {
+    use std::io::Write;
+    let mut err = std::io::stderr().lock();
+    let _ = writeln!(
+        err,
+        "SKIP: {test} — this is a packaged crate, not a checkout of this \
+         repository, so there is no workspace lockfile to read. \
+         {what_went_unchecked} The requirement itself is still checked here: \
+         `the_manifest_pins_both_halves_of_the_generated_api_exactly` reads the \
+         manifest that ships in this package and does not skip."
+    );
+}
+
+/// The workspace root for a crate at `manifest_dir`, two levels above it.
+///
+/// Takes the directory rather than reading `CARGO_MANIFEST_DIR` itself so the
+/// packaged and vendored shapes can be laid out on disk and put through the
+/// same arithmetic — see
+/// [`the_workspace_marker_tells_a_packaged_crate_from_this_checkout`].
+fn workspace_root_of(manifest_dir: &Path) -> PathBuf {
+    manifest_dir
+        .ancestors()
+        .nth(2)
+        .expect("a crate directory has at least two ancestors")
+        .to_path_buf()
+}
+
+/// Where this crate's workspace root would be.
+fn workspace_root() -> PathBuf {
+    workspace_root_of(Path::new(env!("CARGO_MANIFEST_DIR")))
+}
+
+/// The workspace `Cargo.lock` under `root`, or `None` when `root` is not a
+/// checkout of **this** repository.
+///
+/// # Why this can be absent at all
+///
+/// `rto-exec` is published and a published crate ships its tests — this file is
+/// in `rto-exec-<version>.crate`. Unpacked, `CARGO_MANIFEST_DIR` is
+/// `…/registry/src/<index>/rto-exec-<version>`, two levels above which is the
+/// registry source directory: sibling crates, no workspace manifest, no
+/// workspace lockfile. The crate's own packaged `Cargo.lock` sits at its root
+/// and describes a different graph, so reading that instead would assert
+/// against the wrong thing rather than decline.
+///
+/// # Why the marker is the manifest and not the lockfile
+///
+/// **In a checkout, never skip.** A missing `Cargo.lock` inside a real checkout
+/// is a broken checkout and must fail, so absence of the *lockfile* may never
+/// be what authorises the skip. The workspace manifest is the thing a packaged
+/// crate genuinely cannot have, so it is what decides — and a checkout missing
+/// its lockfile then panics on the read, as it should. This returns a path that
+/// may not exist, deliberately.
+///
+/// Only `NotFound` means absent; every other IO error panics. A marker that
+/// read `false` on a permission error would turn "cannot read the repository"
+/// into "this is not a repository" and skip in silence, which is the failure
+/// these guards exist to prevent wearing the guard's own clothes.
+fn workspace_lockfile_at(root: &Path) -> Option<PathBuf> {
+    let manifest = root.join("Cargo.toml");
+    let ours = match std::fs::read_to_string(&manifest) {
+        Ok(text) => manifest_is_ours(&text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => panic!(
+            "cannot read {} ({:?}: {e}). Without it these guards cannot tell a packaged \
+             crate from a repository checkout, and guessing would make them skip in \
+             silence — which is the failure they exist to rule out.",
+            manifest.display(),
+            e.kind(),
+        ),
+    };
+    ours.then(|| root.join("Cargo.lock"))
+}
+
+/// The workspace lockfile for the crate these tests were compiled from.
+fn workspace_lockfile() -> Option<PathBuf> {
+    workspace_lockfile_at(&workspace_root())
+}
+
+/// Whether this manifest is **this repository's** workspace manifest.
+///
+/// Both conditions are whole-line matches, and the second is the one that does
+/// the work — see [`REPOSITORY_FIELD`].
+fn manifest_is_ours(text: &str) -> bool {
+    text.lines().any(|line| line.trim() == "[workspace]")
+        && text.lines().any(|line| line.trim() == REPOSITORY_FIELD)
+}
+
+/// Whether the tree at `workspace_root()` was cloned from this repository.
+///
+/// Independent of the marker being held: not the manifest (a vendored crate
+/// sits under a consumer's) and not the layout (this file ships in the
+/// package). A fork reports its own path and so declines to assert, which is
+/// the right way for a guard to fail.
+fn cloned_from_this_repository() -> bool {
+    Command::new("git")
+        .arg("-C")
+        .arg(workspace_root())
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .is_ok_and(|o| {
+            o.status.success() && String::from_utf8_lossy(&o.stdout).contains(REPOSITORY_PATH)
+        })
+}
+
+/// The exact (`=`) version a manifest requires for `name`.
+///
+/// `None` covers every way the requirement stops being an exact pin — a caret,
+/// a range, or the entry deleted outright — because the caller treats them the
+/// same: each one frees a fresh resolution to float one half of a
+/// prost-generated API away from the other.
+///
+/// # Both manifest shapes, because the guard runs in both
+///
+/// `cargo package` **normalizes** the manifest it ships: the inline
+/// `boxlite = { version = "=0.10.2", optional = true }` written in
+/// `crates/rto-exec/Cargo.toml` is published as a `[dependencies.boxlite]`
+/// table with `version = "=0.10.2"` on a line of its own. A parser that read
+/// only one form would be the oracle in a checkout and blind in a package —
+/// the same shape of hole this guard exists to close. Both are read, and
+/// [`the_requirement_rule_reads_both_manifest_shapes`] holds the rule against
+/// a literal of each.
+///
+/// Only `[dependencies]` counts: a `[dev-dependencies]` entry of the same name
+/// pins nothing that ships. Comment lines are skipped, because this manifest's
+/// own prose quotes `boxlite-shared = "0.10.0"` while explaining the pin.
+fn exact_requirement(manifest: &str, name: &str) -> Option<String> {
+    let inline_key = format!("{name} = ");
+    let table_header = format!("[dependencies.{name}]");
+    let mut section = "";
+    for line in manifest.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') {
+            section = line;
+            continue;
+        }
+        let found = if section == table_header.as_str() {
+            quoted_after(line, "version = ")
+        } else if section == "[dependencies]" {
+            line.strip_prefix(inline_key.as_str())
+                .and_then(declared_requirement)
+        } else {
+            None
+        };
+        if let Some(requirement) = found {
+            return exact_version(&requirement);
+        }
+    }
+    None
+}
+
+/// The requirement on a dependency line's right-hand side: a bare string
+/// (`"=0.10.2"`) or an inline table carrying a `version` key.
+fn declared_requirement(rest: &str) -> Option<String> {
+    let rest = rest.trim_start();
+    if rest.starts_with('{') {
+        quoted_after(rest, "version = ")
+    } else {
+        quoted(rest)
+    }
+}
+
+/// The first `"…"` literal following `key`.
+fn quoted_after(text: &str, key: &str) -> Option<String> {
+    quoted(text.split_once(key)?.1)
+}
+
+/// The contents of the `"…"` literal `text` begins with.
+fn quoted(text: &str) -> Option<String> {
+    let rest = text.trim_start().strip_prefix('"')?;
+    rest.split_once('"').map(|(value, _)| value.to_owned())
+}
+
+/// A requirement that pins exactly one release, as that release.
+///
+/// `=0.10.2` is the only accepted form. `0.10.2` is a caret in cargo's grammar
+/// and floats the patch; `>=0.10.2, <0.11` names a range; `*` names anything.
+/// Each of those is `None`, because none of them holds the two halves of the
+/// API together.
+fn exact_version(requirement: &str) -> Option<String> {
+    let version = requirement.strip_prefix('=')?.trim();
+    let bare = !version.is_empty()
+        && version
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'+');
+    bare.then(|| version.to_owned())
+}
+
+/// **The manifest pins both halves of the generated API, exactly and alike.**
+///
+/// # Why the lockfile cannot be the oracle for this
+///
+/// The defect is `cargo install roteiro --features exec-boxlite`, and that path
+/// resolves the published manifest from scratch — it consults **no lockfile of
+/// ours**. So the condition that broke 6.0.1 is a property of the declared
+/// requirement, and a guard whose oracle is the committed lockfile is measuring
+/// the one axis that was never at risk.
+///
+/// That is measured rather than argued. Relaxing `=0.10.2` to `0.10.2` in
+/// `crates/rto-exec/Cargo.toml` leaves the committed lockfile byte-identical,
+/// leaves `cargo check --locked` green, and left every lockfile-reading guard
+/// in this file passing — while an unlocked install floats the sibling and
+/// fails to compile exactly as it did on 6.0.1.
+///
+/// # Why it is also the guard that survives packaging
+///
+/// `CARGO_MANIFEST_DIR/Cargo.toml` is present in **both** shapes this file runs
+/// in, and `cargo package` preserves the `=` requirement into it. So this
+/// assertion never skips, and the invariant is held here rather than in the
+/// lockfile guards below, which can only run in a checkout.
+#[test]
+fn the_manifest_pins_both_halves_of_the_generated_api_exactly() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    let manifest = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+
+    let parent = exact_requirement(&manifest, "boxlite");
+    let sibling = exact_requirement(&manifest, "boxlite-shared");
+
+    assert!(
+        parent.is_some(),
+        "{} no longer requires `boxlite` with an exact `=` version. A caret there lets a \
+         fresh resolution pick a release these runtime pins do not describe, and no \
+         lockfile of ours is consulted by `cargo install`.",
+        path.display()
+    );
+    assert!(
+        sibling.is_some(),
+        "{} no longer requires `boxlite-shared` with an exact `=` version — the entry is \
+         either gone, deleted as an unused dependency, or relaxed to a range. It is a pin, \
+         not a use, and it is load-bearing: `boxlite` requires its sibling with a caret, so \
+         without this an unlocked resolution floats one half of a prost-generated API away \
+         from the other. That is how `cargo install roteiro --features exec-boxlite` broke \
+         on 6.0.1. See the manifest comment and ADR-0014 v1.9.",
+        path.display()
+    );
+    assert_eq!(
+        parent,
+        sibling,
+        "{} pins boxlite {parent:?} and boxlite-shared {sibling:?}. They are two halves of \
+         one prost-generated API released in lockstep, and upstream ships required fields \
+         on public structs in patch releases, so any skew between them is a compile error \
+         waiting for the next one. Keep the two versions equal.",
+        path.display()
+    );
+    assert_eq!(
+        parent.as_deref(),
+        Some(rto_exec::RUNTIME_VERSION),
+        "{} pins boxlite {parent:?}, but the sandbox-runtime pins in \
+         crates/rto-exec/src/runtime_pins.rs are for {}. Bumping one without the other \
+         pairs a library with a shim and guest from a different release, which the digests \
+         cannot tell apart because they are provisioned from the same file they are checked \
+         against. Re-run scripts/derive-runtime-file-pins.py.",
+        path.display(),
+        rto_exec::RUNTIME_VERSION
+    );
+}
+
+/// **The requirement rule, against a literal of each manifest shape.**
+///
+/// The live assertion above cannot catch a rule that reads only one shape: in a
+/// checkout it would pass on the inline form and never reveal that it is blind
+/// to the published one, and the failure would land only on somebody who
+/// packages us. These literals are the two shapes, written out, plus the forms
+/// that must read as "not a pin".
+#[test]
+fn the_requirement_rule_reads_both_manifest_shapes() {
+    // What is written in crates/rto-exec/Cargo.toml — comment prose included,
+    // because that prose quotes a caret requirement while explaining the pin.
+    let checkout = "[dependencies]\n\
+                    # 0.10.0 asks for `boxlite-shared = \"0.10.0\"`, and 0.10.2 for \"0.10.2\".\n\
+                    boxlite = { version = \"=0.10.2\", optional = true }\n\
+                    boxlite-shared = { version = \"=0.10.2\", optional = true }\n";
+    assert_eq!(
+        exact_requirement(checkout, "boxlite").as_deref(),
+        Some("0.10.2"),
+        "the inline form is what this repository writes"
+    );
+    assert_eq!(
+        exact_requirement(checkout, "boxlite-shared").as_deref(),
+        Some("0.10.2"),
+        "a hyphenated name must not be confused with its prefix, in either direction"
+    );
+
+    // What `cargo package` ships: cargo normalizes every dependency into its own
+    // table. Verified against an actual `cargo package` output, not assumed.
+    let packaged = "[dependencies.boxlite]\n\
+                    version = \"=0.10.2\"\n\
+                    optional = true\n\
+                    \n\
+                    [dependencies.boxlite-shared]\n\
+                    version = \"=0.10.2\"\n\
+                    optional = true\n";
+    assert_eq!(
+        exact_requirement(packaged, "boxlite").as_deref(),
+        Some("0.10.2"),
+        "the published manifest's table form must read too, or this guard is blind in \
+         exactly the tree it was rewritten to serve"
+    );
+    assert_eq!(
+        exact_requirement(packaged, "boxlite-shared").as_deref(),
+        Some("0.10.2")
+    );
+
+    // The injection this guard exists to fail, in both shapes.
+    assert_eq!(
+        exact_requirement(
+            "[dependencies]\nboxlite = { version = \"0.10.2\" }\n",
+            "boxlite"
+        ),
+        None,
+        "a bare requirement is a caret in cargo's grammar and floats the patch"
+    );
+    assert_eq!(
+        exact_requirement("[dependencies.boxlite]\nversion = \"0.10.2\"\n", "boxlite"),
+        None,
+        "and the same relaxation in the published form must read the same way"
+    );
+    assert_eq!(
+        exact_requirement(
+            "[dependencies]\nboxlite = { version = \">=0.10.2, <0.11\" }\n",
+            "boxlite"
+        ),
+        None,
+        "a range is not a pin either"
+    );
+
+    // Deleted outright, and declared somewhere that pins nothing which ships.
+    assert_eq!(
+        exact_requirement("[dependencies]\nserde = \"1\"\n", "boxlite"),
+        None,
+        "a missing entry must read as absent rather than as satisfied"
+    );
+    assert_eq!(
+        exact_requirement(
+            "[dev-dependencies]\nboxlite = { version = \"=0.10.2\" }\n",
+            "boxlite"
+        ),
+        None,
+        "a dev-dependency pins nothing an installer resolves"
+    );
+    assert_eq!(
+        exact_requirement(
+            "[dependencies]\nboxlite-shared = { version = \"=0.10.2\" }\n",
+            "boxlite"
+        ),
+        None,
+        "asking for `boxlite` must not be answered by `boxlite-shared`'s line"
+    );
+}
+
+/// **The lockfile skip fires in a package and cannot fire in a checkout.**
+///
+/// A skip that never skips and a skip that always skips both look green from
+/// here, so both directions are laid out on disk and put through the same
+/// ancestor arithmetic the guards use. The vendored shape is the one #831
+/// settled and is why `[workspace]` alone is not the marker: a consumer's root
+/// says `[workspace]` too, and calling it ours would run these guards against
+/// their lockfile and fail their `cargo test`.
+#[test]
+fn the_workspace_marker_tells_a_packaged_crate_from_this_checkout() {
+    let scratch = Path::new(env!("CARGO_TARGET_TMPDIR")).join("pin-guard-shapes");
+    let _ = std::fs::remove_dir_all(&scratch);
+
+    // The published shape: …/registry/src/<index>/rto-exec-<version>, whose
+    // grandparent is the registry source directory and has no manifest at all.
+    let packaged = scratch
+        .join("registry")
+        .join("src")
+        .join("index.crates.io-1949cf8c6b5b557f")
+        .join(format!("rto-exec-{}", env!("CARGO_PKG_VERSION")));
+    std::fs::create_dir_all(&packaged).expect("the target tmp dir should be writable");
+    std::fs::write(
+        packaged.join("Cargo.toml"),
+        "[package]\nname = \"rto-exec\"\n",
+    )
+    .expect("write the packaged manifest");
+    std::fs::write(
+        packaged.join("Cargo.lock"),
+        "# the package's own, not ours\n",
+    )
+    .expect("write the packaged lockfile");
+    assert_eq!(
+        workspace_lockfile_at(&workspace_root_of(&packaged)),
+        None,
+        "an unpacked crate has no workspace above it, so the lockfile guards must decline \
+         rather than read a path that is not there — and must not fall back to the \
+         package's own lockfile, which describes a different graph"
+    );
+
+    // The vendored shape: our crate two levels under somebody else's workspace,
+    // whose manifest depends on Roteiro by git URL. This is #831's case.
+    let consumer = scratch.join("consumer");
+    let vendored = consumer.join("vendor").join("rto-exec");
+    std::fs::create_dir_all(&vendored).expect("create the vendored layout");
+    std::fs::write(
+        consumer.join("Cargo.toml"),
+        format!(
+            "[workspace]\nmembers = [\"app\"]\n\n[workspace.package]\n\
+             repository = \"https://github.com/someone/their-app\"\n\n\
+             [dependencies]\nroteiro = {{ git = \"{}\" }}\n",
+            REPOSITORY_FIELD
+                .trim_start_matches("repository = ")
+                .trim_matches('"')
+        ),
+    )
+    .expect("write the consumer manifest");
+    std::fs::write(consumer.join("Cargo.lock"), "# theirs\n").expect("write their lockfile");
+    assert_eq!(
+        workspace_lockfile_at(&workspace_root_of(&vendored)),
+        None,
+        "a workspace that DEPENDS on Roteiro is not Roteiro. Calling it ours would read \
+         their lockfile, find no boxlite in it, and fail their `cargo test` over a \
+         repository that is not theirs — which is the defect #831 fixed in the corpus \
+         guards, arriving here by the same route"
+    );
+
+    // And ours, synthesised rather than read, so the rule is held against the
+    // text and not against whatever happens to be on disk.
+    let ours = scratch.join("roteiro").join("crates").join("rto-exec");
+    std::fs::create_dir_all(&ours).expect("create our layout");
+    std::fs::write(
+        scratch.join("roteiro").join("Cargo.toml"),
+        format!(
+            "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.package]\n{REPOSITORY_FIELD}\n"
+        ),
+    )
+    .expect("write our manifest");
+    assert_eq!(
+        workspace_lockfile_at(&workspace_root_of(&ours)),
+        Some(scratch.join("roteiro").join("Cargo.lock")),
+        "our own workspace manifest must be recognised, or every run takes the packaged \
+         exemption and these guards skip in silence"
+    );
+
+    // The live tree, where two signals independent of the marker agree this is
+    // our checkout: the remote says so, and cargo compiled this file from a
+    // `crates/rto-exec` inside it. In a package this half is vacuous by
+    // construction, which is correct there and is said rather than hidden.
+    if cloned_from_this_repository() && Path::new(env!("CARGO_MANIFEST_DIR")).ends_with("rto-exec")
+    {
+        let live = workspace_lockfile()
+            .expect("a checkout of this repository is never the packaged shape");
+        assert!(
+            live.is_file(),
+            "{} is missing. In a checkout that is a broken checkout, not a reason to skip — \
+             the marker is the workspace manifest precisely so that this fails here",
+            live.display()
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&scratch);
+}
 
 /// Every pinned archive has extracted-file pins, and nothing has pins without an
 /// archive.
@@ -95,40 +590,27 @@ fn the_file_pins_were_derived_from_the_archives_that_are_pinned_now() {
 /// cargo passes a `links` dependency's metadata keys and not its version. This
 /// is the check the comment was describing.
 ///
-/// # Why the lockfile
+/// # Why the lockfile, when the requirement guard reads the manifest
 ///
-/// It is what `--locked` builds resolve and what a dependency bump edits, so it
-/// is the version that will actually be compiled. Reading `Cargo.toml`'s
-/// requirement instead would assert against a range rather than a release.
+/// It is what `--locked` builds resolve, and it is what a dependency bump
+/// *edits*. So this is the half that catches a manifest moved on with a stale
+/// lockfile left behind — the one thing the requirement is silent about.
+/// [`the_manifest_pins_both_halves_of_the_generated_api_exactly`] holds the
+/// invariant itself, which is why this one may decline in a package.
 #[test]
 fn the_pins_are_for_the_boxlite_release_the_lockfile_resolves() {
-    let lockfile = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("rto-exec lives two directories below the workspace root")
-        .join("Cargo.lock");
+    let Some(lockfile) = workspace_lockfile() else {
+        loud_skip(
+            "the_pins_are_for_the_boxlite_release_the_lockfile_resolves",
+            "Whether the committed lockfile has been refreshed to the release the \
+             sandbox-runtime pins describe went unchecked.",
+        );
+        return;
+    };
     let source = std::fs::read_to_string(&lockfile)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", lockfile.display()));
 
-    // Every `[[package]]` block whose name is boxlite, by its version line. A
-    // scan rather than a TOML parse keeps this test free of a dependency for one
-    // field; the shape it assumes is asserted below rather than assumed, because
-    // finding nothing must fail loudly and not pass as "no skew found".
-    let versions: Vec<&str> = source
-        .split("[[package]]")
-        .filter_map(|block| {
-            let mut name = None;
-            let mut version = None;
-            for line in block.lines() {
-                if let Some(rest) = line.strip_prefix("name = \"") {
-                    name = rest.strip_suffix('"');
-                } else if let Some(rest) = line.strip_prefix("version = \"") {
-                    version = rest.strip_suffix('"');
-                }
-            }
-            (name == Some("boxlite")).then_some(version).flatten()
-        })
-        .collect();
+    let versions = locked_versions(&source, "boxlite");
 
     assert_eq!(
         versions.len(),
@@ -175,20 +657,27 @@ fn the_pins_are_for_the_boxlite_release_the_lockfile_resolves() {
 ///
 /// `crates/rto-exec/Cargo.toml` pins both and explains why, but a comment is
 /// not a gate: the `boxlite-shared` entry is a pin with no `use`, so the
-/// standing temptation is to delete it as an unused dependency. Deleting it
-/// leaves this test as what refuses. ADR-0014 v1.9 records the duty.
+/// standing temptation is to delete it as an unused dependency. ADR-0014 v1.9
+/// records the duty.
 ///
-/// # Why the lockfile
+/// # Why this is the second half and not the gate
 ///
-/// Same reason as the test above: it is the version that will actually be
-/// compiled, where `Cargo.toml` would only assert against a range.
+/// The deletion above, and every relaxation of the requirement, is caught by
+/// [`the_manifest_pins_both_halves_of_the_generated_api_exactly`], which reads
+/// the manifest and runs in a package too. This test is what remains once that
+/// one exists: proof that the committed lockfile has actually been resolved to
+/// a matched pair, rather than left behind by a manifest that moved. That is a
+/// checkout-only question, so in a package it declines out loud.
 #[test]
 fn boxlite_and_its_generated_api_sibling_resolve_together() {
-    let lockfile = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("rto-exec lives two directories below the workspace root")
-        .join("Cargo.lock");
+    let Some(lockfile) = workspace_lockfile() else {
+        loud_skip(
+            "boxlite_and_its_generated_api_sibling_resolve_together",
+            "Whether the committed lockfile resolves both halves to one version went \
+             unchecked.",
+        );
+        return;
+    };
     let source = std::fs::read_to_string(&lockfile)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", lockfile.display()));
 
