@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-okf-syntax-v0.1.1...rto-okf-syntax-v0.1.2) - 2026-09-21
+
+### Other
+
+- *(deps)* bump sqlparser from 0.62.0 to 0.63.0
+
 ## [0.1.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-okf-syntax-v0.1.0...rto-okf-syntax-v0.1.1) - 2026-09-07
 
 ### Other
