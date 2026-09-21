@@ -7,7 +7,7 @@ to it.
 ## What is embedded, and how
 
 `exec-boxlite` depends on [`boxlite`](https://github.com/boxlite-ai/boxlite)
-v0.10.0 (Apache-2.0). When `boxlite` is compiled from crates.io it does not build
+v0.10.2 (Apache-2.0). When `boxlite` is compiled from crates.io it does not build
 a hypervisor from source; instead its build script takes a prebuilt runtime
 archive, embeds the files with `include_bytes!`, and extracts them at first use
 to a per-user cache, where they are executed as **separate processes**.
@@ -40,8 +40,8 @@ table. The authoritative list of what a given platform's archive contributes is
 themselves — seven files on `darwin-arm64`, eight on each Linux target.
 
 The archives themselves are published at
-<https://github.com/boxlite-ai/boxlite/releases/tag/v0.10.0> as
-`boxlite-runtime-v0.10.0-<platform>.tar.gz`.
+<https://github.com/boxlite-ai/boxlite/releases/tag/v0.10.2> as
+`boxlite-runtime-v0.10.2-<platform>.tar.gz`.
 
 ## What this does and does not mean
 

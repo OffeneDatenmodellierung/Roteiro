@@ -153,6 +153,100 @@ fn the_pins_are_for_the_boxlite_release_the_lockfile_resolves() {
     );
 }
 
+/// `boxlite` and `boxlite-shared` resolve to the **same** release.
+///
+/// # The defect this exists for
+///
+/// An exact pin binds one node and says nothing about that node's own
+/// requirements. `rto-exec` pins `boxlite` exactly, but every `boxlite` release
+/// to date requires its sibling with a **caret** — 0.10.0 asks for
+/// `boxlite-shared = "0.10.0"`, 0.10.2 for `"0.10.2"` — so a fresh resolution is
+/// free to float the sibling while the exact pin holds the parent still.
+///
+/// That is not hypothetical. It is how `cargo install roteiro --features
+/// exec-boxlite` broke on 6.0.1: `boxlite-shared` 0.10.1 added a required sixth
+/// field, `source_is_dir`, to the `UploadChunk` protobuf message, `boxlite`
+/// 0.10.0's struct literal still listed five, and the mismatched pair failed to
+/// compile with `error[E0063]`. The two crates are halves of one
+/// prost-generated API released in lockstep; a version skew between them is a
+/// compile error waiting for the next upstream patch release.
+///
+/// # Why a test and not just the manifest comment
+///
+/// `crates/rto-exec/Cargo.toml` pins both and explains why, but a comment is
+/// not a gate: the `boxlite-shared` entry is a pin with no `use`, so the
+/// standing temptation is to delete it as an unused dependency. Deleting it
+/// leaves this test as what refuses. ADR-0014 v1.9 records the duty.
+///
+/// # Why the lockfile
+///
+/// Same reason as the test above: it is the version that will actually be
+/// compiled, where `Cargo.toml` would only assert against a range.
+#[test]
+fn boxlite_and_its_generated_api_sibling_resolve_together() {
+    let lockfile = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("rto-exec lives two directories below the workspace root")
+        .join("Cargo.lock");
+    let source = std::fs::read_to_string(&lockfile)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", lockfile.display()));
+
+    let parent = locked_versions(&source, "boxlite");
+    let sibling = locked_versions(&source, "boxlite-shared");
+
+    // Finding nothing must fail loudly rather than pass as "no skew found" —
+    // the same reason the test above counts before it compares.
+    assert_eq!(
+        parent.len(),
+        1,
+        "expected exactly one `boxlite` package in {}, found {parent:?}",
+        lockfile.display()
+    );
+    assert_eq!(
+        sibling.len(),
+        1,
+        "expected exactly one `boxlite-shared` package in {}, found {sibling:?}. Zero means \
+         the pin in crates/rto-exec/Cargo.toml was deleted as an unused dependency — \
+         put it back; it is load-bearing and the manifest comment says why.",
+        lockfile.display()
+    );
+
+    assert_eq!(
+        parent[0], sibling[0],
+        "the lockfile resolves boxlite {} against boxlite-shared {}. These two share one \
+         prost-generated API and are released in lockstep, so a skew between them is \
+         a compile error in boxlite's own source. Pin both to the same version in \
+         crates/rto-exec/Cargo.toml — bumping only `boxlite` is what let the sibling \
+         float and broke `cargo install` on 6.0.1.",
+        parent[0], sibling[0]
+    );
+}
+
+/// Every `[[package]]` block with this name, by its version line.
+///
+/// A scan rather than a TOML parse, to keep these tests free of a dependency for
+/// one field. Returns all matches so callers can assert the count themselves:
+/// collapsing to an `Option` here would turn "two releases in the graph" into a
+/// silent pick of the first.
+fn locked_versions<'a>(source: &'a str, name: &str) -> Vec<&'a str> {
+    source
+        .split("[[package]]")
+        .filter_map(|block| {
+            let mut found = None;
+            let mut version = None;
+            for line in block.lines() {
+                if let Some(rest) = line.strip_prefix("name = \"") {
+                    found = rest.strip_suffix('"');
+                } else if let Some(rest) = line.strip_prefix("version = \"") {
+                    version = rest.strip_suffix('"');
+                }
+            }
+            (found == Some(name)).then_some(version).flatten()
+        })
+        .collect()
+}
+
 /// The pins are well formed: unique flat names, real digests, real sizes.
 ///
 /// `build.rs` matches extracted files by name and refuses anything unpinned, so

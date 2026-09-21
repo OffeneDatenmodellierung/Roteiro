@@ -43,7 +43,7 @@ clap = { version = "4.6", features = ["derive", "env"] }
 # than the 1.94 MSRV in force at the time, which broke the `bundled`
 # feature's build.rs. That one is **gone** as of the 1.96 MSRV.
 #
-# The second still stands and is not ours to lift: `boxlite` 0.10.0 requires
+# The second still stands and is not ours to lift: `boxlite` 0.10.2 requires
 # `rusqlite ^0.39`, and `libsqlite3-sys` declares `links = "sqlite3"`, so the
 # graph admits exactly one version of it. Under `--all-features` (which turns
 # on `exec-boxlite`) moving to 0.40 is therefore a resolution conflict, not a

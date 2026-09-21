@@ -434,9 +434,9 @@ dependencies = [
 
 [[package]]
 name = "boxlite"
-version = "0.10.0"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af61fd3e7918844e0439883b49a2aa4cb295b155f28fa855969803ea2263d71b"
+checksum = "5959c12c6b0c3d2171d74a788c13d53c693eb740f168d3cc9dc4534b924ddc00"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -507,16 +507,18 @@ dependencies = [
 
 [[package]]
 name = "boxlite-shared"
-version = "0.10.0"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1845902bae06edecb3fc714b197085f9e87f9cf3a2b132fbbaa7e69c900d816"
+checksum = "2eed8337ffe7d7536e6ab74a1ab6a9a9fb8a5f52c3bbd0e6560a0f3cac323e01"
 dependencies = [
+ "futures",
  "prost",
  "serde",
  "serde_json",
  "tar",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tonic-build",
 ]
@@ -534,9 +536,9 @@ dependencies = [
 
 [[package]]
 name = "bubblewrap-sys"
-version = "0.10.0"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0f650ed99dfd6770c18d30b313a1774c92a8de7c0a6250905100ed891b8afc8"
+checksum = "fe3d1284ddafcbb24772517f6872221fce8c483c4810cd5d9e1550c0a9999dde"
 dependencies = [
  "num_cpus",
 ]
@@ -1085,9 +1087,9 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "e2fsprogs-sys"
-version = "0.10.0"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "635006f11ea19a8d335292d8dcf49288818db076c2273407e78a07f3d6107cd9"
+checksum = "d54ab92ee0e74b53c2b678cdc0aebf242395e4ac21f10bf68d13a5961943bd80"
 dependencies = [
  "num_cpus",
 ]
@@ -2941,9 +2943,9 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "libkrun-sys"
-version = "0.10.0"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "115552df45c2a64ff6398ffff9ee11ade4b81e00c7737769e0d61f7dadf48179"
+checksum = "a944fb097b4dee42a7258bef8c8fce42f3fab3a49e43529903372ffcd703f5f7"
 dependencies = [
  "libc",
  "num_cpus",
@@ -4419,6 +4421,7 @@ name = "rto-exec"
 version = "6.0.1"
 dependencies = [
  "boxlite",
+ "boxlite-shared",
  "futures",
  "rto-graph",
  "rusqlite",
