@@ -373,44 +373,123 @@ fn exact_requirement(manifest: &str, name: &str) -> Option<String> {
     let inline_key = format!("{name} = ");
     let table_header = format!("[dependencies.{name}]");
     let mut section = "";
-    for line in manifest.lines() {
-        let line = line.trim();
-        if line.starts_with('#') {
+    let mut table_fields = String::new();
+    for raw in manifest.lines() {
+        let line = strip_comment(raw).trim();
+        if line.is_empty() {
             continue;
         }
         if line.starts_with('[') {
-            section = line;
+            if section == table_header.as_str() {
+                break;
+            }
+            section = if raw.trim_start().starts_with('[') {
+                raw.trim()
+            } else {
+                section
+            };
+            table_fields.clear();
             continue;
         }
-        let found = if section == table_header.as_str() {
-            quoted_after(line, "version = ")
-        } else if section == "[dependencies]" {
-            line.strip_prefix(inline_key.as_str())
-                .and_then(declared_requirement)
-        } else {
-            None
-        };
-        if let Some(requirement) = found {
-            return exact_version(&requirement);
+        if section == table_header.as_str() {
+            table_fields.push_str(line);
+            table_fields.push(',');
+        } else if section == "[dependencies]"
+            && let Some(rest) = line.strip_prefix(inline_key.as_str())
+        {
+            return declared_requirement(rest, name)
+                .as_deref()
+                .and_then(exact_version);
         }
+    }
+    if section == table_header.as_str() {
+        return field_requirement(&table_fields, name)
+            .as_deref()
+            .and_then(exact_version);
     }
     None
 }
 
+/// A manifest line with any trailing comment removed.
+///
+/// `#` starts a comment only outside a string, so quotes are tracked. Without
+/// this, `boxlite = { path = "vendor/boxlite" } # version = "=0.10.2"` — a
+/// dependency with **no version requirement at all** — reads as an exact pin,
+/// and the guard passes on a manifest that pins nothing.
+fn strip_comment(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    let mut in_string = false;
+    for (i, b) in bytes.iter().enumerate() {
+        match b {
+            b'"' => in_string = !in_string,
+            b'#' if !in_string => return &line[..i],
+            _ => {}
+        }
+    }
+    line
+}
+
 /// The requirement on a dependency line's right-hand side: a bare string
 /// (`"=0.10.2"`) or an inline table carrying a `version` key.
-fn declared_requirement(rest: &str) -> Option<String> {
-    let rest = rest.trim_start();
-    if rest.starts_with('{') {
-        quoted_after(rest, "version = ")
+fn declared_requirement(rest: &str, name: &str) -> Option<String> {
+    let rest = rest.trim();
+    if let Some(table) = rest.strip_prefix('{') {
+        field_requirement(table.trim_end().trim_end_matches('}'), name)
     } else {
         quoted(rest)
     }
 }
 
-/// The first `"…"` literal following `key`.
-fn quoted_after(text: &str, key: &str) -> Option<String> {
-    quoted(text.split_once(key)?.1)
+/// The `version` of a comma-separated set of dependency fields — but only when
+/// those fields describe the crate that was asked for.
+///
+/// # Why `package` has to be read
+///
+/// `boxlite = { package = "boxlite-shared", version = "=0.10.2" }` is a valid
+/// declaration that renames `boxlite-shared` to `boxlite`. Reading only
+/// `version` reports an exact pin on `boxlite` when the manifest in fact
+/// declares `boxlite-shared` twice and never pins `boxlite` at all — so the
+/// pairing guard would compare a version with itself and pass.
+///
+/// A rename therefore reads as **absent** rather than as a pin, and the guard
+/// fails loudly. That is the safe direction and the deliberate one: a rename of
+/// either of these two crates is a thing a person should have to look at, not
+/// something a scanner should quietly try to follow.
+fn field_requirement(fields: &str, name: &str) -> Option<String> {
+    let mut version = None;
+    for field in split_fields(fields) {
+        let field = field.trim();
+        if let Some(rest) = field.strip_prefix("version") {
+            if let Some(rest) = rest.trim_start().strip_prefix('=') {
+                version = quoted(rest);
+            }
+        } else if let Some(rest) = field.strip_prefix("package") {
+            let renamed = rest.trim_start().strip_prefix('=').and_then(quoted);
+            if renamed.as_deref() != Some(name) {
+                return None;
+            }
+        }
+    }
+    version
+}
+
+/// Split dependency fields on commas that are not inside a string.
+fn split_fields(fields: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut in_string = false;
+    let mut start = 0;
+    for (i, b) in fields.as_bytes().iter().enumerate() {
+        match b {
+            b'"' => in_string = !in_string,
+            b',' if !in_string => {
+                out.push(&fields[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&fields[start..]);
+    out
 }
 
 /// The contents of the `"…"` literal `text` begins with.
@@ -549,7 +628,16 @@ fn the_requirement_rule_reads_both_manifest_shapes() {
         exact_requirement(packaged, "boxlite-shared").as_deref(),
         Some("0.10.2")
     );
+}
 
+/// **The forms that must read as "not a pin".**
+///
+/// The shapes test above proves the rule can *find* a requirement. This one
+/// proves it does not manufacture one — which is the dangerous direction, since
+/// every case here would let the pairing guard pass on a manifest that pins
+/// nothing.
+#[test]
+fn the_requirement_rule_refuses_what_is_not_an_exact_pin() {
     // The injection this guard exists to fail, in both shapes.
     assert_eq!(
         exact_requirement(
@@ -594,6 +682,91 @@ fn the_requirement_rule_reads_both_manifest_shapes() {
         ),
         None,
         "asking for `boxlite` must not be answered by `boxlite-shared`'s line"
+    );
+}
+
+/// **Declarations that look like a pin and are not.**
+///
+/// Each of these is a manifest that pins nothing — or pins a different crate —
+/// while containing the text `version = "=0.10.2"` somewhere a careless scan
+/// will find it. Reading any of them as a pin lets the pairing guard compare a
+/// version with itself and pass.
+#[test]
+fn the_requirement_rule_is_not_fooled_by_text_that_merely_looks_like_one() {
+    // A dependency with NO version requirement at all, whose trailing comment
+    // happens to contain one. `#` starts a comment outside a string, and
+    // reading past it reports an exact pin on a manifest that pins nothing.
+    assert_eq!(
+        exact_requirement(
+            "[dependencies]\nboxlite = { path = \"vendor/boxlite\" } # version = \"=0.10.2\"\n",
+            "boxlite"
+        ),
+        None,
+        "a requirement inside a comment is not a requirement"
+    );
+    assert_eq!(
+        exact_requirement(
+            "[dependencies.boxlite]\npath = \"vendor/boxlite\" # version = \"=0.10.2\"\n",
+            "boxlite"
+        ),
+        None,
+        "and the same in the published table form"
+    );
+
+    // The case that needs the comment stripped rather than merely parsed by
+    // field: a comma inside the comment makes `version` look like a field of
+    // its own, so field-boundary parsing alone still reads it as a pin.
+    assert_eq!(
+        exact_requirement(
+            "[dependencies]\nboxlite = { path = \"v\" } # see notes, version = \"=0.10.2\"\n",
+            "boxlite"
+        ),
+        None,
+        "a comma in a comment must not manufacture a `version` field"
+    );
+
+    // A rename. `boxlite = { package = "boxlite-shared", ... }` declares
+    // boxlite-shared under the key `boxlite`, so the manifest pins that crate
+    // twice and never pins boxlite. Reading only `version` would report an
+    // exact pin here and let the pairing guard compare a version with itself.
+    assert_eq!(
+        exact_requirement(
+            "[dependencies]\nboxlite = { package = \"boxlite-shared\", version = \"=0.10.2\" }\n",
+            "boxlite"
+        ),
+        None,
+        "a renamed dependency does not pin the crate whose key it borrows; absent is the \
+         safe reading, and the guard then fails loudly"
+    );
+    assert_eq!(
+        exact_requirement(
+            "[dependencies.boxlite]\npackage = \"boxlite-shared\"\nversion = \"=0.10.2\"\n",
+            "boxlite"
+        ),
+        None,
+        "and the same in the published table form"
+    );
+
+    // A `package` key that names the crate asked for is not a rename at all.
+    assert_eq!(
+        exact_requirement(
+            "[dependencies]\nboxlite = { package = \"boxlite\", version = \"=0.10.2\" }\n",
+            "boxlite"
+        )
+        .as_deref(),
+        Some("0.10.2"),
+        "a redundant `package` naming the same crate still pins it"
+    );
+
+    // A comma inside a string must not split the fields.
+    assert_eq!(
+        exact_requirement(
+            "[dependencies]\nboxlite = { features = [\"a,b\"], version = \"=0.10.2\" }\n",
+            "boxlite"
+        )
+        .as_deref(),
+        Some("0.10.2"),
+        "field splitting has to respect quotes"
     );
 }
 
