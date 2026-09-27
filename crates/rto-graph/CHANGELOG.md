@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.0.2](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v6.0.1...rto-graph-v6.0.2) - 2026-09-21
+
+### Other
+
+- *(deps)* bump tree-sitter-ocaml from 0.25.0 to 0.26.0
+
 ## [6.0.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v6.0.0...rto-graph-v6.0.1) - 2026-09-20
 
 ### Fixed
