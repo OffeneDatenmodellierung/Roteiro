@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.0.2](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v6.0.1...rto-render-v6.0.2) - 2026-09-27
+
+### Fixed
+
+- *(mcp)* migrate off rmcp's deprecated `ServerInfo`, which needs the 3.4.0 bump
+
 ## [6.0.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v5.15.1...rto-render-v6.0.1) - 2026-09-20
 
 ### Fixed
