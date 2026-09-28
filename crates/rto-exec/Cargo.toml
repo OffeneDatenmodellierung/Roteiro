@@ -52,7 +52,7 @@ boxlite = { version = "=0.10.2", optional = true }
 # a caret between them is a semver break waiting to happen. Bumping `boxlite` to
 # 0.10.2 fixes today's mismatch; this line is what stops 0.10.3 causing the next
 # one. Keep the two versions equal. ADR-0014 v1.9 records the duty.
-boxlite-shared = { version = "=0.10.2", optional = true }
+boxlite-shared = { version = "=0.10.4", optional = true }
 # `exec-boxlite` only: `AnalyzerRunner::run` is synchronous and boxlite's API is
 # async, so the runner drives a current-thread runtime it owns. No reactor is
 # shared with the CLI, and nothing here spawns a background thread.
