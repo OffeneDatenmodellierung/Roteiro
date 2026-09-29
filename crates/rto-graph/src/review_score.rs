@@ -429,9 +429,20 @@ pub struct RunArm {
     /// that were, until this field, indistinguishable — which is exactly the
     /// failure recording `context` and `model` was meant to prevent.
     ///
-    /// `None` for a run recorded before the field existed, and
-    /// `skip_serializing_if` keeps the default arm's document byte-identical to
-    /// what it was, so an archived score does not move.
+    /// # Absent means `reply-text`, and that is not ambiguous
+    ///
+    /// Only a **non-default** class source is recorded. `None` therefore covers
+    /// two runs — one recorded before this field existed, and one recorded with
+    /// the default — and they are the same fact: a run predating the field had no
+    /// `--typed-class` to pass, so its classes came from the reply text too. A
+    /// reader loses nothing by the collapse.
+    ///
+    /// Recording `Some("reply-text")` on every default run instead would break the
+    /// byte-identical guarantee this PR states, and it did: the field was written
+    /// unconditionally at first, so every default replay serialised it, while the
+    /// serialisation test constructed `None` by hand and so passed without ever
+    /// touching the production path. The test now builds the arm the way
+    /// `run_replay` does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub class_source: Option<String>,
 }

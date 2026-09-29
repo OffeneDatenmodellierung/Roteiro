@@ -1051,11 +1051,7 @@ pub fn run_replay(
     };
 
     let mut run = CandidateRun {
-        arm: Some(rto_graph::review_score::RunArm {
-            context: arm.tag().to_owned(),
-            model: model.to_owned(),
-            class_source: Some(class_source.tag().to_owned()),
-        }),
+        arm: Some(run_arm(arm, model, class_source)),
         ..CandidateRun::default()
     };
     let mut report = ReplayReport::default();
@@ -1171,6 +1167,33 @@ fn checks_with_notice(checks_path: Option<&str>) -> anyhow::Result<Vec<CheckRun>
         );
     }
     Ok(checks)
+}
+
+/// The arm a run document records: the context, the model, and the class source
+/// **only when it is not the default**.
+///
+/// A function rather than a literal at the one call site, because the "only when
+/// not default" rule is the whole of the byte-identical guarantee on
+/// `RunArm::class_source` and it needs somewhere a test can reach. It was written
+/// as a literal first, recorded `Some("reply-text")` unconditionally, and broke
+/// that guarantee on every default replay — while the serialisation test in
+/// `rto-graph` constructed `None` by hand and so never touched the path that was
+/// wrong. `the_default_arm_records_no_class_source` is the guard; the `rto-graph`
+/// tests document the wire shape.
+#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+fn run_arm(
+    arm: ReviewArm,
+    model: &str,
+    class_source: ClassSource,
+) -> rto_graph::review_score::RunArm {
+    rto_graph::review_score::RunArm {
+        context: arm.tag().to_owned(),
+        model: model.to_owned(),
+        // Absence means `reply-text`, which is also what a run predating the field
+        // means — the same fact either way, so the collapse costs a reader nothing.
+        class_source: (class_source != ClassSource::ReplyText)
+            .then(|| class_source.tag().to_owned()),
+    }
 }
 
 /// Start llama.cpp on `model` with this reviewer's context window.
@@ -1619,7 +1642,7 @@ fn print_file_findings(
             let frac = |v: Option<u32>| v.map_or(f64::NAN, |x| f64::from(x) / scale);
             println!(
                 "      typed class: margin {:.2} nats, sharpness {:.4}, \
-                 option mass {:.4} (neither is a confidence)",
+                 option mass {:.4} (none of the three is a confidence)",
                 f64::from(margin) / scale,
                 frac(f.class_sharpness_ppm),
                 frac(f.class_option_mass_ppm),
@@ -1787,6 +1810,42 @@ mod tests {
         FileUnderReview, ReviewArm, ReviewSet, context_for, corpus_shas, files_at, fork_point,
         graph_at, main_ref, parent_module_source,
     };
+
+    /// **A default run's arm records no class source, so its document is
+    /// byte-identical to one written before the field existed.**
+    ///
+    /// Built through [`super::run_arm`], which is what `run_replay` uses — not by
+    /// hand. The first version of this guarantee was tested by constructing
+    /// `class_source: None` directly in `rto-graph`, which asserted the wire shape
+    /// and could not see that the production path set `Some("reply-text")` on
+    /// every default replay. A test that does not contain the difference cannot
+    /// find it.
+    ///
+    /// Gated like the items it exercises: `run_arm` and `ClassSource` are both
+    /// behind the generation-backend feature, so in a build without one there is
+    /// no production path for this to guard. Left ungated it compiled at
+    /// `--all-features` and at `--features serve`, and broke **every other CI
+    /// cell** — neither of those is the default build.
+    #[cfg(any(feature = "serve", feature = "inference-local-models"))]
+    #[test]
+    fn the_default_arm_records_no_class_source() {
+        let arm = super::run_arm(ReviewArm::DiffOnly, "m", super::ClassSource::ReplyText);
+        assert_eq!(
+            arm.class_source, None,
+            "the default arm records a class source"
+        );
+        let json = serde_json::to_string(&arm).expect("serialize");
+        assert!(
+            !json.contains("class_source"),
+            "a default replay's document is no longer byte-identical: {json}"
+        );
+        let typed = super::run_arm(ReviewArm::DiffOnly, "m", super::ClassSource::TypedRead);
+        assert_eq!(
+            typed.class_source.as_deref(),
+            Some("typed-read"),
+            "a typed run must record what varied, or the artifact cannot be audited"
+        );
+    }
 
     /// **`[paths] exclude` is an egress control on this command, not only a graph
     /// filter — and the replay path must honour it too.**
@@ -3505,7 +3564,7 @@ mod margin_ranking {
     use std::time::Instant;
 
     use rto_graph::review_corpus::{Corpus, CorpusRow, Verdict};
-    use rto_graph::review_score::{CandidateFinding, CandidateRun, LINE_WINDOW, RunArm};
+    use rto_graph::review_score::{CandidateFinding, CandidateRun, LINE_WINDOW};
     use rto_graph::reviewer::FileUnderReview;
 
     use super::typed_class_calibration::{engine_or_skip, separation};
@@ -3580,7 +3639,20 @@ mod margin_ranking {
         /// The generation stopped inside a reasoning block, so the file was never
         /// actually reviewed.
         reasoning_truncated: bool,
+        /// What produced these findings — the model plus this harness's own
+        /// revision. A resumed run refuses a record from a different one.
+        instrument: String,
     }
+
+    /// Bumped whenever a change would make old findings incomparable with new
+    /// ones — the prompt, the class question, the arm, or what
+    /// `classify_findings` records.
+    ///
+    /// It is deliberately **not** derived from anything: a hash of the source
+    /// would invalidate the checkpoint on a comment change, and a version that
+    /// moves for free gets ignored. This is a judgement, made when the change is
+    /// made.
+    const INSTRUMENT: &str = "diff-only/typed-read/v1";
 
     /// Where the checkpoint lives. Outside the repository, and overridable so two
     /// runs need not share one.
@@ -3612,6 +3684,7 @@ mod margin_ranking {
             let findings: Vec<CandidateFinding> =
                 serde_json::from_value(v["findings"].clone()).expect("findings");
             let seconds = v["seconds"].as_f64().unwrap_or(0.0);
+            let instrument = v["instrument"].as_str().unwrap_or("unrecorded").to_owned();
             out.insert(
                 (sha.clone(), p.clone()),
                 Reviewed {
@@ -3627,6 +3700,7 @@ mod margin_ranking {
                     declared_clean: v["declared_clean"].as_bool().unwrap_or(false),
                     unparsed: usize::try_from(v["unparsed"].as_u64().unwrap_or(0)).unwrap_or(0),
                     reasoning_truncated: v["reasoning_truncated"].as_bool().unwrap_or(false),
+                    instrument,
                 },
             );
         }
@@ -3638,6 +3712,12 @@ mod margin_ranking {
         let record = serde_json::json!({
             "sha": r.sha,
             "path": r.path,
+            // **What produced these findings, so a resumed run cannot mix
+            // instruments.** Keyed only by `(sha, path)`, the checkpoint silently
+            // reused findings from a different model, a different prompt or a
+            // different classifier — the resumed run would then report a
+            // measurement over two instruments and say nothing about either.
+            "instrument": r.instrument,
             "seconds": r.seconds,
             // The three fields that tell "found nothing" from "never answered".
             // A file with zero findings is uninterpretable without them, and 11 of
@@ -3731,6 +3811,31 @@ mod margin_ranking {
         by_row
     }
 
+    /// Refuse a checkpoint record that a **different instrument** produced.
+    ///
+    /// The checkpoint is keyed by `(sha, path)`, which says nothing about what
+    /// made the findings. Resuming after a `[models] generative` change, a prompt
+    /// change or a classifier change would silently mix two instruments, and a
+    /// measurement over two instruments measures neither — the sort of quiet
+    /// population change this module's own comparability block exists to refuse.
+    ///
+    /// # Errors
+    /// If the record names a different model or a different [`INSTRUMENT`].
+    fn same_instrument(prev: &Reviewed, model: &str, ckpt: &std::path::Path) -> anyhow::Result<()> {
+        let want = format!("{model}|{INSTRUMENT}");
+        anyhow::ensure!(
+            prev.instrument == want,
+            "checkpoint record for {}:{} was produced by `{}`, but this run is `{want}`. \
+             Delete {} or point ROTEIRO_RANK_CHECKPOINT elsewhere; mixing them would \
+             measure neither instrument.",
+            prev.sha,
+            prev.path,
+            prev.instrument,
+            ckpt.display(),
+        );
+        Ok(())
+    }
+
     /// Review every corpus anchor file with the typed class read on, timing each
     /// and checkpointing as it goes.
     ///
@@ -3785,6 +3890,7 @@ mod margin_ranking {
                 }
                 let key = ((*sha).to_owned(), file.path.clone());
                 if let Some(prev) = done.remove(&key) {
+                    same_instrument(&prev, &model, &ckpt)?;
                     reviewed.push(prev);
                     continue;
                 }
@@ -3838,6 +3944,7 @@ mod margin_ranking {
                     reasoning_truncated: outcome.reasoning_truncated,
                     findings: outcome.findings,
                     seconds,
+                    instrument: format!("{model}|{INSTRUMENT}"),
                 };
                 append_checkpoint(&ckpt, &r);
                 reviewed.push(r);
@@ -4255,11 +4362,11 @@ mod margin_ranking {
             findings: findings.clone(),
             verdicts: Vec::new(),
             suppressed: Vec::new(),
-            arm: Some(RunArm {
-                context: ReviewArm::DiffOnly.tag().to_owned(),
-                model: "qwen3-coder-30b-a3b".to_owned(),
-                class_source: Some(ClassSource::TypedRead.tag().to_owned()),
-            }),
+            arm: Some(super::run_arm(
+                ReviewArm::DiffOnly,
+                "qwen3-coder-30b-a3b",
+                ClassSource::TypedRead,
+            )),
         };
         let scored = rto_graph::review_score::score(&corpus, &run).expect("the run scores");
 

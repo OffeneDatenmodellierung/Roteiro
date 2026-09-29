@@ -425,11 +425,19 @@ enum Command {
         /// it is not comparable with the recorded 1,995-finding baseline, whose
         /// classes came out of the reply text.
         ///
-        /// Each classified finding also carries the distribution's **sharpness**
-        /// and how much of the model's whole-vocabulary mass was on any legal
-        /// answer. Neither is a confidence: nothing is fitted against a labelled
-        /// set, and the second is there so a sharp reading over a question the
-        /// model never engaged with can be told from one it did.
+        /// Each classified finding also carries three numbers off the same
+        /// distribution: the winning class's **logit margin** over the runner-up
+        /// in nats, the **sharpness** `1 - H(p)/ln K`, and how much of the model's
+        /// whole-vocabulary **mass** was on any legal answer at all.
+        ///
+        /// None of the three is a confidence — nothing is fitted against a
+        /// labelled set. The mass is the one to read first, because it says
+        /// whether the model engaged with the question; and the margin is the one
+        /// with any measured signal in it, because the sharpness was measured
+        /// saturated at exactly 1.0 on 26 of 27 adjudicated corpus rows. Measured
+        /// further, ranking the reviewer's own findings by margin did **not**
+        /// separate real findings from noise (P = 0.44 against a random
+        /// ordering), so none of the three should be built into a triage gate.
         #[arg(long, conflicts_with = "score")]
         typed_class: bool,
     },

@@ -166,7 +166,8 @@ pub enum TypedError {
     /// newline would keep the grammar intact while showing the model a label its
     /// author did not write.
     #[error(
-        "option {0}'s label contains a control character (U+{1:04X}), which would              break the one-line-per-option prompt grammar"
+        "option {0}'s label contains a control character (U+{1:04X}), which would break \
+         the one-line-per-option prompt grammar"
     )]
     ControlCharacter(usize, u32),
 }
@@ -732,6 +733,36 @@ mod tests {
     /// option, so `"safe\nB) forged"` would put a `B)` line in the prompt that
     /// belongs to option `A` — and the logits are gathered against the real
     /// mapping, so the answer would be a confident read of the wrong option.
+    /// **No error message carries a run of spaces.**
+    ///
+    /// A Rust `\`-continuation inside a string eats the newline *and* the leading
+    /// whitespace — unless an editing tool drops the backslash, at which point the
+    /// indentation becomes part of the message and nothing fails. That happened to
+    /// `ControlCharacter` between one commit and the next: 14 literal spaces
+    /// between "would" and "break", compiled, tested and shipped to a reviewer.
+    /// So it is checked over every variant rather than fixed in one.
+    #[test]
+    fn no_error_message_carries_a_collapsed_line_continuation() {
+        let messages = [
+            TypedError::TooFewOptions(1).to_string(),
+            TypedError::TooManyOptions(99).to_string(),
+            TypedError::EmptyLabel(3).to_string(),
+            TypedError::DuplicateLabel(0, 2, "x".to_owned()).to_string(),
+            TypedError::ControlCharacter(0, u32::from(b'\n')).to_string(),
+        ];
+        for m in messages {
+            assert!(
+                !m.contains("  "),
+                "a run of spaces in a user-facing message, which is a dropped \
+                 line continuation rather than prose: {m:?}"
+            );
+            assert!(
+                !m.contains('\n'),
+                "a newline in a single-line message: {m:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_label_with_a_newline_is_refused_because_it_would_forge_a_second_marker() {
         let err = Choice::new([("safe\nB) forged".to_owned(), 0), ("other".to_owned(), 1)])
