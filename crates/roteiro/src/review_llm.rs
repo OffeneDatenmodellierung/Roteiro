@@ -463,16 +463,24 @@ pub fn review_file(
 /// * the **sharpness** is saturated — exactly `1_000_000` on 26 of the 27
 ///   adjudicated corpus rows, four of the five wrong answers included — so there
 ///   is nothing in it to order two findings by;
-/// * the **margin** ordered those same human-written descriptions well (0.98 real
-///   above known-false) and ordered **the findings this function classifies** no
-///   better than chance (0.52 against a null of 0.4999, `P = 0.4411`, over 446 of
-///   them).
+/// * the **margin** ordered a correct class above a wrong one on those same
+///   human-written corpus descriptions at 0.81, and ordered **the findings this
+///   function classifies** no better than chance (0.52 against a null of 0.4999,
+///   `P = 0.4411`, over 446 of them).
 ///
-/// So nothing recorded here is a triage signal for the reviewer's own output, and
-/// the fact that the same number works on somebody else's prose is exactly the
-/// trap: the task changed, not the arithmetic. All three are kept because a
-/// different model may behave differently, and a run that records only one cannot
-/// show it.
+/// So nothing recorded here is a triage signal for the reviewer's own output.
+/// **Two** things separate those two margin figures rather than one — who wrote
+/// the prose, and whether what is being separated is a correct class from a wrong
+/// one or a real finding from noise — so neither alone accounts for the drop, and
+/// neither is offered here as the explanation.
+///
+/// The **0.98** recorded against this same corpus belongs to `REALITY_QUESTION`, a
+/// two-option yes/no that this function never asks and that nothing ships. It is
+/// not a reading of the margin recorded here, and quoting it for this number would
+/// credit a binary instrument's result to a fourteen-way one.
+///
+/// All three numbers are kept because a different model may behave differently,
+/// and a run that records only one cannot show it.
 ///
 /// # Errors
 /// If the engine fails on a question. One failure aborts the file rather than

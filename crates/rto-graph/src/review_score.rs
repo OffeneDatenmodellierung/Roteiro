@@ -133,8 +133,11 @@ pub struct CandidateFinding {
     /// So a `1_000_000` here is **not** evidence the model was certain. It is what
     /// this model returns almost always, right or wrong, and a reader who takes it
     /// for certainty has been misled by a constant. There is nothing in it to
-    /// order two findings by, and [`Self::class_margin_micronats`] is the same
-    /// information on a scale that does not saturate.
+    /// order two findings by, and [`Self::class_margin_micronats`] summarises the
+    /// same distribution on a scale that does not saturate. Not the same number
+    /// rescaled: entropy consumes all fourteen options while the margin keeps only
+    /// the winner's lead over the runner-up, so moving a lower-ranked logit changes
+    /// one and not the other.
     ///
     /// # Then why is it still here
     ///
@@ -192,35 +195,52 @@ pub struct CandidateFinding {
     /// nat** (issue #897). `None` under exactly the conditions
     /// [`Self::class_sharpness_ppm`] is `None`.
     ///
-    /// # Measured scope: usable for aboutness, NOT for self-assessment
+    /// # Measured scope: NOT usable for self-assessment
     ///
-    /// Two measurements on `qwen3-coder-30b-a3b`, and they do not agree, because
-    /// they are not the same task:
+    /// Two measurements of **this** number — the margin of the fourteen-option
+    /// class question, which is the only question `--typed-class` asks — on
+    /// `qwen3-coder-30b-a3b`:
     ///
-    /// * **0.98** — separating the 22 adjudicated-real corpus rows from the 5
-    ///   known-false ones. Those descriptions are prose a **human reviewer**
-    ///   wrote, handed to the model to judge.
+    /// * **0.81** — ordering a correct class above a wrong one over the 27
+    ///   adjudicated corpus rows, whose descriptions a **human reviewer** wrote.
+    ///   This is the statistic `print_margin_summary` prints as
+    ///   `separation P(correct>wrong)`, against 0.60 for
+    ///   [`Self::class_sharpness_ppm`] over the same pairs.
     /// * **0.52** — separating real findings from noise among the **446 findings
     ///   the model itself produced** over the 23 corpus anchor files. Against a
     ///   random-ordering null of 0.4999, `P = 0.4411`. The six findings credited
     ///   to a real row ranked 16, 32, 129, 327, 359 and 431 of 446, and
     ///   `precision@k` was 0/1, 0/3, 0/5, 0/10, 1/20.
     ///
-    /// So this number is usable for an **aboutness**-shaped question — does this
-    /// claim, which somebody else wrote, describe what it says it does — and it
-    /// is **not usable for self-assessment**, where the model is judging its own
-    /// output. That is the measurement and not a caution: a caller ranking a
-    /// model's own findings by this field is ordering them at random, and will
-    /// not be able to tell.
+    /// **Two things differ between those rows, not one.** Who wrote the prose — a
+    /// human's corpus description against the model's own finding — *and* what is
+    /// being separated — a correct class from a wrong one against a real finding
+    /// from noise. Neither variable moved alone, so neither on its own explains the
+    /// gap, and this doc does not claim one does.
+    ///
+    /// What is settled is the half a caller needs: on the task this field is
+    /// actually produced for — ranking the reviewer's own output — the number does
+    /// not beat chance. A caller ranking by it is ordering at random and will not
+    /// be able to tell.
+    ///
+    /// ## The 0.98 measured on the same corpus is a different instrument
+    ///
+    /// A separation of **0.98** was also recorded against that corpus and is **not
+    /// this field**. It came from `REALITY_QUESTION`: a **two-option** yes/no, put
+    /// only by the calibration and **not shipped** — nothing in `review --llm` asks
+    /// whether a finding is real — separating adjudicated-real rows from
+    /// known-false ones. A two-option margin over a different truth relation is a
+    /// different measurement, and crediting it to this field would be precisely the
+    /// unearned claim this documentation exists to remove.
     ///
     /// Nothing in this repository sorts by it, and nothing should start without a
     /// measurement on the task it is being sorted for.
     ///
     /// # Why it is recorded at all, given that
     ///
-    /// Because the aboutness reading is real, and because a run document that
-    /// carried only [`Self::class_sharpness_ppm`] would carry only the *constant*
-    /// half of the reading. The two are kept side by side rather than one
+    /// Because the corpus reading is real — 0.81 is not chance — and because a run
+    /// document that carried only [`Self::class_sharpness_ppm`] would carry only
+    /// the *constant* half of the reading. The two are kept side by side rather than one
     /// replacing the other: a different model may not saturate, and a measurement
     /// that cannot compare them cannot say so.
     ///

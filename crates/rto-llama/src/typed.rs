@@ -70,10 +70,11 @@
 //! bigger than 27 rows.
 //!
 //! **And the answer turned out to be "it depends on the task", so the margin does
-//! not inherit a general licence.** It ordered human-written corpus descriptions
-//! well (0.98 real above known-false) and ordered the model's *own* 446 findings
-//! no better than chance (0.52 against a null of 0.4999, `P = 0.4411`). Both
-//! figures are on [`Answer::margin`]; read them before ranking anything by it.
+//! not inherit a general licence.** Asked a fourteen-option class question, it
+//! ordered a correct answer above a wrong one on human-written corpus descriptions
+//! at 0.81, and ordered the model's *own* 446 findings no better than chance (0.52
+//! against a null of 0.4999, `P = 0.4411`). Both figures are on [`Answer::margin`],
+//! with what separates them; read them before ranking anything by it.
 //!
 //! # `option_mass` is what stops the guarantee being vacuous
 //!
@@ -399,9 +400,11 @@ impl<T> Answer<T> {
     /// either.** Measured over 27 adjudicated corpus rows on
     /// `qwen3-coder-30b-a3b` it returned exactly `1.0` on 26 of them, four of the
     /// five wrong answers included — so a `1.0` here says what this model almost
-    /// always says and not that it was right. [`Answer::margin`] is the same
-    /// information on a scale that does not saturate. The module docs set both
-    /// out at length.
+    /// always says and not that it was right. [`Answer::margin`] summarises the
+    /// same distribution on a scale that does not saturate — not the same number
+    /// rescaled, since this figure consumes every option and the margin keeps only
+    /// the winner's lead over the runner-up. The module docs set both out at
+    /// length.
     #[must_use]
     pub fn sharpness(&self) -> f32 {
         self.sharpness
@@ -410,8 +413,10 @@ impl<T> Answer<T> {
     /// The winner's logit lead over the runner-up, in **nats** — `ln(p₁/p₂)` on
     /// the option-only distribution.
     ///
-    /// The same thing [`Answer::sharpness`] is about, on a scale that does not
-    /// saturate. Read it when sharpness is pinned at `1.0`, which is the ordinary
+    /// The same distribution [`Answer::sharpness`] summarises, read as the top-two
+    /// gap rather than as entropy over every option — so the two are different
+    /// summaries and this one does not saturate. Read it when sharpness is pinned
+    /// at `1.0`, which is the ordinary
     /// case for a greedy distribution from a large model: a lead of 12 nats and a
     /// lead of 40 both give `H(p) = 0` to `f32`, and are very different readings.
     ///
@@ -420,24 +425,30 @@ impl<T> Answer<T> {
     /// different option counts** the way sharpness is normalised to be — a lead
     /// over one alternative and a lead over thirteen are different quantities.
     ///
-    /// # Measured scope: usable for aboutness, NOT for self-assessment
+    /// # Measured scope: NOT usable for self-assessment
     ///
     /// An earlier version of this paragraph said the number was good for
     /// "ordering two readings of the same question, which is exactly what ranking
     /// findings by class confidence would need". Being on one scale turned out to
-    /// be necessary and not sufficient. Two measurements on
-    /// `qwen3-coder-30b-a3b`:
+    /// be necessary and not sufficient. Three separations were recorded downstream
+    /// on `qwen3-coder-30b-a3b`, over **two different questions** — and which
+    /// question was asked is part of the reading, not context for it:
     ///
-    /// * **0.98** ordering 22 adjudicated-real corpus rows above 5 known-false
-    ///   ones — descriptions a **human** wrote, judged by the model;
-    /// * **0.52** ordering real findings above noise among 446 findings the
-    ///   **model itself** wrote, against a random-ordering null of 0.4999,
-    ///   `P = 0.4411`.
+    /// * a **fourteen-option** class question over 27 corpus rows a **human**
+    ///   wrote: **0.81**, ordering a correct class above a wrong one;
+    /// * that same fourteen-option question over 446 findings the **model itself**
+    ///   wrote: **0.52**, ordering real above noise, against a random-ordering null
+    ///   of 0.4999, `P = 0.4411`;
+    /// * a **two-option** yes/no asking whether a finding was real, over those same
+    ///   27 human-written rows: **0.98**, ordering real above known-false.
     ///
-    /// So: usable for an **aboutness** question — does this claim, written by
-    /// somebody else, describe what it says it does — and **not usable for
-    /// self-assessment**, where a caller ranking by it is ordering at random and
-    /// cannot tell. `rto_graph::review_score::CandidateFinding::class_margin_micronats`
+    /// So the number does **not** rank a model's assessment of its own output: a
+    /// caller ranking by it there is ordering at random and cannot tell. The other
+    /// two figures are not a licence for that, and neither is a licence for the
+    /// other — 0.98 and 0.81 are *different questions* over the same rows, and
+    /// between 0.81 and 0.52 both the author of the prose and the relation being
+    /// separated changed, so neither variable alone accounts for the drop.
+    /// `rto_graph::review_score::CandidateFinding::class_margin_micronats`
     /// carries the full figures.
     ///
     /// Computed from the logits rather than from the reported probabilities,

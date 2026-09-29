@@ -439,14 +439,20 @@ enum Command {
         /// - sharpness is **saturated**: exactly 1.0 on 26 of 27 adjudicated
         ///   corpus rows, four of the five wrong answers included. A 1.0 is what
         ///   this model almost always returns, not evidence it was right.
-        /// - the margin separated human-written corpus descriptions well (0.98
-        ///   real above known-false) and separated the reviewer's **own** 446
-        ///   findings no better than chance (0.52 against a null of 0.4999,
-        ///   P = 0.44).
+        /// - the margin ordered a correct class above a wrong one on those same
+        ///   human-written corpus descriptions at 0.81, and ordered the reviewer's
+        ///   **own** 446 findings no better than chance (0.52 against a null of
+        ///   0.4999, P = 0.44).
         ///
-        /// So the margin is usable for judging a claim **somebody else wrote**,
-        /// and not for judging the model's own output. Do not build a triage order
-        /// or a gate on any of the three.
+        /// So the margin does **not** rank this reviewer's own output. Two things
+        /// differ between those two figures rather than one — who wrote the prose,
+        /// and whether a correct class is being told from a wrong one or a real
+        /// finding from noise — so neither alone explains the drop. Do not build a
+        /// triage order or a gate on any of the three.
+        ///
+        /// A separation of 0.98 appears in the same calibration output and is a
+        /// **different question**: a two-option yes/no asking whether a finding is
+        /// real, which this flag never asks and which nothing ships.
         #[arg(long, conflicts_with = "score")]
         typed_class: bool,
     },
