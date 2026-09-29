@@ -1692,6 +1692,13 @@ pub fn mcp_router(workspace: Arc<Workspace>, advertised: &Advertised) -> axum::R
 /// path (for networked, multi-client access; terminate TLS at a reverse proxy).
 /// Takes ownership of `workspace`.
 ///
+/// `on_listen` is called once, with the address the listener actually bound,
+/// before the first request is accepted. It exists because the caller cannot
+/// announce the address itself: `addr` is what was *asked for*, and with port
+/// `0` — how anything asks for a free port — that is not where the server ends
+/// up. Announcing the requested address printed `http://127.0.0.1:0/mcp`, which
+/// tells a human nothing and gives a test nothing to connect to (issue #906).
+///
 /// # Errors
 /// Returns an error if the runtime cannot start, the address cannot be bound, or
 /// the server fails.
@@ -1699,10 +1706,12 @@ pub fn serve_http(
     workspace: Arc<Workspace>,
     addr: SocketAddr,
     advertised: &Advertised,
+    on_listen: impl FnOnce(SocketAddr),
 ) -> Result<(), McpError> {
     let router = mcp_router(workspace, advertised);
     runtime()?.block_on(async move {
         let listener = tokio::net::TcpListener::bind(addr).await?;
+        on_listen(listener.local_addr().unwrap_or(addr));
         axum::serve(listener, router).await?;
         Ok(())
     })
