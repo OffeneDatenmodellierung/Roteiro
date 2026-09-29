@@ -127,7 +127,28 @@ pub(crate) const EXTRACT_VERSION: u32 = EXTRACT_BASE_VERSION
 /// combination, and its `#[cfg(not(feature = "pdf-text"))]` arm records
 /// `feature-off`/`ingest-off` — so a default build's output changes too, and a
 /// namespace bump alone would not reach it.
-pub(crate) const EXTRACT_BASE_VERSION: u32 = 15;
+///
+/// **15 → 16** (#813): PDF text is now screened against the document's own
+/// *content stream* as well as its flat extraction, so a PDF can carry a
+/// `concealed-rendering` class in `meta.screen` and can reach `Verdict::Block`
+/// — which it previously could not, by construction. Both change what is stored
+/// on a `file` node.
+///
+/// The bump is the point rather than bookkeeping, for the reason 13 → 14 was:
+/// the documents this exists to catch are **exactly the ones whose bytes never
+/// change**. A committed PDF that was synced before this keeps serving the fact
+/// set it produced when concealment was undetectable — content admitted, no
+/// `meta.screen`, no refusal — until someone edits the PDF, which for a
+/// third-party paper is precisely what never happens. Without the bump the fix
+/// would be invisible on every repository that already has the problem.
+///
+/// Unconditional and namespace-free, like its predecessors, and deliberately so
+/// even though only a `pdf-text` build changes behaviour: the feature namespaces
+/// are a *partition of builds*, not a generation counter per build, so there is
+/// no narrower key to move. Over-invalidating a default build's PDF-free cache
+/// costs a re-extraction; under-invalidating a `pdf-text` build's costs the
+/// defect.
+pub(crate) const EXTRACT_BASE_VERSION: u32 = 16;
 
 /// The stride between feature namespaces above. Each of the three
 /// extraction-affecting features occupies a distinct power-of-ten *bit* slot
@@ -581,7 +602,12 @@ fn file_node(
         // PDF path anyway, so taking this branch on failure changes no content,
         // only what is recorded about it.
         match pdf {
-            Ok(text) => decoded_content(&text, &mut screen_classes),
+            // `decoded_pdf_content` rather than `decoded_content`: the flat text
+            // is screened by every rule that applies to any string, *and* the
+            // original bytes are read for the concealment the extractor threw
+            // away (#813). The image arm below keeps `decoded_content`, which is
+            // the whole reason the two are separate functions.
+            Ok(text) => decoded_pdf_content(&text, bytes, &mut screen_classes),
             Err(outcome) => {
                 pdf_outcome = Some(outcome);
                 String::new()
@@ -1080,6 +1106,69 @@ fn decoded_content(text: &str, classes: &mut Vec<&'static str>) -> String {
     // `admit` is the whole enforcement half: `None` means none of it may be
     // stored, and returning the text anyway would make the screen a label.
     screened.admit.unwrap_or_default()
+}
+
+/// [`decoded_content`], plus the concealment the PDF's own content stream
+/// reveals (#813).
+///
+/// # Why this is a second function and not a flag on the first
+///
+/// `decoded_content` screens a **string**. Everything it can decide is decidable
+/// from that string, which is what lets images and PDFs share it. PDF-native
+/// concealment is not in the string — `pdf_extract::extract_text_from_mem`
+/// discards colour, position, size and rendering mode before returning — so this
+/// needs the *bytes* as well, and a function that takes bytes it does not use
+/// for images would be the wrong shape for the OCR path to keep calling.
+///
+/// The consequence is the one #813 was filed over: without this, `block`
+/// requires concealment and direction together, PDF concealment is undetectable,
+/// and therefore a PDF tops out at `quarantine` no matter what it hides. With
+/// it, the rule means the same thing across formats.
+///
+/// # What changes on the node, stated exactly
+///
+/// This path reads [`crate::screen::Screened::admit`] and `classes()`; it never
+/// inspects the verdict. The only consumer of [`crate::screen::Verdict`] itself
+/// is the OKF bundle reader, which drops a blocked concept — and a bundle is
+/// markdown, so no PDF has ever reached it. **Nothing downstream assumed PDFs
+/// never reach `Block`; nothing downstream looked.** So making `Block`
+/// reachable is a change in what the rule *means*, and on this path today
+/// `Block` and a directive-bearing `Quarantine` produce the same node: no
+/// `meta.content`, a `meta.screen` marker. The capability has to exist before a
+/// consumer can act on it, which is why #813 asks for it now.
+///
+/// The change a reader will actually notice is the other one, and it is not
+/// about directives at all: **a PDF concealing text that is not directive-shaped
+/// used to `Pass`, and the concealed text was admitted into `meta.content`
+/// verbatim** — the model-facing surface. It now quarantines, records
+/// `concealed-rendering`, and keeps a body with the concealed run removed. A
+/// document that used to contribute its full text now contributes less, and a
+/// document that used to quarantine may now block.
+#[cfg(feature = "pdf-text")]
+fn decoded_pdf_content(text: &str, bytes: &[u8], classes: &mut Vec<&'static str>) -> String {
+    let capped = cap_content(text);
+    if capped.is_empty() {
+        return capped;
+    }
+    let runs = crate::screen_pdf::concealed_runs(bytes);
+    let regions: Vec<_> = runs
+        .iter()
+        .map(crate::screen_pdf::Concealed::as_region)
+        .collect();
+    let screened = crate::screen::screen_text_with_concealed(&capped, &regions);
+    if screened.is_clean() {
+        return capped;
+    }
+    classes.extend(screened.classes());
+    screened.admit.unwrap_or_default()
+}
+
+/// Without the `pdf-text` feature there is no PDF text to screen, so this arm is
+/// never reached; it exists so `file_node` compiles as one shape in every
+/// feature combination rather than branching on `cfg` at the call site.
+#[cfg(not(feature = "pdf-text"))]
+fn decoded_pdf_content(text: &str, _bytes: &[u8], classes: &mut Vec<&'static str>) -> String {
+    decoded_content(text, classes)
 }
 
 /// Why a PDF blob contributed no `meta.content` — recorded on its `file` node as
