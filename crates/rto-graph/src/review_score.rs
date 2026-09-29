@@ -120,12 +120,37 @@ pub struct CandidateFinding {
     ///
     /// This is `1 − H(p)/ln K` off the label-token distribution, and nothing here
     /// has been fitted against a labelled set. It says the mass was concentrated;
-    /// it does not say the answer was right. Those come apart exactly where this
-    /// reviewer lives: 71% of a recorded 1,995 findings carried one class of
-    /// fourteen, which is a *sharp* and *uninformative* classifier at once.
-    /// `rto_llama::typed` sets the distinction out at length. Fit it against the
-    /// corpus and the fitted number may be called a confidence; until then this
-    /// name states what was computed.
+    /// it does not say the answer was right.
+    ///
+    /// # Measured: SATURATED on these models, and therefore uninformative
+    ///
+    /// Not a caveat — a result. Asked its 14-way class question about each of the
+    /// 27 adjudicated corpus rows, `qwen3-coder-30b-a3b` returned **exactly
+    /// `1_000_000` on 26 of them**, including on **four of the five it got
+    /// wrong**. Its separation of correct from wrong answers was 0.60, which is
+    /// 0.5 plus tie-mass.
+    ///
+    /// So a `1_000_000` here is **not** evidence the model was certain. It is what
+    /// this model returns almost always, right or wrong, and a reader who takes it
+    /// for certainty has been misled by a constant. There is nothing in it to
+    /// order two findings by, and [`Self::class_margin_micronats`] summarises the
+    /// same distribution on a scale that does not saturate. Not the same number
+    /// rescaled: entropy consumes all fourteen options while the margin keeps only
+    /// the winner's lead over the runner-up, so moving a lower-ranked logit changes
+    /// one and not the other.
+    ///
+    /// # Then why is it still here
+    ///
+    /// Because deleting it would make the saturation **undiscoverable rather than
+    /// absent**. The only reason we know the entropy figure is useless is that it
+    /// was recorded and compared against the margin; a later run on a smaller
+    /// model, a higher-entropy question, or with a fitted temperature may not
+    /// saturate, and with this field gone nobody could tell. It costs four bytes
+    /// and no consumer: nothing in this repository reads it for a decision.
+    ///
+    /// A fitted temperature on the label logits is what would unsaturate it —
+    /// which is exactly the per-model parameter the interface's upstream ships and
+    /// this does not. `rto_llama::typed` sets that out at length.
     ///
     /// # Why parts per million rather than an `f32`
     ///
@@ -157,8 +182,8 @@ pub struct CandidateFinding {
     ///
     /// Persisting the sharpness without it would be the more attractive and the
     /// wrong choice: one number that looks like a confidence, with the only thing
-    /// that can falsify it dropped on the floor. A reader ranking findings by
-    /// sharpness needs to know whether the distribution it ranks was about
+    /// that can falsify it dropped on the floor. A reader tempted to rank findings
+    /// by sharpness needs to know whether the distribution was about
     /// anything, and no later run can recover that.
     ///
     /// Nothing here thresholds it. What counts as too thin is a judgement about a
@@ -170,30 +195,71 @@ pub struct CandidateFinding {
     /// nat** (issue #897). `None` under exactly the conditions
     /// [`Self::class_sharpness_ppm`] is `None`.
     ///
-    /// # This is the one of the three that was measured to carry information
+    /// # Measured scope: NOT usable for self-assessment
     ///
-    /// Recorded because [`Self::class_sharpness_ppm`] was measured **not** to.
-    /// Asked its 14-way class question about each of the 27 rows of the
-    /// adjudicated corpus, `qwen3-coder-30b-a3b` returned a sharpness of exactly
-    /// `1_000_000` on 26 of them — including on four of the five it got wrong —
-    /// so there is nothing in it to order two findings by. The margin over the
-    /// same 27 readings ran from 8.7 to 32.1 nats and ordered a correct answer
-    /// above a wrong one in 0.81 of the correct/wrong pairs, against 0.60 for the
-    /// sharpness, which is 0.5 plus tie-mass.
+    /// Two measurements of **this** number — the margin of the fourteen-option
+    /// class question, which is the only question `--typed-class` asks — on
+    /// `qwen3-coder-30b-a3b`:
     ///
-    /// A run document that carried only the saturated number would be archiving
-    /// the useless half of the reading. That is why this field exists, and the
-    /// two are kept side by side rather than one replacing the other: a different
-    /// model may not saturate, and a measurement that cannot compare them cannot
-    /// say so.
+    /// * **0.81** — ordering a correct class above a wrong one over the 27
+    ///   adjudicated corpus rows, whose descriptions a **human reviewer** wrote.
+    ///   This is the statistic `print_margin_summary` prints as
+    ///   `separation P(correct>wrong)`, against 0.60 for
+    ///   [`Self::class_sharpness_ppm`] over the same pairs.
+    /// * **0.5178** — separating real findings from noise among the **446 findings
+    ///   the model itself produced** over the 23 corpus anchor files, against a
+    ///   random-ordering null of 0.4999, `P = 0.4411`. Ordering those 446 by this
+    ///   field put the six credited to a real row at ranks **16, 32, 129, 327, 359
+    ///   and 431 of 446**; `precision@k` was **0/1, 0/3, 0/5, 0/10, 1/20**.
+    ///
+    /// **Two things differ between those rows, not one.** Who wrote the prose — a
+    /// human's corpus description against the model's own finding — *and* what is
+    /// being separated — a correct class from a wrong one against a real finding
+    /// from noise. Neither variable moved alone, so neither on its own explains the
+    /// gap, and this doc does not claim one does.
+    ///
+    /// **What that ranking would have handed a reader** — the question a caller is
+    /// really asking — is in the ranks above, not in the separation figure. A
+    /// triage pass over the top ten of those 446 finds **none** of the six; over
+    /// the top twenty it finds one. Three of the six sit in the bottom quarter of
+    /// the list.
+    ///
+    /// That is an observation about what the ordering produced, and it is the
+    /// ground for the advice here. The statistic beside it reports that the
+    /// separation was not distinguishable from a random ordering on this sample —
+    /// which is a failure to find a signal and not a demonstration that none
+    /// exists. Neither number is offered as the other.
+    ///
+    /// ## The 0.98 measured on the same corpus is a different instrument
+    ///
+    /// A separation of **0.98** was also recorded against that corpus and is **not
+    /// this field**. It came from `REALITY_QUESTION`: a **two-option** yes/no, put
+    /// only by the calibration and **not shipped** — nothing in `review --llm` asks
+    /// whether a finding is real — separating adjudicated-real rows from
+    /// known-false ones. A two-option margin over a different truth relation is a
+    /// different measurement, and crediting it to this field would be precisely the
+    /// unearned claim this documentation exists to remove.
+    ///
+    /// Nothing in this repository sorts by it, and nothing should start without a
+    /// measurement on the task it is being sorted for.
+    ///
+    /// # Why it is recorded at all, given that
+    ///
+    /// Because the corpus reading is real — 0.81 is not chance — and because a run
+    /// document that carried only [`Self::class_sharpness_ppm`] would carry only
+    /// the *constant* half of the reading. The two are kept side by side rather than one
+    /// replacing the other: a different model may not saturate, and a measurement
+    /// that cannot compare them cannot say so.
     ///
     /// # Nats, and the two things that follow from it
     ///
     /// Unbounded above and `0.0` on a tie, so it is **not** a probability and
     /// nothing may present it as one. And it is not normalised by option count
-    /// the way the sharpness is, so it is comparable across readings of the *same*
-    /// question — which is what ranking findings needs — and **not** across
-    /// questions with different option counts.
+    /// the way the sharpness is, so two readings of the *same* question are on one
+    /// scale while readings of questions with **different option counts** are not.
+    /// Being on one scale is a necessary condition for ranking and not a
+    /// sufficient one — see the measured scope above, where it is on one scale and
+    /// still does not rank.
     ///
     /// Integer for [`Self::class_sharpness_ppm`]'s reasons. A margin of tens of
     /// nats at 1e-6 resolution is far inside `u32`, which holds 4,294 nats.

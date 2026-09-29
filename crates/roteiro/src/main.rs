@@ -431,13 +431,32 @@ enum Command {
         /// whole-vocabulary **mass** was on any legal answer at all.
         ///
         /// None of the three is a confidence — nothing is fitted against a
-        /// labelled set. The mass is the one to read first, because it says
-        /// whether the model engaged with the question; and the margin is the one
-        /// with any measured signal in it, because the sharpness was measured
-        /// saturated at exactly 1.0 on 26 of 27 adjudicated corpus rows. Measured
-        /// further, ranking the reviewer's own findings by margin did **not**
-        /// separate real findings from noise (P = 0.44 against a random
-        /// ordering), so none of the three should be built into a triage gate.
+        /// labelled set — and none of them ranks this reviewer's output. Read the
+        /// mass first: it says whether the model engaged with the question at all.
+        ///
+        /// What each was measured to do, on `qwen3-coder-30b-a3b`:
+        ///
+        /// - sharpness is **saturated**: exactly 1.0 on 26 of 27 adjudicated
+        ///   corpus rows, four of the five wrong answers included. A 1.0 is what
+        ///   this model almost always returns, not evidence it was right.
+        /// - the margin ordered a correct class above a wrong one on those same
+        ///   human-written corpus descriptions at 0.81. Ranking the reviewer's
+        ///   **own** 446 findings by it put the six real ones at ranks 16, 32,
+        ///   129, 327, 359 and 431 — none in the top ten, one in the top twenty —
+        ///   at a separation of 0.5178 against a null of 0.4999, P = 0.44.
+        ///
+        /// So triaging the head of that list by margin would have surfaced none of
+        /// them. That is what the ordering produced; the P-value beside it reports
+        /// a failure to find a signal on this sample, not proof there is none. Two
+        /// things differ between the 0.81 and the 446-finding figure rather than
+        /// one — who wrote the prose, and whether a correct class is being told
+        /// from a wrong one or a real finding from noise — so neither alone
+        /// explains the drop. Do not build a triage order or a gate on any of the
+        /// three.
+        ///
+        /// A separation of 0.98 appears in the same calibration output and is a
+        /// **different question**: a two-option yes/no asking whether a finding is
+        /// real, which this flag never asks and which nothing ships.
         #[arg(long, conflicts_with = "score")]
         typed_class: bool,
     },
