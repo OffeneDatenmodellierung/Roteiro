@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v6.0.2...roteiro-v6.1.0) - 2026-09-29
+
+### Fixed
+
+- *(extract)* guard the sync warning, and stop claiming a crash proves text was lost
+- *(extract)* name why a PDF contributed no content instead of one silent None
+
+### Other
+
+- Merge pull request #905 from OffeneDatenmodellierung/polly/typed-logit-read
+
 ## [6.0.2](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v6.0.1...roteiro-v6.0.2) - 2026-09-21
 
 ### Other
