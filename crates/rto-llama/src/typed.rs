@@ -69,6 +69,12 @@
 //! temperature, because choosing one is a fit and a fit needs a labelled set
 //! bigger than 27 rows.
 //!
+//! **And the answer turned out to be "it depends on the task", so the margin does
+//! not inherit a general licence.** It ordered human-written corpus descriptions
+//! well (0.98 real above known-false) and ordered the model's *own* 446 findings
+//! no better than chance (0.52 against a null of 0.4999, `P = 0.4411`). Both
+//! figures are on [`Answer::margin`]; read them before ranking anything by it.
+//!
 //! # `option_mass` is what stops the guarantee being vacuous
 //!
 //! "Off-schema is unrepresentable" is a claim about the return type, and a
@@ -389,10 +395,13 @@ impl<T> Answer<T> {
 
     /// `1 − H(p)/ln K` over the options: `1.0` all on one, `0.0` uniform.
     ///
-    /// **Not a confidence.** Nothing here has been fitted against a labelled
-    /// set, so this says how concentrated the mass was and not how likely the
-    /// answer is to be right. The module docs set out why the distinction is
-    /// load-bearing rather than pedantic.
+    /// **Not a confidence, and on the models in this repository not informative
+    /// either.** Measured over 27 adjudicated corpus rows on
+    /// `qwen3-coder-30b-a3b` it returned exactly `1.0` on 26 of them, four of the
+    /// five wrong answers included — so a `1.0` here says what this model almost
+    /// always says and not that it was right. [`Answer::margin`] is the same
+    /// information on a scale that does not saturate. The module docs set both
+    /// out at length.
     #[must_use]
     pub fn sharpness(&self) -> f32 {
         self.sharpness
@@ -410,8 +419,26 @@ impl<T> Answer<T> {
     /// be presented as one. It is also **not comparable across questions with
     /// different option counts** the way sharpness is normalised to be — a lead
     /// over one alternative and a lead over thirteen are different quantities.
-    /// What it is good for is ordering two readings of the *same* question, which
-    /// is exactly what ranking findings by class confidence would need.
+    ///
+    /// # Measured scope: usable for aboutness, NOT for self-assessment
+    ///
+    /// An earlier version of this paragraph said the number was good for
+    /// "ordering two readings of the same question, which is exactly what ranking
+    /// findings by class confidence would need". Being on one scale turned out to
+    /// be necessary and not sufficient. Two measurements on
+    /// `qwen3-coder-30b-a3b`:
+    ///
+    /// * **0.98** ordering 22 adjudicated-real corpus rows above 5 known-false
+    ///   ones — descriptions a **human** wrote, judged by the model;
+    /// * **0.52** ordering real findings above noise among 446 findings the
+    ///   **model itself** wrote, against a random-ordering null of 0.4999,
+    ///   `P = 0.4411`.
+    ///
+    /// So: usable for an **aboutness** question — does this claim, written by
+    /// somebody else, describe what it says it does — and **not usable for
+    /// self-assessment**, where a caller ranking by it is ordering at random and
+    /// cannot tell. `rto_graph::review_score::CandidateFinding::class_margin_micronats`
+    /// carries the full figures.
     ///
     /// Computed from the logits rather than from the reported probabilities,
     /// because the probabilities are where the information was lost: `p₂`

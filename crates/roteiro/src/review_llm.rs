@@ -452,16 +452,27 @@ pub fn review_file(
 /// right" would make the recorded class a function of two mechanisms and of which
 /// agreed, and nothing downstream could then say which instrument it was scoring.
 ///
-/// # Three numbers, and the one that was measured to work
+/// # Three numbers, and none of them ranks what this function produces
 ///
-/// The reading records its sharpness, its option mass and its **margin**. That
-/// looks redundant and is not: measured against the 27 adjudicated corpus rows,
-/// the sharpness came back as exactly `1_000_000` on 26 of them — including four
-/// of the five wrong answers — so it cannot order two findings, while the margin
-/// ran 8.7 to 32.1 nats and ordered a correct answer above a wrong one in 0.81 of
-/// the pairs. `CandidateFinding::class_margin_micronats` carries that argument in
-/// full. All three are kept because a different model may saturate differently,
-/// and the comparison is what would show it.
+/// The reading records its sharpness, its option mass and its **margin**, and the
+/// measured scope of each is on
+/// `CandidateFinding::class_margin_micronats` and
+/// `CandidateFinding::class_sharpness_ppm` in full. In short, on
+/// `qwen3-coder-30b-a3b`:
+///
+/// * the **sharpness** is saturated — exactly `1_000_000` on 26 of the 27
+///   adjudicated corpus rows, four of the five wrong answers included — so there
+///   is nothing in it to order two findings by;
+/// * the **margin** ordered those same human-written descriptions well (0.98 real
+///   above known-false) and ordered **the findings this function classifies** no
+///   better than chance (0.52 against a null of 0.4999, `P = 0.4411`, over 446 of
+///   them).
+///
+/// So nothing recorded here is a triage signal for the reviewer's own output, and
+/// the fact that the same number works on somebody else's prose is exactly the
+/// trap: the task changed, not the arithmetic. All three are kept because a
+/// different model may behave differently, and a run that records only one cannot
+/// show it.
 ///
 /// # Errors
 /// If the engine fails on a question. One failure aborts the file rather than
@@ -1641,8 +1652,13 @@ fn print_file_findings(
             let scale = f64::from(rto_graph::review_score::PPM_SCALE);
             let frac = |v: Option<u32>| v.map_or(f64::NAN, |x| f64::from(x) / scale);
             println!(
+                // The scope, not a hedge: "may be unreliable" is what lets
+                // somebody use it anyway. The margin was measured at P = 0.44
+                // against a random ordering *on findings like these*, so the
+                // actionable sentence is that it does not rank them.
                 "      typed class: margin {:.2} nats, sharpness {:.4}, \
-                 option mass {:.4} (none of the three is a confidence)",
+                 option mass {:.4} — none is a confidence, and the margin does \
+                 NOT rank self-authored findings (measured P = 0.44 vs random)",
                 f64::from(margin) / scale,
                 frac(f.class_sharpness_ppm),
                 frac(f.class_option_mass_ppm),

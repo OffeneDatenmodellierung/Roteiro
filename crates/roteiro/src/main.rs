@@ -431,13 +431,22 @@ enum Command {
         /// whole-vocabulary **mass** was on any legal answer at all.
         ///
         /// None of the three is a confidence — nothing is fitted against a
-        /// labelled set. The mass is the one to read first, because it says
-        /// whether the model engaged with the question; and the margin is the one
-        /// with any measured signal in it, because the sharpness was measured
-        /// saturated at exactly 1.0 on 26 of 27 adjudicated corpus rows. Measured
-        /// further, ranking the reviewer's own findings by margin did **not**
-        /// separate real findings from noise (P = 0.44 against a random
-        /// ordering), so none of the three should be built into a triage gate.
+        /// labelled set — and none of them ranks this reviewer's output. Read the
+        /// mass first: it says whether the model engaged with the question at all.
+        ///
+        /// What each was measured to do, on `qwen3-coder-30b-a3b`:
+        ///
+        /// - sharpness is **saturated**: exactly 1.0 on 26 of 27 adjudicated
+        ///   corpus rows, four of the five wrong answers included. A 1.0 is what
+        ///   this model almost always returns, not evidence it was right.
+        /// - the margin separated human-written corpus descriptions well (0.98
+        ///   real above known-false) and separated the reviewer's **own** 446
+        ///   findings no better than chance (0.52 against a null of 0.4999,
+        ///   P = 0.44).
+        ///
+        /// So the margin is usable for judging a claim **somebody else wrote**,
+        /// and not for judging the model's own output. Do not build a triage order
+        /// or a gate on any of the three.
         #[arg(long, conflicts_with = "score")]
         typed_class: bool,
     },
