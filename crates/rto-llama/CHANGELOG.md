@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v6.0.2...rto-llama-v6.1.0) - 2026-09-29
+
+### Added
+
+- *(llama)* read a typed answer off the label-token distribution ([#897](https://github.com/OffeneDatenmodellierung/Roteiro/pull/897))
+
+### Fixed
+
+- *(review)* keep the default run byte-identical, and name the instrument
+- *(llama)* refuse a label that forges a marker, record the class source
+- *(llama)* stop two ways a typed read reports a confident wrong answer
+
 ## [5.15.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v5.14.3...rto-llama-v5.15.0) - 2026-09-15
 
 ### Fixed
