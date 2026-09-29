@@ -110,10 +110,24 @@ pub(crate) const EXTRACT_VERSION: u32 = EXTRACT_BASE_VERSION
 /// defect this bump exists to prevent is therefore the very defect the screen
 /// was added to fix, surviving in cache. Nodes can also now carry `meta.screen`,
 /// which a stale fact set would omit. Unconditional and namespace-free: the
-/// screen runs in every feature combination, because `pdf_content` and
+/// screen runs in every feature combination, because `pdf_text` and
 /// `image_content` are always compiled, merely returning `None` without their
 /// features.
-pub(crate) const EXTRACT_BASE_VERSION: u32 = 14;
+///
+/// **14 → 15** (#907): a PDF that contributed no `meta.content` now records
+/// *why* on its `file` node as `meta.extract` (see [`PdfOutcome`]). The bump is
+/// the whole point rather than bookkeeping: the documents this exists to name
+/// are **exactly the ones whose bytes never change** — a committed paper that
+/// crashed the parser is cached as a content-free fact set and would keep being
+/// served as one, with no marker, until someone edited the PDF. Without the bump
+/// the fix would be invisible on every repository that had already synced, which
+/// is every repository that has the problem.
+///
+/// Unconditional and namespace-free: `pdf_text` is compiled in every feature
+/// combination, and its `#[cfg(not(feature = "pdf-text"))]` arm records
+/// `feature-off`/`ingest-off` — so a default build's output changes too, and a
+/// namespace bump alone would not reach it.
+pub(crate) const EXTRACT_BASE_VERSION: u32 = 15;
 
 /// The stride between feature namespaces above. Each of the three
 /// extraction-affecting features occupies a distinct power-of-ten *bit* slot
@@ -539,9 +553,10 @@ fn file_node(
     let end = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
     let mut meta = serde_json::json!({ "bytes": bytes.len(), "lines": lines });
     // Capture the (capped) body so inference embeds *meaning*, not just the
-    // filename: prose files decode as UTF-8; PDFs go through `pdf_content` (only
-    // when the `pdf-text` feature is on, otherwise it is a no-op). Each class is
-    // gated by its `ingest` toggle so a project can suppress it without a rebuild.
+    // filename: prose files decode as UTF-8; PDFs go through `pdf_text` (which
+    // yields text only when the `pdf-text` feature is on, and otherwise records
+    // why on the node). Each class is gated by its `ingest` toggle so a project
+    // can suppress it without a rebuild.
     //
     // Every branch here **decodes text that exists in the bytes** — that is the
     // whole membership rule (ADR-0015). Prose and PDF text are parses; OCR is
@@ -555,10 +570,23 @@ fn file_node(
     // first — see `decoded_content` for why the line falls there and not at the
     // call site.
     let mut screen_classes: Vec<&'static str> = Vec::new();
+    // Why a PDF contributed nothing, when it contributed nothing. `None` for
+    // every other path class — there is nothing to explain about a `.rs` file
+    // having no PDF text (#907).
+    let mut pdf_outcome: Option<PdfOutcome> = None;
     let content = if ingest.prose && is_prose(path) {
         cap_content(&String::from_utf8_lossy(bytes))
-    } else if let Some(text) = ingest.pdf.then(|| pdf_content(path, bytes)).flatten() {
-        decoded_content(&text, &mut screen_classes)
+    } else if let Some(pdf) = pdf_text(path, bytes, ingest) {
+        // Both arms are terminal for a `.pdf`: `image_content` below rejects a
+        // PDF path anyway, so taking this branch on failure changes no content,
+        // only what is recorded about it.
+        match pdf {
+            Ok(text) => decoded_content(&text, &mut screen_classes),
+            Err(outcome) => {
+                pdf_outcome = Some(outcome);
+                String::new()
+            }
+        }
     } else if let Some(text) = image_content(path, bytes, ingest) {
         decoded_content(&text, &mut screen_classes)
     } else {
@@ -566,6 +594,13 @@ fn file_node(
     };
     if !content.is_empty() {
         meta["content"] = serde_json::Value::from(content);
+    }
+    // Recorded for the same reason `meta.screen` below and `meta.scan` in
+    // `opaque_file_node` are: a body that is absent should say why. Written only
+    // when extraction produced no content, so a PDF that extracted cleanly
+    // carries no marker and the two are never both present.
+    if let Some(outcome) = pdf_outcome {
+        meta["extract"] = serde_json::Value::from(outcome.as_str());
     }
     // Recorded on the node even when nothing survived, so a withheld body is a
     // fact somebody can find rather than an absence they have to infer. A screen
@@ -1047,29 +1082,199 @@ fn decoded_content(text: &str, classes: &mut Vec<&'static str>) -> String {
     screened.admit.unwrap_or_default()
 }
 
-/// Extract the text of a PDF blob for embedding, or `None` when `path` is not a
-/// PDF, the `pdf-text` feature is off, the file is too large, or extraction
-/// yields no usable text.
+/// Why a PDF blob contributed no `meta.content` — recorded on its `file` node as
+/// `meta.extract`, so the absence is a fact somebody can find rather than one
+/// they have to infer (the rule `meta.screen` and `meta.scan` already follow).
+///
+/// # Why this exists
+///
+/// `pdf_content` used to answer `None` for five different reasons, one of which
+/// was a **caught panic**, and nothing anywhere said which (#907). A reader
+/// looking at a content-free `file` node could not separate "this PDF holds no
+/// text" from "we tried and the parser died", so a corpus could be 96% ingested
+/// and look complete from the outside. On the 323-paper corpus the issue
+/// measures, 17 documents (5.3%) reach one of these variants.
+///
+/// # Determinism
+///
+/// Every variant renders to a fixed `&'static str`. Nothing here carries a
+/// timestamp, a duration, an address or an upstream error message, so
+/// `meta.extract` stays a pure function of `(path, blob id, bytes)` and may be
+/// cached like the rest of the fact set (ADR-0019 §5). That is deliberate and
+/// not an oversight: the panic payload *would* be more informative and is
+/// exactly what must not be stored.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum PdfOutcome {
+    /// Extraction was attempted and **panicked**, caught by
+    /// [`std::panic::catch_unwind`].
+    ///
+    /// This does **not** establish that the document holds text. The panic can
+    /// fire on a graphics operator before any text is inspected — #907's is
+    /// exactly that, `Path::current_point` on an empty path — so all that is
+    /// known here is that the parse did not complete. Whether text was lost is a
+    /// separate, *measurable* question, and on #907's corpus it was measured: all
+    /// 12 documents reaching this variant have a text layer another extractor
+    /// reads. That is evidence about those documents, not a property of this
+    /// variant, and nothing downstream may treat it as one.
+    Crashed,
+    /// Extraction was attempted and the parser returned an error. Previously
+    /// folded into the same `None` as "no text" by an `.ok()`, so this was a
+    /// *sixth* cause hiding inside the five the issue names.
+    Unreadable,
+    /// Extraction succeeded and the document genuinely holds no extractable
+    /// text (a scan, or a text-free page set). The only variant here that is a
+    /// true fact about the document rather than a limit of this build.
+    NoText,
+    /// The blob is larger than `MAX_PDF_BYTES`, so extraction was never
+    /// attempted.
+    TooLarge,
+    /// Built without the `pdf-text` feature, so no extractor exists.
+    FeatureOff,
+    /// `[ingest] pdf` is off for this repository (ADR-0007), so PDF text is
+    /// suppressed by configuration.
+    IngestOff,
+}
+
+impl PdfOutcome {
+    /// Every variant, in declaration order.
+    ///
+    /// Exists so the consistency check below and its unit test can enumerate the
+    /// enum rather than restating it — a new variant that nobody wires into
+    /// `CONTENT_FAILURE_CLASSES` is then a compile error, not a silently
+    /// uncounted class of loss. Also what makes `FeatureOff` constructed in a
+    /// `pdf-text` build, where its own arm is compiled out.
+    const ALL: [Self; 6] = [
+        Self::Crashed,
+        Self::Unreadable,
+        Self::NoText,
+        Self::TooLarge,
+        Self::FeatureOff,
+        Self::IngestOff,
+    ];
+
+    /// The stable token written to `meta.extract`.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Crashed => "crashed",
+            Self::Unreadable => "unreadable",
+            Self::NoText => "no-text",
+            Self::TooLarge => "too-large",
+            Self::FeatureOff => "feature-off",
+            Self::IngestOff => "ingest-off",
+        }
+    }
+
+    /// Whether extraction was **attempted and failed** — the line
+    /// [`crate::SyncReport::blobs_content_failed`] counts.
+    ///
+    /// The line is *attempted*, not *absent*, and not *lossy* — which is
+    /// deliberate, because whether text was lost is not knowable here (see
+    /// [`Self::Crashed`]). `TooLarge`, `FeatureOff` and `IngestOff` are limits
+    /// this build or this repository chose, and reporting them every sync would
+    /// be noise; `NoText` is a true fact about the document, established by a
+    /// parse that completed. The two below are the ones where the parse did
+    /// **not** complete, so nothing at all is known about what the document
+    /// holds — and nobody decided that.
+    pub(crate) const fn is_failure(self) -> bool {
+        matches!(self, Self::Crashed | Self::Unreadable)
+    }
+}
+
+/// The `meta.extract` tokens that mean extraction was attempted and failed.
+///
+/// One source of truth shared with the store's count query, which cannot call
+/// [`PdfOutcome::is_failure`] across a SQL boundary.
+/// `extract::tests::failure_classes_agree_with_is_failure` holds the two halves
+/// together, so adding a variant cannot leave the count behind.
+pub(crate) const CONTENT_FAILURE_CLASSES: &[&str] = &[
+    PdfOutcome::Crashed.as_str(),
+    PdfOutcome::Unreadable.as_str(),
+];
+
+// The two halves must name the same set. This is the *arity* half, checked at
+// compile time in every feature combination: mark a new variant `is_failure` and
+// forget to list its token here and the crate stops building, rather than the
+// store's count quietly omitting a whole class of lost document. The *membership*
+// half — that the tokens listed are the right ones — is
+// `tests::failure_classes_agree_with_is_failure`, which a compile-time check
+// cannot express because it needs string comparison.
+const _: () = {
+    let mut failures = 0usize;
+    let mut i = 0usize;
+    while i < PdfOutcome::ALL.len() {
+        if PdfOutcome::ALL[i].is_failure() {
+            failures += 1;
+        }
+        i += 1;
+    }
+    assert!(
+        failures == CONTENT_FAILURE_CLASSES.len(),
+        "CONTENT_FAILURE_CLASSES must list exactly the PdfOutcome variants whose \
+         is_failure() is true, or Store::content_failure_count undercounts"
+    );
+};
+
+/// Extract the text of a PDF blob for embedding.
+///
+/// `None` means **`path` is not a PDF at all** — there is nothing to say about
+/// it and no `meta.extract` is recorded. `Some(Ok(text))` is non-empty text.
+/// `Some(Err(outcome))` names, precisely, why a PDF yielded none; see
+/// [`PdfOutcome`].
 ///
 /// `pdf-extract` handles fonts/CMaps internally but can panic on some malformed
 /// documents; the call is panic-guarded so a bad PDF degrades to a plain file
-/// node rather than aborting the whole sync.
+/// node rather than aborting the whole sync. The guard stays — what changes is
+/// that the guarded outcome is now *reported* instead of being one of five
+/// indistinguishable `None`s (#907).
+///
+/// # The panic hook still runs
+///
+/// [`std::panic::catch_unwind`] stops the unwind; it does not stop the panic
+/// hook, so the default hook prints `thread '…' panicked at …` to stderr for
+/// each crashed document. That is left alone deliberately: a process-global
+/// `set_hook` would suppress **unrelated** panics for as long as it was
+/// installed, which is a worse defect than the one this fixes, and the printed
+/// line names the upstream source location — which is the one piece of
+/// information `meta.extract` may not store, because it is not stable across
+/// upstream versions.
 #[cfg(feature = "pdf-text")]
-fn pdf_content(path: &str, bytes: &[u8]) -> Option<String> {
-    if extension(path).as_deref() != Some("pdf") || bytes.len() > MAX_PDF_BYTES {
+fn pdf_text(path: &str, bytes: &[u8], ingest: IngestConfig) -> Option<Result<String, PdfOutcome>> {
+    if extension(path).as_deref() != Some("pdf") {
         return None;
     }
+    if !ingest.pdf {
+        return Some(Err(PdfOutcome::IngestOff));
+    }
+    if bytes.len() > MAX_PDF_BYTES {
+        return Some(Err(PdfOutcome::TooLarge));
+    }
     let owned = bytes.to_vec();
-    let text = std::panic::catch_unwind(move || pdf_extract::extract_text_from_mem(&owned).ok())
-        .ok()
-        .flatten()?;
-    (!text.trim().is_empty()).then_some(text)
+    Some(
+        match std::panic::catch_unwind(move || pdf_extract::extract_text_from_mem(&owned)) {
+            Err(_) => Err(PdfOutcome::Crashed),
+            Ok(Err(_)) => Err(PdfOutcome::Unreadable),
+            Ok(Ok(text)) if text.trim().is_empty() => Err(PdfOutcome::NoText),
+            Ok(Ok(text)) => Ok(text),
+        },
+    )
 }
 
-/// No-op when the `pdf-text` feature is off: PDFs become plain file nodes.
+/// Without the `pdf-text` feature there is no extractor, so every PDF resolves
+/// to [`PdfOutcome::FeatureOff`] — still recorded, so a content-free PDF node in
+/// a default build says *why* rather than looking like a PDF with no text.
+///
+/// `[ingest] pdf` is checked first, so a repository that has switched PDF
+/// ingestion off reads the same in both builds.
 #[cfg(not(feature = "pdf-text"))]
-fn pdf_content(_path: &str, _bytes: &[u8]) -> Option<String> {
-    None
+fn pdf_text(path: &str, _bytes: &[u8], ingest: IngestConfig) -> Option<Result<String, PdfOutcome>> {
+    if extension(path).as_deref() != Some("pdf") {
+        return None;
+    }
+    Some(Err(if ingest.pdf {
+        PdfOutcome::FeatureOff
+    } else {
+        PdfOutcome::IngestOff
+    }))
 }
 
 /// Embeddable content for an image blob: the literal text OCR reads out of it,
@@ -2613,7 +2818,7 @@ fn extend(scope: &[Scope], seg: &str, key: Option<String>) -> Vec<Scope> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Extractor, FileNodeExtractor, Registry, RustExtractor};
+    use super::{Extractor, FileNodeExtractor, PdfOutcome, Registry, RustExtractor};
     use crate::{EdgeKind, Node, NodeKind};
 
     /// The dispatch-level proof, with the real defect in the fixture: a `.json`
@@ -3261,9 +3466,81 @@ mod inner {
         // Extension matching is case-insensitive: `Guide.PDF` extracts too.
         let upper = FileNodeExtractor.extract("docs/Guide.PDF", "b", &pdf);
         assert!(upper.nodes[0].meta.get("content").is_some());
-        // A malformed PDF degrades to a plain file node — no panic, no content.
+        // …and carries no outcome marker: content and `meta.extract` are
+        // mutually exclusive by construction (#907).
+        assert!(facts.nodes[0].meta.get("extract").is_none());
+        // A malformed PDF degrades to a plain file node — no panic, no content —
+        // and now says *which* of the ways it failed. Before #907 this was the
+        // same `None` a crashed parse produced.
         let bad = FileNodeExtractor.extract("docs/bad.pdf", "b", b"%PDF-1.4\ngarbage");
         assert!(bad.nodes[0].meta.get("content").is_none());
+        assert_eq!(bad.nodes[0].meta["extract"], "unreadable");
+    }
+
+    /// **The two halves of the failure-class definition name the same set.**
+    ///
+    /// `Store::content_failure_count` cannot call [`PdfOutcome::is_failure`]
+    /// across a SQL boundary, so it matches on the tokens in
+    /// [`CONTENT_FAILURE_CLASSES`] instead. The compile-time check beside that
+    /// constant holds the *arity*; this holds the membership, which needs string
+    /// comparison and so cannot be a `const` assertion. Without it, a slice
+    /// listing `"crashed"` twice would satisfy the arity check and silently stop
+    /// counting unreadable documents.
+    #[test]
+    fn failure_classes_agree_with_is_failure() {
+        let expected: Vec<&str> = PdfOutcome::ALL
+            .iter()
+            .filter(|o| o.is_failure())
+            .map(|o| o.as_str())
+            .collect();
+        assert_eq!(
+            expected,
+            super::CONTENT_FAILURE_CLASSES.to_vec(),
+            "CONTENT_FAILURE_CLASSES must list exactly the variants is_failure() \
+             accepts, in the same order",
+        );
+        // The tokens must be distinct, or the enum is not a partition and two
+        // causes would be indistinguishable in `meta.extract` — the defect.
+        let mut all: Vec<&str> = PdfOutcome::ALL.iter().map(|o| o.as_str()).collect();
+        let n = all.len();
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(all.len(), n, "every PdfOutcome needs its own token");
+    }
+
+    /// **A build without `pdf-text` says so on the node.**
+    ///
+    /// The default build's PDFs were the most confusing case in the issue: no
+    /// content, no reason, and no way to tell from the graph that the binary
+    /// simply had no extractor in it. No fixture is needed — without the feature
+    /// the bytes are never parsed, so a real PDF would prove nothing that these
+    /// eight bytes do not.
+    #[cfg(not(feature = "pdf-text"))]
+    #[test]
+    fn a_build_without_the_feature_says_so() {
+        let facts = FileNodeExtractor.extract("docs/paper.pdf", "b", b"%PDF-1.4");
+        assert!(facts.nodes[0].meta.get("content").is_none());
+        assert_eq!(facts.nodes[0].meta["extract"], "feature-off");
+
+        // Configuration still wins over the build, so both builds agree about a
+        // repository that has switched PDF ingestion off.
+        let off = Registry::new(crate::IngestConfig {
+            pdf: false,
+            ..crate::IngestConfig::default()
+        });
+        let facts = off.extract("docs/paper.pdf", "b", b"%PDF-1.4");
+        assert_eq!(facts.nodes[0].meta["extract"], "ingest-off");
+    }
+
+    /// A non-PDF never carries `meta.extract`: there is nothing to explain about
+    /// a Markdown file having no PDF text, and a marker on every node would make
+    /// the one that matters unfindable.
+    #[test]
+    fn only_pdfs_carry_an_extraction_outcome() {
+        let md = FileNodeExtractor.extract("docs/notes.md", "b", b"# Title\n\nbody\n");
+        assert!(md.nodes[0].meta.get("extract").is_none());
+        let rs = FileNodeExtractor.extract("src/lib.rs", "b", b"fn main() {}\n");
+        assert!(rs.nodes.iter().all(|n| n.meta.get("extract").is_none()));
     }
 
     #[cfg(any(feature = "image-ocr", feature = "image-vision"))]

@@ -332,6 +332,46 @@ impl Store {
         Ok(usize::try_from(n).unwrap_or(0))
     }
 
+    /// Number of `file` nodes whose content extraction was **attempted and
+    /// failed** — the count [`crate::SyncReport::blobs_content_failed`] carries.
+    ///
+    /// Read from the *store*, not accumulated during extraction, and that is the
+    /// whole design (#907). Extraction is cached on `(path, blob oid, env)`, so a
+    /// counter incremented inside the extractor reports the true number exactly
+    /// once — on the cold sync — and zero on every warm one, which is every sync
+    /// after the first. The documents this exists to count are precisely the ones
+    /// whose bytes never change, so the counter would read zero for the entire
+    /// life of the corpus. Counting the assembled graph instead makes the number
+    /// a property of the graph rather than of this run's cache-miss set, and it
+    /// is the same reason `blobs_total` is derived from the graph (see
+    /// [`Store::file_node_count`]).
+    ///
+    /// The failure classes come from `extract::CONTENT_FAILURE_CLASSES` rather
+    /// than being spelled again here, so the SQL cannot drift from
+    /// `PdfOutcome::is_failure`. They are crate-internal ASCII
+    /// literals, but they are bound as parameters rather than interpolated, so
+    /// the query text is fixed regardless.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure.
+    pub fn content_failure_count(&self) -> Result<usize, StoreError> {
+        let classes = crate::extract::CONTENT_FAILURE_CLASSES;
+        // `?1` is the node kind; the classes bind from `?2` onward.
+        let holes: Vec<String> = (2..=classes.len() + 1).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "SELECT COUNT(*) FROM nodes \
+             WHERE kind = ?1 AND json_extract(meta, '$.extract') IN ({})",
+            holes.join(", ")
+        );
+        let params: Vec<&str> = std::iter::once(crate::NodeKind::File.as_str())
+            .chain(classes.iter().copied())
+            .collect();
+        let n: i64 = self
+            .conn
+            .query_row(&sql, rusqlite::params_from_iter(params), |r| r.get(0))?;
+        Ok(usize::try_from(n).unwrap_or(0))
+    }
+
     /// Number of edges currently in the store.
     ///
     /// # Errors

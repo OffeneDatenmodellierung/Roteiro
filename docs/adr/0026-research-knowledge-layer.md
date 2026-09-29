@@ -801,7 +801,7 @@ for any text input, PDF included.
 > rather than repeating its own mistake.** Whether a zero-width or bidi codepoint
 > in a PDF actually *survives* `pdf_extract` into the string `decoded_content`
 > screens is **not established**: the existing guard exercises `screen_text`
-> directly, and no fixture drives a real PDF through `pdf_content` into it. It
+> directly, and no fixture drives a real PDF through `pdf_text` into it. It
 > plausibly depends on the document's font encoding — a `ToUnicode` CMap can
 > carry U+200B where a `WinAnsiEncoding` text stream cannot. **The test that
 > settles it is a PDF fixture containing a zero-width-obfuscated directive**,
@@ -809,7 +809,7 @@ for any text input, PDF included.
 > assertion has to be chosen with care: `decoded_content` returns the admitted
 > `String` and a list of finding *classes*, not a `Verdict`, so a test cannot
 > assert `Verdict::Block` through it without changing that signature. Two
-> writable forms, neither needing an API change — drive `pdf_content`'s output
+> writable forms, neither needing an API change — drive `pdf_text`'s output
 > into `screen_text` and assert the verdict there (which is precisely the
 > survival question), or drive the fixture through `decoded_content` and assert
 > it **admits nothing** while recording the directive class, which is the
