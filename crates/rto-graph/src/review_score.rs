@@ -217,10 +217,18 @@ pub const PPM_SCALE: u32 = 1_000_000;
 /// the field it was reused for is exactly the shape of defect the reviewer this
 /// serves is built to find.
 ///
-/// `u32` holds 4,294 nats at this resolution. Beyond that, and for a `NaN`, it
-/// saturates rather than wrapping: a margin that large is degenerate either way,
-/// and `u32::MAX` says "off the top of the scale" where a wrap would say
-/// "certain and unremarkable".
+/// `u32` holds 4,294 nats at this resolution, and the two ways out of range are
+/// **not** the same value, because they do not mean the same thing:
+///
+/// * a margin **above** the scale — or `+inf` — saturates to `u32::MAX`, which
+///   reads as "off the top", where a wrap would read as "certain and
+///   unremarkable";
+/// * a **`NaN`**, or anything negative, reads as `0`, the bottom of the scale,
+///   because a degenerate row carries no orderable information and `0` is what
+///   that means for every other number in this struct.
+///
+/// So a caller must not read `0` as "off the scale high". `an_absurd_margin_saturates_rather_than_wrapping`
+/// pins both ends.
 #[must_use]
 pub fn margin_micronats(nats: f32) -> u32 {
     if nats.is_nan() {

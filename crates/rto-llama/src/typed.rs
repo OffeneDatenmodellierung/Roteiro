@@ -576,14 +576,31 @@ pub fn read_distribution(option_logits: &[f32], all_logits: &[f32]) -> (Vec<f32>
     (probs, mass.clamp(0.0, 1.0))
 }
 
-/// The largest logit's lead over the second largest, in nats — `0.0` on a tie or
-/// on fewer than two finite values.
+/// The largest logit's lead over the second largest, in nats — `0.0` on a tie,
+/// on fewer than two finite values, or on a row [`softmax`] reads as degenerate.
 ///
-/// One pass, and it does not sort: a sort would be `O(K log K)` for two values
-/// and would have to decide what to do about `NaN`, which this simply never
-/// admits to either slot.
+/// # The last of those is not a detail, it is a correctness condition
+///
+/// This number and the [`Answer::value`] beside it must describe the **same**
+/// winner. They are computed from the same slice by different code, so they can
+/// disagree, and a `NaN` is where: `f32::max` ignores `NaN`, so `[NaN, 10.0, 0.0]`
+/// has a finite maximum of `10.0` and a lead of `10.0` — while the softmax's
+/// *total* is `NaN`, which sends it to the uniform fallback, whose argmax is
+/// option `0`. A margin of 10 nats would then be reported for an option that did
+/// not win, which is worse than no margin at all.
+///
+/// So a row carrying any non-finite value has no margin. That agrees with
+/// `softmax` by construction rather than by coincidence: `softmax` answers
+/// "uniform, no information" for exactly these rows, and `0.0` is what no
+/// information means here.
 #[must_use]
 pub fn margin(logits: &[f32]) -> f32 {
+    // Checked first, and over the whole slice: a single `NaN` makes the softmax
+    // total `NaN` and so makes the distribution uniform, whatever the other
+    // entries say.
+    if logits.iter().any(|l| l.is_nan()) {
+        return 0.0;
+    }
     let mut best = f32::NEG_INFINITY;
     let mut second = f32::NEG_INFINITY;
     for l in logits.iter().copied().filter(|l| l.is_finite()) {
@@ -607,21 +624,43 @@ pub fn margin(logits: &[f32]) -> f32 {
 /// supplies the row and which entries the markers sit at, and gets back a value
 /// from the caller's own option set.
 ///
-/// `option_logits` must be in `question`'s option order and the same length. A
-/// mismatch is a bug in the engine rather than something a caller can cause, so
-/// this takes the shorter of the two rather than failing — a truncated reading is
-/// still in-schema, and `option_mass` reports that it was thin.
+/// `option_logits` must be in `question`'s option order and **the same length**.
+///
+/// # Why that is a panic and not a tolerance
+///
+/// This used to take the shorter of the two and pad the rest with zeroes, on the
+/// reasoning that a truncated reading is still in-schema. It is — and it is
+/// *confidently wrong*, which is the one outcome this module exists to make
+/// impossible. One supplied logit for a fourteen-option question softmaxes to
+/// probability `1.0`, the other thirteen pad to `0.0`, and the answer reports a
+/// **sharpness of exactly 1.0**: the most certain reading the type can express,
+/// produced by an engine that supplied almost no data. `option_mass` does not
+/// rescue it either, because the mass of the one logit that did arrive can be the
+/// whole of the model's belief.
+///
+/// A mismatch is unreachable from outside: the only caller builds the vector by
+/// mapping over `question.markers()`, so the lengths agree by construction. It is
+/// therefore an engine bug, and the right answer to an engine bug is to say so
+/// loudly rather than to return a number nobody can tell is wrong.
+///
+/// # Panics
+/// If `option_logits.len()` differs from `question.len()`.
 #[must_use]
 pub fn read_answer<T: Clone>(
     question: &Choice<T>,
     option_logits: &[f32],
     all_logits: &[f32],
 ) -> Answer<T> {
-    let n = option_logits.len().min(question.len());
-    let (probs, mass) = read_distribution(&option_logits[..n], all_logits);
-    let mut padded = probs;
-    padded.resize(question.len(), 0.0);
-    question.answer_from(&padded, mass, margin(&option_logits[..n]))
+    assert_eq!(
+        option_logits.len(),
+        question.len(),
+        "the engine supplied {} logit(s) for a {}-option question; padding the rest \
+         would report a maximally sharp answer for a reading that did not happen",
+        option_logits.len(),
+        question.len(),
+    );
+    let (probs, mass) = read_distribution(option_logits, all_logits);
+    question.answer_from(&probs, mass, margin(option_logits))
 }
 
 #[cfg(test)]
@@ -886,6 +925,44 @@ mod tests {
             .find_map(|(l, p)| (l == "no").then_some(p))
             .expect("a no option");
         assert!((Noul::p_yes(&a) - (1.0 - p_no)).abs() < EPS);
+    }
+
+    /// **The margin and the winner must agree.** `f32::max` ignores `NaN`, so a
+    /// row with one would otherwise report a lead for an option the uniform
+    /// fallback did not pick — a confident number about the wrong answer.
+    #[test]
+    fn a_nan_row_reports_no_margin_so_it_cannot_describe_the_wrong_winner() {
+        let q = Choice::new([
+            ("a".to_owned(), 0),
+            ("b".to_owned(), 1),
+            ("c".to_owned(), 2),
+        ])
+        .expect("valid");
+        let row = [f32::NAN, 10.0, 0.0];
+        assert!(
+            margin(&row).abs() < EPS,
+            "a NaN row still reports a margin: {}",
+            margin(&row)
+        );
+        let answer = read_answer(&q, &row, &row);
+        // The softmax total is NaN, so the distribution is uniform and the argmax
+        // is the caller's first option. The margin must not claim otherwise.
+        assert_eq!(
+            *answer.value(),
+            0,
+            "the uniform fallback picks the first option"
+        );
+        assert!(answer.margin().abs() < EPS, "margin {}", answer.margin());
+    }
+
+    /// A short logit vector must not become a maximally sharp answer. Asserted as
+    /// a panic because it is an engine bug, and a silent `sharpness == 1.0` is
+    /// indistinguishable from a real one.
+    #[test]
+    #[should_panic(expected = "logit(s) for a")]
+    fn a_short_logit_vector_is_refused_rather_than_padded() {
+        let q: Choice<u8> = Choice::new((0..14u8).map(|i| (format!("c{i}"), i))).expect("valid");
+        let _ = read_answer(&q, &[3.0], &[3.0]);
     }
 
     #[test]

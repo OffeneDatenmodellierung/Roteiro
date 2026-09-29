@@ -401,8 +401,9 @@ pub fn review_file(
 }
 
 /// Ask the model, as a **typed question**, which of the fourteen classes each
-/// finding belongs to, and overwrite its class and the two shape numbers with
-/// what the distribution says (issue #897).
+/// finding belongs to, and overwrite its class and all **three** shape numbers —
+/// sharpness, option mass and margin — with what the distribution says
+/// (issue #897).
 ///
 /// # What the model is shown, and what it is not
 ///
@@ -1558,6 +1559,19 @@ fn announce_unreviewable(skipped: &[String]) {
 ///
 /// Returns `(findings printed, claims withheld)`.
 ///
+/// # The shape numbers are shown when there are any
+///
+/// Under `--typed-class` a finding carries a sharpness, an option mass and a
+/// margin, and the replay path records all three into the run document. The live
+/// path writes no document, so printing them is the **only** way a person who
+/// asked for a typed read can see what it produced — without it the flag is
+/// indistinguishable from the default except by reading the source. They are
+/// printed only when present, so the default output is byte-for-byte what it was.
+///
+/// The margin is given in nats and the other two as fractions, because that is
+/// what they are; and the mass is worth reading first, since a sharpness over a
+/// question the model never engaged with is a number about nothing.
+///
 /// A withheld claim is printed and counted but **not** appended: it was withheld
 /// from the reader under `rto_graph::compile_claim`, and a verdict asked to
 /// synthesise a claim nobody was shown would be summarising evidence the reader
@@ -1574,6 +1588,17 @@ fn print_file_findings(
     for f in &outcome.findings {
         let class = f.defect_class.map_or("unclassified", |c| c.as_str());
         println!("  {path}:{}  [{class}]  {}", f.line, f.description);
+        if let Some(margin) = f.class_margin_micronats {
+            let scale = f64::from(rto_graph::review_score::PPM_SCALE);
+            let frac = |v: Option<u32>| v.map_or(f64::NAN, |x| f64::from(x) / scale);
+            println!(
+                "      typed class: margin {:.2} nats, sharpness {:.4}, \
+                 option mass {:.4} (neither is a confidence)",
+                f64::from(margin) / scale,
+                frac(f.class_sharpness_ppm),
+                frac(f.class_option_mass_ppm),
+            );
+        }
         reported.push(format!("{path}:{} [{class}] {}", f.line, f.description));
     }
     for (f, reason) in &outcome.suppressed {
@@ -2841,7 +2866,7 @@ mod tests {
 ///   prevent.
 ///
 /// ```text
-/// cargo test -p roteiro --features serve --lib \
+/// cargo test -p roteiro --features serve --bin roteiro \
 ///     review_llm::typed_class_calibration -- --ignored --nocapture
 /// ```
 #[cfg(all(test, any(feature = "serve", feature = "inference-local-models")))]
@@ -3268,7 +3293,7 @@ mod typed_class_calibration {
     /// which is exactly the choice that method's own docs tell a caller to make.
     ///
     /// ```text
-    /// cargo test -p roteiro --features serve --lib \
+    /// cargo test -p roteiro --features serve --bin roteiro \
     ///     review_llm::typed_class_calibration::the_noul -- --ignored --nocapture
     /// ```
     #[test]
