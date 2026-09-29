@@ -4471,8 +4471,8 @@ fn report_foreign_worktree(report: &rto_graph::SyncReport) {
     }
 }
 
-/// Say so, on stderr, when documents in the graph hold text that extraction
-/// **tried and failed** to read (#907).
+/// Say so, on stderr, when extraction **tried and failed** on documents in the
+/// graph (#907).
 ///
 /// Content-free `file` nodes are otherwise indistinguishable from documents that
 /// genuinely carry no text, so a corpus can be 95% ingested and look complete
@@ -4480,6 +4480,12 @@ fn report_foreign_worktree(report: &rto_graph::SyncReport) {
 /// names `meta.extract` rather than listing the paths because the count is the
 /// part that makes somebody look, and the graph is where the per-document answer
 /// already is.
+///
+/// The wording claims a failed *extraction*, not lost *text*: a crashed parse
+/// can die on a graphics operator before reaching any text, so whether the
+/// document held some is a separate question this line is not entitled to
+/// answer. Overstating it would make the warning easy to dismiss the first time
+/// somebody checked one of these documents and found it genuinely blank.
 ///
 /// Printed on a no-op sync too: the number is a property of the graph, not of
 /// this run's work, and a corpus whose losses vanished from the report as soon as
@@ -4492,10 +4498,10 @@ fn report_content_failures(report: &rto_graph::SyncReport) {
     }
     let s = if n == 1 { "" } else { "s" };
     eprintln!(
-        "warning: {n} document{s} in this graph hold text that extraction could not \
-         read (the parser crashed or errored); their `file` nodes carry \
-         `meta.extract` naming the outcome. Anything grounded on this graph is \
-         missing them."
+        "warning: PDF text extraction failed on {n} document{s} in this graph (the \
+         parser crashed or returned an error), so nothing was read out of them. \
+         Their `file` nodes carry `meta.extract` naming the outcome. Anything \
+         grounded on this graph has their identity but not their content."
     );
 }
 

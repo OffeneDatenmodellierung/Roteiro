@@ -53,8 +53,13 @@ pub struct SyncReport {
     /// (the dirty overlay); always zero for a committed-only [`sync`].
     pub blobs_dirty: usize,
     /// Source files whose content extraction was **attempted and failed**: the
-    /// parser panicked, or returned an error. Text those documents hold did not
-    /// reach `meta.content`, and nobody chose that.
+    /// parser panicked, or returned an error. Their `file` nodes are in the graph;
+    /// nothing was read out of their bytes, and nobody chose that.
+    ///
+    /// Deliberately *not* phrased as text lost. A failed parse says nothing about
+    /// whether the document held any — see `crate::extract::PdfOutcome::Crashed`
+    /// — so the claim this number makes is about the extraction, not about the
+    /// document.
     ///
     /// Non-zero is the loud half of #907. `pdf_content` used to answer `None` for
     /// five different reasons — one of them a caught panic — and no field here

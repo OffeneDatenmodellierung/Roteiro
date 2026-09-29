@@ -1106,8 +1106,16 @@ fn decoded_content(text: &str, classes: &mut Vec<&'static str>) -> String {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum PdfOutcome {
     /// Extraction was attempted and **panicked**, caught by
-    /// [`std::panic::catch_unwind`]. The text is in the document; this build
-    /// lost it.
+    /// [`std::panic::catch_unwind`].
+    ///
+    /// This does **not** establish that the document holds text. The panic can
+    /// fire on a graphics operator before any text is inspected — #907's is
+    /// exactly that, `Path::current_point` on an empty path — so all that is
+    /// known here is that the parse did not complete. Whether text was lost is a
+    /// separate, *measurable* question, and on #907's corpus it was measured: all
+    /// 12 documents reaching this variant have a text layer another extractor
+    /// reads. That is evidence about those documents, not a property of this
+    /// variant, and nothing downstream may treat it as one.
     Crashed,
     /// Extraction was attempted and the parser returned an error. Previously
     /// folded into the same `None` as "no text" by an `.ok()`, so this was a
@@ -1159,11 +1167,14 @@ impl PdfOutcome {
     /// Whether extraction was **attempted and failed** — the line
     /// [`crate::SyncReport::blobs_content_failed`] counts.
     ///
-    /// The line is *attempted*, not *absent*. `TooLarge`, `FeatureOff` and
-    /// `IngestOff` are deliberate limits this build or this repository chose and
-    /// reporting them every sync would be noise; `NoText` is a true fact about
-    /// the document, with nothing to have lost. The two below are the ones where
-    /// text the document holds did not reach the graph and nobody decided that.
+    /// The line is *attempted*, not *absent*, and not *lossy* — which is
+    /// deliberate, because whether text was lost is not knowable here (see
+    /// [`Self::Crashed`]). `TooLarge`, `FeatureOff` and `IngestOff` are limits
+    /// this build or this repository chose, and reporting them every sync would
+    /// be noise; `NoText` is a true fact about the document, established by a
+    /// parse that completed. The two below are the ones where the parse did
+    /// **not** complete, so nothing at all is known about what the document
+    /// holds — and nobody decided that.
     pub(crate) const fn is_failure(self) -> bool {
         matches!(self, Self::Crashed | Self::Unreadable)
     }
