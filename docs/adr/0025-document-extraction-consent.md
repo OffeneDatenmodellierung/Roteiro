@@ -28,7 +28,7 @@ confluence-url:
 
 ## Reference
 
-Affected code: [[crates/rto-graph/src/extract.rs#pdf_content]],
+Affected code: [[crates/rto-graph/src/extract.rs#pdf_text]],
 [[crates/rto-graph/src/extract.rs#IngestConfig]],
 [[crates/rto-graph/src/screen.rs#screen_text]],
 [[crates/rto-graph/src/okf_consent.rs#screen_fingerprint]].
@@ -71,14 +71,14 @@ Three forces make this worth doing now.
 
 **PDF extraction already exists, and the case for it already carried.**
 `pdf-extract` is a declared optional dependency behind the `pdf-text` feature;
-[[crates/rto-graph/src/extract.rs#pdf_content]] runs it bounded at 20 MiB and
+[[crates/rto-graph/src/extract.rs#pdf_text]] runs it bounded at 20 MiB and
 panic-guarded, degrading a hostile document to a plain file node rather than
 aborting a sync. Nothing about Office formats is a harder question than the one
 already answered.
 
 **Nothing Roteiro extracted was screened.** When this was written, `screen_text`
 had exactly two callers, both on the OKF path: the importer and the viewer. Text
-that OCR read out of an image, and text `pdf_content` read out of a PDF, went
+that OCR read out of an image, and text `pdf_text` read out of a PDF, went
 into `meta.content` — which search hands to a model — without passing the screen
 at all. That was a live gap, not a future one, and it is the half of this ADR
 that has since been built: `extract.rs::decoded_content` is the third caller.

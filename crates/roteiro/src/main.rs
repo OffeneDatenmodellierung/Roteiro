@@ -4471,6 +4471,34 @@ fn report_foreign_worktree(report: &rto_graph::SyncReport) {
     }
 }
 
+/// Say so, on stderr, when documents in the graph hold text that extraction
+/// **tried and failed** to read (#907).
+///
+/// Content-free `file` nodes are otherwise indistinguishable from documents that
+/// genuinely carry no text, so a corpus can be 95% ingested and look complete
+/// from every angle a reader has. This is the one line that says it is not. It
+/// names `meta.extract` rather than listing the paths because the count is the
+/// part that makes somebody look, and the graph is where the per-document answer
+/// already is.
+///
+/// Printed on a no-op sync too: the number is a property of the graph, not of
+/// this run's work, and a corpus whose losses vanished from the report as soon as
+/// it stopped changing would be back to being silent about exactly the documents
+/// that never change.
+fn report_content_failures(report: &rto_graph::SyncReport) {
+    let n = report.blobs_content_failed;
+    if n == 0 {
+        return;
+    }
+    let s = if n == 1 { "" } else { "s" };
+    eprintln!(
+        "warning: {n} document{s} in this graph hold text that extraction could not \
+         read (the parser crashed or errored); their `file` nodes carry \
+         `meta.extract` naming the outcome. Anything grounded on this graph is \
+         missing them."
+    );
+}
+
 /// Sync the graph for the current repository, optionally including uncommitted
 /// edits to tracked files.
 fn run_sync(
@@ -4506,6 +4534,7 @@ fn run_sync(
         emit_json(&report)?;
     } else {
         report_foreign_worktree(&report);
+        report_content_failures(&report);
         let tree = &report.tree[..report.tree.len().min(12)];
         let dirty = if report.blobs_dirty > 0 {
             format!(" +{} uncommitted", report.blobs_dirty)

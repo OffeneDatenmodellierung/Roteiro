@@ -188,7 +188,7 @@ false twice over.** It said a PDF parser is dependency weight under ADR-0017, an
 that the media pipeline is where it would belong "if it is ever wanted".
 Roteiro has extracted PDF text since before this ADR: `pdf-extract` is a declared
 optional dependency, gated behind the `pdf-text` feature, and
-[[crates/rto-graph/src/extract.rs#pdf_content]] runs it size-bounded at 20 MiB
+[[crates/rto-graph/src/extract.rs#pdf_text]] runs it size-bounded at 20 MiB
 and panic-guarded, feeding a file node's embeddable content. The trade was made
 and paid for; the ADR argued against making it.
 

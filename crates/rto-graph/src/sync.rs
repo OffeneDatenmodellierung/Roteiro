@@ -52,6 +52,28 @@ pub struct SyncReport {
     /// Working-tree files whose uncommitted content overrode the committed blob
     /// (the dirty overlay); always zero for a committed-only [`sync`].
     pub blobs_dirty: usize,
+    /// Source files whose content extraction was **attempted and failed**: the
+    /// parser panicked, or returned an error. Text those documents hold did not
+    /// reach `meta.content`, and nobody chose that.
+    ///
+    /// Non-zero is the loud half of #907. `pdf_content` used to answer `None` for
+    /// five different reasons — one of them a caught panic — and no field here
+    /// could express any of them, so a sync that dropped 4% of a corpus printed
+    /// exactly the same line as one that dropped nothing. Per-document, the
+    /// reason is on the `file` node as `meta.extract`; this is the count that makes
+    /// somebody go and look.
+    ///
+    /// **Attempted** is the line, deliberately. A PDF over the size cap, a build
+    /// without `pdf-text`, a repository with `[ingest] pdf` off and a document
+    /// that genuinely holds no text are all recorded on the node too, but none
+    /// of them is a failure: three are limits somebody chose and the fourth is a
+    /// true fact about the document. Counting them here would make a non-zero
+    /// number routine, which is how a report stops being read.
+    ///
+    /// Derived from the assembled graph via [`Store::content_failure_count`], not
+    /// accumulated during extraction — see that method for why a counter would
+    /// read zero on every sync after the first.
+    pub blobs_content_failed: usize,
     /// Nodes in the store after syncing.
     pub nodes: u64,
     /// Edges in the store after syncing.
@@ -150,6 +172,7 @@ pub fn sync(
     {
         return Ok(SyncReport {
             no_op: true,
+            blobs_content_failed: store.content_failure_count()?,
             nodes: store.node_count()?,
             edges: store.edge_count()?,
             tree,
@@ -186,6 +209,7 @@ pub fn sync(
         blobs_extracted: committed.extracted,
         blobs_cached: committed.cached,
         blobs_dirty: 0,
+        blobs_content_failed: store.content_failure_count()?,
         nodes: store.node_count()?,
         edges: store.edge_count()?,
         tree,
@@ -338,6 +362,7 @@ fn try_incremental(
         blobs_extracted: extracted,
         blobs_cached: cached,
         blobs_dirty: 0,
+        blobs_content_failed: store.content_failure_count()?,
         nodes: store.node_count()?,
         edges: store.edge_count()?,
         tree: head_tree.to_owned(),
@@ -478,6 +503,7 @@ pub fn sync_worktree(
             no_op: true,
             blobs_total: total,
             blobs_dirty: dirty_count,
+            blobs_content_failed: store.content_failure_count()?,
             nodes: store.node_count()?,
             edges: store.edge_count()?,
             tree,
@@ -502,6 +528,7 @@ pub fn sync_worktree(
         blobs_extracted: committed.extracted,
         blobs_cached: committed.cached,
         blobs_dirty: dirty_count,
+        blobs_content_failed: store.content_failure_count()?,
         nodes: store.node_count()?,
         edges: store.edge_count()?,
         tree,
@@ -552,6 +579,7 @@ pub fn sync_index(
             // count of the assembled graph. Counted the same way here so a no-op
             // does not claim excluded files are in the graph.
             blobs_total: store.file_node_count()?,
+            blobs_content_failed: store.content_failure_count()?,
             nodes: store.node_count()?,
             edges: store.edge_count()?,
             tree: state,
@@ -580,6 +608,7 @@ pub fn sync_index(
         blobs_extracted: extracted.extracted,
         blobs_cached: extracted.cached,
         blobs_dirty: 0,
+        blobs_content_failed: store.content_failure_count()?,
         nodes: store.node_count()?,
         edges: store.edge_count()?,
         tree: state,
@@ -626,6 +655,7 @@ pub fn sync_tree(
         blobs_extracted: extracted.extracted,
         blobs_cached: extracted.cached,
         blobs_dirty: 0,
+        blobs_content_failed: store.content_failure_count()?,
         nodes: store.node_count()?,
         edges: store.edge_count()?,
         tree: rev.to_owned(),
