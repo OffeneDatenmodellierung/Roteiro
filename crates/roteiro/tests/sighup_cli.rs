@@ -24,11 +24,13 @@
 
 #![cfg(all(unix, any(feature = "serve", feature = "explorer", feature = "mcp")))]
 
+use std::io::{BufRead, BufReader};
 #[cfg(feature = "explorer")]
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 mod common;
@@ -56,7 +58,7 @@ const BIN: &str = env!("CARGO_BIN_EXE_roteiro");
 struct ServerCase {
     /// The `Command` variant name, matching `is_long_lived_server`.
     variant: &'static str,
-    /// Arguments after the binary; `{addr}` is substituted with a free address.
+    /// Arguments after the binary; `{addr}` is substituted with [`EPHEMERAL`].
     args: &'static [&'static str],
     /// Whether this build can actually run this server (see above).
     runnable: bool,
@@ -123,15 +125,19 @@ fn every_long_lived_server_survives_sighup() {
     make_repo(&repo);
 
     for case in cases.iter().filter(|c| c.runnable) {
-        let addr = free_addr();
         let args: Vec<String> = case
             .args
             .iter()
-            .map(|a| a.replace("{addr}", &addr))
+            .map(|a| a.replace("{addr}", EPHEMERAL))
             .collect();
         let home = IsolatedHome::new("sighup-survives");
         let mut server = Server::spawn(&args, &repo, &home);
 
+        // Announced, then connected to. The announcement is where the port comes
+        // from at all; the connection is the readiness signal this file's header
+        // argues for, and it is still worth making because a server that printed
+        // its address and is not yet accepting is not ready.
+        let addr = server.wait_for_listening(case.variant);
         wait_for_port(&addr, &mut server.child, case.variant);
 
         sighup(&server.child);
@@ -170,30 +176,21 @@ fn sighup_reloads_the_graph_api_and_the_flat_view_together() {
         make_repo(&root.join(name));
     }
 
-    let addr = free_addr();
     let home = IsolatedHome::new("sighup-reload");
     let args = [
         "serve".to_owned(),
         "--workspace".to_owned(),
         root.to_str().expect("utf-8 root").to_owned(),
         "--addr".to_owned(),
-        addr.clone(),
+        EPHEMERAL.to_owned(),
     ];
     let mut server = Server::spawn(&args, &root.join("one"), &home);
-    // Collect stderr on a thread: the reload line is the flat view's own report,
-    // and reading it inline would deadlock on the pipe.
-    let stderr = server.child.stderr.take().expect("piped stderr");
-    let (tx, rx) = std::sync::mpsc::channel::<String>();
-    std::thread::spawn(move || {
-        use std::io::BufRead;
-        for line in std::io::BufReader::new(stderr)
-            .lines()
-            .map_while(Result::ok)
-        {
-            let _ = tx.send(line);
-        }
-    });
+    // stderr is pumped by `Server::spawn` — the reload line is the flat view's
+    // own report, and reading the pipe inline would deadlock on it. This used to
+    // start a second thread here; `Server` needs the same stream to learn the
+    // bound port, and two readers of one pipe would each see half the lines.
 
+    let addr = server.wait_for_listening("Serve");
     wait_for_port(&addr, &mut server.child, "Serve");
     assert_eq!(
         projects(&addr),
@@ -207,7 +204,7 @@ fn sighup_reloads_the_graph_api_and_the_flat_view_together() {
     sighup(&server.child);
 
     // Wait for the reload line, which is emitted after both swaps.
-    let reported = wait_for_reload_line(&rx, &mut server.child);
+    let reported = wait_for_reload_line(&server.lines, &mut server.child);
     let expected = vec!["one".to_owned(), "three".to_owned(), "two".to_owned()];
     assert_eq!(
         reported, expected,
@@ -299,6 +296,14 @@ fn server_commands_declared_in_main() -> Vec<String> {
 /// way: a fault-injection run leaked a listener.
 struct Server {
     child: Child,
+    /// Every line the child has written to stderr, pumped on a thread.
+    ///
+    /// Pumped rather than read on demand for two reasons. The startup line is
+    /// how this file learns which port the child bound (see [`EPHEMERAL`]), so
+    /// it is needed on every path; and reading a pipe inline while the child
+    /// keeps writing to it is a deadlock, which is what the reload test below
+    /// used to spawn its own thread to avoid.
+    lines: Receiver<String>,
 }
 
 impl Server {
@@ -313,11 +318,87 @@ impl Server {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         home.apply(&mut command);
-        let child = command
+        let mut child = command
             .spawn()
             .unwrap_or_else(|e| panic!("spawn roteiro {args:?}: {e}"));
-        Self { child }
+        let lines = stderr_lines(&mut child);
+        Self { child, lines }
     }
+
+    /// Block until the child announces the address it bound, and return it.
+    ///
+    /// This is the whole reason [`EPHEMERAL`] works: the test does not choose a
+    /// port, the kernel does, and the child is the only thing that knows which.
+    /// All three servers this file drives print `listener.local_addr()` — see
+    /// `serve_graph_ui`, `serve_okf_only` and `rto_render::mcp::serve_http`.
+    fn wait_for_listening(&mut self, what: &str) -> String {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut seen = String::new();
+        while Instant::now() < deadline {
+            match self.lines.recv_timeout(Duration::from_millis(250)) {
+                Ok(line) => {
+                    seen.push_str(&line);
+                    seen.push('\n');
+                    if line.contains(" listening on http://") {
+                        return listening_addr(&line);
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    if let Some(status) = self.child.try_wait().expect("try_wait") {
+                        panic!("`{what}` exited before listening ({status}). stderr:\n{seen}");
+                    }
+                }
+                // stderr closed: the child is on its way out and will print no
+                // more. Not the same event as the exit, and they arrive in that
+                // order, so wait for the status rather than reporting `None`.
+                Err(RecvTimeoutError::Disconnected) => {
+                    let status = wait_for_exit(&mut self.child, Duration::from_secs(30));
+                    panic!(
+                        "`{what}` closed stderr without ever announcing a \
+                         listening address (exit: {status:?}). stderr:\n{seen}"
+                    );
+                }
+            }
+        }
+        panic!("`{what}` never announced a listening address. stderr:\n{seen}");
+    }
+}
+
+/// Block until `child` exits, or `grace` elapses — `None` meaning it is still
+/// running.
+///
+/// Exists because "stderr closed" and "the process exited" are two events and
+/// arrive in that order, so a single `try_wait` at the moment the pipe closes
+/// reads `None` and reports a perfectly ordinary failure as a mystery. The
+/// diagnostic that sent somebody looking for a phantom — `Mcp exited before
+/// binding 127.0.0.1:58354`, with no reason attached — is the cost of not
+/// waiting here.
+fn wait_for_exit(child: &mut Child, grace: Duration) -> Option<std::process::ExitStatus> {
+    let deadline = Instant::now() + grace;
+    loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            return Some(status);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// Pump the child's stderr into a channel on a thread, so a caller can wait for a
+/// line without blocking on a pipe that may never close.
+fn stderr_lines(child: &mut Child) -> Receiver<String> {
+    let stderr = child.stderr.take().expect("piped stderr");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    rx
 }
 
 impl Drop for Server {
@@ -355,15 +436,43 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} failed in {}", dir.display());
 }
 
-/// A loopback address nothing is listening on, by binding port 0 and releasing
-/// it. Racy in principle; in practice the kernel does not immediately re-hand
-/// the same ephemeral port, and the alternative (a fixed port) collides between
-/// concurrent test binaries for certain.
-fn free_addr() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let addr = listener.local_addr().expect("local addr");
-    drop(listener);
-    format!("127.0.0.1:{}", addr.port())
+/// **The address every server here is started on: port zero.** The kernel picks
+/// the port at bind time, in the process that holds it, and
+/// [`Server::wait_for_listening`] reads back which one it got.
+///
+/// This file carried the second copy of the helper issue #906 is about: bind
+/// `:0`, read the port back, **release it**, and hand the number to a child that
+/// binds it hundreds of milliseconds later. Anything on the machine can take the
+/// port in that window, and under a full test run something does — see the long
+/// note on `EPHEMERAL` in `serve_mode_selection_cli.rs` for the mechanism (a
+/// machine-global monotonic cursor over 49152–65535 that laps under load) and
+/// for the measurement: 504, 324 and 490 failures out of 600 forced concurrent
+/// binds for the released shape, and 0 out of 600 for this one.
+///
+/// Both copies are fixed together deliberately. Fixing one and leaving the other
+/// would leave the suite with a helper that looks correct where it was copied
+/// from and races where it was copied to.
+const EPHEMERAL: &str = "127.0.0.1:0";
+
+/// The address out of a `… listening on http://ADDR…` line.
+fn listening_addr(line: &str) -> String {
+    let rest = line
+        .split_once(" listening on http://")
+        .unwrap_or_else(|| panic!("not a listening line: {line}"))
+        .1;
+    let addr = rest
+        .split(['/', ' '])
+        .next()
+        .expect("address in listening line")
+        .to_owned();
+    assert!(
+        !addr.ends_with(":0"),
+        "the server announced the address it was ASKED for, not the one it \
+         bound. Port zero means `pick one`, so a startup line naming `:0` is a \
+         server nobody can reach and a test with nothing to connect to. Restore \
+         the `listener.local_addr()` read at the bind site.\nline: {line}"
+    );
+    addr
 }
 
 /// Send SIGHUP to `child` via `kill(1)` — no `libc` dependency, and this file is

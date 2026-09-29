@@ -53,7 +53,7 @@
 #![cfg(feature = "explorer")]
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -508,11 +508,8 @@ fn a_config_resolving_to_nothing_bails_rather_than_falling_back() {
             "no workspaces to serve — run inside a repo, pass `--workspace <ROOT>`, or configure",
         ),
     ] {
-        let (status, stderr) = run_refusing(
-            &[cmd, "--scope", "all", "--addr", &free_addr()],
-            &cwd,
-            &home,
-        );
+        let (status, stderr) =
+            run_refusing(&[cmd, "--scope", "all", "--addr", EPHEMERAL], &cwd, &home);
         assert!(
             !status.success(),
             "`roteiro {cmd} --scope all` must refuse when config resolves to no \
@@ -952,7 +949,7 @@ fn serve_with_a_workspace_name_selects_within_the_single_repo_fallback() {
     // it was one of the three values #824 reported as impossible.
     for name in ["bogus", "plain"] {
         let (status, stderr) =
-            run_refusing(&["serve", "-w", name, "--addr", &free_addr()], &repo, &home);
+            run_refusing(&["serve", "-w", name, "--addr", EPHEMERAL], &repo, &home);
         assert!(
             !status.success(),
             "`serve -w {name}` names no workspace this server holds and must refuse"
@@ -991,7 +988,7 @@ fn serve_with_a_workspace_name_selects_within_the_single_repo_fallback() {
     // The same flag, the same directory, the other command: unchanged, and now
     // matched rather than contrasted.
     let (status, stderr) = run_refusing(
-        &["explorer", "-w", "bogus", "--addr", &free_addr()],
+        &["explorer", "-w", "bogus", "--addr", EPHEMERAL],
         &repo,
         &home,
     );
@@ -1030,7 +1027,7 @@ fn scope_here_outside_a_repo_refuses_and_names_scope_all() {
 
     for cmd in ["explorer", "serve"] {
         let (status, stderr) = run_refusing(
-            &[cmd, "--scope", "here", "--addr", &free_addr()],
+            &[cmd, "--scope", "here", "--addr", EPHEMERAL],
             &cwd,
             &fx.home,
         );
@@ -1273,7 +1270,7 @@ fn scope_bundle_refuses_a_path_that_holds_no_bundle() {
             "bundle",
             utf8_arg(&empty),
             "--addr",
-            &free_addr(),
+            EPHEMERAL,
         ],
         &base.path,
         &home,
@@ -1333,8 +1330,7 @@ fn conflicting_scope_and_workspace_flags_refuse_rather_than_choosing() {
     ] {
         let mut full = vec!["serve"];
         full.extend_from_slice(&args);
-        let addr = free_addr();
-        full.extend_from_slice(&["--addr", &addr]);
+        full.extend_from_slice(&["--addr", EPHEMERAL]);
         let (status, stderr) = run_refusing(&full, &fx.alpha, &fx.home);
         assert!(!status.success(), "`roteiro {full:?}` must refuse");
         assert!(
@@ -1399,7 +1395,7 @@ fn the_serve_scope_config_key_declares_the_scope_and_the_flag_still_wins() {
     // And a flag still overrides it — here, back to a refusal, which is the
     // sharpest way to observe that the config value was not consulted.
     let (status, stderr) = run_refusing(
-        &["explorer", "--scope", "here", "--addr", &free_addr()],
+        &["explorer", "--scope", "here", "--addr", EPHEMERAL],
         &cwd,
         &fx.home,
     );
@@ -1417,7 +1413,7 @@ fn the_serve_scope_config_key_declares_the_scope_and_the_flag_still_wins() {
         "[serve]\nscope = \"everything\"\n",
     )
     .expect("write config");
-    let (status, stderr) = run_refusing(&["explorer", "--addr", &free_addr()], &cwd, &broken);
+    let (status, stderr) = run_refusing(&["explorer", "--addr", EPHEMERAL], &cwd, &broken);
     assert!(!status.success(), "an unparseable scope must refuse");
     assert!(
         stderr.contains("unknown scope `everything`") && stderr.contains("[serve] scope"),
@@ -1443,14 +1439,7 @@ fn scope_project_is_refused_as_deferred_and_not_as_a_typo() {
     let home = IsolatedHome::new("scope-project");
 
     let (status, stderr) = run_refusing(
-        &[
-            "serve",
-            "--scope",
-            "project",
-            "alpha",
-            "--addr",
-            &free_addr(),
-        ],
+        &["serve", "--scope", "project", "alpha", "--addr", EPHEMERAL],
         &repo,
         &home,
     );
@@ -1550,10 +1539,9 @@ fn observe_mode(
     cwd: &Path,
     home: &IsolatedHome,
 ) -> (Mode, String) {
-    let addr = free_addr();
     let mut args: Vec<&str> = vec![cmd];
     args.extend_from_slice(scope);
-    args.extend_from_slice(&["--addr", &addr]);
+    args.extend_from_slice(&["--addr", EPHEMERAL]);
     let mut child = spawn(&args, cwd, home);
     let lines = stderr_lines(&mut child);
     let mut server = Server { child, lines };
@@ -1601,6 +1589,9 @@ fn observe_mode(
         return (Mode::Refuses, stderr);
     };
 
+    // The port the server bound, read back out of its own startup line — it was
+    // started on port zero and nobody else knows the number. See [`EPHEMERAL`].
+    let addr = listening_addr(&line);
     let graph_line = line.contains(&format!("http://{addr}/ (UI)"));
     // The **route**, not the reason. Bundles-only is now reachable two ways — the
     // cwd fallback ("no repository here") and `--scope bundle <PATH>`, which says
@@ -1933,10 +1924,15 @@ struct Server {
 }
 
 impl Server {
-    /// Spawn `args` in `cwd`, substituting a free address for `{addr}`.
+    /// Spawn `args` in `cwd`, substituting [`EPHEMERAL`] for `{addr}`.
+    ///
+    /// The caller never learns the port from here, because here nobody knows it:
+    /// the child picks it. [`Server::wait_for_listening`] is where it comes back.
     fn spawn(args: &[&str], cwd: &Path, home: &IsolatedHome) -> Self {
-        let addr = free_addr();
-        let owned: Vec<String> = args.iter().map(|a| a.replace("{addr}", &addr)).collect();
+        let owned: Vec<String> = args
+            .iter()
+            .map(|a| a.replace("{addr}", EPHEMERAL))
+            .collect();
         let borrowed: Vec<&str> = owned.iter().map(String::as_str).collect();
         let mut child = spawn(&borrowed, cwd, home);
         let lines = stderr_lines(&mut child);
@@ -1990,15 +1986,7 @@ impl Server {
             .unwrap_or_else(|| {
                 panic!("the server never reported a listening address. stderr:\n{seen}")
             });
-        let rest = line
-            .split_once(" listening on http://")
-            .expect("listening line")
-            .1;
-        let addr = rest
-            .split(['/', ' '])
-            .next()
-            .expect("address in listening line")
-            .to_owned();
+        let addr = listening_addr(&line);
         (addr, line, seen)
     }
 }
@@ -2161,14 +2149,72 @@ fn run_refusing(
     }
 }
 
-/// A loopback address nothing is listening on, by binding port 0 and releasing
-/// it. Racy in principle; a fixed port collides between concurrent test binaries
-/// for certain.
-fn free_addr() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let addr = listener.local_addr().expect("local addr");
-    drop(listener);
-    format!("127.0.0.1:{}", addr.port())
+/// **The address every server here is started on: port zero.** The kernel picks
+/// the port at bind time, in the process that will hold it, and the server says
+/// which one it got — [`listening_addr`] reads it back out of the startup line.
+///
+/// # What this replaced, and why choosing a port is the defect
+///
+/// The previous helper bound `:0`, read the port number back, **released it**,
+/// and handed the number to a child that bound it some hundreds of milliseconds
+/// later. Between the release and the child's bind, anything on the machine
+/// could take that port — and under a full test run something regularly did.
+/// It flaked a *different* test each time and passed in isolation, which is how
+/// it went four runs out of six while being read as machine load (issue #906).
+///
+/// The mechanism, established rather than assumed: macOS hands out ephemeral
+/// ports from a **monotonic cursor** over 49152–65535 that is global to the
+/// machine. A released port is handed out again once the cursor laps those
+/// 16,384 slots. A quiet machine never laps, which is why this reproduces on
+/// nobody's laptop; a full `cargo test --workspace --all-features` run, with
+/// dozens of binaries opening servers and client sockets, laps it repeatedly.
+///
+/// Measured on this machine with a harness that forces the lap — 20 threads x
+/// 30 rounds, a 300 ms gap standing in for process start-up, six background
+/// threads churning ports:
+///
+/// ```text
+/// released (choose, release, bind later)   504 / 324 / 490 failures of 600
+/// ephemeral (bind :0 and keep it)            0 /   0 /   0 failures of 600
+/// with no background churn at all            0 failures of 600, both shapes
+/// ```
+///
+/// The last row is the reason this was misdiagnosed: with nothing else taking
+/// ports, the broken shape is indistinguishable from the correct one.
+///
+/// A better-chosen fixed port does not help and neither does retrying: the
+/// defect is the **window between choosing and binding**, so the fix is to have
+/// no window. Note that this is not the same hazard as a pid-plus-nanoseconds
+/// temp name, which is unique-ish and still collides; here nothing is generated
+/// at all, and two servers cannot be handed the same port because neither is
+/// handed one.
+const EPHEMERAL: &str = "127.0.0.1:0";
+
+/// The address out of a `… listening on http://ADDR…` line.
+///
+/// The counterpart to [`EPHEMERAL`]: the test asks for port zero and the server
+/// answers with the port it bound, so this is the only place the number exists.
+/// Every server started here prints `listener.local_addr()` rather than the
+/// address it was asked for — see `serve_okf_only`, `serve_graph_ui` and
+/// `rto_render::mcp::serve_http` — which is what makes port zero usable at all.
+fn listening_addr(line: &str) -> String {
+    let rest = line
+        .split_once(" listening on http://")
+        .unwrap_or_else(|| panic!("not a listening line: {line}"))
+        .1;
+    let addr = rest
+        .split(['/', ' '])
+        .next()
+        .expect("address in listening line")
+        .to_owned();
+    assert!(
+        !addr.ends_with(":0"),
+        "the server announced the address it was ASKED for, not the one it \
+         bound. Port zero means `pick one`, so a startup line naming `:0` is a \
+         server nobody can reach and a test with nothing to connect to. Restore \
+         the `listener.local_addr()` read at the bind site.\nline: {line}"
+    );
+    addr
 }
 
 // ---------------------------------------------------------------------------
@@ -2478,13 +2524,17 @@ fn scope_here_inside_a_worktree_announces_the_worktree_its_repo_and_its_branch()
 fn scope_here_worktree_announcement(cmd: &str) {
     let (fx, home, checkout) = worktree_fixture(&format!("scope-here-wt-note-{cmd}"));
     let main = fx.join("plain");
-
-    let addr = free_addr();
-    let server = Server::spawn(&[cmd, "--scope", "here", "--addr", &addr], &checkout, &home);
+    let server = Server::spawn(
+        &[cmd, "--scope", "here", "--addr", "{addr}"],
+        &checkout,
+        &home,
+    );
     let mut stderr = String::new();
-    server
+    let line = server
         .wait_for_line(|l| l.contains(" listening on http://"), &mut stderr)
         .unwrap_or_else(|| panic!("{cmd}: no listening line; stderr:\n{stderr}"));
+    // Read back from the server; it was started on port zero. See [`EPHEMERAL`].
+    let addr = listening_addr(&line);
 
     // The announcement: a worktree presented as though it were the repository is
     // the same silent misrepresentation #837 exists to remove, from the other
@@ -2538,16 +2588,15 @@ fn scope_here_worktree_announcement(cmd: &str) {
 fn scope_here_inside_a_worktree_serves_that_worktrees_own_tree() {
     let (_fx, home, checkout) = worktree_fixture("scope-here-wt-tree");
 
-    let addr = free_addr();
     let server = Server::spawn(
-        &["serve", "--scope", "here", "--addr", &addr],
+        &["serve", "--scope", "here", "--addr", "{addr}"],
         &checkout,
         &home,
     );
-    let mut stderr = String::new();
-    server
-        .wait_for_line(|l| l.contains(" listening on http://"), &mut stderr)
-        .unwrap_or_else(|| panic!("no listening line; stderr:\n{stderr}"));
+    // The address comes back FROM the server, because only the server knows it:
+    // it was started on port zero, which is what makes a collision with another
+    // test unexpressible rather than unlikely. See [`EPHEMERAL`].
+    let (addr, _line, _stderr) = server.wait_for_listening_verbose();
 
     let (status, _, nodes) = http_get(&addr, "/v1/graph/checkout/nodes?limit=1000");
     assert_eq!(status, 200, "{nodes}");
@@ -2583,9 +2632,7 @@ fn scope_here_in_an_ordinary_repository_announces_no_worktree() {
         let home = IsolatedHome::new(&format!("scope-here-plain-{cmd}"));
         let repo = fx.join("plain");
         make_repo(&repo);
-
-        let addr = free_addr();
-        let server = Server::spawn(&[cmd, "--scope", "here", "--addr", &addr], &repo, &home);
+        let server = Server::spawn(&[cmd, "--scope", "here", "--addr", EPHEMERAL], &repo, &home);
         let mut stderr = String::new();
         server
             .wait_for_line(|l| l.contains(" listening on http://"), &mut stderr)
@@ -2617,10 +2664,8 @@ fn scope_here_in_a_detached_worktree_does_not_claim_a_branch() {
         &main,
         &["worktree", "add", "-q", "--detach", utf8_arg(&checkout)],
     );
-
-    let addr = free_addr();
     let server = Server::spawn(
-        &["serve", "--scope", "here", "--addr", &addr],
+        &["serve", "--scope", "here", "--addr", EPHEMERAL],
         &checkout,
         &home,
     );
@@ -2676,9 +2721,7 @@ fn both_serve_and_explorer_report_the_worktrees_a_root_walked_past() {
         );
         make_repo(&root.join("other"));
         write_config(&home, &[("pool", &root)]);
-
-        let addr = free_addr();
-        let server = Server::spawn(&[cmd, "--scope", "all", "--addr", &addr], &root, &home);
+        let server = Server::spawn(&[cmd, "--scope", "all", "--addr", EPHEMERAL], &root, &home);
         let mut stderr = String::new();
         server
             .wait_for_line(|l| l.contains(" listening on http://"), &mut stderr)
@@ -2756,9 +2799,7 @@ fn a_standalone_pool_of_only_worktrees_is_announced_before_the_cwd_fallback() {
             ),
         )
         .expect("write config.toml");
-
-        let addr = free_addr();
-        let server = Server::spawn(&[cmd, "--scope", "all", "--addr", &addr], &here, &home);
+        let server = Server::spawn(&[cmd, "--scope", "all", "--addr", EPHEMERAL], &here, &home);
         let mut stderr = String::new();
         server
             .wait_for_line(|l| l.contains(" listening on http://"), &mut stderr)
@@ -2823,11 +2864,7 @@ fn mcp_serves_a_lone_worktree_and_reports_the_skip_when_roots_are_configured() {
     // Row 1: nothing configured — `All` finds an empty list, so the single-repo
     // branch takes over and serves the worktree we are standing in.
     let home = IsolatedHome::new("mcp-worktree-nocfg");
-    let server = Server::spawn(
-        &["mcp", "--http", &free_addr()],
-        &root.join("checkout"),
-        &home,
-    );
+    let server = Server::spawn(&["mcp", "--http", EPHEMERAL], &root.join("checkout"), &home);
     let mut stderr = String::new();
     server
         .wait_for_line(|l| l.contains("MCP server listening on"), &mut stderr)
@@ -2842,7 +2879,7 @@ fn mcp_serves_a_lone_worktree_and_reports_the_skip_when_roots_are_configured() {
     let home2 = IsolatedHome::new("mcp-worktree-cfg");
     write_config(&home2, &[("pool", &root)]);
     let server2 = Server::spawn(
-        &["mcp", "--http", &free_addr()],
+        &["mcp", "--http", EPHEMERAL],
         &root.join("checkout"),
         &home2,
     );

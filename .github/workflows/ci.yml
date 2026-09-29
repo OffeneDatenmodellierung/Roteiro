@@ -375,9 +375,45 @@ jobs:
       - name: Clippy
         if: env.RELEASE_PR != 'true'
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      # `--no-fail-fast`, and a report of which test binaries actually ran —
+      # issue #906. The two halves are one fix.
+      #
+      # Without `--no-fail-fast` cargo stops at the first failing test binary
+      # and **never runs the later ones**. The job goes red, which reads like
+      # honest reporting, but the scope it reports on is smaller than the scope
+      # it appears to cover and nothing says which part is missing. Not
+      # hypothetical: a fixed-port flake in `serve_mode_selection_cli` truncated
+      # this cell repeatedly, and `-p`-scoped runs were added beside it without
+      # anyone establishing why the full cell was not reaching those crates.
+      # Same family as #822 (a gate that never ran) and #854 (a gate covering
+      # one axis reading as coverage across all of them).
+      #
+      # THE COST, stated rather than left to be discovered: a genuinely broken
+      # commit now runs the WHOLE suite instead of stopping at the first
+      # failure, so a red run costs more wall-clock than it used to. That is the
+      # correct trade — the alternative is a red run whose coverage nobody can
+      # state — and the five sibling cells in `default-features` and
+      # `no-default-features` already pay it.
+      #
+      # The `--no-run` pass is what makes the report possible: it records which
+      # test binaries were BUILT, the log records which were STARTED, and the
+      # script compares the two. A log-only check cannot do this — a fail-fast
+      # truncation leaves the log internally consistent, because every `Running`
+      # line it contains is followed by a `test result:`. Only the compiled list
+      # knows what is missing. It compiles nothing the run below would not
+      # compile anyway, so the cost is cargo's own overhead, not a second build.
       - name: Test
         if: env.RELEASE_PR != 'true'
-        run: cargo test --workspace --all-features
+        run: |
+          set -euo pipefail
+          cargo test --workspace --all-features --no-run --message-format=json-render-diagnostics > test-targets.json
+          cargo test --workspace --all-features --no-fail-fast 2>&1 | tee test-run.log
+      # `always()` so a red test step still states what it covered — which is the
+      # point: the run that most needs its scope written down is the one that
+      # failed. This step fails if any compiled binary was never started.
+      - name: Which test binaries actually ran
+        if: ${{ always() && env.RELEASE_PR != 'true' }}
+        run: python3 scripts/ci-test-cell-report.py --targets test-targets.json --log test-run.log
       # Broken intra-doc links — issue #783. No `RUSTDOCFLAGS` here: the lints
       # are denied in `Cargo.toml`, so this fails on a plain `cargo doc` and
       # keeps failing for anyone who runs it by hand.
@@ -862,9 +898,27 @@ jobs:
         uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
         with:
           tool: cargo-llvm-cov
+      # `--no-fail-fast` for the reason the `checks` job records at length
+      # (#906), and it bites harder here than anywhere: `cargo llvm-cov` stopping
+      # at the first failing test binary does not merely report less, it
+      # **measures** less, and the number it then prints is a coverage figure
+      # computed from a truncated run with nothing on it saying so. This job
+      # exists to produce the input to a threshold decision; a silently partial
+      # input is worse than no input. It is the second of the two cells that
+      # lacked the flag — the other five already had it.
+      #
+      # `set -o pipefail` is the second half of the same defect and was there
+      # before this change. GitHub runs `run:` under `bash -e {0}` — **without**
+      # `pipefail` — so `cargo llvm-cov … | tee` reports `tee`'s status, and
+      # `tee` succeeds whatever cargo did. A failing measurement therefore ran on
+      # to the reporting step below, which published whatever landed in
+      # `coverage-summary.txt` under the heading "the input to deciding whether
+      # the floor should be enforced". A partial figure presented as the figure
+      # is precisely what this job must not do.
       - name: Measure coverage (per file + workspace total)
         run: |
-          cargo llvm-cov --workspace --all-features \
+          set -o pipefail
+          cargo llvm-cov --workspace --all-features --no-fail-fast \
             --ignore-filename-regex '(tests?/|/target/)' \
             --summary-only | tee coverage-summary.txt
       - name: Report the numbers that a threshold decision needs
