@@ -198,9 +198,26 @@ pub enum ClassSource {
     #[default]
     ReplyText,
     /// From a typed question over the closed class set, read off the model's
-    /// label-token distribution (`rto_llama::typed`). Carries a sharpness and an
-    /// option mass; see [`classify_findings`].
+    /// label-token distribution (`rto_llama::typed`). Carries a sharpness, an
+    /// option mass and a margin; see [`classify_findings`].
     TypedRead,
+}
+
+#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+impl ClassSource {
+    /// The tag written into [`rto_graph::review_score::RunArm::class_source`].
+    ///
+    /// Beside [`ReviewArm::tag`] and in the same shape, because this is the
+    /// **second** experimental variable `review --llm` has: a run document that
+    /// recorded one and not the other could not be told from a run that varied
+    /// the unrecorded one, which is the whole reason `RunArm` exists.
+    #[must_use]
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::ReplyText => "reply-text",
+            Self::TypedRead => "typed-read",
+        }
+    }
 }
 
 /// One file's review, before scoring.
@@ -416,9 +433,17 @@ pub fn review_file(
 /// cost a second full prefill per finding to re-derive something already stated.
 ///
 /// It is a real limitation and not only an economy: a description too vague to
-/// classify is classified anyway, from too little. What that produces is a flat
-/// distribution — a low sharpness — which is exactly the signal the number is for,
-/// so the limitation is *reported* by the measurement rather than hidden by it.
+/// classify is classified anyway, from too little — and **nothing here reports
+/// that it happened.**
+///
+/// An earlier version of this paragraph claimed such a case produces a flat
+/// distribution, so the limitation would be visible in the sharpness. The
+/// measurement in `typed_class_calibration` disproves it: of the five corpus rows
+/// this classifier got wrong, four came back at a sharpness of *exactly*
+/// `1_000_000` ppm. A model can be sharply wrong on an under-specified
+/// description, and on this model it usually is. The limitation is therefore
+/// **not** self-reporting, and a caller must not read a high sharpness as
+/// evidence that the description carried enough to classify.
 ///
 /// # No fallback to the parsed class
 ///
@@ -1029,6 +1054,7 @@ pub fn run_replay(
         arm: Some(rto_graph::review_score::RunArm {
             context: arm.tag().to_owned(),
             model: model.to_owned(),
+            class_source: Some(class_source.tag().to_owned()),
         }),
         ..CandidateRun::default()
     };
@@ -4232,6 +4258,7 @@ mod margin_ranking {
             arm: Some(RunArm {
                 context: ReviewArm::DiffOnly.tag().to_owned(),
                 model: "qwen3-coder-30b-a3b".to_owned(),
+                class_source: Some(ClassSource::TypedRead.tag().to_owned()),
             }),
         };
         let scored = rto_graph::review_score::score(&corpus, &run).expect("the run scores");

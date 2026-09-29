@@ -151,6 +151,24 @@ pub enum TypedError {
     /// meaningless however sharp it looked.
     #[error("options {0} and {1} share the label `{2}`")]
     DuplicateLabel(usize, usize, String),
+    /// A label carries a control character — a newline, most consequentially.
+    ///
+    /// [`Choice::render`] writes **one `A) label` per line**, so a label
+    /// containing a newline forges a second apparent mapping: `"safe\nB) forged"`
+    /// puts a `B)` line in the prompt that belongs to option `A`. The prompt the
+    /// model reads then disagrees with the marker-to-index mapping the logits are
+    /// gathered against, and the answer is a confident reading of the wrong
+    /// option.
+    ///
+    /// That is precisely the failure the module claims to have removed by having
+    /// one piece of code both assign the markers and render them, so it is
+    /// refused at construction rather than escaped at render time: an escaped
+    /// newline would keep the grammar intact while showing the model a label its
+    /// author did not write.
+    #[error(
+        "option {0}'s label contains a control character (U+{1:04X}), which would              break the one-line-per-option prompt grammar"
+    )]
+    ControlCharacter(usize, u32),
 }
 
 /// One option: what the model is shown, and what the caller gets back.
@@ -197,6 +215,9 @@ impl<T> Choice<T> {
         for (i, (label, _)) in pairs.iter().enumerate() {
             if label.trim().is_empty() {
                 return Err(TypedError::EmptyLabel(i));
+            }
+            if let Some(c) = label.chars().find(|c| c.is_control()) {
+                return Err(TypedError::ControlCharacter(i, c as u32));
             }
             // Quadratic over at most 26 labels, which is cheaper than the
             // allocation a set would take and reports *both* indices — the thing
@@ -705,6 +726,42 @@ mod tests {
         ])
         .expect_err("duplicate");
         assert_eq!(err, TypedError::DuplicateLabel(0, 2, "same".to_owned()));
+    }
+
+    /// **A newline in a label forges a marker mapping.** `render` is one line per
+    /// option, so `"safe\nB) forged"` would put a `B)` line in the prompt that
+    /// belongs to option `A` — and the logits are gathered against the real
+    /// mapping, so the answer would be a confident read of the wrong option.
+    #[test]
+    fn a_label_with_a_newline_is_refused_because_it_would_forge_a_second_marker() {
+        let err = Choice::new([("safe\nB) forged".to_owned(), 0), ("other".to_owned(), 1)])
+            .expect_err("a newline label");
+        assert_eq!(err, TypedError::ControlCharacter(0, u32::from(b'\n')));
+    }
+
+    /// Every control character, not only the newline that motivated the check: a
+    /// carriage return ends a line on its own in plenty of readers, and a
+    /// denylist of the ones that happen to matter cannot be finished.
+    #[test]
+    fn every_control_character_is_refused_rather_than_a_chosen_few() {
+        for bad in ['\n', '\r', '\t', '\u{0}', '\u{1b}'] {
+            let err = Choice::new([(format!("a{bad}b"), 0), ("other".to_owned(), 1)])
+                .expect_err("a control character");
+            assert_eq!(
+                err,
+                TypedError::ControlCharacter(0, bad as u32),
+                "for {bad:?}"
+            );
+        }
+    }
+
+    /// And the rendered prompt has exactly one line per option, which is the
+    /// property the check exists to hold.
+    #[test]
+    fn the_rendered_prompt_has_one_line_per_option() {
+        let q: Choice<u8> =
+            Choice::new((0..14u8).map(|i| (format!("class-{i}"), i))).expect("valid");
+        assert_eq!(q.render().lines().count(), q.len());
     }
 
     #[test]

@@ -416,6 +416,24 @@ pub struct RunArm {
     /// The model that generated it, so a comparison across arms can be shown to
     /// have held it fixed.
     pub model: String,
+    /// Where each finding's [`CandidateFinding::defect_class`] came from —
+    /// `reply-text` or `typed-read` (issue #897).
+    ///
+    /// # A second experimental variable, so a second recorded one
+    ///
+    /// This struct exists so that a comparison between runs can be audited from
+    /// the artifacts rather than from their filenames, and `--typed-class`
+    /// changes what the reviewer emits: the class stops being a token parsed out
+    /// of the reply and becomes an index into a closed set, and three shape
+    /// numbers appear on every finding. Two run documents that differ only in
+    /// that were, until this field, indistinguishable — which is exactly the
+    /// failure recording `context` and `model` was meant to prevent.
+    ///
+    /// `None` for a run recorded before the field existed, and
+    /// `skip_serializing_if` keeps the default arm's document byte-identical to
+    /// what it was, so an archived score does not move.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class_source: Option<String>,
 }
 
 /// Schema tag for a [`CandidateRun`] document.
@@ -1097,7 +1115,7 @@ fn match_findings<'a>(rows: &[&'a CorpusRow], findings: &'a [CandidateFinding]) 
 mod tests {
     use super::{
         CandidateFinding, CandidateRun, CandidateVerdict, LINE_WINDOW, PPM_SCALE, RUN_SCHEMA,
-        SCORE_SCHEMA, ScoreError, VerdictStance, fraction_ppm, margin_micronats, score,
+        RunArm, SCORE_SCHEMA, ScoreError, VerdictStance, fraction_ppm, margin_micronats, score,
     };
     use crate::review_corpus::{Corpus, DefectClass, Verdict};
 
@@ -1165,6 +1183,38 @@ mod tests {
 
     /// `NaN` reads as the flattest value rather than as an arbitrary integer: a
     /// degenerate logit row is "no information", and `0` is what that means here.
+    /// **An arm that did not vary the class source leaves the document
+    /// byte-identical**, so an archived score does not move and a diff of two
+    /// runs shows only what actually differed.
+    #[test]
+    fn an_arm_with_no_class_source_serialises_without_the_field() {
+        let arm = RunArm {
+            context: "diff-only".to_owned(),
+            model: "qwen3-coder-30b-a3b".to_owned(),
+            class_source: None,
+        };
+        let json = serde_json::to_string(&arm).expect("serialize");
+        assert!(!json.contains("class_source"), "{json}");
+    }
+
+    /// And a recorded one round-trips through `deny_unknown_fields`, which would
+    /// refuse the field outright had it not been declared — the failure mode that
+    /// makes an undeclared experimental variable worse than no artifact at all.
+    #[test]
+    fn a_recorded_class_source_round_trips() {
+        let arm = RunArm {
+            context: "diff-only".to_owned(),
+            model: "qwen3-coder-30b-a3b".to_owned(),
+            class_source: Some("typed-read".to_owned()),
+        };
+        let json = serde_json::to_string(&arm).expect("serialize");
+        let back: RunArm = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, arm);
+        let old = r#"{"context":"graph","model":"m"}"#;
+        let legacy: RunArm = serde_json::from_str(old).expect("a pre-field arm parses");
+        assert_eq!(legacy.class_source, None, "absence reads as not-recorded");
+    }
+
     #[test]
     fn a_margin_is_recorded_in_millionths_of_a_nat() {
         assert_eq!(margin_micronats(0.0), 0);
