@@ -372,6 +372,38 @@ impl Store {
         Ok(usize::try_from(n).unwrap_or(0))
     }
 
+    /// Number of `file` nodes for `.pdf` paths that carry a `meta.content` body
+    /// — the documents whose text passed the screen and is now reachable by the
+    /// model-facing tools.
+    ///
+    /// Read from the store for exactly the reason
+    /// [`Store::content_failure_count`] above records: extraction is cached on
+    /// `(path, blob oid, env)`, the documents this speaks about are precisely
+    /// the ones whose bytes never change, and a counter incremented inside the
+    /// extractor would therefore read zero on every sync after the first.
+    ///
+    /// # What it is for
+    ///
+    /// `roteiro sync` prints a standing declaration when this is non-zero,
+    /// naming what a PDF `pass` does and does not cover (#813). A PDF `pass` is
+    /// a narrower statement than a markdown `pass`, and the difference has to be
+    /// where the person ingesting the document will see it rather than only in a
+    /// doc comment.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] on query failure.
+    pub fn screened_pdf_count(&self) -> Result<usize, StoreError> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM nodes \
+             WHERE kind = ?1 \
+               AND LOWER(path) LIKE '%.pdf' \
+               AND json_extract(meta, '$.content') IS NOT NULL",
+            [crate::NodeKind::File.as_str()],
+            |r| r.get(0),
+        )?;
+        Ok(usize::try_from(n).unwrap_or(0))
+    }
+
     /// Number of edges currently in the store.
     ///
     /// # Errors

@@ -4505,6 +4505,44 @@ fn report_content_failures(report: &rto_graph::SyncReport) {
     );
 }
 
+/// Say what a PDF `pass` covers, at the point documents are accepted.
+///
+/// # Why this prints rather than being documented
+///
+/// #813's requirement, tightened after a reviewer pointed out that the original
+/// wording — "declared where a user of the upload path will see it" — was
+/// satisfiable by an internal code comment, and therefore was not a requirement
+/// at all:
+///
+/// > The declaration must appear **in the ingest command's own output at the
+/// > point a document is accepted**, and **in `docs/`**.
+///
+/// The reason it matters more here than in most places is that the screen runs,
+/// passes, and thereby implies a check it did not perform. A PDF `pass` covers
+/// directive text, invisible characters, and concealment by rendering mode, fill
+/// colour, page position and font size read from the content stream — and it
+/// does **not** cover a text layer painted over by an opaque image, one hidden
+/// by clipping or alpha, or a lying layer whose lie is not directive-shaped.
+/// Someone reading `synced … 400 nodes` has no way to know that.
+///
+/// Printed only when the graph actually holds screened PDF text: a repository
+/// with no PDFs in it is told nothing, because a standing notice nobody's work
+/// relates to is a line people learn to skip.
+fn report_pdf_screening(count: usize) {
+    if count == 0 {
+        return;
+    }
+    eprintln!(
+        "note: {count} PDF(s) contributed screened text. A PDF `pass` covers \
+         directive text, invisible characters, and concealment by render mode, \
+         fill colour, page position and font size read from the content stream. \
+         It does NOT cover a text layer painted over by an opaque image, hidden \
+         by clipping or alpha, or disagreeing with the page in words that are \
+         not directives. A PDF `pass` therefore means less than a markdown \
+         `pass` — see docs/SCREENING.md."
+    );
+}
+
 /// Sync the graph for the current repository, optionally including uncommitted
 /// edits to tracked files.
 fn run_sync(
@@ -4541,6 +4579,7 @@ fn run_sync(
     } else {
         report_foreign_worktree(&report);
         report_content_failures(&report);
+        report_pdf_screening(store.screened_pdf_count()?);
         let tree = &report.tree[..report.tree.len().min(12)];
         let dirty = if report.blobs_dirty > 0 {
             format!(" +{} uncommitted", report.blobs_dirty)
