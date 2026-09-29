@@ -148,7 +148,7 @@
 //! the box the run sweeps out. A line that starts inside the page and runs off
 //! the edge is not reported, and neither is one pushed off by `Tc`/`Tw`.
 //!
-//! **No form XObjects.** `Do` on a form is not followed into its own content
+//! **No form `XObject`s.** `Do` on a form is not followed into its own content
 //! stream, so concealment inside one is not seen. Its rectangle is likewise not
 //! recorded as page coverage, which is the safe direction: claiming an opaque
 //! region this reader never looked inside would *suppress* findings.
@@ -1782,12 +1782,14 @@ mod tests {
     fn the_ink_of_a_run_is_whichever_colour_its_render_mode_actually_paints() {
         let white = [1.0, 1.0, 1.0];
         let black = [0.0, 0.0, 0.0];
-        let state = |mode: i64| {
-            let mut gs = GraphicsState::default();
-            gs.text.render_mode = mode;
-            gs.fill = Some(white);
-            gs.stroke = Some(black);
-            gs
+        let state = |mode: i64| GraphicsState {
+            fill: Some(white),
+            stroke: Some(black),
+            text: TextParameters {
+                render_mode: mode,
+                ..TextParameters::default()
+            },
+            ..GraphicsState::default()
         };
         for mode in [0, 4] {
             assert_eq!(ink_colours(&state(mode)), Some(vec![white]), "mode {mode}");
@@ -1820,10 +1822,20 @@ mod tests {
     /// failure is silent in opposite directions: a reader that drops `Ts` reads
     /// an off-page glyph as on-page, and one that drops `Th` reads a collapsed
     /// glyph as 12 pt.
+    #[expect(
+        clippy::float_cmp,
+        reason = "12, 500 and 0 are exactly representable and the matrix only \
+                  multiplies them by 1 or 0, so every product here is exact in \
+                  IEEE-754 — and exactness is the property under test: a \
+                  tolerance would accept a rise quietly dropped to a small \
+                  number instead of carried"
+    )]
     #[test]
     fn the_rendering_matrix_carries_the_rise_and_the_horizontal_scale() {
-        let mut params = TextParameters::default();
-        params.size = 12.0;
+        let mut params = TextParameters {
+            size: 12.0,
+            ..TextParameters::default()
+        };
 
         let plain = params.rendering_matrix();
         assert_eq!(plain.apply(0.0, 0.0), (0.0, 0.0));
