@@ -104,15 +104,41 @@ def parse_targets(path: Path) -> list[Target]:
     Only `profile.test` artefacts with an `executable` are test binaries: the
     same stream carries build-script and dependency artefacts, which are
     compiled and never run by anybody.
+
+    # Why this refuses a stream it cannot fully read
+
+    This list is the *expectation set* the whole report is measured against, so
+    a short read here does not produce a smaller answer — it produces a
+    confident wrong one. Drop the last few lines and the missing binaries are
+    missing from the expectation too, and the report says `N of N` about a run
+    that covered less. That is this issue's own defect, one level in.
+
+    Two refusals, therefore. A line that begins `{` and does not parse is
+    corruption, not noise, and is named rather than skipped. And the stream must
+    end with cargo's own `build-finished`: it is emitted last, so its absence is
+    the definition of a truncated or abandoned build, and no count of artefacts
+    can substitute for it.
     """
     out: list[Target] = []
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = line.strip()
+    finished: bool | None = None
+    for number, raw in enumerate(
+        path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1
+    ):
+        line = raw.strip()
         if not line.startswith("{"):
-            continue  # `json-render-diagnostics` still puts rendered text here
+            continue  # `json-render-diagnostics` may still print plain text
         try:
             msg = json.loads(line)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            raise SystemExit(
+                f"{path}:{number} begins as JSON and does not parse ({e}). That "
+                f"is a truncated or corrupt `--no-run` stream, and this file is "
+                f"the list every 'N of N' in this report is measured against — "
+                f"reading it partially would understate the expectation and "
+                f"report a short run as a complete one."
+            ) from e
+        if msg.get("reason") == "build-finished":
+            finished = bool(msg.get("success"))
             continue
         if msg.get("reason") != "compiler-artifact":
             continue
@@ -128,6 +154,19 @@ def parse_targets(path: Path) -> list[Target]:
                 kind=kinds[0],
                 executable=os.path.basename(executable),
             )
+        )
+    if finished is None:
+        raise SystemExit(
+            f"{path} contains no `build-finished` message. Cargo emits it last, "
+            f"so the stream was truncated or the build was killed — and an "
+            f"expectation set read from half a stream turns a short run into a "
+            f"report that says it covered everything."
+        )
+    if not finished:
+        raise SystemExit(
+            f"{path} records `build-finished` with `success: false`: the test "
+            f"binaries did not all compile, so there is no complete expectation "
+            f"set to measure the run against. Read the build failure above."
         )
     return out
 
