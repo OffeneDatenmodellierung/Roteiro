@@ -50,6 +50,16 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# ANSI colour, which this log DOES carry: `ci.yml` sets `CARGO_TERM_COLOR:
+# always` at the workflow level, so cargo emits `\e[1m\e[92m     Running\e[0m …`
+# and libtest emits `test result: \e[32mok\e[0m. …`. Stripped before every match.
+#
+# This is not a hypothetical. The first CI run of this script reported `0 of 101
+# compiled test binaries were started` against a cell that had just run all 101,
+# because it was developed against a terminal-less local log and the regexes
+# anchored on `^\s*Running`. It failed loudly, which is the right way round —
+# but a reporter that cannot read the log is a reporter that cannot report.
+ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 # `     Running unittests src/lib.rs (target/debug/deps/roteiro-1a2b3c)` and
 # `     Running tests/serve_mode_selection_cli.rs (target/debug/deps/serve-4d5e)`.
 RUNNING = re.compile(r"^\s*Running\s+(?P<what>.+?)\s+\((?P<path>[^)]+)\)\s*$")
@@ -131,19 +141,29 @@ def package_name(package_id: str) -> str:
     return package_id.split(" ", 1)[0]
 
 
-def parse_log(path: Path, by_executable: dict[str, Target]) -> list[tuple[str, str | None]]:
-    """Mark every target the log shows started, and return the doc-test runs.
+def parse_log(
+    path: Path, by_executable: dict[str, Target]
+) -> tuple[list[tuple[str, str | None]], bool]:
+    """Mark every target the log shows started; return the doc-test runs, and
+    whether the log contained any recognisable test output at all.
 
     Cargo runs test binaries one at a time, so a `test result:` line belongs to
     the most recent `Running`/`Doc-tests` heading. Attribution is by that
     ordering rather than by parsing the harness's own output, which carries no
     binary name at all.
+
+    The second return value separates two things that otherwise look identical
+    in the report: a cell that truncated (some binaries never started) and a
+    reader that could not parse the log (none of them did, while the log is full
+    of test output). Those want opposite responses from whoever reads the job,
+    and the first CI run of this script needed exactly that distinction.
     """
+    saw_test_output = False
     doctests: list[tuple[str, str | None]] = []
     current: Target | None = None
     current_doctest: int | None = None
     for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = raw.rstrip()
+        line = ANSI.sub("", raw).rstrip()
         running = RUNNING.match(line)
         if running:
             current_doctest = None
@@ -159,6 +179,7 @@ def parse_log(path: Path, by_executable: dict[str, Target]) -> list[tuple[str, s
             continue
         result = RESULT.match(line)
         if result:
+            saw_test_output = True
             if current is not None:
                 current.verdict = result.group("verdict")
                 current.counts = {
@@ -167,10 +188,14 @@ def parse_log(path: Path, by_executable: dict[str, Target]) -> list[tuple[str, s
             elif current_doctest is not None:
                 crate, _ = doctests[current_doctest]
                 doctests[current_doctest] = (crate, result.group("verdict"))
-    return doctests
+    return doctests, saw_test_output
 
 
-def render(targets: list[Target], doctests: list[tuple[str, str | None]]) -> tuple[str, bool]:
+def render(
+    targets: list[Target],
+    doctests: list[tuple[str, str | None]],
+    saw_test_output: bool,
+) -> tuple[str, bool]:
     """The report, and whether the cell is complete."""
     missing = [t for t in targets if not t.started]
     lines: list[str] = []
@@ -188,7 +213,22 @@ def render(targets: list[Target], doctests: list[tuple[str, str | None]]) -> tup
     ran = len(targets) - len(missing)
     lines.append(f"**{ran} of {len(targets)} compiled test binaries were started.**")
     lines.append("")
-    if missing:
+    if ran == 0 and saw_test_output:
+        # Not a truncation. The log plainly contains test results, so the tests
+        # ran and this script failed to read the log — which is a defect in the
+        # reporter, not in the cell, and saying "nothing ran" about it would send
+        # the reader looking for a failure that is not there.
+        lines.append(
+            "**This is a reading failure, not a truncated cell.** The log "
+            "contains `test result:` lines, so the binaries did run — this "
+            "script could not match them to the compiled list. Check the "
+            "`Running` line format first: `ci.yml` sets `CARGO_TERM_COLOR: "
+            "always`, so those lines carry ANSI escapes, and that is exactly "
+            "what broke this script's first CI run. Do not read the table "
+            "below as evidence about the tests."
+        )
+        lines.append("")
+    elif missing:
         lines.append(
             "The cell is **truncated**: the binaries below were built and never "
             "run, so nothing in them was verified by this run. Without "
@@ -251,8 +291,8 @@ def main() -> int:
             return 1
 
     targets = parse_targets(args.targets)
-    doctests = parse_log(args.log, {t.executable: t for t in targets})
-    report, complete = render(targets, doctests)
+    doctests, saw_test_output = parse_log(args.log, {t.executable: t for t in targets})
+    report, complete = render(targets, doctests, saw_test_output)
     emit(report)
     return 0 if complete else 1
 

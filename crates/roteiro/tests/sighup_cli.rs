@@ -348,11 +348,41 @@ impl Server {
                         panic!("`{what}` exited before listening ({status}). stderr:\n{seen}");
                     }
                 }
-                // stderr closed: the child is on its way out and will print no more.
-                Err(RecvTimeoutError::Disconnected) => break,
+                // stderr closed: the child is on its way out and will print no
+                // more. Not the same event as the exit, and they arrive in that
+                // order, so wait for the status rather than reporting `None`.
+                Err(RecvTimeoutError::Disconnected) => {
+                    let status = wait_for_exit(&mut self.child, Duration::from_secs(30));
+                    panic!(
+                        "`{what}` closed stderr without ever announcing a \
+                         listening address (exit: {status:?}). stderr:\n{seen}"
+                    );
+                }
             }
         }
         panic!("`{what}` never announced a listening address. stderr:\n{seen}");
+    }
+}
+
+/// Block until `child` exits, or `grace` elapses — `None` meaning it is still
+/// running.
+///
+/// Exists because "stderr closed" and "the process exited" are two events and
+/// arrive in that order, so a single `try_wait` at the moment the pipe closes
+/// reads `None` and reports a perfectly ordinary failure as a mystery. The
+/// diagnostic that sent somebody looking for a phantom — `Mcp exited before
+/// binding 127.0.0.1:58354`, with no reason attached — is the cost of not
+/// waiting here.
+fn wait_for_exit(child: &mut Child, grace: Duration) -> Option<std::process::ExitStatus> {
+    let deadline = Instant::now() + grace;
+    loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            return Some(status);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(25));
     }
 }
 
