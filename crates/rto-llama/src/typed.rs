@@ -72,9 +72,10 @@
 //! **And the answer turned out to be "it depends on the task", so the margin does
 //! not inherit a general licence.** Asked a fourteen-option class question, it
 //! ordered a correct answer above a wrong one on human-written corpus descriptions
-//! at 0.81, and ordered the model's *own* 446 findings no better than chance (0.52
-//! against a null of 0.4999, `P = 0.4411`). Both figures are on [`Answer::margin`],
-//! with what separates them; read them before ranking anything by it.
+//! at 0.81; ranking the model's *own* 446 findings by it put none of the six real
+//! ones in the top ten (0.5178 against a null of 0.4999, `P = 0.4411`). Both
+//! figures are on [`Answer::margin`], with what separates them and what the
+//! ranking produced; read them before ranking anything by it.
 //!
 //! # `option_mass` is what stops the guarantee being vacuous
 //!
@@ -437,17 +438,21 @@ impl<T> Answer<T> {
     /// * a **fourteen-option** class question over 27 corpus rows a **human**
     ///   wrote: **0.81**, ordering a correct class above a wrong one;
     /// * that same fourteen-option question over 446 findings the **model itself**
-    ///   wrote: **0.52**, ordering real above noise, against a random-ordering null
-    ///   of 0.4999, `P = 0.4411`;
+    ///   wrote: **0.5178**, ordering real above noise, against a random-ordering
+    ///   null of 0.4999, `P = 0.4411`. Ordering those 446 by it put the six real
+    ///   ones at ranks 16, 32, 129, 327, 359 and 431 — **none in the top ten**;
     /// * a **two-option** yes/no asking whether a finding was real, over those same
     ///   27 human-written rows: **0.98**, ordering real above known-false.
     ///
-    /// So the number does **not** rank a model's assessment of its own output: a
-    /// caller ranking by it there is ordering at random and cannot tell. The other
-    /// two figures are not a licence for that, and neither is a licence for the
-    /// other — 0.98 and 0.81 are *different questions* over the same rows, and
-    /// between 0.81 and 0.52 both the author of the prose and the relation being
-    /// separated changed, so neither variable alone accounts for the drop.
+    /// So a caller who ranked a model's own findings by this and read the top of
+    /// the list would have found none of the real ones there. That is what the
+    /// ordering produced; the `P` beside it says the separation was not
+    /// distinguishable from random on that sample, which is a failure to find a
+    /// signal rather than proof of its absence, and neither is stated as the
+    /// other. The remaining figures are not a licence either — 0.98 and 0.81 are
+    /// *different questions* over the same rows, and between 0.81 and 0.5178 both
+    /// the author of the prose and the relation being separated changed, so
+    /// neither variable alone accounts for the drop.
     /// `rto_graph::review_score::CandidateFinding::class_margin_micronats`
     /// carries the full figures.
     ///

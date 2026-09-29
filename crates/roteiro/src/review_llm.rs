@@ -464,11 +464,17 @@ pub fn review_file(
 ///   adjudicated corpus rows, four of the five wrong answers included — so there
 ///   is nothing in it to order two findings by;
 /// * the **margin** ordered a correct class above a wrong one on those same
-///   human-written corpus descriptions at 0.81, and ordered **the findings this
-///   function classifies** no better than chance (0.52 against a null of 0.4999,
-///   `P = 0.4411`, over 446 of them).
+///   human-written corpus descriptions at 0.81. Over 446 of **the findings this
+///   function classifies**, ordering by it put the six credited to a real corpus
+///   row at ranks 16, 32, 129, 327, 359 and 431 — **none in the top ten**, one in
+///   the top twenty — at a separation of 0.5178 against a null of 0.4999,
+///   `P = 0.4411`.
 ///
-/// So nothing recorded here is a triage signal for the reviewer's own output.
+/// So a caller who triaged the head of that list would have found nothing there.
+/// That is what the ordering produced; the statistic beside it says the separation
+/// was not distinguishable from random on this sample, which is a failure to find
+/// a signal rather than proof there is none. The advice rests on the first.
+///
 /// **Two** things separate those two margin figures rather than one — who wrote
 /// the prose, and whether what is being separated is a correct class from a wrong
 /// one or a real finding from noise — so neither alone accounts for the drop, and
@@ -1661,12 +1667,17 @@ fn print_file_findings(
             let frac = |v: Option<u32>| v.map_or(f64::NAN, |x| f64::from(x) / scale);
             println!(
                 // The scope, not a hedge: "may be unreliable" is what lets
-                // somebody use it anyway. The margin was measured at P = 0.44
-                // against a random ordering *on findings like these*, so the
-                // actionable sentence is that it does not rank them.
+                // somebody use it anyway. But "does not rank them" asserts the
+                // null, which `P = 0.44` does not support. One line has room for
+                // neither argument, so it carries the *observation* instead —
+                // what ranking findings like these actually produced — which is
+                // both honest and the thing a reader can act on.
+                // `CandidateFinding::class_margin_micronats` has the full ranks,
+                // the precision@k and the test.
                 "      typed class: margin {:.2} nats, sharpness {:.4}, \
-                 option mass {:.4} — none is a confidence, and the margin does \
-                 NOT rank self-authored findings (measured P = 0.44 vs random)",
+                 option mass {:.4} — none is a confidence; ranking findings like \
+                 these by margin put 0 of 6 real ones in the top 10 of 446 \
+                 (0.52 vs null 0.4999, P = 0.44)",
                 f64::from(margin) / scale,
                 frac(f.class_sharpness_ppm),
                 frac(f.class_option_mass_ppm),

@@ -206,11 +206,11 @@ pub struct CandidateFinding {
     ///   This is the statistic `print_margin_summary` prints as
     ///   `separation P(correct>wrong)`, against 0.60 for
     ///   [`Self::class_sharpness_ppm`] over the same pairs.
-    /// * **0.52** — separating real findings from noise among the **446 findings
-    ///   the model itself produced** over the 23 corpus anchor files. Against a
-    ///   random-ordering null of 0.4999, `P = 0.4411`. The six findings credited
-    ///   to a real row ranked 16, 32, 129, 327, 359 and 431 of 446, and
-    ///   `precision@k` was 0/1, 0/3, 0/5, 0/10, 1/20.
+    /// * **0.5178** — separating real findings from noise among the **446 findings
+    ///   the model itself produced** over the 23 corpus anchor files, against a
+    ///   random-ordering null of 0.4999, `P = 0.4411`. Ordering those 446 by this
+    ///   field put the six credited to a real row at ranks **16, 32, 129, 327, 359
+    ///   and 431 of 446**; `precision@k` was **0/1, 0/3, 0/5, 0/10, 1/20**.
     ///
     /// **Two things differ between those rows, not one.** Who wrote the prose — a
     /// human's corpus description against the model's own finding — *and* what is
@@ -218,10 +218,17 @@ pub struct CandidateFinding {
     /// from noise. Neither variable moved alone, so neither on its own explains the
     /// gap, and this doc does not claim one does.
     ///
-    /// What is settled is the half a caller needs: on the task this field is
-    /// actually produced for — ranking the reviewer's own output — the number does
-    /// not beat chance. A caller ranking by it is ordering at random and will not
-    /// be able to tell.
+    /// **What that ranking would have handed a reader** — the question a caller is
+    /// really asking — is in the ranks above, not in the separation figure. A
+    /// triage pass over the top ten of those 446 finds **none** of the six; over
+    /// the top twenty it finds one. Three of the six sit in the bottom quarter of
+    /// the list.
+    ///
+    /// That is an observation about what the ordering produced, and it is the
+    /// ground for the advice here. The statistic beside it reports that the
+    /// separation was not distinguishable from a random ordering on this sample —
+    /// which is a failure to find a signal and not a demonstration that none
+    /// exists. Neither number is offered as the other.
     ///
     /// ## The 0.98 measured on the same corpus is a different instrument
     ///

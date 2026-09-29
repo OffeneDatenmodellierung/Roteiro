@@ -440,15 +440,19 @@ enum Command {
         ///   corpus rows, four of the five wrong answers included. A 1.0 is what
         ///   this model almost always returns, not evidence it was right.
         /// - the margin ordered a correct class above a wrong one on those same
-        ///   human-written corpus descriptions at 0.81, and ordered the reviewer's
-        ///   **own** 446 findings no better than chance (0.52 against a null of
-        ///   0.4999, P = 0.44).
+        ///   human-written corpus descriptions at 0.81. Ranking the reviewer's
+        ///   **own** 446 findings by it put the six real ones at ranks 16, 32,
+        ///   129, 327, 359 and 431 — none in the top ten, one in the top twenty —
+        ///   at a separation of 0.5178 against a null of 0.4999, P = 0.44.
         ///
-        /// So the margin does **not** rank this reviewer's own output. Two things
-        /// differ between those two figures rather than one — who wrote the prose,
-        /// and whether a correct class is being told from a wrong one or a real
-        /// finding from noise — so neither alone explains the drop. Do not build a
-        /// triage order or a gate on any of the three.
+        /// So triaging the head of that list by margin would have surfaced none of
+        /// them. That is what the ordering produced; the P-value beside it reports
+        /// a failure to find a signal on this sample, not proof there is none. Two
+        /// things differ between the 0.81 and the 446-finding figure rather than
+        /// one — who wrote the prose, and whether a correct class is being told
+        /// from a wrong one or a real finding from noise — so neither alone
+        /// explains the drop. Do not build a triage order or a gate on any of the
+        /// three.
         ///
         /// A separation of 0.98 appears in the same calibration output and is a
         /// **different question**: a two-option yes/no asking whether a finding is
