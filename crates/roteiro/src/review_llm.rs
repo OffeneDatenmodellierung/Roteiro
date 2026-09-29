@@ -2932,7 +2932,7 @@ mod typed_class_calibration {
     /// `None` when one of the two groups is empty — perfect or zero accuracy has
     /// no pairs to order, and reporting `0.5` for it would read as "measured, no
     /// separation" rather than "not measurable".
-    fn separation(correct: &[u32], wrong: &[u32]) -> Option<f64> {
+    pub(super) fn separation(correct: &[u32], wrong: &[u32]) -> Option<f64> {
         if correct.is_empty() || wrong.is_empty() {
             return None;
         }
@@ -3130,7 +3130,9 @@ mod typed_class_calibration {
     /// model choice, which does not outlive this function, and a measurement that
     /// does not say which model produced it is not comparable with the next one —
     /// so it is carried rather than dropped.
-    fn engine_or_skip(out: &mut impl Write) -> Option<(rto_llama::llama::LlamaEngine, String)> {
+    pub(super) fn engine_or_skip(
+        out: &mut impl Write,
+    ) -> Option<(rto_llama::llama::LlamaEngine, String)> {
         // **`resolve_model` reads a process-global slot that only `main` fills.**
         //
         // A test binary is not `main`, so without this the pins are all unset and
@@ -3376,6 +3378,878 @@ mod typed_class_calibration {
             margins.iter().copied().fold(f32::NEG_INFINITY, f32::max),
             separation(&real_margins, &false_margins)
                 .map_or_else(|| "n/a (one group empty)".to_owned(), |s| format!("{s:.4}")),
+        );
+    }
+}
+
+/// **Does ordering the reviewer's own findings by logit margin put the real ones
+/// near the top?** (Issue #897, the expensive half.)
+///
+/// # This measures RANKING, and ranking is not recall
+///
+/// The recorded failure is a **recall** failure: observed 4 real rows matched
+/// against a permutation null mean of 4.19, `P(≥observed) = 0.72`, and the
+/// project's own verdict that *"the reviewer scored below chance"*
+/// (`docs/history/BUILD_PLAN_V2.md`). A per-finding number cannot fix that. It
+/// cannot make the reviewer see a defect it did not see, and nothing in this
+/// module claims otherwise.
+///
+/// What it can fix is **ranking**: given the findings the reviewer does emit, does
+/// ordering by margin put the real ones first? Those are different questions and
+/// the second is the useful one. A reviewer emitting 10.9 findings per file of
+/// which two are real is unusable as a list and usable as a *ranked* list, if the
+/// ranking works. So the headline here is the ranking statistic against a
+/// random-ordering null, and recall is reported beside it as the thing that did
+/// not change.
+///
+/// # On the margin, not on the sharpness
+///
+/// `sharpness` was measured saturated — exactly `1_000_000` ppm on 26 of the 27
+/// corpus rows (`typed_class_calibration`). Ranking by a number that is constant
+/// cannot separate from chance, and that is arithmetic rather than a measurement.
+/// So this ranks by `CandidateFinding::class_margin_micronats`.
+///
+/// # The population is 23 files, and that is not the recorded baseline's
+///
+/// `review_score`'s matcher credits a finding to a row on
+/// `(commit, path, line ±LINE_WINDOW)`, and the permutation null relocates a row
+/// **inside its own reconstructed diff** — so a row never leaves its own
+/// `(sha, path)`. Only findings on a corpus anchor can therefore match, in either
+/// arm. There are **23 distinct anchors** over 15 commits, so 23 file reviews
+/// answer the same statistic as 183 would, at an eighth of the inference.
+///
+/// It also means this run's finding population is **not** the recorded run's
+/// 1,995 over 183 files. Density differs, so the null differs, so
+/// `4 vs 4.19` is **not** a like-for-like comparison and this module does not make
+/// one. It computes its own observed and its own null, from one command over one
+/// file set at one commit, and says so.
+///
+/// # Checkpointed, and it proves it ran
+///
+/// Each file's findings are appended to a JSONL checkpoint as they are produced,
+/// so a fault costs one file rather than the run; a re-run skips what is already
+/// there. Because a resumed run performs no inference, the "it really ran" proof
+/// is reported per-file and asserted only over the files reviewed *this* time —
+/// the session that wrote this module had a calibration run report `ok` having
+/// done no inference at all, and the only thing that made it visible was a
+/// printed reason.
+///
+/// ```text
+/// ROTEIRO_RANK_MAX_FILES=1 cargo test -p roteiro --features serve --bin roteiro \
+///     review_llm::margin_ranking -- --ignored --nocapture      # time one file
+/// cargo test -p roteiro --features serve --bin roteiro \
+///     review_llm::margin_ranking -- --ignored --nocapture      # the whole run
+/// ```
+#[cfg(all(test, any(feature = "serve", feature = "inference-local-models")))]
+mod margin_ranking {
+    #![expect(
+        clippy::cast_precision_loss,
+        reason = "every cast is a small count (corpus rows, findings, trials) \
+                  becoming a rate; f64 is exact well past any of them"
+    )]
+
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::time::Instant;
+
+    use rto_graph::review_corpus::{Corpus, CorpusRow, Verdict};
+    use rto_graph::review_score::{CandidateFinding, CandidateRun, LINE_WINDOW, RunArm};
+    use rto_graph::reviewer::FileUnderReview;
+
+    use super::typed_class_calibration::{engine_or_skip, separation};
+    use super::{ClassSource, ReviewArm};
+
+    /// Permutation trials for both nulls.
+    ///
+    /// The recorded baseline used 2,000 for the recall null and this matches it so
+    /// the two are the same experiment; the ranking null gets more because it is
+    /// cheaper (a label shuffle, no diff parsing) and its statistic is finer.
+    /// Neither is sampled adaptively and neither is re-run: the count is fixed
+    /// here, before any number is seen.
+    const RECALL_TRIALS: usize = 2_000;
+    /// See [`RECALL_TRIALS`].
+    const RANKING_TRIALS: usize = 100_000;
+
+    /// The seed both nulls draw from.
+    ///
+    /// Fixed and stated so the p-values reproduce. A seed chosen after seeing a
+    /// result is the tuning this measurement must not do, so it is a constant in
+    /// the source rather than an input.
+    const SEED: u64 = 0x5197_8974_2026_0929;
+
+    /// `k` values `precision@k` is reported at.
+    const KS: [usize; 5] = [1, 3, 5, 10, 20];
+
+    /// A deterministic `xorshift64*` — enough for a label shuffle, and it avoids
+    /// taking a dependency for one.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next_u64(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+
+        /// A uniform value in `0..n`, by rejection so that the modulo bias which
+        /// would quietly skew a null is not present.
+        fn below(&mut self, n: usize) -> usize {
+            assert!(n > 0, "no range to draw from");
+            let n64 = n as u64;
+            let limit = u64::MAX - (u64::MAX % n64);
+            loop {
+                let v = self.next_u64();
+                if v < limit {
+                    // `n` came in as a `usize`, so `v % n` is inside `usize` by
+                    // construction on every target.
+                    return usize::try_from(v % n64).expect("v % n < n <= usize::MAX");
+                }
+            }
+        }
+
+        fn shuffle<T>(&mut self, items: &mut [T]) {
+            for i in (1..items.len()).rev() {
+                items.swap(i, self.below(i + 1));
+            }
+        }
+    }
+
+    /// One reviewed file, as the checkpoint records it.
+    struct Reviewed {
+        sha: String,
+        path: String,
+        findings: Vec<CandidateFinding>,
+        seconds: f64,
+        /// Whether the model said `NO FINDINGS` in the required form.
+        declared_clean: bool,
+        /// Lines that looked like findings but carried no usable anchor.
+        unparsed: usize,
+        /// The generation stopped inside a reasoning block, so the file was never
+        /// actually reviewed.
+        reasoning_truncated: bool,
+    }
+
+    /// Where the checkpoint lives. Outside the repository, and overridable so two
+    /// runs need not share one.
+    fn checkpoint_path() -> PathBuf {
+        std::env::var_os("ROTEIRO_RANK_CHECKPOINT").map_or_else(
+            || std::env::temp_dir().join("roteiro-margin-ranking.jsonl"),
+            PathBuf::from,
+        )
+    }
+
+    /// Read whatever the checkpoint already holds, keyed by `(sha, path)`.
+    ///
+    /// A malformed line is **fatal**, not skipped: a half-written record from a
+    /// killed process would otherwise silently reduce the population and move
+    /// every number here.
+    fn read_checkpoint(path: &std::path::Path) -> BTreeMap<(String, String), Reviewed> {
+        let mut out = BTreeMap::new();
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return out;
+        };
+        for (n, line) in text.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let v: serde_json::Value = serde_json::from_str(line)
+                .unwrap_or_else(|e| panic!("checkpoint line {} is not JSON: {e}", n + 1));
+            let sha = v["sha"].as_str().expect("sha").to_owned();
+            let p = v["path"].as_str().expect("path").to_owned();
+            let findings: Vec<CandidateFinding> =
+                serde_json::from_value(v["findings"].clone()).expect("findings");
+            let seconds = v["seconds"].as_f64().unwrap_or(0.0);
+            out.insert(
+                (sha.clone(), p.clone()),
+                Reviewed {
+                    sha,
+                    path: p,
+                    findings,
+                    seconds,
+                    // Absent in a checkpoint written before these were recorded.
+                    // `false`/`0` is the reading that claims the least: it says
+                    // "not recorded as clean" rather than "recorded as clean",
+                    // and the summary counts them separately so an older
+                    // checkpoint cannot be read as having answered the question.
+                    declared_clean: v["declared_clean"].as_bool().unwrap_or(false),
+                    unparsed: usize::try_from(v["unparsed"].as_u64().unwrap_or(0)).unwrap_or(0),
+                    reasoning_truncated: v["reasoning_truncated"].as_bool().unwrap_or(false),
+                },
+            );
+        }
+        out
+    }
+
+    /// Append one file's outcome to the checkpoint, flushed before returning.
+    fn append_checkpoint(path: &std::path::Path, r: &Reviewed) {
+        let record = serde_json::json!({
+            "sha": r.sha,
+            "path": r.path,
+            "seconds": r.seconds,
+            // The three fields that tell "found nothing" from "never answered".
+            // A file with zero findings is uninterpretable without them, and 11 of
+            // this run's 23 files had zero.
+            "declared_clean": r.declared_clean,
+            "unparsed": r.unparsed,
+            "reasoning_truncated": r.reasoning_truncated,
+            "findings": serde_json::to_value(&r.findings).expect("findings serialise"),
+        });
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .expect("checkpoint opens");
+        writeln!(f, "{record}").expect("checkpoint writes");
+        f.flush().expect("checkpoint flushes");
+    }
+
+    /// The new-side line numbers a unified diff shows, in order.
+    ///
+    /// The permutation null relocates each corpus row to a line **its own diff
+    /// actually shows**, which is the recorded baseline's recipe; this is that set.
+    /// Context lines count as well as added ones, because a reviewer can anchor a
+    /// finding to either and the tighter added-only variant is reported separately
+    /// by the baseline.
+    fn diff_new_lines(diff: &str) -> Vec<u32> {
+        let mut out = Vec::new();
+        let mut next = 0u32;
+        for line in diff.lines() {
+            if let Some(rest) = line.strip_prefix("@@") {
+                // `@@ -a,b +c,d @@` — take `c`.
+                if let Some(plus) = rest.split('+').nth(1) {
+                    let digits: String = plus.chars().take_while(char::is_ascii_digit).collect();
+                    if let Ok(start) = digits.parse::<u32>() {
+                        next = start;
+                    }
+                }
+                continue;
+            }
+            match line.as_bytes().first() {
+                Some(b'+') => {
+                    out.push(next);
+                    next += 1;
+                }
+                Some(b'-') => {}
+                // A context line, and the `\ No newline` marker which is neither.
+                _ if line.starts_with('\\') => {}
+                _ => {
+                    out.push(next);
+                    next += 1;
+                }
+            }
+        }
+        out
+    }
+
+    /// Which findings the scorer's rule credits to a row, as indices into
+    /// `findings`, keyed by row id.
+    ///
+    /// **A reimplementation of `review_score`'s private `match_findings`, and it is
+    /// cross-checked rather than trusted.** The shipped matcher returns finding
+    /// *references* keyed by row and the ranking needs indices, so this repeats
+    /// the rule: greedy one-to-one over `(sha, path, |Δline| ≤ LINE_WINDOW)`,
+    /// nearest first, ties broken by row id then by line so the result does not
+    /// depend on finding order. The test then asserts its real-row count equals
+    /// the shipped `score()`'s `found`, which is what licenses using it — the same
+    /// step the recorded baseline took before believing its own null.
+    fn credited(rows: &[&CorpusRow], findings: &[CandidateFinding]) -> BTreeMap<u64, usize> {
+        let mut pairs: Vec<(u32, u64, u32, usize)> = Vec::new();
+        for (idx, f) in findings.iter().enumerate() {
+            for row in rows {
+                if row.reviewed_sha != f.reviewed_sha || row.path != f.path {
+                    continue;
+                }
+                let distance = row.line.abs_diff(f.line);
+                if distance <= LINE_WINDOW {
+                    pairs.push((distance, row.id, f.line, idx));
+                }
+            }
+        }
+        pairs.sort_unstable();
+        let mut by_row: BTreeMap<u64, usize> = BTreeMap::new();
+        let mut used: BTreeSet<usize> = BTreeSet::new();
+        for (_, row_id, _, idx) in pairs {
+            if by_row.contains_key(&row_id) || used.contains(&idx) {
+                continue;
+            }
+            by_row.insert(row_id, idx);
+            used.insert(idx);
+        }
+        by_row
+    }
+
+    /// Review every corpus anchor file with the typed class read on, timing each
+    /// and checkpointing as it goes.
+    ///
+    /// Returns `(reviewed files, files reviewed *this run*, seconds spent this
+    /// run, stopped early)`. The middle two are what the "it really ran"
+    /// assertions are made over, because a fully resumed run performs no inference
+    /// and must not be able to report one; the last says the population is a
+    /// deliberate fragment and must not be measured.
+    fn review_anchors(
+        out: &mut impl Write,
+        corpus: &Corpus,
+        repo: &std::path::Path,
+    ) -> anyhow::Result<(Vec<Reviewed>, usize, f64, bool)> {
+        let anchors: BTreeSet<(&str, &str)> = corpus
+            .rows()
+            .iter()
+            .map(|r| (r.reviewed_sha.as_str(), r.path.as_str()))
+            .collect();
+        let cap = std::env::var("ROTEIRO_RANK_MAX_FILES")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(usize::MAX);
+
+        let ckpt = checkpoint_path();
+        let mut done = read_checkpoint(&ckpt);
+        let _ = writeln!(
+            out,
+            "checkpoint {} — {} file(s) already recorded",
+            ckpt.display(),
+            done.len()
+        );
+
+        let Some((engine, model)) = engine_or_skip(out) else {
+            anyhow::bail!("no engine");
+        };
+        let main = super::main_ref(repo)?;
+        let shas: Vec<&str> = corpus.reviewed_shas().into_iter().collect();
+
+        let mut reviewed: Vec<Reviewed> = Vec::new();
+        let mut fresh = 0usize;
+        let mut spent = 0.0f64;
+        // The full anchor count, deliberately **not** capped: this number prices
+        // the whole run, and a projection that shrank with `ROTEIRO_RANK_MAX_FILES`
+        // would make a one-file timing run report the cost of a one-file run.
+        let total_anchors = anchors.len();
+
+        for sha in &shas {
+            let set = super::files_at(repo, sha, &main, rto_graph::PathPolicy::empty())?;
+            for file in set.files {
+                if !anchors.contains(&(*sha, file.path.as_str())) {
+                    continue;
+                }
+                let key = ((*sha).to_owned(), file.path.clone());
+                if let Some(prev) = done.remove(&key) {
+                    reviewed.push(prev);
+                    continue;
+                }
+                if reviewed.len() >= cap {
+                    let _ = writeln!(
+                        out,
+                        "stopping at ROTEIRO_RANK_MAX_FILES={cap} — this is a timing \
+                         run, not a measurement"
+                    );
+                    return Ok((reviewed, fresh, spent, true));
+                }
+                let started = Instant::now();
+                let outcome = super::review_file(
+                    &engine,
+                    &model,
+                    &file,
+                    &rto_graph::reviewer::GraphContext::none(),
+                    &[],
+                    &|_p: &str| None,
+                    ClassSource::TypedRead,
+                )?;
+                let seconds = started.elapsed().as_secs_f64();
+                spent += seconds;
+                fresh += 1;
+                let n = outcome.findings.len();
+                let why = if outcome.reasoning_truncated {
+                    " NEVER REVIEWED (reasoning truncated)"
+                } else if n == 0 && outcome.declared_clean {
+                    " declared clean"
+                } else if n == 0 {
+                    " zero findings and NO clean declaration"
+                } else {
+                    ""
+                };
+                // Progress with a live projection, so the cost of the whole run is
+                // visible from its first file rather than extrapolated from prose.
+                let per_file = spent / fresh as f64;
+                let _ = writeln!(
+                    out,
+                    "  [{}/{total_anchors}] {} — {n} finding(s){why} in {seconds:.1}s \
+                     (mean {per_file:.1}s, projected total {:.1} min)",
+                    reviewed.len() + 1,
+                    file.path,
+                    per_file * total_anchors as f64 / 60.0,
+                );
+                let r = Reviewed {
+                    sha: (*sha).to_owned(),
+                    path: file.path.clone(),
+                    declared_clean: outcome.declared_clean,
+                    unparsed: outcome.unparsed,
+                    reasoning_truncated: outcome.reasoning_truncated,
+                    findings: outcome.findings,
+                    seconds,
+                };
+                append_checkpoint(&ckpt, &r);
+                reviewed.push(r);
+            }
+        }
+        assert!(
+            done.is_empty(),
+            "the checkpoint holds {} record(s) for files this run did not visit, so it \
+             is from a different corpus or a different path policy: {:?}",
+            done.len(),
+            done.keys().collect::<Vec<_>>()
+        );
+        Ok((reviewed, fresh, spent, false))
+    }
+
+    /// The observed real-row count and the recall permutation null.
+    ///
+    /// Relocate every corpus row to a uniformly random line its own reconstructed
+    /// diff shows, leave the findings byte-for-byte as emitted, and rescore. The
+    /// recorded baseline's recipe exactly, so the *method* is comparable even
+    /// though the population is not.
+    fn recall_null(
+        out: &mut impl Write,
+        corpus: &Corpus,
+        findings: &[CandidateFinding],
+        lines_by_anchor: &BTreeMap<(String, String), Vec<u32>>,
+        observed: usize,
+    ) {
+        let real: Vec<&CorpusRow> = corpus
+            .rows()
+            .iter()
+            .filter(|r| r.verdict == Verdict::Real)
+            .collect();
+        // Two supports, because two rows anchor outside their own diff. The
+        // baseline's recipe relocates every row into the diff, which for those two
+        // *raises* their matchability above the position they were observed at and
+        // so biases the null upward — conservative, but not like-for-like. The
+        // second arm keeps only rows whose own line is inside, so relocation stays
+        // within the support the observation came from. Both are reported; neither
+        // is chosen after the fact.
+        let inside_only: Vec<&CorpusRow> = real
+            .iter()
+            .copied()
+            .filter(|r| {
+                lines_by_anchor
+                    .get(&(r.reviewed_sha.clone(), r.path.clone()))
+                    .is_some_and(|l| l.contains(&r.line))
+            })
+            .collect();
+        let observed_inside = credited(&inside_only, findings).len();
+
+        let trial = |rows: &[&CorpusRow], target: usize| -> (f64, f64) {
+            let mut rng = Rng(SEED);
+            let mut at_or_above = 0usize;
+            let mut total = 0usize;
+            for _ in 0..RECALL_TRIALS {
+                let moved: Vec<CorpusRow> = rows
+                    .iter()
+                    .map(|r| {
+                        let mut c = (*r).clone();
+                        let key = (r.reviewed_sha.clone(), r.path.clone());
+                        if let Some(lines) = lines_by_anchor.get(&key)
+                            && !lines.is_empty()
+                        {
+                            c.line = lines[rng.below(lines.len())];
+                        }
+                        c
+                    })
+                    .collect();
+                let refs: Vec<&CorpusRow> = moved.iter().collect();
+                let hits = credited(&refs, findings).len();
+                total += hits;
+                if hits >= target {
+                    at_or_above += 1;
+                }
+            }
+            (
+                total as f64 / RECALL_TRIALS as f64,
+                at_or_above as f64 / RECALL_TRIALS as f64,
+            )
+        };
+        let (mean_all, p_all) = trial(&real, observed);
+        let (mean_in, p_in) = trial(&inside_only, observed_inside);
+        let _ = writeln!(
+            out,
+            "\n  == RECALL (not what a per-finding number can change) ==\
+             \n  {RECALL_TRIALS} trials, seed fixed, rows relocated inside their own diff\
+             \n  all real rows ({:>2})          observed {observed}, null mean {mean_all:.2}, \
+             P(null>=obs) {p_all:.3}\
+             \n  rows inside their diff ({:>2}) observed {observed_inside}, null mean \
+             {mean_in:.2}, P(null>=obs) {p_in:.3}",
+            real.len(),
+            inside_only.len(),
+        );
+    }
+
+    /// The ranking statistic and its random-ordering null — **the headline**.
+    fn ranking_null(
+        out: &mut impl Write,
+        findings: &[CandidateFinding],
+        hit_indices: &BTreeSet<usize>,
+    ) {
+        // The `precision@k` line is assembled into a `String`, which needs the
+        // `fmt` trait beside this module's `io` one.
+        use std::fmt::Write as _;
+
+        let n = findings.len();
+        let margins: Vec<u32> = findings
+            .iter()
+            .map(|f| {
+                f.class_margin_micronats
+                    .expect("typed read recorded a margin")
+            })
+            .collect();
+        let hits: Vec<u32> = (0..n)
+            .filter(|i| hit_indices.contains(i))
+            .map(|i| margins[i])
+            .collect();
+        let misses: Vec<u32> = (0..n)
+            .filter(|i| !hit_indices.contains(i))
+            .map(|i| margins[i])
+            .collect();
+
+        let Some(observed) = separation(&hits, &misses) else {
+            let _ = writeln!(
+                out,
+                "\n  == RANKING ==\n  not measurable: {} credited of {n} finding(s), so one \
+                 group is empty. That is a statement about this run's recall, not about \
+                 the margin.",
+                hits.len()
+            );
+            return;
+        };
+
+        // Order by margin, highest first; ties by index so the order is total and
+        // does not depend on sort stability.
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by_key(|&i| (std::cmp::Reverse(margins[i]), i));
+        let ranks: Vec<usize> = order
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| hit_indices.contains(i))
+            .map(|(rank, _)| rank + 1)
+            .collect();
+        let mean_rank = ranks.iter().sum::<usize>() as f64 / ranks.len() as f64;
+
+        // The random-ordering null for `separation` is exactly 0.5, so the p-value
+        // is what is worth computing: shuffle which findings are credited, keeping
+        // the count, and recompute.
+        let mut rng = Rng(SEED);
+        let mut labels: Vec<bool> = (0..n).map(|i| hit_indices.contains(&i)).collect();
+        let mut at_or_above = 0usize;
+        let mut null_total = 0.0f64;
+        for _ in 0..RANKING_TRIALS {
+            rng.shuffle(&mut labels);
+            let mut h: Vec<u32> = Vec::with_capacity(hits.len());
+            let mut m: Vec<u32> = Vec::with_capacity(n - hits.len());
+            for (&g, &is_hit) in margins.iter().zip(&labels) {
+                if is_hit {
+                    h.push(g);
+                } else {
+                    m.push(g);
+                }
+            }
+            let s = separation(&h, &m).unwrap_or(0.5);
+            null_total += s;
+            if s >= observed {
+                at_or_above += 1;
+            }
+        }
+        let p = at_or_above as f64 / RANKING_TRIALS as f64;
+
+        let _ = writeln!(
+            out,
+            "\n  == RANKING BY MARGIN — the question this run exists to answer ==\
+             \n  findings ranked             {n}\
+             \n  credited to a real row      {}\
+             \n  separation P(hit>miss)      {observed:.4}   (0.5 = no ordering)\
+             \n  null mean over {RANKING_TRIALS} shuffles  {:.4}\
+             \n  P(null >= observed)         {p:.4}\
+             \n  ranks of credited findings  {ranks:?} of {n}\
+             \n  mean rank                   {mean_rank:.1}  (random: {:.1})",
+            hits.len(),
+            null_total / RANKING_TRIALS as f64,
+            (n + 1) as f64 / 2.0,
+        );
+
+        let base = hits.len() as f64 / n as f64;
+        let mut line = String::from("  precision@k                 ");
+        for k in KS {
+            if k > n {
+                continue;
+            }
+            let got = order[..k]
+                .iter()
+                .filter(|i| hit_indices.contains(i))
+                .count();
+            let _ = write!(line, "k={k}: {got}/{k}  ");
+        }
+        let _ = writeln!(out, "{line}\n  random expectation at any k {base:.4} of k");
+    }
+
+    /// **The harness is real, asserted before a single number is read off it.**
+    ///
+    /// A run that performed no inference must not be able to report a measurement,
+    /// and in this session one already has: the first `typed_class_calibration`
+    /// run reported `ok` having resolved a model nobody configured and called it
+    /// zero times. So four things that a do-nothing run cannot produce are checked
+    /// here — wall-clock over the files reviewed *this* time, a non-empty finding
+    /// set, a margin on every finding, and **more than one distinct margin** — and
+    /// the model id and per-file seconds are printed beside them.
+    ///
+    /// A fully resumed run legitimately performs no inference. That is reported
+    /// loudly rather than asserted against, because the checkpoint is the whole
+    /// point of being resumable; what must not happen is a *fresh* run passing
+    /// these checks without having worked.
+    fn prove_it_ran(
+        out: &mut impl Write,
+        reviewed: &[Reviewed],
+        fresh: usize,
+        spent: f64,
+    ) -> Vec<CandidateFinding> {
+        if fresh == 0 {
+            let _ = writeln!(
+                out,
+                "\nNOTE: every file came from the checkpoint, so THIS run performed no \
+                 inference. The numbers below are the recorded run's."
+            );
+        } else {
+            assert!(
+                spent > 1.0,
+                "{fresh} file(s) reportedly reviewed in {spent:.3}s — a 30B model cannot \
+                 do that, so no inference happened"
+            );
+            let _ = writeln!(
+                out,
+                "\n  inference: {fresh} file(s) reviewed in {spent:.1}s ({:.1}s/file)",
+                spent / fresh as f64,
+            );
+        }
+
+        let findings: Vec<CandidateFinding> =
+            reviewed.iter().flat_map(|r| r.findings.clone()).collect();
+        assert!(
+            !findings.is_empty(),
+            "no findings at all over {} file(s) — nothing to rank",
+            reviewed.len()
+        );
+        for f in &findings {
+            assert!(
+                f.class_margin_micronats.is_some(),
+                "{}:{} carries no margin, so --typed-class did not run",
+                f.path,
+                f.line
+            );
+        }
+        let distinct: BTreeSet<u32> = findings
+            .iter()
+            .map(|f| f.class_margin_micronats.expect("just asserted"))
+            .collect();
+        assert!(
+            distinct.len() > 1,
+            "all {} findings share one margin ({distinct:?}) — there is nothing to rank, \
+             and that is the read being degenerate rather than the ranking failing",
+            findings.len(),
+        );
+        // **A zero-finding file is uninterpretable on its own.** The repository's
+        // own record names three ways a clean-looking zero means nothing — an
+        // empty diff, a PR head, a truncated reasoning reply — so the breakdown is
+        // printed rather than left for a reader to assume "clean".
+        let empty: Vec<&Reviewed> = reviewed.iter().filter(|r| r.findings.is_empty()).collect();
+        let truncated = empty.iter().filter(|r| r.reasoning_truncated).count();
+        let declared = empty.iter().filter(|r| r.declared_clean).count();
+        let unexplained = empty.len() - truncated - declared;
+        let _ = writeln!(
+            out,
+            "\n=== margin ranking — {} file(s), {} finding(s), {} distinct margin(s) ===\
+             \n  files with zero findings    {} of {} — {declared} declared clean, \
+             {truncated} never reviewed, {unexplained} neither recorded\
+             \n  unparsed finding-like lines {}",
+            reviewed.len(),
+            findings.len(),
+            distinct.len(),
+            empty.len(),
+            reviewed.len(),
+            reviewed.iter().map(|r| r.unparsed).sum::<usize>(),
+        );
+        findings
+    }
+
+    /// The new-side line set per anchor, and how many corpus rows actually sit
+    /// inside their own.
+    ///
+    /// # The check, and what measuring it found
+    ///
+    /// If [`diff_new_lines`] were wrong the relocation set would be wrong and so
+    /// would the null, silently and in an unknown direction. The corpus's own
+    /// anchors are the only known-good coordinates to check it against — so this
+    /// counts how many rows land on a line their own diff shows.
+    ///
+    /// It was first written to **assert** that all of them do, and that assertion
+    /// fired: `25 of 27`. Two rows anchor outside their own reconstructed diff —
+    /// `add397f2 main.rs:2070`, whose nearest shown line is 2064, and
+    /// `413f73cc config.rs:634`, whose nearest is 575. The parser is right and the
+    /// assumption was wrong; the repository's own guarantee is that a row's diff
+    /// *touches its anchor file*, not its anchor line. So the count is reported
+    /// and the assertion is now the weaker one a broken parser would still fail:
+    /// a non-empty line set per anchor, and a clear majority of rows inside.
+    ///
+    /// The second of those two rows matters on its own: at 59 lines from the
+    /// nearest line its diff shows, **no finding can ever match it** within
+    /// `LINE_WINDOW`. It is a real row outside the reachable set, and it caps
+    /// recall independently of anything a reviewer does.
+    fn relocation_lines(
+        corpus: &Corpus,
+        repo: &std::path::Path,
+        out: &mut impl Write,
+    ) -> BTreeMap<(String, String), Vec<u32>> {
+        let main = super::main_ref(repo).expect("a main ref");
+        let mut lines: BTreeMap<(String, String), Vec<u32>> = BTreeMap::new();
+        for sha in corpus.reviewed_shas() {
+            let set = super::files_at(repo, sha, &main, rto_graph::PathPolicy::empty())
+                .expect("reconstructs");
+            for FileUnderReview { path, diff, .. } in set.files {
+                lines.insert((sha.to_owned(), path), diff_new_lines(&diff));
+            }
+        }
+        let mut inside = 0usize;
+        for row in corpus.rows() {
+            let key = (row.reviewed_sha.clone(), row.path.clone());
+            let shown = lines
+                .get(&key)
+                .unwrap_or_else(|| panic!("no reconstructed diff for {key:?}"));
+            assert!(
+                !shown.is_empty(),
+                "the diff for {key:?} parsed to no new-side lines at all, so the parser \
+                 is broken rather than the corpus being unusual"
+            );
+            if shown.contains(&row.line) {
+                inside += 1;
+            } else {
+                let nearest = shown
+                    .iter()
+                    .min_by_key(|l| l.abs_diff(row.line))
+                    .copied()
+                    .unwrap_or(0);
+                let _ = writeln!(
+                    out,
+                    "  row {} at {}:{} is OUTSIDE its own diff (nearest shown line {nearest}, \
+                     {} away{})",
+                    row.id,
+                    row.path,
+                    row.line,
+                    nearest.abs_diff(row.line),
+                    if nearest.abs_diff(row.line) > LINE_WINDOW {
+                        "; unreachable, so it caps recall"
+                    } else {
+                        ""
+                    },
+                );
+            }
+        }
+        let _ = writeln!(
+            out,
+            "  rows inside their own diff  {inside}/{}",
+            corpus.rows().len()
+        );
+        assert!(
+            inside * 3 >= corpus.rows().len() * 2,
+            "only {inside} of {} rows land on a line their own diff shows — a working \
+             parser puts nearly all of them there, so this is the parser",
+            corpus.rows().len()
+        );
+        lines
+    }
+
+    #[test]
+    #[ignore = "reviews 23 files with a 30B model; prints a measurement"]
+    fn margin_ranks_the_reviewers_own_findings() {
+        let mut out = std::io::stderr();
+        let corpus = rto_graph::review_corpus::builtin().expect("the builtin corpus parses");
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("the workspace root is two levels above this crate")
+            .to_path_buf();
+
+        let (reviewed, fresh, spent, capped) = match review_anchors(&mut out, &corpus, &repo) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = writeln!(out, "SKIP: {e}");
+                return;
+            }
+        };
+        if capped {
+            // A capped run priced the inference and stopped. It has no population
+            // to measure, and running the assertions over a deliberate fragment
+            // would fail for the one reason that is not interesting.
+            let _ = writeln!(
+                out,
+                "\n  TIMING ONLY — {fresh} file(s) in {spent:.1}s ({:.1}s/file). \
+                 Unset ROTEIRO_RANK_MAX_FILES for the measurement.\n",
+                spent / fresh.max(1) as f64,
+            );
+            return;
+        }
+
+        let findings = prove_it_ran(&mut out, &reviewed, fresh, spent);
+
+        // The observed real-row count, from the **shipped** scorer, and the
+        // reimplemented matcher cross-checked against it.
+        let run = CandidateRun {
+            schema: rto_graph::review_score::RUN_SCHEMA.to_owned(),
+            attempted_shas: reviewed.iter().map(|r| r.sha.clone()).collect(),
+            findings: findings.clone(),
+            verdicts: Vec::new(),
+            suppressed: Vec::new(),
+            arm: Some(RunArm {
+                context: ReviewArm::DiffOnly.tag().to_owned(),
+                model: "qwen3-coder-30b-a3b".to_owned(),
+            }),
+        };
+        let scored = rto_graph::review_score::score(&corpus, &run).expect("the run scores");
+
+        let real: Vec<&CorpusRow> = corpus
+            .rows()
+            .iter()
+            .filter(|r| r.verdict == Verdict::Real)
+            .collect();
+        let by_row = credited(&real, &findings);
+        assert_eq!(
+            by_row.len(),
+            scored.found,
+            "the reimplemented matcher credits {} real row(s) and the shipped scorer {} — \
+             they must agree before either is believed",
+            by_row.len(),
+            scored.found
+        );
+        let _ = writeln!(
+            out,
+            "  matcher cross-check         {} real row(s), same as the shipped scorer",
+            by_row.len()
+        );
+
+        let hit_indices: BTreeSet<usize> = by_row.values().copied().collect();
+        ranking_null(&mut out, &findings, &hit_indices);
+
+        let lines_by_anchor = relocation_lines(&corpus, &repo, &mut out);
+        recall_null(&mut out, &corpus, &findings, &lines_by_anchor, scored.found);
+
+        let _ = writeln!(
+            out,
+            "\n  == COMPARABILITY ==\
+             \n  This is {} file(s) / {} commit(s) / {} findings, one command, one commit.\
+             \n  The recorded baseline is 183 files / 15 commits / 1,995 findings, so its\
+             \n  4-vs-4.19 is a DIFFERENT POPULATION and nothing above is an improvement\
+             \n  on it. Only the numbers in this block's own run are compared with each\
+             \n  other.\
+             \n  Sample-size limit: the corpus holds 22 real and 5 known-false rows. Five\
+             \n  is five, whatever any statistic over it reads.\n",
+            reviewed.len(),
+            corpus.reviewed_shas().len(),
+            findings.len(),
         );
     }
 }
