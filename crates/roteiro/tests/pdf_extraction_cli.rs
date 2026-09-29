@@ -137,3 +137,71 @@ fn sync_is_silent_when_every_document_extracted() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// The committed clean-control fixture, read by path rather than rebuilt.
+///
+/// Cross-crate, and deliberately: the module note above refuses a fourth copy of
+/// a PDF builder, and this needs only "a PDF whose text extracts". Borrowing the
+/// artefact costs one path and keeps `rto-graph/tests/pdf_fixtures.rs` the
+/// workspace's only PDF writer. If it is ever renamed this fails loudly with the
+/// path, which is the outcome worth having.
+fn clean_pdf() -> Vec<u8> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../rto-graph/tests/fixtures/pdf/01-clean-control.pdf");
+    std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+/// **What a PDF `pass` does not cover reaches `--json`, not only the terminal.**
+///
+/// #813 requires the screening limits to be declared "in the ingest command's
+/// own output at the point a document is accepted". `--json` *is* that output
+/// for every caller that is not a person at a terminal, and it carried nothing:
+/// a machine consumer reading a clean sync had no way to learn that
+/// concealment-under-an-opaque-image was never checked. That is precisely the
+/// "a `pass` on a PDF does not mean what a `pass` on markdown means" problem the
+/// issue exists to close, surviving in the half of the surface nobody looked at.
+///
+/// Caught in review on PR #912, and it is the same defect this file was created
+/// for one field over — which is why the guard lands here rather than in the
+/// library: `SyncReport` having the field proves nothing about the command
+/// emitting it.
+#[test]
+fn sync_json_carries_the_pdf_screening_declaration() {
+    let dir = fresh_dir("screened-json");
+    git(&dir, &["init", "-q"]);
+    std::fs::write(dir.join("paper.pdf"), clean_pdf()).expect("write pdf");
+    std::fs::write(dir.join("notes.md"), "# Notes\n\nbody\n").expect("write md");
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "corpus"]);
+
+    let json = roteiro(&dir, &["sync", "--json"]);
+    assert!(json.status.success(), "sync --json failed: {json:?}");
+    let report: serde_json::Value =
+        serde_json::from_slice(&json.stdout).expect("sync --json emits JSON");
+    assert_eq!(
+        report["blobs_pdf_screened"], 1,
+        "--json must say a PDF contributed screened text; got {report}",
+    );
+
+    // The human surface still says it too, in prose — the two halves are one
+    // requirement, and a fix to either must not become a regression to the
+    // other.
+    let plain = roteiro(&fresh_synced(&dir), &["sync"]);
+    let stderr = String::from_utf8_lossy(&plain.stderr);
+    assert!(
+        stderr.contains("docs/SCREENING.md"),
+        "the terminal must point at the limits; got {stderr:?}",
+    );
+}
+
+/// A second checkout of the same corpus, so the prose assertion above runs
+/// against a sync that actually did work rather than a cached no-op.
+fn fresh_synced(source: &Path) -> PathBuf {
+    let dir = fresh_dir("screened-text");
+    git(&dir, &["init", "-q"]);
+    std::fs::copy(source.join("paper.pdf"), dir.join("paper.pdf")).expect("copy pdf");
+    std::fs::write(dir.join("notes.md"), "# Notes\n\nbody\n").expect("write md");
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "corpus"]);
+    dir
+}

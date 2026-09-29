@@ -55,13 +55,55 @@
 //! | degenerate size | effective size below [`MIN_LEGIBLE_SIZE`] once the text and current transformation matrices are composed |
 //! | lying layer | an invisible text run over a page image — **content screened, existence not reported**; see below |
 //!
+//! # The state model, and why it is the whole of it
+//!
+//! Whether a glyph marks the page is a question about the **graphics state**,
+//! and a reader that tracks a subset of it answers a different question than it
+//! thinks. Three of the classes above were bypassable for exactly that reason
+//! until the #912 review, so what is tracked is enumerated here against the
+//! specification's own tables rather than against what came to mind.
+//!
+//! **Graphics state (PDF 32000-1 Table 52).** Tracked: the CTM; the fill and
+//! stroke colours *and the spaces they are read in*; and the text state below —
+//! all of them saved by `q` and restored by `Q`, because that is what §9.3 says
+//! and a reader that kept any of them outside the stack reads a `Q` as leaving
+//! them alone. Not tracked, and each is a decision:
+//!
+//! - **the clipping path** (`W`, `W*`) — can conceal, declared below;
+//! - **`ExtGState`** (`gs`: constant alpha, soft mask, blend mode) — can
+//!   conceal, declared below;
+//! - **stroke geometry** (line width, cap, join, miter, dash) — cannot hide a
+//!   *filled* glyph at all, and hides a stroked one only through a degenerate
+//!   dash pattern, which is the clipping class one operator over and declared
+//!   with it;
+//! - **rendering intent, flatness, smoothness, stroke adjustment, overprint** —
+//!   these change how a mark is *rendered*, never whether there is one. Nothing
+//!   in this set can carry a concealment, which is why they are absent rather
+//!   than declared.
+//!
+//! **Text state (Table 103).** Tracked: `Tf` and its size, `Tz`, `Ts`, `TL` and
+//! `Tr`. These are **graphics** state, so `q`/`Q` carry them and `BT` does not
+//! reset them — getting that wrong is wrong in both directions, and fixtures 15
+//! and 16 are the two. Three of them enter the *rendering matrix* of §9.4.4
+//! rather than being separate tests; see [`TextParameters::rendering_matrix`],
+//! which is why `Tz` and `Ts` are closed by getting the transform right instead
+//! of by two more special cases. Not tracked: `Tc` and `Tw`, which change the
+//! **advance** and not the origin (see the glyph-advance note below), and `Tk`,
+//! which is a transparency-group property and belongs to the alpha class.
+//!
+//! **Text object state (§9.4.1).** The text and text-line matrices, reset by
+//! `BT` and *not* saved by `q`/`Q` — the one place where the opposite rule
+//! applies, and the reason [`TextState`] is a separate type from
+//! [`TextParameters`].
+//!
 //! # What is deliberately **not** detected, and why
 //!
 //! Stated here, in [`crate::screen`]'s own non-goals list, in `docs/`, and in
-//! what `roteiro sync` prints when it accepts a PDF. A screen that runs, passes,
-//! and implies a check it did not perform is worse than no screen: it reads as
-//! coverage. #813 and ADR-0025 both settle on the same standard — *a narrower
-//! guard that states its limits beats a broad one that quietly checks nothing.*
+//! what `roteiro sync` prints when it accepts a PDF — on both its human and its
+//! `--json` surface. A screen that runs, passes, and implies a check it did not
+//! perform is worse than no screen: it reads as coverage. #813 and ADR-0025
+//! both settle on the same standard — *a narrower guard that states its limits
+//! beats a broad one that quietly checks nothing.*
 //!
 //! **Text painted over by an opaque image.** An ordinary black, 12 pt, in-bounds
 //! text layer with a picture drawn on top of it afterwards. Nothing in that
@@ -95,14 +137,21 @@
 //! reaches `block` if it carries a directive; its mere existence is not a
 //! finding. A lying layer whose lie is not directive-shaped therefore passes.
 //!
-//! **No opacity, no clipping, no transparency groups.** `q`/`Q` and `cm` are
-//! tracked; `gs` (an `ExtGState`, which can set a constant alpha), `W`/`W*`
-//! clipping paths, soft masks and blend modes are not. Text made invisible by an
-//! alpha of zero or clipped away entirely is not detected.
+//! **No opacity, no clipping, no transparency groups.** Text made invisible by
+//! a constant alpha of zero, a soft mask, or a clipping path that excludes it is
+//! not detected. This is the largest declared gap and it is a *real* bypass, not
+//! an unreachable one — it is declared rather than closed because each needs a
+//! resource resolved (`ExtGState`, and a path-intersection model for clipping)
+//! and neither is a small addition to a content-stream walk.
 //!
 //! **No glyph advance.** The origin of each text-showing operator is tested, not
 //! the box the run sweeps out. A line that starts inside the page and runs off
-//! the edge is not reported.
+//! the edge is not reported, and neither is one pushed off by `Tc`/`Tw`.
+//!
+//! **No form XObjects.** `Do` on a form is not followed into its own content
+//! stream, so concealment inside one is not seen. Its rectangle is likewise not
+//! recorded as page coverage, which is the safe direction: claiming an opaque
+//! region this reader never looked inside would *suppress* findings.
 //!
 //! **Concealed text is only recoverable when its font is.** Directives are
 //! matched against text decoded through the font's own encoding. A subset font
@@ -255,6 +304,7 @@ fn scan_page(doc: &Document, page_id: ObjectId, out: &mut Vec<Concealed>, budget
     let crop = page_box(doc, page_id, b"CropBox").unwrap_or(media);
     let fonts: PageFonts<'_> = doc.get_page_fonts(page_id).unwrap_or_default();
     let images = image_names(doc, page_id);
+    let spaces = page_colour_spaces(doc, page_id);
 
     let mut gs = GraphicsState::default();
     let mut stack: Vec<GraphicsState> = Vec::new();
@@ -272,14 +322,36 @@ fn scan_page(doc: &Document, page_id: ObjectId, out: &mut Vec<Concealed>, budget
                     gs.ctm = m.then(gs.ctm);
                 }
             }
-            "g" | "G" => set_fill(&mut gs, op.operator.as_str(), gray(operands)),
-            "rg" | "RG" => set_fill(&mut gs, op.operator.as_str(), rgb(operands)),
-            "k" | "K" => set_fill(&mut gs, op.operator.as_str(), cmyk(operands)),
+            // These three set the space *and* the colour in one operator, so
+            // they also re-establish that the next `sc`/`scn` is readable.
+            "g" | "G" => set_colour(&mut gs, op.operator.as_str(), gray(operands)),
+            "rg" | "RG" => set_colour(&mut gs, op.operator.as_str(), rgb(operands)),
+            "k" | "K" => set_colour(&mut gs, op.operator.as_str(), cmyk(operands)),
+            "cs" | "CS" => {
+                let space = colour_space(operands, &spaces);
+                if op.operator == "cs" {
+                    gs.fill_space = space;
+                    // §8.6.8: selecting a space resets the colour to that
+                    // space's initial value. Unknown for anything but a device
+                    // space, and unknown never stands in for a value.
+                    gs.fill = (space == ColourSpace::Device).then_some([0.0, 0.0, 0.0]);
+                } else {
+                    gs.stroke_space = space;
+                    gs.stroke = (space == ColourSpace::Device).then_some([0.0, 0.0, 0.0]);
+                }
+            }
             // `sc`/`scn` set a colour in whatever space `cs` selected. Numeric
             // operands are read by arity; a pattern or a named colour leaves the
             // fill **unknown**, which suppresses the colour test rather than
             // guessing at it.
-            "sc" | "scn" => gs.fill = components(operands),
+            "sc" | "scn" | "SC" | "SCN" => {
+                let space = if op.operator.starts_with(char::is_lowercase) {
+                    gs.fill_space
+                } else {
+                    gs.stroke_space
+                };
+                set_colour(&mut gs, op.operator.as_str(), components(space, operands));
+            }
             "re" => {
                 if let Some(r) = rect(operands, gs.ctm) {
                     path.push(r);
@@ -311,7 +383,7 @@ fn scan_page(doc: &Document, page_id: ObjectId, out: &mut Vec<Concealed>, budget
             // (§9.4.1); the font, size, leading and rendering mode persist
             // across text objects because they are graphics state.
             "BT" => text = TextState::default(),
-            "Tf" | "Tr" | "TL" => {
+            "Tf" | "Tr" | "TL" | "Tz" | "Ts" => {
                 gs.text.apply(op.operator.as_str(), operands);
             }
             "Tm" | "Td" | "TD" | "T*" => {
@@ -341,15 +413,10 @@ fn scan_page(doc: &Document, page_id: ObjectId, out: &mut Vec<Concealed>, budget
                     budget,
                 );
             }
-            // Every other operator is read past, and four are worth naming
+            // Every other operator is read past, and two are worth naming
             // because their absence looks like an oversight:
             //
             // * `ET` closes a text object whose state the next `BT` resets;
-            // * `SC`/`SCN` and `G`/`RG`/`K` set the **stroking** colour, which
-            //   no check here reads (see `set_fill`);
-            // * `cs`/`CS` select a colour space this reader does not resolve —
-            //   `sc`/`scn` are read by arity instead, and an arity it does not
-            //   recognise leaves the colour unknown rather than guessed;
             // * `gs`, `W` and `W*` are the alpha and clipping this module
             //   declares as non-goals.
             _ => {}
@@ -375,9 +442,20 @@ struct Run<'a> {
 /// and each is recorded, because `meta.screen` names *what was found*, not a
 /// single best explanation.
 fn inspect_run(run: &Run<'_>, strings: &[Object], out: &mut Vec<Concealed>, budget: &mut usize) {
-    let trm = run.text.tm.then(run.gs.ctm);
+    // The full text rendering matrix of §9.4.4, not `Tm · CTM`: the text-state
+    // parameters `Tfs`, `Th` and `Ts` are *part of the transform*, and reading
+    // the origin without them misses a glyph that `Ts` has lifted off the page.
+    let trm = run
+        .gs
+        .text
+        .rendering_matrix()
+        .then(run.text.tm)
+        .then(run.gs.ctm);
     let (x, y) = trm.apply(0.0, 0.0);
-    let effective = run.gs.text.size.abs() * trm.vertical_scale();
+    // Both axes. A glyph is illegible if *either* collapses — `0 Tz` leaves the
+    // vertical scale at a perfectly ordinary 12 pt while the glyph occupies no
+    // width at all.
+    let effective = trm.vertical_scale().min(trm.horizontal_scale());
     let behind = topmost(run.painted, x, y);
 
     let mut found: Vec<(&'static str, String)> = Vec::new();
@@ -398,14 +476,13 @@ fn inspect_run(run: &Run<'_>, strings: &[Object], out: &mut Vec<Concealed>, budg
                 format!("text rendering mode {}", run.gs.text.render_mode),
             ));
         }
-    } else if fills(run.gs.text.render_mode)
-        && let Some(ink) = run.gs.fill
+    } else if let Some(inks) = ink_colours(run.gs)
         && let Paint::Solid(background) = behind
-        && indistinguishable(ink, background)
+        && inks.iter().all(|ink| indistinguishable(*ink, background))
     {
         found.push((
             mechanism::BACKGROUND_COLOUR,
-            "fill colour indistinguishable from what is painted behind it".to_owned(),
+            "text colour indistinguishable from what is painted behind it".to_owned(),
         ));
     }
 
@@ -428,7 +505,7 @@ fn inspect_run(run: &Run<'_>, strings: &[Object], out: &mut Vec<Concealed>, budg
     // malformed document that shows text with no font selected would be reported
     // as concealing it at the default size of zero, which is a claim about the
     // parser's state rather than about the page.
-    if run.gs.text.font.is_some() && effective < MIN_LEGIBLE_SIZE {
+    if run.gs.text.font.is_some() && effective.abs() < MIN_LEGIBLE_SIZE {
         found.push((
             mechanism::DEGENERATE_SIZE,
             format!("effective text size {effective:.4} pt"),
@@ -469,11 +546,40 @@ fn inspect_run(run: &Run<'_>, strings: &[Object], out: &mut Vec<Concealed>, budg
     }
 }
 
-/// Whether a text rendering mode fills glyphs, and so has a fill colour that
-/// means anything. Modes 0, 2, 4 and 6 fill; 1 and 5 stroke only; 3 and 7 paint
-/// nothing (PDF 32000-1 §9.3.6).
-fn fills(mode: i64) -> bool {
-    matches!(mode, 0 | 2 | 4 | 6)
+/// Every colour this run actually puts on the page, or `None` when one of them
+/// is in a space this reader does not read.
+///
+/// The text rendering mode decides which (PDF 32000-1 §9.3.6), and getting it
+/// wrong is wrong in both directions:
+///
+/// | mode | paints | ink |
+/// |---|---|---|
+/// | 0, 4 | fill | the fill colour |
+/// | 1, 5 | **stroke** | the **stroking** colour |
+/// | 2, 6 | fill and stroke | **both** |
+/// | 3, 7 | nothing | handled before this is reached |
+///
+/// Modes 1 and 5 are why the stroking colour is tracked at all: they put no
+/// fill on the page, so reading the fill there asks about ink that was never
+/// laid down.
+///
+/// Modes 2 and 6 need *both* to match, and that direction matters just as much:
+/// a glyph filled white and stroked black is perfectly visible, and reporting
+/// it on the strength of the fill alone would be a false positive on every
+/// outlined heading.
+///
+/// `None` anywhere in the set suppresses the check rather than guessing — an
+/// unknown colour is not evidence of concealment.
+fn ink_colours(gs: &GraphicsState) -> Option<Vec<[f64; 3]>> {
+    match gs.text.render_mode {
+        0 | 4 => gs.fill.map(|c| vec![c]),
+        1 | 5 => gs.stroke.map(|c| vec![c]),
+        2 | 6 => match (gs.fill, gs.stroke) {
+            (Some(fill), Some(stroke)) => Some(vec![fill, stroke]),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// Whether two colours are closer than an 8-bit render can separate.
@@ -547,6 +653,63 @@ fn decode_run(
     out
 }
 
+/// Resolve a `cs`/`CS` operand to a [`ColourSpace`].
+///
+/// The operand is either a device space by name, or a key into the page's
+/// `/Resources /ColorSpace` — and resolving that alias matters in the opposite
+/// direction from the Separation case: a document that writes `/CS0 cs` where
+/// `CS0` *is* `/DeviceRGB` is ordinary, and treating the alias as unreadable
+/// would suppress the colour check on it and miss real white-on-white.
+fn colour_space(operands: &[Object], spaces: &BTreeMap<Vec<u8>, ColourSpace>) -> ColourSpace {
+    let Some(name) = operands.first().and_then(|o| o.as_name().ok()) else {
+        return ColourSpace::Other;
+    };
+    if is_device_space(name) {
+        return ColourSpace::Device;
+    }
+    spaces.get(name).copied().unwrap_or(ColourSpace::Other)
+}
+
+/// The three spaces whose components `components` can read.
+fn is_device_space(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"DeviceGray" | b"DeviceRGB" | b"DeviceCMYK" | b"G" | b"RGB" | b"CMYK"
+    )
+}
+
+/// The page's `/Resources /ColorSpace` entries, classified.
+///
+/// Only the aliases that resolve to a device space are worth recording; an
+/// entry this does not list is [`ColourSpace::Other`] by
+/// [`colour_space`]'s fallback, which is the safe direction.
+fn page_colour_spaces(doc: &Document, page_id: ObjectId) -> BTreeMap<Vec<u8>, ColourSpace> {
+    let Ok((Some(resources), _)) = doc.get_page_resources(page_id) else {
+        return BTreeMap::new();
+    };
+    let Ok(declared) = resources.get(b"ColorSpace").and_then(Object::as_dict) else {
+        return BTreeMap::new();
+    };
+    declared
+        .iter()
+        .map(|(name, object)| {
+            // A device space may be named directly or wrapped in a one-element
+            // array; anything longer is a parameterised space (`Separation`,
+            // `Indexed`, `ICCBased`, `Lab`) whose components are not device
+            // components.
+            let resolved = match object {
+                Object::Name(n) if is_device_space(n) => ColourSpace::Device,
+                Object::Array(items) if items.len() == 1 => match &items[0] {
+                    Object::Name(n) if is_device_space(n) => ColourSpace::Device,
+                    _ => ColourSpace::Other,
+                },
+                _ => ColourSpace::Other,
+            };
+            (name.clone(), resolved)
+        })
+        .collect()
+}
+
 /// The image `XObject` names a page declares.
 ///
 /// Only images: a form `XObject`'s own content stream is not walked, so recording
@@ -610,6 +773,19 @@ struct GraphicsState {
     /// pattern, a separation, an indexed space. Unknown suppresses the colour
     /// test; it never stands in for a value.
     fill: Option<[f64; 3]>,
+    /// The **stroking** colour, on the same terms as [`Self::fill`].
+    ///
+    /// Read because text rendering modes 1 and 5 *stroke glyphs and do not fill
+    /// them*, so for those modes the stroking colour is the only ink on the
+    /// page — and `1 Tr` with the stroking colour set to the background is
+    /// white-on-white concealment spelled one operator over. Discarding it, as
+    /// this reader did until the #912 review, left the class it claims to
+    /// detect trivially bypassable.
+    stroke: Option<[f64; 3]>,
+    /// The space [`Self::fill`]'s `sc`/`scn` operands are read in.
+    fill_space: ColourSpace,
+    /// The same for [`Self::stroke`].
+    stroke_space: ColourSpace,
     /// The **text state**, which is part of the graphics state and therefore
     /// saved and restored by `q`/`Q` (PDF 32000-1 §9.3).
     ///
@@ -627,7 +803,13 @@ impl Default for GraphicsState {
     fn default() -> Self {
         Self {
             ctm: Matrix::IDENTITY,
+            // Black, in `DeviceGray` — the specification's initial value for
+            // both.
             fill: Some([0.0, 0.0, 0.0]),
+            stroke: Some([0.0, 0.0, 0.0]),
+            // `DeviceGray`, per §8.6.8's initial colour space.
+            fill_space: ColourSpace::Device,
+            stroke_space: ColourSpace::Device,
             text: TextParameters::default(),
         }
     }
@@ -640,15 +822,83 @@ impl Default for GraphicsState {
 /// and restore them and `BT` does **not** reset them — `BT` initialises only the
 /// text and text-line matrices (§9.4.1), which is why those two live in
 /// [`TextState`] instead.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct TextParameters {
+    /// `Tf`'s size operand — **not** the size in points. See
+    /// [`TextParameters::rendering_matrix`].
     size: f64,
+    /// `Tz`, as a multiplier rather than the operator's percentage.
+    ///
+    /// Modelled because `0 Tz` collapses every glyph to zero width: invisible
+    /// text by a mechanism that leaves `Tf` reading an ordinary 12 pt.
+    horizontal_scale: f64,
+    /// `Ts`, the text rise, in unscaled text-space units.
+    ///
+    /// Modelled because it translates the glyph away from the origin `Td` put
+    /// it at — so a large rise puts text off the page while the positioning
+    /// operators claim it is in the middle of it.
+    rise: f64,
     leading: f64,
     render_mode: i64,
     font: Option<Vec<u8>>,
 }
 
+impl Default for TextParameters {
+    fn default() -> Self {
+        Self {
+            size: 0.0,
+            // 100 % — the specification's initial value, as a multiplier.
+            horizontal_scale: 1.0,
+            rise: 0.0,
+            leading: 0.0,
+            render_mode: 0,
+            font: None,
+        }
+    }
+}
+
 impl TextParameters {
+    /// The text-space parameter matrix of PDF 32000-1 §9.4.4:
+    ///
+    /// ```text
+    /// | Tfs x Th   0     0 |
+    /// | 0          Tfs   0 |
+    /// | 0          Ts    1 |
+    /// ```
+    ///
+    /// Composed with the text matrix and the CTM, this is the transform that
+    /// actually puts a glyph on the page — which is why the reader builds it
+    /// rather than treating `Tf`'s operand as a size in points and the `Td`
+    /// origin as a position.
+    ///
+    /// # Why the whole matrix rather than three more tests
+    ///
+    /// Two of these parameters are concealment mechanisms in their own right,
+    /// and both were live before this existed (#912 review):
+    ///
+    /// * **`Ts`** translates the glyph away from where `Td` put it, so a rise
+    ///   of 100 000 draws off the page while every positioning operator in the
+    ///   stream reads as ordinary. A reader that took the origin from `Tm·CTM`
+    ///   alone sees a glyph in the middle of the page.
+    /// * **`Th`** scales glyphs horizontally, and `0 Tz` collapses them to
+    ///   nothing while `Tf` still reads 12 pt. A reader that measured only the
+    ///   vertical scale sees an ordinary line of text.
+    ///
+    /// Both fall out of composing the matrix the specification defines. Adding
+    /// a test per parameter instead is how the *next* one gets missed: the
+    /// question "what else moves a glyph?" has an answer in Table 103, and it
+    /// is this matrix.
+    fn rendering_matrix(&self) -> Matrix {
+        Matrix {
+            a: self.size * self.horizontal_scale,
+            b: 0.0,
+            c: 0.0,
+            d: self.size,
+            e: 0.0,
+            f: self.rise,
+        }
+    }
+
     /// Apply one text-state operator, or report that this is not one.
     fn apply(&mut self, operator: &str, operands: &[Object]) -> bool {
         match operator {
@@ -665,6 +915,11 @@ impl TextParameters {
             // specification itself defaults to.
             "Tr" => self.render_mode = operands.first().and_then(integer).unwrap_or(0),
             "TL" => self.leading = operands.first().and_then(number).unwrap_or(0.0),
+            // The operand is a percentage; the initial value is 100.
+            "Tz" => {
+                self.horizontal_scale = operands.first().and_then(number).unwrap_or(100.0) / 100.0;
+            }
+            "Ts" => self.rise = operands.first().and_then(number).unwrap_or(0.0),
             _ => return false,
         }
         true
@@ -784,6 +1039,12 @@ impl Matrix {
     fn vertical_scale(self) -> f64 {
         (self.c * self.c + self.d * self.d).sqrt()
     }
+
+    /// The same, across. `0 Tz` drives this to zero while
+    /// [`Self::vertical_scale`] stays at an ordinary 12.
+    fn horizontal_scale(self) -> f64 {
+        (self.a * self.a + self.b * self.b).sqrt()
+    }
 }
 
 /// An axis-aligned rectangle in default user space.
@@ -851,6 +1112,31 @@ impl Rect {
     fn contains(self, x: f64, y: f64) -> bool {
         x >= self.x0 && x <= self.x1 && y >= self.y0 && y <= self.y1
     }
+}
+
+/// The colour space a `sc`/`scn` operand is to be read in.
+///
+/// # Why this is tracked rather than assumed
+///
+/// `sc`/`scn` carry bare numbers whose meaning is whatever the preceding
+/// `cs`/`CS` selected, and this reader used to read them **by arity alone** —
+/// one number as grey, three as RGB, four as CMYK. In a device space that is
+/// right. In a `/Separation` space it is backwards: `1 scn` is *full spot ink*,
+/// as dark as that colourant goes, and reading it as `[1, 1, 1]` calls it white.
+///
+/// That is not an exotic failure. Spot colours are ordinary in publisher-set
+/// PDFs, so a paper with a spot-coloured rule or heading on a white page would
+/// have been reported as **white-on-white concealment** — a false positive on
+/// exactly the corpus this module exists to screen, in the direction that
+/// quarantines honest documents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColourSpace {
+    /// One of the three device spaces, where the arity read is correct.
+    Device,
+    /// Anything else — `Separation`, `Indexed`, `Lab`, `Pattern`, or a resource
+    /// name that does not resolve to a device space. The components are not
+    /// device components, so the colour is **unknown** rather than guessed.
+    Other,
 }
 
 /// What a painted region puts on the page.
@@ -923,11 +1209,17 @@ fn rect(operands: &[Object], ctm: Matrix) -> Option<Rect> {
     }
 }
 
-/// Only the *non*-stroking operators set the colour glyphs are filled with; the
-/// uppercase forms set the stroking colour, which no check here reads.
-fn set_fill(gs: &mut GraphicsState, operator: &str, value: Option<[f64; 3]>) {
+/// Route a colour operator to the fill or the stroke by its case: PDF spells
+/// the non-stroking operators in lower case and the stroking ones in upper.
+///
+/// Both are kept. Which one is ink depends on the text rendering mode — see
+/// [`ink_colours`] — and reading only the fill made modes 1 and 5 invisible to
+/// the colour check entirely.
+fn set_colour(gs: &mut GraphicsState, operator: &str, value: Option<[f64; 3]>) {
     if operator.chars().next().is_some_and(char::is_lowercase) {
         gs.fill = value;
+    } else {
+        gs.stroke = value;
     }
 }
 
@@ -961,10 +1253,16 @@ fn cmyk(operands: &[Object]) -> Option<[f64; 3]> {
     }
 }
 
-/// `sc`/`scn` operands, read by arity because the colour space was set by a
-/// separate `cs` this reader does not resolve. A pattern name or any other
-/// arity leaves the colour unknown.
-fn components(operands: &[Object]) -> Option<[f64; 3]> {
+/// `sc`/`scn` operands, read by arity — but **only in a device space**, where
+/// arity is enough to know what the numbers mean. See [`ColourSpace`] for the
+/// false positive this guard exists to prevent.
+///
+/// A pattern name, any other arity, or any non-device space leaves the colour
+/// unknown, which suppresses the colour check rather than guessing at it.
+fn components(space: ColourSpace, operands: &[Object]) -> Option<[f64; 3]> {
+    if space != ColourSpace::Device {
+        return None;
+    }
     match operands.iter().filter_map(number).collect::<Vec<_>>()[..] {
         [g] => Some([g, g, g]),
         [r, g, b] => Some([r, g, b]),
@@ -1029,11 +1327,25 @@ mod tests {
         "13-ctm-shrunk-text-control",
         "16-render-mode-across-q",
         "16-render-mode-across-q-control",
+        "17-degenerate-size-across-q",
+        "17-degenerate-size-across-q-control",
+        "18-lying-layer-across-q",
+        "18-lying-layer-across-q-control",
+        "19-text-rise-off-page",
+        "19-text-rise-off-page-control",
+        "20-zero-horizontal-scale",
+        "20-zero-horizontal-scale-control",
+        "21-stroke-only-background",
+        "21-stroke-only-background-control",
+        "23-aliased-device-space",
+        "23-aliased-device-space-control",
         "08-scaled-text-matrix",
         "09-white-text-over-image",
         "10-searchable-scan",
         "14-scaled-placement",
         "15-restored-render-mode",
+        "22-outlined-heading",
+        "24-separation-spot-colour",
     ];
 
     /// What each fixture must decide: `(verdict, classes, reportable mechanisms)`.
@@ -1043,8 +1355,19 @@ mod tests {
         const CONCEALED: &[&str] = &["concealed-rendering"];
         const NONE: &[&str] = &[];
         match name {
-            "02-white-on-white" => (Verdict::Block, BOTH, &[mechanism::BACKGROUND_COLOUR]),
-            "03-outside-mediabox" => (Verdict::Block, BOTH, &[mechanism::OUTSIDE_MEDIA_BOX]),
+            // `21` is `02` one operator over: mode 1 strokes and does not fill,
+            // so the *stroking* colour is the only ink on the page.
+            // `23` is `02` written through a `/Resources /ColorSpace` alias for
+            // a device space — indirection, not a different mechanism, and the
+            // alias has to be resolved or the check is suppressed.
+            "02-white-on-white" | "21-stroke-only-background" | "23-aliased-device-space" => {
+                (Verdict::Block, BOTH, &[mechanism::BACKGROUND_COLOUR])
+            }
+            // `19` is off-page by **text rise** rather than by `Td`: the
+            // positioning operators read as ordinary and `Ts` does the moving.
+            "03-outside-mediabox" | "19-text-rise-off-page" => {
+                (Verdict::Block, BOTH, &[mechanism::OUTSIDE_MEDIA_BOX])
+            }
             // `12` is `03b` with `MediaBox`/`CropBox` declared on `/Pages` and
             // inherited by the page — the only fixture that fails if the reader
             // stops at the page dictionary, which an injection run established.
@@ -1053,9 +1376,14 @@ mod tests {
             }
             // `13` is `04` hidden behind a matrix: `/F1 20 Tf` inside a 1/500
             // scale. A reader that trusted the `Tf` operand sees a heading.
-            "04-degenerate-size" | "13-ctm-shrunk-text" => {
-                (Verdict::Block, BOTH, &[mechanism::DEGENERATE_SIZE])
-            }
+            // `17` is `04` restored by a `Q`; `20` collapses the glyph across
+            // with `0 Tz` while `Tf` still reads 12 pt. Three spellings of "the
+            // glyph occupies no area", and all three fall out of composing the
+            // §9.4.4 rendering matrix rather than out of three separate tests.
+            "04-degenerate-size"
+            | "13-ctm-shrunk-text"
+            | "17-degenerate-size-across-q"
+            | "20-zero-horizontal-scale" => (Verdict::Block, BOTH, &[mechanism::DEGENERATE_SIZE]),
             // `16` is `05` with the mode set outside the text object and restored
             // by a `Q`: it is the fixture that fails unless the text state is
             // carried in the *graphics* state, per PDF 32000-1 §9.3.
@@ -1067,7 +1395,11 @@ mod tests {
             // built, so its existence is deliberately not a finding. Compare
             // `10-searchable-scan`, which is the same mechanism saying something
             // innocuous and passes.
-            "06-lying-layer" => (Verdict::Block, DIRECTIVE, &[]),
+            // `18` is `06` with the mode restored by a `Q`. It is the costliest
+            // bypass of the set: read as mode 0 the run trips no check at all,
+            // so its text is never collected — and a lying layer reaches
+            // `block` only through what it says.
+            "06-lying-layer" | "18-lying-layer-across-q" => (Verdict::Block, DIRECTIVE, &[]),
             // The declared non-goal. An ordinary text layer under an opaque image
             // is invisible to a content-stream read, so this tops out where every
             // PDF used to: `Quarantine`, on the strength of the visible directive
@@ -1167,6 +1499,12 @@ mod tests {
                     | "12-inherited-boxes"
                     | "13-ctm-shrunk-text"
                     | "16-render-mode-across-q"
+                    | "17-degenerate-size-across-q"
+                    | "18-lying-layer-across-q"
+                    | "19-text-rise-off-page"
+                    | "20-zero-horizontal-scale"
+                    | "21-stroke-only-background"
+                    | "23-aliased-device-space"
             );
             let recovered = runs
                 .iter()
@@ -1343,7 +1681,20 @@ mod tests {
         // A pattern name has no components: the fill colour becomes unknown, and
         // `inspect_run` skips the colour test rather than comparing against a
         // default that would read as black.
-        assert_eq!(components(&[Name(b"P1".to_vec())]), None);
+        assert_eq!(
+            components(ColourSpace::Device, &[Name(b"P1".to_vec())]),
+            None
+        );
+        // The same numbers are readable in a device space and **not** in any
+        // other. `1 scn` is white through `/DeviceGray` and full spot ink
+        // through a `/Separation`, and no arity can tell those apart — so the
+        // space decides, and an unreadable one yields nothing rather than a
+        // guess that would report visible text as white-on-white.
+        assert_eq!(
+            components(ColourSpace::Device, &[Integer(1)]),
+            Some([1.0, 1.0, 1.0])
+        );
+        assert_eq!(components(ColourSpace::Other, &[Integer(1)]), None);
         assert!(indistinguishable([1.0; 3], [1.0 - 1.0 / 255.0; 3]));
         assert!(!indistinguishable([1.0; 3], [0.99, 1.0, 1.0]));
     }
@@ -1418,16 +1769,76 @@ mod tests {
         assert_eq!(text.tm.apply(0.0, 0.0), (72.0, 672.0));
     }
 
-    /// Only the modes that put a filled glyph on the page have a fill colour
-    /// worth comparing. Getting this wrong reports every stroke-only heading as
-    /// hidden in its background.
+    /// Which colour is ink depends on the rendering mode, and every mode is
+    /// checked rather than the two that happened to be on my mind.
+    ///
+    /// The stroke-only modes are the point: they put **no fill** on the page, so
+    /// a reader that asked about the fill there was asking about ink that was
+    /// never laid down — and `1 Tr` with a background-coloured stroke went
+    /// undetected until the #912 review. Modes 2 and 6 are the other direction:
+    /// a white fill with a black stroke is visible, and must need *both* to
+    /// match before it counts.
     #[test]
-    fn only_filling_render_modes_carry_a_fill_colour() {
-        for mode in [0, 2, 4, 6] {
-            assert!(fills(mode), "mode {mode} fills");
+    fn the_ink_of_a_run_is_whichever_colour_its_render_mode_actually_paints() {
+        let white = [1.0, 1.0, 1.0];
+        let black = [0.0, 0.0, 0.0];
+        let state = |mode: i64| {
+            let mut gs = GraphicsState::default();
+            gs.text.render_mode = mode;
+            gs.fill = Some(white);
+            gs.stroke = Some(black);
+            gs
+        };
+        for mode in [0, 4] {
+            assert_eq!(ink_colours(&state(mode)), Some(vec![white]), "mode {mode}");
         }
-        for mode in [1, 3, 5, 7] {
-            assert!(!fills(mode), "mode {mode} does not fill");
+        for mode in [1, 5] {
+            assert_eq!(ink_colours(&state(mode)), Some(vec![black]), "mode {mode}");
         }
+        for mode in [2, 6] {
+            assert_eq!(
+                ink_colours(&state(mode)),
+                Some(vec![white, black]),
+                "mode {mode} must need both"
+            );
+        }
+        // 3 and 7 paint nothing; `inspect_run` decides those before asking.
+        for mode in [3, 7] {
+            assert_eq!(ink_colours(&state(mode)), None, "mode {mode}");
+        }
+        // An unreadable colour suppresses the check rather than standing in for
+        // one — and for a fill-and-stroke mode, *either* being unknown is enough.
+        let mut unknown = state(2);
+        unknown.stroke = None;
+        assert_eq!(ink_colours(&unknown), None);
+    }
+
+    /// `Tz` and `Ts` are part of the transform that puts a glyph on the page,
+    /// and both are concealment mechanisms on their own.
+    ///
+    /// Asserted at the matrix rather than only through a fixture because the
+    /// failure is silent in opposite directions: a reader that drops `Ts` reads
+    /// an off-page glyph as on-page, and one that drops `Th` reads a collapsed
+    /// glyph as 12 pt.
+    #[test]
+    fn the_rendering_matrix_carries_the_rise_and_the_horizontal_scale() {
+        let mut params = TextParameters::default();
+        params.size = 12.0;
+
+        let plain = params.rendering_matrix();
+        assert_eq!(plain.apply(0.0, 0.0), (0.0, 0.0));
+        assert_eq!(plain.vertical_scale(), 12.0);
+        assert_eq!(plain.horizontal_scale(), 12.0);
+
+        // A rise moves the glyph off the origin `Td` chose.
+        params.rise = 500.0;
+        assert_eq!(params.rendering_matrix().apply(0.0, 0.0), (0.0, 500.0));
+
+        // `0 Tz` collapses the glyph across while leaving it 12 pt tall.
+        params.rise = 0.0;
+        params.horizontal_scale = 0.0;
+        let collapsed = params.rendering_matrix();
+        assert_eq!(collapsed.vertical_scale(), 12.0);
+        assert_eq!(collapsed.horizontal_scale(), 0.0);
     }
 }

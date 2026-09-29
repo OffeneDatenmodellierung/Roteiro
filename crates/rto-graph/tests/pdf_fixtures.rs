@@ -125,6 +125,14 @@ struct Page {
     inherit_boxes: bool,
     /// The content stream, already assembled.
     content: String,
+    /// Declare a `/ColorSpace` resource with two entries: `/CS0`, a plain alias
+    /// for `/DeviceRGB`, and `/CS1`, a `/Separation` spot colour.
+    ///
+    /// The two exist together because they are the two directions of the same
+    /// question — whether `sc`/`scn`'s bare numbers can be read as device
+    /// components. Through `/CS0` they can; through `/CS1` they cannot, and
+    /// `1 scn` there is full ink rather than white.
+    colour_spaces: bool,
     /// A greyscale image `XObject` painted by the content stream, as
     /// `(width, height, samples)`. `None` leaves `/XObject` out of
     /// `/Resources`
@@ -245,6 +253,64 @@ fn geometry_fixtures() -> Vec<Fixture> {
         text_op(&["0 Tr"], 72, 700, 12, VISIBLE),
     ));
 
+    // 17 — a degenerate `Tf` size **restored by a `Q`**. The size is set to
+    // 0.01, a `q` block sets a perfectly ordinary 12, and the `Q` puts 0.01
+    // back — so the run that follows is invisible while the nearest `Tf` in the
+    // stream reads 12. `Tf` is a text-state parameter and therefore part of the
+    // *graphics* state (PDF 32000-1 §9.3), so a reader whose `q`/`Q` stack
+    // carries only the CTM and the colour sees a 12 pt line and reports nothing.
+    out.extend(pair(
+        "17-degenerate-size-across-q",
+        Page {
+            content: format!(
+                "BT\n/F1 0.01 Tf\nq\n/F1 12 Tf\nQ\n72 660 Td\n({}) Tj\nET\n{}",
+                escape(PAYLOAD),
+                text_op(&[], 72, 700, 12, VISIBLE),
+            ),
+            ..Page::default()
+        },
+        text_op(&[], 72, 700, 12, VISIBLE),
+    ));
+
+    // 19 — **text rise**. `Td` puts the glyph at y = 700, in the middle of the
+    // page, and `400 Ts` then lifts it to y = 1100 — 308 points above the top
+    // edge. Every positioning operator in the stream reads as ordinary; the
+    // rise is what moves it, and it is a text-state parameter rather than a
+    // matrix, so a reader taking the origin from `Tm · CTM` alone sees a glyph
+    // sitting comfortably on the page.
+    out.extend(pair(
+        "19-text-rise-off-page",
+        Page {
+            content: format!(
+                "{}{}",
+                text_op(&["400 Ts"], 72, 700, 12, PAYLOAD),
+                text_op(&["0 Ts"], 72, 660, 12, VISIBLE),
+            ),
+            ..Page::default()
+        },
+        text_op(&["0 Ts"], 72, 660, 12, VISIBLE),
+    ));
+
+    // 20 — **zero horizontal scale**. `0 Tz` collapses every glyph to no width
+    // at all while `Tf` still reads 12 pt and the vertical scale is untouched.
+    // A reader that measured concealment by the vertical scale alone — as this
+    // one did until the #912 review — sees an ordinary line of body text.
+    //
+    // The visible line comes first: `Tz` is graphics state, so it survives `ET`
+    // and would collapse anything drawn after it.
+    out.extend(pair(
+        "20-zero-horizontal-scale",
+        Page {
+            content: format!(
+                "{}{}",
+                text_op(&[], 72, 700, 12, VISIBLE),
+                text_op(&["0 Tz"], 72, 660, 12, PAYLOAD),
+            ),
+            ..Page::default()
+        },
+        text_op(&[], 72, 700, 12, VISIBLE),
+    ));
+
     out
 }
 
@@ -298,6 +364,31 @@ fn image_fixtures() -> Vec<Fixture> {
             "{}{}",
             draw_image(60, 640, 500, 40),
             text_op(&[], 72, 700, 12, VISIBLE),
+        ),
+    ));
+
+    // 18 — the lying layer, **restored by a `Q`**. Mode 3 is set, a `q` block
+    // sets mode 0, and the `Q` puts mode 3 back before the payload is shown
+    // over the page image. This is the bypass that costs the most: with the
+    // mode read as 0 the run trips no check at all, so its text is never
+    // collected — and the lying layer reaches `block` only through what it
+    // *says*, which nothing then reads.
+    out.extend(pair(
+        "18-lying-layer-across-q",
+        Page {
+            content: format!(
+                "{}BT\n3 Tr\nq\n0 Tr\nQ\n/F1 12 Tf\n72 660 Td\n({}) Tj\nET\n{}",
+                draw_image(0, 0, 612, 792),
+                escape(PAYLOAD),
+                text_op(&["0 Tr"], 72, 700, 12, VISIBLE),
+            ),
+            image: Some(checkerboard()),
+            ..Page::default()
+        },
+        format!(
+            "{}{}",
+            draw_image(0, 0, 612, 792),
+            text_op(&["0 Tr"], 72, 700, 12, VISIBLE),
         ),
     ));
 
@@ -390,6 +481,44 @@ fn colour_fixtures() -> Vec<Fixture> {
         text_op(&[], 72, 700, 12, VISIBLE),
     ));
 
+    // 21 — **stroke-only text in the background colour**. Mode 1 strokes glyphs
+    // and does not fill them, so the stroking colour is the only ink on the
+    // page; set it to white and the run is as invisible as fixture 02's, by a
+    // mechanism one operator over. A reader that only ever looked at the *fill*
+    // — which this one did until the #912 review — is asking about ink that was
+    // never laid down, and reports nothing.
+    out.extend(pair(
+        "21-stroke-only-background",
+        Page {
+            content: format!(
+                "{}{}",
+                text_op(&[], 72, 700, 12, VISIBLE),
+                text_op(&["1 Tr", "1 1 1 RG"], 72, 660, 12, PAYLOAD),
+            ),
+            ..Page::default()
+        },
+        text_op(&[], 72, 700, 12, VISIBLE),
+    ));
+
+    // 23 — white-on-white written through a **resource alias** for a device
+    // space. `/CS0 cs` then `1 1 1 scn` is exactly `1 1 1 rg` with one more
+    // level of indirection, and a reader that gave up on any name it did not
+    // recognise would suppress the colour check here and miss it. The alias has
+    // to be resolved through `/Resources /ColorSpace`, not assumed unreadable.
+    out.extend(pair(
+        "23-aliased-device-space",
+        Page {
+            colour_spaces: true,
+            content: format!(
+                "{}{}",
+                text_op(&[], 72, 700, 12, VISIBLE),
+                text_op(&["/CS0 cs", "1 1 1 scn"], 72, 660, 12, PAYLOAD),
+            ),
+            ..Page::default()
+        },
+        text_op(&[], 72, 700, 12, VISIBLE),
+    ));
+
     out
 }
 
@@ -468,6 +597,43 @@ fn negative_fixtures() -> Vec<Fixture> {
         control_of: None,
     });
 
+    // 22 — an **outlined heading**: mode 2 fills white and strokes black, which
+    // is how display type is set over a coloured panel and is perfectly
+    // legible. The fill alone matches the page background exactly, so a colour
+    // check that asked only about the fill for a fill-*and*-stroke mode would
+    // call this concealed. Both must match before it counts.
+    out.push(Fixture {
+        name: "22-outlined-heading.pdf",
+        page: Page {
+            content: format!(
+                "BT\n2 Tr\n1 1 1 rg\n0 0 0 RG\n/F1 24 Tf\n72 700 Td\n({}) Tj\nET\n",
+                escape(VISIBLE)
+            ),
+            ..Page::default()
+        },
+        control_of: None,
+    });
+
+    // 24 — a **spot colour**, which is ordinary in a publisher-set PDF. `1 scn`
+    // in a `/Separation` space is *full ink* — as dark as that colourant goes —
+    // and the arity read this module used before the #912 review called it
+    // `[1, 1, 1]`, white. On a white page that is a white-on-white report
+    // against perfectly visible text: a false positive on exactly the corpus
+    // this exists to screen, quarantining honest papers.
+    out.push(Fixture {
+        name: "24-separation-spot-colour.pdf",
+        page: Page {
+            colour_spaces: true,
+            content: format!(
+                "{}{}",
+                text_op(&[], 72, 700, 12, VISIBLE),
+                text_op(&["/CS1 cs", "1 scn"], 72, 660, 12, VISIBLE),
+            ),
+            ..Page::default()
+        },
+        control_of: None,
+    });
+
     // 10 — an honest searchable scan: a page image with an invisible OCR layer
     // over it saying what the page says. This is how **every** searchable scan
     // is built, and #813 measured the shape on a real corpus — 237 of 310
@@ -496,6 +662,7 @@ fn negative_fixtures() -> Vec<Fixture> {
 fn pair(stem: &'static str, concealed: Page, control_content: String) -> Vec<Fixture> {
     let control = Page {
         crop: concealed.crop,
+        colour_spaces: concealed.colour_spaces,
         inherit_boxes: concealed.inherit_boxes,
         content: control_content,
         image: concealed.image.clone(),
@@ -602,13 +769,22 @@ fn render(page: &Page) -> Vec<u8> {
     } else {
         ""
     };
+    // Both entries are written inline. A `/Separation` array may carry its tint
+    // transform as a direct dictionary when the function is type 2, so neither
+    // needs an indirect object and the image's object number stays 6.
+    let colour_spaces = if page.colour_spaces {
+        " /ColorSpace << /CS0 /DeviceRGB /CS1 [/Separation /Spot /DeviceCMYK \
+         << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [0 0 0 1] /N 1 >>] >>"
+    } else {
+        ""
+    };
 
     let mut objects: Vec<Vec<u8>> = vec![
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
         format!("<< /Type /Pages /Kids [3 0 R] /Count 1{on_pages} >>").into_bytes(),
         format!(
             "<< /Type /Page /Parent 2 0 R{on_page} \
-             /Resources << /Font << /F1 5 0 R >>{xobject} >> /Contents 4 0 R >>"
+             /Resources << /Font << /F1 5 0 R >>{xobject}{colour_spaces} >> /Contents 4 0 R >>"
         )
         .into_bytes(),
         stream(
