@@ -27,7 +27,7 @@
 // same crate version can therefore embed different bytes, undetectably.
 //
 // Roteiro will not ship that. The digests below were computed from the real
-// v0.10.2 release assets, and are what makes the embedded runtime reproducible:
+// v0.10.4 release assets, and are what makes the embedded runtime reproducible:
 // `roteiro security prefetch --allow-download` fetches and verifies the archive
 // against them, and `build.rs` then refuses to build unless `BOXLITE_RUNTIME_URL`
 // points at a local file whose bytes match. `boxlite`'s `curl` never reaches the
@@ -72,7 +72,7 @@ pub struct PinnedArchive {
 /// and left the pins alone would hand the old archive to the new library,
 /// verify it against the old digests it was provisioned from, and agree with
 /// itself. Every digest here would match and the pairing would still be wrong.
-pub const RUNTIME_VERSION: &str = "0.10.2";
+pub const RUNTIME_VERSION: &str = "0.10.4";
 
 /// The asset id the archive is provisioned under.
 pub const RUNTIME_ASSET: &str = "boxlite-runtime";
@@ -87,21 +87,21 @@ pub const RUNTIME_FILE: &str = "boxlite-runtime.tar.gz";
 pub const RUNTIME_ARCHIVES: &[PinnedArchive] = &[
     PinnedArchive {
         target: "darwin-arm64",
-        url: "https://github.com/boxlite-ai/boxlite/releases/download/v0.10.2/boxlite-runtime-v0.10.2-darwin-arm64.tar.gz",
-        sha256: "fbd3d7143f4f9e1217c07a58eceeef4755da5e9ee6aa844c2d11bee8036969d4",
-        bytes: 29_465_793,
+        url: "https://github.com/boxlite-ai/boxlite/releases/download/v0.10.4/boxlite-runtime-v0.10.4-darwin-arm64.tar.gz",
+        sha256: "1424114d7a9637c746b05429e4e05dd47b8b9e90a84ba709f0b515375a6db5d3",
+        bytes: 29_577_342,
     },
     PinnedArchive {
         target: "linux-x64-gnu",
-        url: "https://github.com/boxlite-ai/boxlite/releases/download/v0.10.2/boxlite-runtime-v0.10.2-linux-x64-gnu.tar.gz",
-        sha256: "3977e350393502dcdcff6e2a232c3935bbbaa6ad5d02162a3f5588aaf83c6ec7",
-        bytes: 28_000_036,
+        url: "https://github.com/boxlite-ai/boxlite/releases/download/v0.10.4/boxlite-runtime-v0.10.4-linux-x64-gnu.tar.gz",
+        sha256: "ec31b15832e0b801d5b6f2e98883a6a16c08c3a0fa6a71c3a09cb7be16ee484c",
+        bytes: 28_118_793,
     },
     PinnedArchive {
         target: "linux-arm64-gnu",
-        url: "https://github.com/boxlite-ai/boxlite/releases/download/v0.10.2/boxlite-runtime-v0.10.2-linux-arm64-gnu.tar.gz",
-        sha256: "0af74d10b4b211481b8c11b83260f0d9d0886f5b76bc48d73a016a3c811475b9",
-        bytes: 31_657_468,
+        url: "https://github.com/boxlite-ai/boxlite/releases/download/v0.10.4/boxlite-runtime-v0.10.4-linux-arm64-gnu.tar.gz",
+        sha256: "3d4876986676b80d5ad3b3fd726480925663dce47bd182b9729eb630bc4fc891",
+        bytes: 31_768_243,
     },
 ];
 

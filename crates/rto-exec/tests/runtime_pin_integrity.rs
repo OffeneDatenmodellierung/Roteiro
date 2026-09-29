@@ -1154,7 +1154,7 @@ fn assert_locked_boxlite_matches_the_pins(lockfile: &Path) {
 /// An exact pin binds one node and says nothing about that node's own
 /// requirements. `rto-exec` pins `boxlite` exactly, but every `boxlite` release
 /// to date requires its sibling with a **caret** — 0.10.0 asks for
-/// `boxlite-shared = "0.10.0"`, 0.10.2 for `"0.10.2"` — so a fresh resolution is
+/// `boxlite-shared = "^0.10.0"`, and 0.10.4 still for `"^0.10.4"` — so a resolution is
 /// free to float the sibling while the exact pin holds the parent still.
 ///
 /// That is not hypothetical. It is how `cargo install roteiro --features

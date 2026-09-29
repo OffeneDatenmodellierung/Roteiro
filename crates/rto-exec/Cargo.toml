@@ -27,17 +27,17 @@ rto-graph = { workspace = true }
 # the three archive pins and every per-file digest in `runtime_file_pins.rs`
 # move together, and `tests/runtime_pin_integrity.rs` fails the build if they
 # do not. Re-derive with `scripts/derive-runtime-file-pins.py`, never by hand.
-boxlite = { version = "=0.10.2", optional = true }
+boxlite = { version = "=0.10.4", optional = true }
 # `exec-boxlite` only: **a pin, not a use.** Nothing in this crate names
 # `boxlite_shared`; this entry exists solely to hold it at the version `boxlite`
 # was built and tested against. **Do not delete it as an unused dependency** —
 # deleting it re-opens the break below for everyone who installs without
 # `--locked`.
 #
-# Why the pin above is not enough: `=0.10.2` pins `boxlite`, but *not* what
+# Why the pin above is not enough: `=0.10.4` pins `boxlite`, but *not* what
 # `boxlite` itself depends on. Every `boxlite` release to date requires its
-# sibling with a **caret** — 0.10.0 asks for `boxlite-shared = "0.10.0"`, and
-# 0.10.2 asks for `"0.10.2"` — so a fresh resolution is free to float the
+# sibling with a **caret** — 0.10.0 asks for `boxlite-shared = "^0.10.0"`, and
+# 0.10.4 still asks for `"^0.10.4"` — so a fresh resolution is free to float the
 # sibling while our exact pin holds the parent still. That is not hypothetical:
 # it is exactly how `cargo install roteiro --features exec-boxlite` broke on
 # 6.0.1. `boxlite-shared` 0.10.1 added a required sixth field, `source_is_dir`,
@@ -49,10 +49,15 @@ boxlite = { version = "=0.10.2", optional = true }
 #
 # The two crates are two halves of one prost-generated API released in lockstep,
 # and upstream ships required fields on public structs in **patch** releases, so
-# a caret between them is a semver break waiting to happen. Bumping `boxlite` to
-# 0.10.2 fixes today's mismatch; this line is what stops 0.10.3 causing the next
-# one. Keep the two versions equal. ADR-0014 v1.9 records the duty.
-boxlite-shared = { version = "=0.10.2", optional = true }
+# a caret between them is a semver break waiting to happen. It waited exactly one
+# release: 0.10.3 rewrote the SSH half of that same `service.proto`, adding a
+# required `host_public_key` to `SshStatus` and *removing* `listen_address`,
+# `ca_public_key` and `principal` from `SshConfigureRequest` — fields 1-3 are now
+# `reserved`, replaced by a nested `SshConfig`. A second required-field-in-a-patch
+# break, in a patch that deletes public fields too. This line is what keeps that
+# class of release out of a fresh resolution. Keep the two versions equal.
+# ADR-0014 v1.10 records the duty and this second instance.
+boxlite-shared = { version = "=0.10.4", optional = true }
 # `exec-boxlite` only: `AnalyzerRunner::run` is synchronous and boxlite's API is
 # async, so the runner drives a current-thread runtime it owns. No reactor is
 # shared with the CLI, and nothing here spawns a background thread.
