@@ -664,6 +664,48 @@ pub fn build_prompt(file: &FileUnderReview, context: &GraphContext, budget: usiz
     }
 }
 
+/// The closed class question, as `(label, class)` pairs in [`CLASSES`] order —
+/// what a **typed** classification asks instead of reading a token out of the
+/// reply's text (issue #897).
+///
+/// Plain data rather than an `rto_llama::typed::Choice`, which is what keeps this
+/// crate's dependency on `rto-llama` optional: the question is derived here, next
+/// to the class set and the glosses it is built from, and the caller that has an
+/// engine is the one that turns it into a question. `rto-llama` would otherwise
+/// become a hard dependency of `rto-graph` for fourteen strings.
+///
+/// Each label is the corpus token followed by the same one-line gloss the review
+/// prompt already lists, because the model is being asked to pick between these
+/// with no other description of them in front of it. Deriving both from
+/// `class_gloss` rather than restating them is what stops the two prompts
+/// describing one class two ways.
+///
+/// # What this removes
+///
+/// `parse_findings` reads `class=<token>` with
+/// [`DefectClass::from_token`](crate::review_corpus::DefectClass::from_token),
+/// which answers `None` for anything that is not a member — so a model that
+/// invents a class, abbreviates one, or translates one has its answer silently
+/// discarded, and the finding is recorded as carrying no class at all. Asked as a
+/// typed question the answer is an index into this list, so there is no token to
+/// be wrong: the off-schema case stops being handled and starts being
+/// unrepresentable.
+#[must_use]
+pub fn class_options() -> Vec<(String, DefectClass)> {
+    CLASSES
+        .into_iter()
+        .map(|c| (format!("{} — {}", c.as_str(), class_gloss(c)), c))
+        .collect()
+}
+
+/// The question put to the model beside [`class_options`].
+///
+/// Stated here rather than at the call site so that the wording travels with the
+/// option list it is asked over, and so it can be asserted against the classes
+/// without a model.
+pub const CLASS_QUESTION: &str =
+    "Which one of these classes does that finding belong to? Pick the single best fit.";
+
 /// A one-line gloss per defect class, for the prompt.
 ///
 /// Written from the class's own meaning rather than from any corpus row, and kept
@@ -998,6 +1040,13 @@ fn parse_one(reviewed_sha: &str, path: &str, line: &str) -> Option<CandidateFind
         },
         claims_compile_failure,
         defect_class: class,
+        // A text-parsed class carries no distribution, so there is nothing to
+        // report about its shape. `review_llm` overwrites all three fields
+        // together when it asks the typed question instead (#897); this function
+        // reads a token and cannot produce any of them.
+        class_sharpness_ppm: None,
+        class_option_mass_ppm: None,
+        class_margin_micronats: None,
     })
 }
 
@@ -1148,9 +1197,9 @@ fn module_feature_gate(path: &str, parent_source: &str) -> Option<Features> {
 #[cfg(test)]
 mod tests {
     use super::{
-        FileUnderReview, GraphContext, NO_FINDINGS, Prompt, SINGLE_CALL_BUDGET_TOKENS,
-        annotate_diff, build_prompt, build_verdict_prompt, claim_site, class_gloss,
-        estimate_tokens, parse_findings, parse_verdict,
+        CLASS_QUESTION, FileUnderReview, GraphContext, NO_FINDINGS, Prompt,
+        SINGLE_CALL_BUDGET_TOKENS, annotate_diff, build_prompt, build_verdict_prompt, claim_site,
+        class_gloss, class_options, estimate_tokens, parse_findings, parse_verdict,
     };
     use crate::compile_claim::{CheckRun, Conclusion, Features, TargetOs, Targets, suppression};
     use crate::review_corpus::{CLASSES, DefectClass};
@@ -1229,6 +1278,49 @@ mod tests {
                 "{class} is not named in the prompt"
             );
         }
+    }
+
+    /// The typed class question offers **every** class and no others, in the
+    /// report's own order.
+    ///
+    /// The whole claim of a typed read is that the answer is a member of this
+    /// list, so the list being the class set is what the claim is *about*: an
+    /// option set that dropped a class would make that class unanswerable while
+    /// still looking closed, which is a worse failure than the free-text token it
+    /// replaces — that one at least records `None`.
+    #[test]
+    fn the_typed_class_question_offers_exactly_the_class_set_in_order() {
+        let options = class_options();
+        assert_eq!(options.len(), CLASSES.len(), "one option per class");
+        let offered: Vec<DefectClass> = options.iter().map(|(_, c)| *c).collect();
+        assert_eq!(offered, CLASSES.to_vec(), "same classes, same order");
+    }
+
+    /// Each option names its class **and** describes it, because the model sees
+    /// the option list and nothing else about what the classes mean.
+    #[test]
+    fn every_typed_class_option_carries_its_token_and_its_gloss() {
+        for (label, class) in class_options() {
+            assert!(
+                label.starts_with(class.as_str()),
+                "{class}'s option does not start with its corpus token: {label}"
+            );
+            assert!(
+                label.contains(class_gloss(class)),
+                "{class}'s option drops its gloss: {label}"
+            );
+        }
+    }
+
+    /// The question is asked about a finding, so it has to refer to one. A
+    /// question that named only the class set would be asking the model to pick a
+    /// class for nothing in particular.
+    #[test]
+    fn the_class_question_asks_about_a_finding() {
+        assert!(
+            CLASS_QUESTION.to_lowercase().contains("finding"),
+            "the class question does not mention the finding it is about: {CLASS_QUESTION}"
+        );
     }
 
     /// A helper for the budget tests: an item whose body is `chars` bytes long,

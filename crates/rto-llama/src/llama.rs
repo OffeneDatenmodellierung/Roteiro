@@ -1175,6 +1175,221 @@ impl LlamaEngine {
             finish_reason,
         })
     }
+
+    /// Ask a typed question about `state` and read the answer off the model's own
+    /// next-token distribution over the option markers, generating no text at all
+    /// (issue #897).
+    ///
+    /// The answer is a [`crate::typed::Answer`] carrying a value the caller put
+    /// into `choice`, so an off-schema answer is not refused here — it is not
+    /// representable. `crate::typed` sets out that property and why the entropy
+    /// figure it reports is called `sharpness` rather than confidence.
+    ///
+    /// # This is one decode and no sampler
+    ///
+    /// The prompt is batched once, `decode`d once, and the logits at the last
+    /// position are read. No [`LlamaSampler`] is constructed, no token is
+    /// selected, and nothing is detokenised — so the per-request seed, the
+    /// temperature and the whole of `run_generation` are not on this path, and
+    /// the read has no RNG in it to be deterministic *about*.
+    ///
+    /// What it is a pure function of is `(model, state, question, choice)`, and
+    /// three deliberate omissions are what make that true:
+    ///
+    /// * **No speculative decoding.** A plain context, always. The speculative
+    ///   path verifies at batch width up to four where this decodes at the prompt
+    ///   width, and `tests/batch_numerics.rs` measures llama.cpp giving different
+    ///   floats for the same token at different widths — enough to flip a greedy
+    ///   argmax at a near-tie. A reading that silently changed with
+    ///   `ROTEIRO_SPECULATIVE` would be a different instrument per environment.
+    /// * **No preamble reuse.** `reuse_preamble` is not called, so the
+    ///   prompt is decoded in one batch every time. Restoring a cached prefix
+    ///   decodes *fewer* tokens in the batch that follows it, which is the same
+    ///   batch-width question by another route; and the cache is keyed by model
+    ///   and prefix, so a reading would depend on what was asked before it.
+    /// * **No generation budget.** The window is sized for the prompt plus one
+    ///   position, because one position is all that is read.
+    ///
+    /// Bit-identical floats are **not** claimed even so: the same prompt on a
+    /// different backend, or at a different `n_ubatch`, may move the last decimal
+    /// places. What is claimed is the argmax and the option ordering, which is the
+    /// claim `tests/batch_numerics.rs` is written to the shape of, and it is why
+    /// nothing here or in `typed` asserts float equality across two decodes.
+    ///
+    /// # Errors
+    /// [`EngineError::UnknownModel`] if `model` is not served;
+    /// [`EngineError::InvalidRequest`] if the model is encoder-only (it cannot
+    /// decode at all), if the rendered prompt does not fit the model's window, or
+    /// if a marker letter is not a single token in this model's vocabulary — which
+    /// is the one assumption `crate::typed` makes that only a tokeniser can check;
+    /// [`EngineError::TemplateRejected`] if the model's own chat template refuses
+    /// the turn; [`EngineError::Inference`] if load, tokenisation or decoding
+    /// fails.
+    pub fn ask_choice<T: Clone>(
+        &self,
+        model: &str,
+        state: &str,
+        question: &str,
+        choice: &crate::typed::Choice<T>,
+    ) -> Result<crate::typed::Answer<T>, EngineError> {
+        let path = self
+            .path_for(model)
+            .ok_or_else(|| EngineError::UnknownModel(model.to_owned()))?;
+        let resolved = self.resolve(model, &path)?;
+        let loaded = &resolved.model;
+
+        // Every FFI call below is under this, for the reason `chat_stream` states
+        // at length: llama.cpp is not assumed thread-safe, and the metadata read
+        // in the encoder-only guard is an FFI call like any other.
+        let _gen = resolved
+            .gen_lock
+            .lock()
+            .map_err(|_| EngineError::Inference("model generation lock poisoned".to_owned()))?;
+
+        // The same defensive guard `chat_stream` carries, and needed for the same
+        // reason rather than for symmetry: an encoder-only embedding model driven
+        // through `decode` aborts the **whole process** with a `GGML_ASSERT`, so a
+        // typed question mis-addressed to `bge-large-en-v1.5` would take the
+        // process down rather than return an error. Nothing about reading logits
+        // instead of sampling changes that; it is the `decode` that aborts.
+        if let Ok(arch) = loaded.meta_val_str("general.architecture")
+            && is_encoder_only_arch(&arch)
+        {
+            return Err(EngineError::InvalidRequest(format!(
+                "model `{model}` is an embedding model (encoder-only architecture \
+                 `{arch}`) and cannot answer a typed question"
+            )));
+        }
+
+        // Resolve the markers to token ids **before** decoding, so a vocabulary
+        // that cannot express the question fails without spending a prefill.
+        let markers = marker_tokens(loaded, model, choice)?;
+
+        let prompt = render_prompt(
+            loaded,
+            model,
+            &[Message {
+                role: "user".to_owned(),
+                content: choice.prompt(state, question),
+            }],
+            None,
+        )?;
+        let tokens = loaded
+            .str_to_token(&prompt, AddBos::Always)
+            .map_err(|e| EngineError::Inference(format!("tokenize: {e}")))?;
+        let prompt_tokens = u32::try_from(tokens.len()).unwrap_or(u32::MAX);
+
+        // One position beyond the prompt, because one is all that is read. The
+        // context is sized to the prompt exactly as a chat request's is (#486).
+        let n_ctx = self.request_window(loaded, prompt_tokens, 1);
+        let mut ctx = self.new_context(loaded, n_ctx)?;
+        // `base_params` sets `n_batch` to `n_ctx`, so this one check covers both
+        // the batch llama.cpp will accept and the `n_ctx > i` precondition of
+        // `get_logits_ith` below — which is an `assert!` inside `llama-cpp-2`,
+        // i.e. a panic rather than an error, and so has to be made unreachable
+        // here rather than handled.
+        check_batch_capacity(tokens.len(), batch_capacity(&ctx, false), "question")?;
+
+        let mut batch = LlamaBatch::new(tokens.len().max(1), 1);
+        let last = tokens.len().saturating_sub(1);
+        for (i, token) in tokens.iter().enumerate() {
+            batch
+                .add(
+                    *token,
+                    i32::try_from(i).unwrap_or(i32::MAX),
+                    &[0],
+                    // Logits at the last position only: that is the row the answer
+                    // is read from, and it is also what makes the row index below
+                    // the one `initialized_logits` records.
+                    i == last,
+                )
+                .map_err(|e| EngineError::Inference(format!("question batch: {e}")))?;
+        }
+        ctx.decode(&mut batch)
+            .map_err(|e| EngineError::Inference(format!("question decode: {e}")))?;
+
+        // `LlamaBatch::add` records the **batch** offset it set logits at, and
+        // `decode` copies that list onto the context — so the row to read is the
+        // last token's index within this batch, not `0` and not a context
+        // position. The whole prompt went in as one batch, so the two coincide
+        // here; they would not if the prompt had been split, which is a second
+        // reason this path does not reuse a preamble.
+        let row = i32::try_from(last).unwrap_or(i32::MAX);
+        let all = ctx.get_logits_ith(row);
+        let option_logits: Vec<f32> = markers
+            .iter()
+            .map(|t| {
+                usize::try_from(t.0)
+                    .ok()
+                    .and_then(|i| all.get(i).copied())
+                    // A marker id outside the logits row cannot happen —
+                    // `str_to_token` returns ids from this model's own vocabulary
+                    // and the row is `n_vocab` wide — but the alternative to a
+                    // stated fallback is an index panic, and `-inf` is the correct
+                    // reading for "this option had no support at all".
+                    .unwrap_or(f32::NEG_INFINITY)
+            })
+            .collect();
+
+        Ok(crate::typed::read_answer(choice, &option_logits, all))
+    }
+
+    /// Ask a yes/no question and return `P(yes)` (issue #897) — the interface's
+    /// `noul`.
+    ///
+    /// [`Self::ask_choice`] over a two-option question, so the arithmetic, the
+    /// prompt shape and the single decode are the same code rather than a second
+    /// implementation. A caller that needs the shape numbers as well as the
+    /// probability should ask `ask_choice` with [`crate::typed::Noul::as_choice`]
+    /// and keep the [`crate::typed::Answer`]: this returns the one number, and a
+    /// bare `f32` cannot carry `option_mass`, which is what says whether the
+    /// number meant anything.
+    ///
+    /// # Errors
+    /// As [`Self::ask_choice`].
+    pub fn ask_noul(&self, model: &str, state: &str, question: &str) -> Result<f32, EngineError> {
+        let noul = crate::typed::Noul::new();
+        let answer = self.ask_choice(model, state, question, noul.as_choice())?;
+        Ok(crate::typed::Noul::p_yes(&answer))
+    }
+}
+
+/// Resolve each of `choice`'s marker letters to the single token it must be in
+/// `loaded`'s vocabulary.
+///
+/// `crate::typed` assigns single ASCII letters precisely so that one option is
+/// one token, but whether a letter *is* one token is a fact about the tokeniser,
+/// which that module cannot see. This is where the assumption is checked, and it
+/// is checked rather than assumed because a letter that tokenised to two pieces
+/// would make the reading a confident answer about the wrong distribution — the
+/// exact silent failure the typed interface exists to remove.
+///
+/// Refused as an [`EngineError::InvalidRequest`] naming the model, the letter and
+/// the count, because the actionable fix is a smaller option set or a different
+/// model and a reader cannot choose between those without all three.
+fn marker_tokens<T>(
+    loaded: &LlamaModel,
+    model: &str,
+    choice: &crate::typed::Choice<T>,
+) -> Result<Vec<LlamaToken>, EngineError> {
+    let mut out = Vec::with_capacity(choice.len());
+    for marker in choice.markers() {
+        let ids = loaded
+            .str_to_token(&marker.to_string(), AddBos::Never)
+            .map_err(|e| EngineError::Inference(format!("tokenize marker `{marker}`: {e}")))?;
+        match ids.as_slice() {
+            [only] => out.push(*only),
+            other => {
+                return Err(EngineError::InvalidRequest(format!(
+                    "model `{model}`: the option marker `{marker}` is {} tokens in this \
+                     model's vocabulary, not one, so an answer cannot be read off a single \
+                     position",
+                    other.len(),
+                )));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// How one text generation will be decoded: the plain context, or the

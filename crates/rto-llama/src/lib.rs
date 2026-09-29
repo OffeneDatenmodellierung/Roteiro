@@ -46,9 +46,19 @@ pub mod slot;
 // endpoint and the `roteiro` CLI) have to be able to see it from crates that do
 // not agree on which llama.cpp features are on.
 pub mod thinking;
+// Typed questions (#897): ask for one of a closed set of answers and read the
+// answer off the label-token distribution, parsing no text — so an answer cannot
+// go off-schema. Compiled unconditionally, because all of it is arithmetic over
+// one row of logits and none of it needs llama.cpp; the engine method that
+// supplies the row is `llama::LlamaEngine::ask_choice`, which is behind the
+// feature. That split is deliberate: it is what lets the arithmetic — and the
+// schema guarantee, which is a property of the types — be unit-tested in the CI
+// cells that build no C++ at all.
+pub mod typed;
 
 pub use engine::{
     ChatRequest, Completion, CompletionStats, Engine, EngineError, FinishReason, Message, ModelInfo,
 };
 pub use slot::{EngineSlot, KeyedSlot};
 pub use thinking::Unterminated;
+pub use typed::{Answer, Choice, Noul, TypedError};

@@ -408,6 +408,38 @@ enum Command {
         /// audited from the artifacts rather than from their filenames.
         #[arg(long)]
         graph_context: bool,
+        /// Ask the model which **defect class** each finding belongs to as a
+        /// *typed question* — read off its own label-token distribution over the
+        /// closed fourteen — instead of parsing the `class=` token out of its
+        /// reply (issue #897).
+        ///
+        /// This removes an off-schema failure rather than mitigating one: a class
+        /// the model invents, abbreviates or translates currently parses to
+        /// nothing and the finding is recorded with no class at all. A typed read
+        /// cannot produce a non-member, because the answer is an index into the
+        /// class list and never a string.
+        ///
+        /// Opt-in for two reasons. It costs **one extra model call per finding**
+        /// rather than per file, and the recorded baseline emits 10.9 findings
+        /// per file. And it changes what the reviewer emits, so a run made with
+        /// it is not comparable with the recorded 1,995-finding baseline, whose
+        /// classes came out of the reply text.
+        ///
+        /// Each classified finding also carries three numbers off the same
+        /// distribution: the winning class's **logit margin** over the runner-up
+        /// in nats, the **sharpness** `1 - H(p)/ln K`, and how much of the model's
+        /// whole-vocabulary **mass** was on any legal answer at all.
+        ///
+        /// None of the three is a confidence — nothing is fitted against a
+        /// labelled set. The mass is the one to read first, because it says
+        /// whether the model engaged with the question; and the margin is the one
+        /// with any measured signal in it, because the sharpness was measured
+        /// saturated at exactly 1.0 on 26 of 27 adjudicated corpus rows. Measured
+        /// further, ranking the reviewer's own findings by margin did **not**
+        /// separate real findings from noise (P = 0.44 against a random
+        /// ordering), so none of the three should be built into a triage gate.
+        #[arg(long, conflicts_with = "score")]
+        typed_class: bool,
     },
     /// Verify authored links against code and ADR states; non-zero on drift.
     ///
@@ -2403,15 +2435,38 @@ fn main() -> anyhow::Result<()> {
             limit,
             graph_context,
             no_diff,
+            typed_class,
         } => match (score, replay, llm) {
             (Some(run), _, _) => review::run_score(&run, corpus.as_deref(), json),
-            (None, Some(out), _) => {
-                run_replay(&out, checks.as_deref(), limit, graph_context, ingest)
+            (None, Some(out), _) => run_replay(
+                &out,
+                checks.as_deref(),
+                limit,
+                graph_context,
+                typed_class,
+                ingest,
+            ),
+            (None, None, true) => run_llm_review(
+                base.as_deref(),
+                checks.as_deref(),
+                graph_context,
+                typed_class,
+                ingest,
+            ),
+            (None, None, false) => {
+                // `--typed-class` is a property of the model reviewer, and
+                // `review` without `--llm` runs no model. Refused by name rather
+                // than ignored: a flag silently dropped reads, from the outside,
+                // exactly like a flag that did nothing — which is how a whole run
+                // gets recorded under the wrong arm.
+                anyhow::ensure!(
+                    !typed_class,
+                    "`--typed-class` asks the model a typed question about each finding, \
+                     so it needs `--llm` or `--replay`. `roteiro review` on its own runs \
+                     no model at all."
+                );
+                run_review(ingest, json, base.as_deref(), debt_ignore, no_diff)
             }
-            (None, None, true) => {
-                run_llm_review(base.as_deref(), checks.as_deref(), graph_context, ingest)
-            }
-            (None, None, false) => run_review(ingest, json, base.as_deref(), debt_ignore, no_diff),
         },
         Command::Query {
             key,
@@ -4876,12 +4931,29 @@ fn review_arm(graph_context: bool) -> review_llm::ReviewArm {
     }
 }
 
+/// Where the reviewer's defect classes come from, from `--typed-class`.
+///
+/// Beside [`review_arm`] and in the same shape, so that the two experiment
+/// variables `review --llm` has are read from the flags in one place rather than
+/// each at its own call site — including its feature gate, because `review_llm`
+/// is itself behind one and a build with no backend has no `ClassSource` to
+/// return.
+#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+fn review_class_source(typed_class: bool) -> review_llm::ClassSource {
+    if typed_class {
+        review_llm::ClassSource::TypedRead
+    } else {
+        review_llm::ClassSource::ReplyText
+    }
+}
+
 /// `roteiro review --llm` — review the change with the local generative model.
 #[cfg(any(feature = "serve", feature = "inference-local-models"))]
 fn run_llm_review(
     base: Option<&str>,
     checks: Option<&str>,
     graph_context: bool,
+    typed_class: bool,
     ingest: rto_graph::IngestConfig,
 ) -> anyhow::Result<()> {
     review_llm::run_llm(
@@ -4889,6 +4961,7 @@ fn run_llm_review(
         base,
         checks,
         review_arm(graph_context),
+        review_class_source(typed_class),
         ingest,
     )
 }
@@ -4900,6 +4973,7 @@ fn run_replay(
     checks: Option<&str>,
     limit: Option<usize>,
     graph_context: bool,
+    typed_class: bool,
     ingest: rto_graph::IngestConfig,
 ) -> anyhow::Result<()> {
     review_llm::run_replay(
@@ -4908,6 +4982,7 @@ fn run_replay(
         checks,
         limit,
         review_arm(graph_context),
+        review_class_source(typed_class),
         ingest,
     )
 }
@@ -4923,6 +4998,7 @@ fn run_llm_review(
     _base: Option<&str>,
     _checks: Option<&str>,
     _graph_context: bool,
+    _typed_class: bool,
     _ingest: rto_graph::IngestConfig,
 ) -> anyhow::Result<()> {
     anyhow::bail!(
@@ -4939,6 +5015,7 @@ fn run_replay(
     _checks: Option<&str>,
     _limit: Option<usize>,
     _graph_context: bool,
+    _typed_class: bool,
     _ingest: rto_graph::IngestConfig,
 ) -> anyhow::Result<()> {
     anyhow::bail!(
