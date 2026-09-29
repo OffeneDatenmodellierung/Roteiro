@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.0.3](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-exec-v6.0.2...rto-exec-v6.0.3) - 2026-09-29
+
+### Other
+
+- *(deps)* pair-bump boxlite and boxlite-shared to 0.10.4
+
 ## [6.0.2](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-exec-v6.0.1...rto-exec-v6.0.2) - 2026-09-21
 
 ### Fixed
