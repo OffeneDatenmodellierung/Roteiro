@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v6.0.2...rto-render-v6.1.0) - 2026-09-29
+
+### Fixed
+
+- *(ci)* refuse what these guards were only claiming to check
+- *(serve)* announce the address a server bound, not the one it was asked for
+
 ## [6.0.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v5.15.1...rto-render-v6.0.1) - 2026-09-20
 
 ### Fixed
