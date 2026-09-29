@@ -106,6 +106,164 @@ pub struct CandidateFinding {
     /// separately.
     #[serde(default)]
     pub defect_class: Option<DefectClass>,
+    /// How concentrated the model's own next-token distribution was when it was
+    /// asked, as a **typed question**, which class this finding belongs to — in
+    /// parts per million, so `1_000_000` is all the mass on one class and `0` is
+    /// uniform over all fourteen (issue #897).
+    ///
+    /// `None` whenever the class came out of the reply's text, which is the
+    /// default and every run recorded before this field existed. A reviewer that
+    /// was not asked a typed question has no such number, and `0` would be a
+    /// *reading* — the flattest one there is — rather than an absence.
+    ///
+    /// # It is not a confidence, and the name is load-bearing
+    ///
+    /// This is `1 − H(p)/ln K` off the label-token distribution, and nothing here
+    /// has been fitted against a labelled set. It says the mass was concentrated;
+    /// it does not say the answer was right. Those come apart exactly where this
+    /// reviewer lives: 71% of a recorded 1,995 findings carried one class of
+    /// fourteen, which is a *sharp* and *uninformative* classifier at once.
+    /// `rto_llama::typed` sets the distinction out at length. Fit it against the
+    /// corpus and the fitted number may be called a confidence; until then this
+    /// name states what was computed.
+    ///
+    /// # Why parts per million rather than an `f32`
+    ///
+    /// Two reasons, and neither is style. This struct derives `Eq`, and so does
+    /// the [`CandidateRun`] that holds a `Vec` of it: an `f32` field cannot be
+    /// `Eq`, so adding one would mean **taking `Eq` off both** — a public API
+    /// removal on two types, to carry a number that has no use for it. And a run
+    /// document is an artifact that gets diffed, where a float's decimal
+    /// rendering is a serialiser detail rather than the value: two readings that
+    /// agree need not compare equal as bytes. An integer has neither problem, and
+    /// 1e-6 granularity discards nothing a ranking can use — differences below it
+    /// are float noise, which is why nothing downstream compares these for float
+    /// equality either.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class_sharpness_ppm: Option<u32>,
+    /// How much of the model's next-token mass — over its **whole vocabulary** —
+    /// was on any of the fourteen class options at all, in parts per million
+    /// (issue #897). `None` under exactly the conditions
+    /// [`Self::class_sharpness_ppm`] is `None`.
+    ///
+    /// # Recorded beside the sharpness because it is what makes it readable
+    ///
+    /// A softmax over fourteen entries of a 150,000-entry vocabulary always
+    /// yields a distribution, so a model that was going to answer `<think>`, or
+    /// `Sorry`, or a newline still produces a confident-looking winner among
+    /// options it never considered. This number is how much of its actual belief
+    /// was on a legal answer, and a reading with it near zero is a class whose
+    /// closedness did no work.
+    ///
+    /// Persisting the sharpness without it would be the more attractive and the
+    /// wrong choice: one number that looks like a confidence, with the only thing
+    /// that can falsify it dropped on the floor. A reader ranking findings by
+    /// sharpness needs to know whether the distribution it ranks was about
+    /// anything, and no later run can recover that.
+    ///
+    /// Nothing here thresholds it. What counts as too thin is a judgement about a
+    /// particular model, and a number chosen in this struct would be a claim
+    /// about all of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class_option_mass_ppm: Option<u32>,
+    /// The winning class's logit lead over the runner-up, in **millionths of a
+    /// nat** (issue #897). `None` under exactly the conditions
+    /// [`Self::class_sharpness_ppm`] is `None`.
+    ///
+    /// # This is the one of the three that was measured to carry information
+    ///
+    /// Recorded because [`Self::class_sharpness_ppm`] was measured **not** to.
+    /// Asked its 14-way class question about each of the 27 rows of the
+    /// adjudicated corpus, `qwen3-coder-30b-a3b` returned a sharpness of exactly
+    /// `1_000_000` on 26 of them — including on four of the five it got wrong —
+    /// so there is nothing in it to order two findings by. The margin over the
+    /// same 27 readings ran from 8.7 to 32.1 nats and ordered a correct answer
+    /// above a wrong one in 0.81 of the correct/wrong pairs, against 0.60 for the
+    /// sharpness, which is 0.5 plus tie-mass.
+    ///
+    /// A run document that carried only the saturated number would be archiving
+    /// the useless half of the reading. That is why this field exists, and the
+    /// two are kept side by side rather than one replacing the other: a different
+    /// model may not saturate, and a measurement that cannot compare them cannot
+    /// say so.
+    ///
+    /// # Nats, and the two things that follow from it
+    ///
+    /// Unbounded above and `0.0` on a tie, so it is **not** a probability and
+    /// nothing may present it as one. And it is not normalised by option count
+    /// the way the sharpness is, so it is comparable across readings of the *same*
+    /// question — which is what ranking findings needs — and **not** across
+    /// questions with different option counts.
+    ///
+    /// Integer for [`Self::class_sharpness_ppm`]'s reasons. A margin of tens of
+    /// nats at 1e-6 resolution is far inside `u32`, which holds 4,294 nats.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class_margin_micronats: Option<u32>,
+}
+
+/// The parts-per-million scale [`CandidateFinding::class_sharpness_ppm`] and
+/// [`CandidateFinding::class_option_mass_ppm`] are both on — and, read as
+/// millionths rather than as parts of a whole, the scale
+/// [`CandidateFinding::class_margin_micronats`] is on too.
+pub const PPM_SCALE: u32 = 1_000_000;
+
+/// Quantise a margin in nats onto millionths of a nat, saturating.
+///
+/// Separate from [`fraction_ppm`] because the input is **not** a `0.0..=1.0`
+/// fraction: a margin is unbounded above, so clamping it at `PPM_SCALE` — which
+/// is what passing it through `fraction_ppm` would do — would record every
+/// reading past one nat as the same number, and every reading in this repository's
+/// own measurement was between 8 and 33 nats. One function that silently ruined
+/// the field it was reused for is exactly the shape of defect the reviewer this
+/// serves is built to find.
+///
+/// `u32` holds 4,294 nats at this resolution. Beyond that, and for a `NaN`, it
+/// saturates rather than wrapping: a margin that large is degenerate either way,
+/// and `u32::MAX` says "off the top of the scale" where a wrap would say
+/// "certain and unremarkable".
+#[must_use]
+pub fn margin_micronats(nats: f32) -> u32 {
+    if nats.is_nan() {
+        return 0;
+    }
+    let scaled = (f64::from(nats) * f64::from(PPM_SCALE)).clamp(0.0, f64::from(u32::MAX));
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped to 0.0..=u32::MAX on the line above"
+    )]
+    let micronats = scaled as u32;
+    micronats
+}
+
+/// Quantise a `0.0..=1.0` fraction onto [`PPM_SCALE`].
+///
+/// One function for both ppm fields on [`CandidateFinding`], so that the reader
+/// and the writer cannot disagree about the scale and the two numbers cannot end
+/// up on different ones. Rounds to nearest and clamps, because the input comes
+/// from a softmax over floats and `1.0` can arrive as `1.0000001`: a value out of
+/// range is a last-decimal artefact rather than a caller error, and saturating is
+/// the honest reading of it. A `NaN` — which a degenerate logit row can produce —
+/// clamps to `0`, the flattest reading, rather than becoming an arbitrary
+/// integer.
+#[must_use]
+pub fn fraction_ppm(fraction: f32) -> u32 {
+    if fraction.is_nan() {
+        return 0;
+    }
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "PPM_SCALE is 1e6, which f32 represents exactly"
+    )]
+    let scale = PPM_SCALE as f32;
+    let clamped = (fraction * scale).round().clamp(0.0, scale);
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped to 0.0..=PPM_SCALE on the line above"
+    )]
+    let ppm = clamped as u32;
+    ppm
 }
 
 /// Where a whole-change verdict comes down: nothing to push back on, or something
@@ -930,8 +1088,8 @@ fn match_findings<'a>(rows: &[&'a CorpusRow], findings: &'a [CandidateFinding]) 
 #[cfg(test)]
 mod tests {
     use super::{
-        CandidateFinding, CandidateRun, CandidateVerdict, LINE_WINDOW, RUN_SCHEMA, SCORE_SCHEMA,
-        ScoreError, VerdictStance, score,
+        CandidateFinding, CandidateRun, CandidateVerdict, LINE_WINDOW, PPM_SCALE, RUN_SCHEMA,
+        SCORE_SCHEMA, ScoreError, VerdictStance, fraction_ppm, margin_micronats, score,
     };
     use crate::review_corpus::{Corpus, DefectClass, Verdict};
 
@@ -971,7 +1129,134 @@ mod tests {
             description: "a finding".to_owned(),
             claims_compile_failure: false,
             defect_class: None,
+            class_sharpness_ppm: None,
+            class_option_mass_ppm: None,
+            class_margin_micronats: None,
         }
+    }
+
+    #[test]
+    fn sharpness_quantises_the_ends_of_the_range_exactly() {
+        assert_eq!(fraction_ppm(0.0), 0);
+        assert_eq!(fraction_ppm(1.0), PPM_SCALE);
+        assert_eq!(fraction_ppm(0.5), PPM_SCALE / 2);
+    }
+
+    /// A softmax over floats can hand back `1.0000001`, and a clamp is the honest
+    /// reading of that rather than a wrap or a panic. Below zero cannot arise from
+    /// `sharpness`, which clamps already, but this function is public and must not
+    /// answer a negative with a huge `u32`.
+    #[test]
+    fn a_sharpness_just_outside_the_range_saturates_rather_than_wrapping() {
+        assert_eq!(fraction_ppm(1.000_001), PPM_SCALE);
+        assert_eq!(fraction_ppm(5.0), PPM_SCALE);
+        assert_eq!(fraction_ppm(-0.5), 0);
+        assert_eq!(fraction_ppm(f32::INFINITY), PPM_SCALE);
+        assert_eq!(fraction_ppm(f32::NEG_INFINITY), 0);
+    }
+
+    /// `NaN` reads as the flattest value rather than as an arbitrary integer: a
+    /// degenerate logit row is "no information", and `0` is what that means here.
+    #[test]
+    fn a_margin_is_recorded_in_millionths_of_a_nat() {
+        assert_eq!(margin_micronats(0.0), 0);
+        assert_eq!(margin_micronats(1.0), PPM_SCALE);
+        assert_eq!(margin_micronats(25.5), 25_500_000);
+    }
+
+    /// **A margin is not a fraction, and reusing `fraction_ppm` for it would
+    /// silently record every real reading as the same number.**
+    ///
+    /// Every margin this repository has measured is between 8 and 33 nats, and
+    /// `fraction_ppm` clamps at `PPM_SCALE` — one nat. So the wrong function does
+    /// not fail, it flattens: 8.7 and 32.1 both become `1000000`, the field looks
+    /// populated, and the ranking it exists for is destroyed. The two functions
+    /// are held apart here rather than in a comment.
+    #[test]
+    fn a_margin_must_not_be_quantised_as_though_it_were_a_fraction() {
+        assert_eq!(
+            fraction_ppm(8.7),
+            fraction_ppm(32.1),
+            "both clamp, as designed"
+        );
+        assert_ne!(
+            margin_micronats(8.7),
+            margin_micronats(32.1),
+            "the margin quantiser flattens the range it exists to preserve"
+        );
+        assert!(margin_micronats(32.1) > margin_micronats(8.7));
+    }
+
+    #[test]
+    fn an_absurd_margin_saturates_rather_than_wrapping() {
+        assert_eq!(margin_micronats(f32::INFINITY), u32::MAX);
+        assert_eq!(margin_micronats(1e12), u32::MAX);
+        assert_eq!(margin_micronats(-1.0), 0);
+        assert_eq!(margin_micronats(f32::NAN), 0);
+    }
+
+    #[test]
+    fn a_nan_sharpness_reads_as_flat_rather_than_as_a_number() {
+        assert_eq!(fraction_ppm(f32::NAN), 0);
+    }
+
+    /// Quantisation preserves order, which is the only property a ranking needs
+    /// from it. Checked across the scale rather than at one pair, because a
+    /// rounding rule that inverted anywhere would invert a ranking there.
+    #[test]
+    fn quantising_preserves_the_order_of_two_sharpness_values() {
+        let mut previous = 0;
+        for step in 0..=100u32 {
+            #[expect(clippy::cast_precision_loss, reason = "step is at most 100")]
+            let ppm = fraction_ppm(step as f32 / 100.0);
+            assert!(
+                ppm >= previous,
+                "order inverted at {step}: {ppm} < {previous}"
+            );
+            previous = ppm;
+        }
+    }
+
+    /// **An absent sharpness leaves the document byte-identical.**
+    ///
+    /// This is what makes the typed read opt-in at no cost to anything that does
+    /// not ask for it: a run recorded without it serialises exactly as it did
+    /// before the field existed, so `--score` over an archived document, and a
+    /// diff of two runs, are unaffected. `skip_serializing_if` is what holds
+    /// that, and the field is `deny_unknown_fields`-adjacent, so a test rather
+    /// than an attribute is what proves it.
+    #[test]
+    fn a_finding_with_no_sharpness_serialises_without_the_field() {
+        let json = serde_json::to_string(&finding(SHA_A, "src/a.rs", 1)).expect("serialize");
+        assert!(
+            !json.contains("class_sharpness_ppm"),
+            "an absent sharpness still reaches the document: {json}"
+        );
+    }
+
+    /// And a present one round-trips, including through `deny_unknown_fields` —
+    /// which would refuse the field outright had it not been declared.
+    #[test]
+    fn a_finding_with_a_sharpness_round_trips() {
+        let mut f = finding(SHA_A, "src/a.rs", 1);
+        f.class_sharpness_ppm = Some(742_113);
+        f.class_option_mass_ppm = Some(999_812);
+        f.class_margin_micronats = Some(25_110_000);
+        f.defect_class = Some(DefectClass::ContractDrift);
+        let json = serde_json::to_string(&f).expect("serialize");
+        assert!(json.contains("\"class_sharpness_ppm\":742113"), "{json}");
+        let back: CandidateFinding = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, f);
+    }
+
+    /// A document written before the field existed still parses, and reads as
+    /// "not asked" rather than as "asked and flat".
+    #[test]
+    fn a_document_predating_the_field_parses_with_no_sharpness() {
+        let json = r#"{"reviewed_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "path":"src/a.rs","line":1,"description":"a finding"}"#;
+        let back: CandidateFinding = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(back.class_sharpness_ppm, None);
     }
 
     /// **A blanketing reviewer must not be credited with recall it did not earn.**

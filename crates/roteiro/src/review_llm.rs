@@ -152,6 +152,57 @@ impl ReviewArm {
     }
 }
 
+/// Where a finding's defect class comes from (issue #897).
+///
+/// # Why this is a choice and not simply the better way
+///
+/// [`Self::TypedRead`] strictly removes a failure: `parse_findings` reads
+/// `class=<token>` through `DefectClass::from_token`, which answers `None` for
+/// anything outside the fourteen — so an invented, abbreviated or translated
+/// class is silently discarded and the finding is recorded as carrying no class
+/// at all. A typed read cannot produce a non-member, because the answer is an
+/// index into the class list rather than a string.
+///
+/// It is nonetheless **off by default**, on two grounds:
+///
+/// * **It costs one prefill per finding, not per file.** The recorded baseline
+///   emits 10.9 findings per file, so this is an order of magnitude more
+///   inference calls than the review itself — cheap ones (the question is a few
+///   hundred tokens, not a whole diff) but ten times as many. A default that
+///   multiplies a three-hour pass is a decision for the person paying for it.
+/// * **It changes what the reviewer emits.** The recorded 1,995-finding run is
+///   the baseline every comparison is against, and its classes came out of the
+///   reply's text. Switching the default would make the next run incomparable
+///   with it while looking like the same command.
+///
+/// [`Self::ReplyText`] is therefore what `review --llm` does unless asked, and a
+/// run document written under it is byte-identical to one written before any of
+/// this existed.
+///
+/// `#[non_exhaustive]`: these two are the mechanisms that exist, not the
+/// mechanisms there can be. A *fitted* read — the same distribution through a
+/// calibration the module docs say must come before the number may be called a
+/// confidence — is a third source and not a variation on either of these, and it
+/// is the obvious next one.
+///
+/// Behind the same gate as [`FileOutcome`], and for the same reason: the only
+/// things that read it are the per-file review and the classification pass, both
+/// of which need a generation backend. In a build without one there is no
+/// mechanism to choose between.
+#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum ClassSource {
+    /// From the `class=<token>` field of the reply's own text — the default, and
+    /// what every recorded run used.
+    #[default]
+    ReplyText,
+    /// From a typed question over the closed class set, read off the model's
+    /// label-token distribution (`rto_llama::typed`). Carries a sharpness and an
+    /// option mass; see [`classify_findings`].
+    TypedRead,
+}
+
 /// One file's review, before scoring.
 #[cfg(any(feature = "serve", feature = "inference-local-models"))]
 pub struct FileOutcome {
@@ -242,6 +293,7 @@ pub fn review_file(
     context: &GraphContext,
     checks: &[CheckRun],
     sources: &dyn Fn(&str) -> Option<String>,
+    class_source: ClassSource,
 ) -> anyhow::Result<FileOutcome> {
     use rto_llama::Engine as _;
 
@@ -327,6 +379,17 @@ pub fn review_file(
         }
     }
 
+    if class_source == ClassSource::TypedRead {
+        // Both lists, and for the same reason the suppression loop keeps them
+        // both: a withheld finding is still recorded in the run document, and a
+        // score over it would otherwise compare a typed class against a parsed
+        // one depending on whether CI happened to refute it.
+        classify_findings(engine, model, &mut findings)?;
+        for (finding, _) in &mut withheld {
+            classify_findings(engine, model, std::slice::from_mut(finding))?;
+        }
+    }
+
     Ok(FileOutcome {
         findings,
         suppressed: withheld,
@@ -335,6 +398,92 @@ pub fn review_file(
         reasoning_truncated: parsed.reasoning_truncated,
         dropped_tokens: prompt.dropped_tokens,
     })
+}
+
+/// Ask the model, as a **typed question**, which of the fourteen classes each
+/// finding belongs to, and overwrite its class and the two shape numbers with
+/// what the distribution says (issue #897).
+///
+/// # What the model is shown, and what it is not
+///
+/// The state is the finding's **own text** — its path, its line and its
+/// description — and not the diff it came from. That is deliberate and it is the
+/// reason this is cheap: the question is *which class does this claim belong to*,
+/// which is a property of the claim, and the review prompt already requires each
+/// finding to be self-contained (*"Quote the specific words that conflict, so a
+/// reader can check you without opening the file"*). Re-sending the diff would
+/// cost a second full prefill per finding to re-derive something already stated.
+///
+/// It is a real limitation and not only an economy: a description too vague to
+/// classify is classified anyway, from too little. What that produces is a flat
+/// distribution — a low sharpness — which is exactly the signal the number is for,
+/// so the limitation is *reported* by the measurement rather than hidden by it.
+///
+/// # No fallback to the parsed class
+///
+/// A finding this read touches has its class replaced outright, including when
+/// the text had already parsed to a class. Keeping the parsed one "when it looks
+/// right" would make the recorded class a function of two mechanisms and of which
+/// agreed, and nothing downstream could then say which instrument it was scoring.
+///
+/// # Three numbers, and the one that was measured to work
+///
+/// The reading records its sharpness, its option mass and its **margin**. That
+/// looks redundant and is not: measured against the 27 adjudicated corpus rows,
+/// the sharpness came back as exactly `1_000_000` on 26 of them — including four
+/// of the five wrong answers — so it cannot order two findings, while the margin
+/// ran 8.7 to 32.1 nats and ordered a correct answer above a wrong one in 0.81 of
+/// the pairs. `CandidateFinding::class_margin_micronats` carries that argument in
+/// full. All three are kept because a different model may saturate differently,
+/// and the comparison is what would show it.
+///
+/// # Errors
+/// If the engine fails on a question. One failure aborts the file rather than
+/// leaving a mixture: a `FileOutcome` whose findings came from two different
+/// class mechanisms is not a measurement of either.
+#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+pub fn classify_findings(
+    engine: &rto_llama::llama::LlamaEngine,
+    model: &str,
+    findings: &mut [CandidateFinding],
+) -> anyhow::Result<()> {
+    use rto_graph::review_score::{fraction_ppm, margin_micronats};
+
+    if findings.is_empty() {
+        return Ok(());
+    }
+    // One question, asked of every finding: built once because it is a pure
+    // function of the class set, and because `Choice::new`'s validation of that
+    // set should be paid once per file rather than once per finding.
+    let question = rto_llama::typed::Choice::new(rto_graph::reviewer::class_options())
+        .map_err(|e| anyhow::anyhow!("building the class question: {e}"))?;
+
+    for finding in findings {
+        let state = format!(
+            "A code reviewer reported this finding about `{}` at line {}:\n\n{}",
+            finding.path, finding.line, finding.description,
+        );
+        let answer = engine
+            .ask_choice(
+                model,
+                &state,
+                rto_graph::reviewer::CLASS_QUESTION,
+                &question,
+            )
+            .map_err(|e| anyhow::anyhow!("classifying {}:{}: {e}", finding.path, finding.line))?;
+        // `value()` is a `DefectClass` the question was built from, so there is no
+        // token to validate and no `None` arm to take — which is the whole of what
+        // this replaces.
+        finding.defect_class = Some(*answer.value());
+        finding.class_sharpness_ppm = Some(fraction_ppm(answer.sharpness()));
+        finding.class_option_mass_ppm = Some(fraction_ppm(answer.option_mass()));
+        // Nats, so a **different** quantiser: `fraction_ppm` clamps at one and
+        // every margin measured on this corpus was between 8 and 33, so reusing it
+        // would record them all as the same number. `review_score` holds the two
+        // apart with a test.
+        finding.class_margin_micronats = Some(margin_micronats(answer.margin()));
+    }
+    Ok(())
 }
 
 /// The graph as it was at `sha`, for the graph arm — or `None` for the diff-only
@@ -849,21 +998,12 @@ pub fn run_replay(
     checks_path: Option<&str>,
     limit: Option<usize>,
     arm: ReviewArm,
+    class_source: ClassSource,
     ingest: rto_graph::IngestConfig,
 ) -> anyhow::Result<()> {
     let corpus = rto_graph::review_corpus::builtin()?;
     let main = main_ref(repo)?;
-    let checks = match checks_path {
-        Some(p) => read_checks(p)?,
-        None => Vec::new(),
-    };
-    if checks.is_empty() {
-        eprintln!(
-            "note: no --checks evidence supplied, so no compile claim can be refuted \
-             and none will be withheld. That is the conservative default, not a \
-             disabled filter: `compile_claim` is opt-in on evidence."
-        );
-    }
+    let checks = checks_with_notice(checks_path)?;
 
     let choice = rto_graph::resolve_model(rto_graph::ModelTask::Review)?;
     let model = choice.require_installed()?;
@@ -938,7 +1078,15 @@ pub fn run_replay(
             // A three-hour pass that dies on file 140 has measured nothing, and the
             // refusals are themselves a result: they say which files this budget
             // cannot actually review.
-            let outcome = match review_file(&engine, model, file, &context, &checks, &sources) {
+            let outcome = match review_file(
+                &engine,
+                model,
+                file,
+                &context,
+                &checks,
+                &sources,
+                class_source,
+            ) {
                 Ok(outcome) => outcome,
                 Err(e) => {
                     eprintln!("      refused {}: {e}", file.path);
@@ -971,6 +1119,31 @@ pub fn run_replay(
     std::fs::write(out, format!("{json}\n")).map_err(|e| anyhow::anyhow!("writing {out}: {e}"))?;
     print_replay(&report, out);
     Ok(())
+}
+
+/// Read the `--checks` evidence, saying plainly on stderr when there is none.
+///
+/// The read and the notice are one function because the notice is *about* the
+/// absence the read produced: `compile_claim` is opt-in on evidence, so an empty
+/// set is the conservative default rather than a disabled filter, and a run whose
+/// log does not say so reads as one where the filter was consulted.
+///
+/// # Errors
+/// If `checks_path` names a file that cannot be read or parsed.
+#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+fn checks_with_notice(checks_path: Option<&str>) -> anyhow::Result<Vec<CheckRun>> {
+    let checks = match checks_path {
+        Some(p) => read_checks(p)?,
+        None => Vec::new(),
+    };
+    if checks.is_empty() {
+        eprintln!(
+            "note: no --checks evidence supplied, so no compile claim can be refuted \
+             and none will be withheld. That is the conservative default, not a \
+             disabled filter: `compile_claim` is opt-in on evidence."
+        );
+    }
+    Ok(checks)
 }
 
 /// Start llama.cpp on `model` with this reviewer's context window.
@@ -1380,6 +1553,36 @@ fn announce_unreviewable(skipped: &[String]) {
     }
 }
 
+/// Print one file's findings and its withheld compile claims, appending each
+/// *printed* finding to `reported` in the shape the whole-change pass is handed.
+///
+/// Returns `(findings printed, claims withheld)`.
+///
+/// A withheld claim is printed and counted but **not** appended: it was withheld
+/// from the reader under `rto_graph::compile_claim`, and a verdict asked to
+/// synthesise a claim nobody was shown would be summarising evidence the reader
+/// cannot check. That is the same rule [`record_outcome`] follows for the replay,
+/// and it is stated in both places because the two paths build `reported`
+/// independently.
+#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+fn print_file_findings(
+    path: &str,
+    outcome: &FileOutcome,
+    reported: &mut Vec<String>,
+) -> (usize, usize) {
+    println!("\n{path}");
+    for f in &outcome.findings {
+        let class = f.defect_class.map_or("unclassified", |c| c.as_str());
+        println!("  {path}:{}  [{class}]  {}", f.line, f.description);
+        reported.push(format!("{path}:{} [{class}] {}", f.line, f.description));
+    }
+    for (f, reason) in &outcome.suppressed {
+        println!("  {path}:{}  [withheld]  {}", f.line, f.description);
+        println!("      {reason}");
+    }
+    (outcome.findings.len(), outcome.suppressed.len())
+}
+
 /// Review the working-tree change (or a `base..HEAD` range) with the model.
 ///
 /// # Errors
@@ -1390,6 +1593,7 @@ pub fn run_llm(
     base: Option<&str>,
     checks_path: Option<&str>,
     arm: ReviewArm,
+    class_source: ClassSource,
     ingest: rto_graph::IngestConfig,
 ) -> anyhow::Result<()> {
     let checks = match checks_path {
@@ -1451,28 +1655,24 @@ pub fn run_llm(
     for file in &files {
         let sources = worktree_sources(repo, ingest.paths);
         let context = context_for(graph.as_ref(), file, &sources)?;
-        let outcome = review_file(&engine, model, file, &context, &checks, &sources)?;
+        let outcome = review_file(
+            &engine,
+            model,
+            file,
+            &context,
+            &checks,
+            &sources,
+            class_source,
+        )?;
         if outcome.reasoning_truncated {
             never_reviewed.push(file.path.as_str());
         }
         if outcome.findings.is_empty() && outcome.suppressed.is_empty() {
             continue;
         }
-        println!("\n{}", file.path);
-        for f in &outcome.findings {
-            let class = f.defect_class.map_or("unclassified", |c| c.as_str());
-            println!("  {}:{}  [{class}]  {}", file.path, f.line, f.description);
-            reported.push(format!(
-                "{}:{} [{class}] {}",
-                file.path, f.line, f.description
-            ));
-            total += 1;
-        }
-        for (f, reason) in &outcome.suppressed {
-            println!("  {}:{}  [withheld]  {}", file.path, f.line, f.description);
-            println!("      {reason}");
-            withheld += 1;
-        }
+        let (printed, suppressed) = print_file_findings(&file.path, &outcome, &mut reported);
+        total += printed;
+        withheld += suppressed;
     }
     println!(
         "\n{total} finding(s) over {} file(s); {withheld} compile claim(s) withheld",
@@ -2593,5 +2793,589 @@ mod tests {
         // *every* build, including the one with no remote tier to offer.
         #[cfg(feature = "models")]
         assert!(rto_graph::ModelTask::Review.goes_remote());
+    }
+}
+
+/// **Does the typed class read's `sharpness` know when it is wrong?** (Issue
+/// #897.)
+///
+/// The cheap half of the #897 measurement, and the one that has to come first.
+/// Ranking a reviewer's 1,995 findings by sharpness costs a full replay pass; a
+/// ranking is only worth that if the number carries information at all, and there
+/// is exactly one labelled set on which to ask — the adjudicated corpus, whose
+/// every row carries a human-assigned `defect_class`. So this asks the shipped
+/// question, in the shipped prompt shape, about each row's own description, and
+/// prints how the answers land against the labels.
+///
+/// # It prints and does not threshold
+///
+/// Written to the shape of `rto_llama`'s `tests/batch_numerics.rs`: the answer is
+/// a property of a model, a prompt and a corpus, and a tolerance asserted here
+/// would be a claim about all three that this module is not in a position to
+/// make. What it *does* assert is that the pass happened — every row classified,
+/// every row carrying both shape numbers — so that a silent no-op cannot be read
+/// as a result. That is the same rule `reasoning_truncated` exists for one level
+/// up: a number whose null is not stated is not yet a result, and a run that did
+/// not happen is not a zero.
+///
+/// # What it reports, and why each number is there
+///
+/// * **Accuracy** against the labels, with three nulls beside it. The
+///   label-permutation expectation is the honest one: hold the classifier's own
+///   predicted distribution fixed and assign its predictions to rows at random,
+///   which is `Σ_c n_pred(c)·n_true(c) / N` exactly and needs no trials. It is
+///   the null that catches the failure this reviewer has already been measured
+///   making — 71% of 1,995 findings under one label of fourteen — because a
+///   classifier that answers one thing scores its base rate and no more.
+/// * **Separation**, as the probability that a correct answer's sharpness
+///   exceeds a wrong answer's over every correct/incorrect pair, ties at a half.
+///   `0.5` is no separation. A single number, no threshold, and it is the whole
+///   question: if sharpness cannot order right from wrong on 27 labelled rows, it
+///   will not order real from noise on 1,995 unlabelled ones, and the expensive
+///   half of the experiment should not be run.
+/// * **Option mass**, min and mean. Sharpness over fourteen options is a
+///   distribution whatever the model was thinking about, so this is what says
+///   whether it engaged with the question. A near-zero mass makes every other
+///   number here a statement about renormalised noise, and reading them without
+///   it is the mistake `CandidateFinding::class_option_mass_ppm` exists to
+///   prevent.
+///
+/// ```text
+/// cargo test -p roteiro --features serve --lib \
+///     review_llm::typed_class_calibration -- --ignored --nocapture
+/// ```
+#[cfg(all(test, any(feature = "serve", feature = "inference-local-models")))]
+mod typed_class_calibration {
+    // Every cast below turns a count into a rate. The counts are a corpus row
+    // count (27) and a class count (14); `f64` represents every integer to 2^53
+    // exactly, so nothing here can lose a digit. Stated once at the module rather
+    // than at fifteen call sites, because it is one fact about all of them.
+    #![expect(
+        clippy::cast_precision_loss,
+        reason = "every cast is a small count (<= 27) becoming a rate; f64 is exact there"
+    )]
+
+    use std::io::Write;
+
+    use rto_graph::review_corpus::{CLASSES, CorpusRow, DefectClass};
+    use rto_graph::review_score::{CandidateFinding, PPM_SCALE};
+
+    /// What one row's reading came to, in the two numbers and the one comparison
+    /// the summary is built from.
+    struct Reading {
+        /// Sharpness values on the rows the classifier got right.
+        correct: Vec<u32>,
+        /// Sharpness values on the rows it got wrong.
+        wrong: Vec<u32>,
+        /// Option mass on every row, right or wrong.
+        masses: Vec<u32>,
+    }
+
+    /// A row's own text, in exactly the shape `classify_findings` builds for a
+    /// real finding — so this measures the shipped instrument and not a variant
+    /// of it.
+    fn as_finding(row: &CorpusRow) -> CandidateFinding {
+        CandidateFinding {
+            reviewed_sha: row.reviewed_sha.clone(),
+            path: row.path.clone(),
+            line: row.line,
+            description: row.description.clone(),
+            claims_compile_failure: false,
+            defect_class: None,
+            class_sharpness_ppm: None,
+            class_option_mass_ppm: None,
+            class_margin_micronats: None,
+        }
+    }
+
+    /// A ppm integer back as the `0.0..=1.0` fraction it quantised.
+    fn fraction(ppm: u32) -> f64 {
+        f64::from(ppm) / f64::from(PPM_SCALE)
+    }
+
+    /// The mean of some ppm values as a fraction, or `NaN` for none — which
+    /// prints as `NaN` and so cannot be mistaken for a measured zero.
+    fn mean(values: &[u32]) -> f64 {
+        if values.is_empty() {
+            return f64::NAN;
+        }
+        values.iter().map(|v| fraction(*v)).sum::<f64>() / values.len() as f64
+    }
+
+    /// A margin in nats onto a `u32` at 1e-6-nat resolution, so it can reach
+    /// [`separation`]'s integer comparison.
+    ///
+    /// Integers for the reason `p_yes` uses them: `separation` counts ties, and a
+    /// tie between two `f32`s off two different softmaxes is a statement about the
+    /// last bits rather than about the model. A margin of tens of nats scaled by
+    /// 1e6 stays far inside `u32`; a pathological one saturates rather than
+    /// wrapping.
+    fn margin_ppm(nats: f32) -> u32 {
+        let scaled = (f64::from(nats) * 1e6).clamp(0.0, f64::from(u32::MAX));
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "clamped to 0..=u32::MAX on the line above"
+        )]
+        let q = scaled as u32;
+        q
+    }
+
+    /// `P(sharpness of a correct answer > sharpness of a wrong one)` over every
+    /// correct/incorrect pair, ties counted as a half.
+    ///
+    /// The Mann-Whitney statistic, normalised. `0.5` is no separation and `1.0` is
+    /// perfect ordering. Chosen over a threshold-and-count because a threshold is
+    /// the thing this measurement must not quietly pick: any cut would be fitted
+    /// to 27 rows and would then be the result.
+    ///
+    /// `None` when one of the two groups is empty — perfect or zero accuracy has
+    /// no pairs to order, and reporting `0.5` for it would read as "measured, no
+    /// separation" rather than "not measurable".
+    fn separation(correct: &[u32], wrong: &[u32]) -> Option<f64> {
+        if correct.is_empty() || wrong.is_empty() {
+            return None;
+        }
+        let mut wins = 0.0f64;
+        for c in correct {
+            for w in wrong {
+                wins += match c.cmp(w) {
+                    std::cmp::Ordering::Greater => 1.0,
+                    std::cmp::Ordering::Equal => 0.5,
+                    std::cmp::Ordering::Less => 0.0,
+                };
+            }
+        }
+        Some(wins / (correct.len() as f64 * wrong.len() as f64))
+    }
+
+    /// Expected correct answers if the classifier's **own** predicted
+    /// distribution were assigned to rows at random: `Σ_c n_pred(c)·n_true(c)/N`.
+    ///
+    /// Exact rather than sampled, so it costs nothing and cannot be quietly
+    /// under-trialled. This is the null that a one-answer classifier fails: it
+    /// scores its base rate, and so does the null.
+    fn permutation_expectation(predicted: &[DefectClass], truth: &[DefectClass]) -> f64 {
+        let n = truth.len();
+        if n == 0 {
+            return 0.0;
+        }
+        let mut expected = 0.0f64;
+        for class in CLASSES {
+            let p = predicted.iter().filter(|c| **c == class).count() as f64;
+            let t = truth.iter().filter(|c| **c == class).count() as f64;
+            expected += p * t / n as f64;
+        }
+        expected
+    }
+
+    /// How many distinct classes the classifier actually used.
+    ///
+    /// The one number that catches the failure already on record: 71% of 1,995
+    /// findings under one label of fourteen. A classifier using two of fourteen
+    /// can still look accurate on a corpus whose labels are skewed the same way,
+    /// and the permutation null beside it is what prices that.
+    fn distinct_used(predicted: &[DefectClass]) -> usize {
+        CLASSES
+            .into_iter()
+            .filter(|c| predicted.contains(c))
+            .count()
+    }
+
+    /// Print one line per row and collect the three vectors the summary needs.
+    fn print_rows(
+        out: &mut impl Write,
+        findings: &[CandidateFinding],
+        truth: &[DefectClass],
+        predicted: &[DefectClass],
+    ) -> Reading {
+        let mut reading = Reading {
+            correct: Vec::new(),
+            wrong: Vec::new(),
+            masses: Vec::new(),
+        };
+        for ((f, want), got) in findings.iter().zip(truth).zip(predicted) {
+            let sharp = f.class_sharpness_ppm.expect("asserted present");
+            let mass = f.class_option_mass_ppm.expect("asserted present");
+            reading.masses.push(mass);
+            if got == want {
+                reading.correct.push(sharp);
+            } else {
+                reading.wrong.push(sharp);
+            }
+            let _ = writeln!(
+                out,
+                // **Printed as the ppm integers, not as rounded fractions.**
+                // `separation` below consumes these exact integers, and at four
+                // decimal places every sharpness on this model prints as `1.0000`
+                // while differing in the last few ppm — so a rounded table cannot
+                // reproduce the statistic computed from it, and a reader checking
+                // one against the other would find a number with no visible
+                // support. The scale is `PPM_SCALE`; `1000000` is all the mass on
+                // one option.
+                "  {:<34} {:>5}  want {:<21} got {:<21} sharp {sharp:>7}  mass {mass:>7}{}",
+                f.path.rsplit('/').next().unwrap_or(&f.path),
+                f.line,
+                want.as_str(),
+                got.as_str(),
+                if got == want { "" } else { "  <- wrong" },
+            );
+        }
+        reading
+    }
+
+    /// The same separation statistic over the **margins** the same readings
+    /// already recorded — no second pass, because `classify_findings` persists
+    /// them.
+    ///
+    /// Printed beside the sharpness separation rather than instead of it: the two
+    /// lines are the same statistic over the same rows by two different numbers,
+    /// and the comparison is the result. A margin separation near `0.5` as well
+    /// would say the reading carries no orderable signal at all and that no
+    /// rescaling of it would help.
+    fn print_margin_summary(
+        out: &mut impl Write,
+        findings: &[CandidateFinding],
+        truth: &[DefectClass],
+        predicted: &[DefectClass],
+    ) {
+        let mut correct: Vec<u32> = Vec::new();
+        let mut wrong: Vec<u32> = Vec::new();
+        let mut raw: Vec<u32> = Vec::new();
+        for ((f, want), got) in findings.iter().zip(truth).zip(predicted) {
+            let m = f.class_margin_micronats.expect("asserted present");
+            raw.push(m);
+            if got == want {
+                correct.push(m);
+            } else {
+                wrong.push(m);
+            }
+        }
+        let nats = |m: u32| f64::from(m) / f64::from(PPM_SCALE);
+        let _ = writeln!(
+            out,
+            "  --- the same readings, ordered by MARGIN instead ---\
+             \n  margin (nats) min / max     {:.3} / {:.3}\
+             \n  separation P(correct>wrong) {}\
+             \n\n  Compare with the sharpness separation above. If this one is \
+             also ~0.5 the reading carries no orderable signal at all, and no \
+             rescaling of it would.\n",
+            raw.iter().copied().min().map_or(f64::NAN, nats),
+            raw.iter().copied().max().map_or(f64::NAN, nats),
+            separation(&correct, &wrong)
+                .map_or_else(|| "n/a (one group empty)".to_owned(), |s| format!("{s:.4}")),
+        );
+    }
+
+    /// Print the summary: accuracy with three nulls beside it, the separation
+    /// statistic, and the option mass that says whether to believe any of them.
+    fn print_summary(
+        out: &mut impl Write,
+        reading: &Reading,
+        truth: &[DefectClass],
+        predicted: &[DefectClass],
+    ) {
+        let n = truth.len();
+        let hits = reading.correct.len();
+        let null = permutation_expectation(predicted, truth);
+        let majority = CLASSES
+            .into_iter()
+            .map(|c| truth.iter().filter(|t| **t == c).count())
+            .max()
+            .unwrap_or(0);
+        let classes = CLASSES.len();
+        let _ = writeln!(
+            out,
+            "\n  accuracy                    {hits}/{n} = {:.3}\
+             \n  permutation null (exact)    {null:.2}/{n} = {:.3}\
+             \n  majority-class baseline     {majority}/{n} = {:.3}\
+             \n  uniform baseline            1/{classes} = {:.3}\
+             \n  distinct classes used       {} of {classes}\
+             \n  mean sharpness (correct)    {:.4}\
+             \n  mean sharpness (wrong)      {:.4}\
+             \n  separation P(correct>wrong) {}\
+             \n  option mass min / mean      {:.4} / {:.4}",
+            hits as f64 / n as f64,
+            null / n as f64,
+            majority as f64 / n as f64,
+            1.0 / classes as f64,
+            distinct_used(predicted),
+            mean(&reading.correct),
+            mean(&reading.wrong),
+            separation(&reading.correct, &reading.wrong)
+                .map_or_else(|| "n/a (one group empty)".to_owned(), |s| format!("{s:.4}")),
+            reading
+                .masses
+                .iter()
+                .copied()
+                .min()
+                .map_or(f64::NAN, fraction),
+            mean(&reading.masses),
+        );
+        let _ = writeln!(
+            out,
+            "\n  No threshold is asserted above. `separation` at 0.5 is no ordering, \
+             and `option mass` decides whether the rest is about anything.\n"
+        );
+    }
+
+    /// Resolve the pinned review model and start llama.cpp on it, or print why
+    /// this measurement is being skipped.
+    ///
+    /// Written to `stderr` directly rather than through `eprintln!` because libtest
+    /// discards a *passing* test's captured output, and a skip that printed to
+    /// nobody would read as a run that found nothing.
+    ///
+    /// The name comes back owned rather than borrowed: it is read through the
+    /// model choice, which does not outlive this function, and a measurement that
+    /// does not say which model produced it is not comparable with the next one —
+    /// so it is carried rather than dropped.
+    fn engine_or_skip(out: &mut impl Write) -> Option<(rto_llama::llama::LlamaEngine, String)> {
+        // **`resolve_model` reads a process-global slot that only `main` fills.**
+        //
+        // A test binary is not `main`, so without this the pins are all unset and
+        // every task resolves to its *default* — `qwen3-0.6b` for `Review`, which
+        // is not installed here, so the measurement self-skipped while reporting a
+        // pass. The skip printed its reason, which is the only thing that made it
+        // visible; a silent one would have read as a measurement that found
+        // nothing.
+        //
+        // So it is done here exactly as `main` does it, from the same two layers,
+        // and the model name is printed beside every number: this repository pins
+        // `[models] generative` to the model the Stage 35b baseline was recorded
+        // on, and a measurement against a different one is not comparable with it.
+        #[cfg(feature = "models")]
+        match crate::config::load(&std::env::current_dir().unwrap_or_default()) {
+            Ok(cfg) => rto_graph::set_model_pins(cfg.effective.models.resolve()),
+            Err(e) => {
+                let _ = writeln!(out, "SKIP: config would not load ({e})");
+                return None;
+            }
+        }
+        let choice = match rto_graph::resolve_model(rto_graph::ModelTask::Review) {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = writeln!(out, "SKIP: no review model resolved ({e})");
+                return None;
+            }
+        };
+        let model = match choice.require_installed() {
+            Ok(m) => m.to_owned(),
+            Err(e) => {
+                let _ = writeln!(out, "SKIP: review model not installed ({e})");
+                return None;
+            }
+        };
+        match super::start_engine(&model) {
+            Ok(engine) => Some((engine, model)),
+            Err(e) => {
+                let _ = writeln!(out, "SKIP: llama.cpp would not start ({e})");
+                None
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "needs the pinned generative model under ~/.roteiro/models; prints a measurement"]
+    fn sharpness_against_the_adjudicated_class_set() {
+        let mut out = std::io::stderr();
+        let corpus = rto_graph::review_corpus::builtin().expect("the builtin corpus parses");
+        let Some((engine, model)) = engine_or_skip(&mut out) else {
+            return;
+        };
+
+        let truth: Vec<DefectClass> = corpus.rows().iter().map(|r| r.defect_class).collect();
+        let mut findings: Vec<CandidateFinding> = corpus.rows().iter().map(as_finding).collect();
+        let n = findings.len();
+        let _ = writeln!(
+            out,
+            "\n=== typed class read vs the adjudicated corpus — {model}, {n} rows, \
+             {} classes ===",
+            CLASSES.len()
+        );
+
+        super::classify_findings(&engine, &model, &mut findings)
+            .expect("the typed class read completes over every row");
+
+        // **The pass happened**, asserted before a single number is read off it, so
+        // that a no-op cannot be reported as a measurement.
+        assert_eq!(findings.len(), n, "a row was lost");
+        for f in &findings {
+            assert!(
+                f.defect_class.is_some(),
+                "{}:{} came back with no class",
+                f.path,
+                f.line
+            );
+            assert!(
+                f.class_sharpness_ppm.is_some()
+                    && f.class_option_mass_ppm.is_some()
+                    && f.class_margin_micronats.is_some(),
+                "{}:{} came back with no shape numbers",
+                f.path,
+                f.line
+            );
+        }
+
+        let predicted: Vec<DefectClass> = findings
+            .iter()
+            .map(|f| f.defect_class.expect("just asserted present"))
+            .collect();
+        let reading = print_rows(&mut out, &findings, &truth, &predicted);
+        print_summary(&mut out, &reading, &truth, &predicted);
+        print_margin_summary(&mut out, &findings, &truth, &predicted);
+    }
+    /// The yes/no question this measurement asks, and the reason it lives here
+    /// rather than beside `rto_graph::reviewer::CLASS_QUESTION`.
+    ///
+    /// `CLASS_QUESTION` is part of the shipped instrument: `--typed-class` asks
+    /// it, so it belongs with the option list it is asked over. This one is not
+    /// shipped — nothing in `review --llm` asks whether a finding is real, and
+    /// #897's own note says a model judging its own findings is a separate claim
+    /// from a model classifying them. So it is a question the *measurement* asks,
+    /// and it is written where the measurement is.
+    const REALITY_QUESTION: &str = "Does that finding describe a real defect — something a maintainer would \
+         actually fix — rather than a false alarm?";
+
+    /// **Can `P(yes)` tell an adjudicated real row from a known-false one?**
+    ///
+    /// The half of #897's Phase 3 that the corpus can answer without a replay
+    /// pass. The expensive question — does ranking a reviewer's own 1,995 findings
+    /// by sharpness beat the permutation null — needs the reviewer re-run; this
+    /// asks the *same* instrument about 27 rows a human already adjudicated, and
+    /// costs 27 prefills.
+    ///
+    /// It is a weaker question than Phase 3's in one specific way that must not be
+    /// glossed: these descriptions are a **human reviewer's** prose, not the
+    /// model's own findings, so a separation here does not establish that the
+    /// number would order the model's output. It is nonetheless the strictly
+    /// easier task — the rows are well-written and half of them were written by a
+    /// tool that got them right — so **a failure here is decisive** and a success
+    /// is only encouraging.
+    ///
+    /// # The base rate is the whole difficulty
+    ///
+    /// 22 of 27 rows are `real`, so answering "yes" to everything scores 0.815 and
+    /// accuracy is close to useless. The number that is not fooled by that is the
+    /// separation over every real/false pair, which is invariant to the base rate:
+    /// `0.5` is no ordering whatever the mix. Accuracy is printed beside it only so
+    /// the base rate is visible rather than implied.
+    ///
+    /// Uses `ask_choice` over `Noul::as_choice` rather than `ask_noul`, because
+    /// `ask_noul` returns the probability alone and this needs the option mass —
+    /// which is exactly the choice that method's own docs tell a caller to make.
+    ///
+    /// ```text
+    /// cargo test -p roteiro --features serve --lib \
+    ///     review_llm::typed_class_calibration::the_noul -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs the pinned generative model under ~/.roteiro/models; prints a measurement"]
+    fn the_noul_separates_real_rows_from_known_false_ones() {
+        use rto_graph::review_corpus::Verdict;
+        use rto_graph::review_score::fraction_ppm;
+
+        let mut out = std::io::stderr();
+        let corpus = rto_graph::review_corpus::builtin().expect("the builtin corpus parses");
+        let Some((engine, model)) = engine_or_skip(&mut out) else {
+            return;
+        };
+        let noul = rto_llama::typed::Noul::new();
+
+        let _ = writeln!(
+            out,
+            "\n=== noul: real vs known-false — {model}, {} rows ===",
+            corpus.rows().len()
+        );
+
+        let mut real: Vec<u32> = Vec::new();
+        let mut known_false: Vec<u32> = Vec::new();
+        let mut masses: Vec<u32> = Vec::new();
+        let mut margins: Vec<f32> = Vec::new();
+        let mut real_margins: Vec<u32> = Vec::new();
+        let mut false_margins: Vec<u32> = Vec::new();
+        for row in corpus.rows() {
+            let state = format!(
+                "A code reviewer reported this finding about `{}` at line {}:\n\n{}",
+                row.path, row.line, row.description,
+            );
+            let answer = engine
+                .ask_choice(&model, &state, REALITY_QUESTION, noul.as_choice())
+                .expect("the noul completes over every row");
+            // Through the ppm quantiser and not kept as an `f32`: `separation`
+            // counts ties, and a tie between two floats off two different
+            // softmaxes is a statement about the last bits rather than about the
+            // model. Integers make "the same reading" mean something.
+            let p_yes = fraction_ppm(rto_llama::typed::Noul::p_yes(&answer));
+            let mass = fraction_ppm(answer.option_mass());
+            masses.push(mass);
+            // Margins go into their own two groups as well as the printed list:
+            // eyeballing which rows sit low is not a statistic, and the whole
+            // point of `separation` is that it is one.
+            let margin_q = margin_ppm(answer.margin());
+            match row.verdict {
+                Verdict::Real => real_margins.push(margin_q),
+                Verdict::False => false_margins.push(margin_q),
+            }
+            margins.push(answer.margin());
+            match row.verdict {
+                Verdict::Real => real.push(p_yes),
+                Verdict::False => known_false.push(p_yes),
+            }
+            let _ = writeln!(
+                out,
+                // ppm integers, for the reason `print_rows` states: these are
+                // what `separation` reads, and four decimal places round every
+                // one of them to `1.0000`.
+                "  {:<34} {:>5}  {:<5}  P(yes) {p_yes:>7}  mass {mass:>7}  margin {:>7.3}",
+                row.path.rsplit('/').next().unwrap_or(&row.path),
+                row.line,
+                match row.verdict {
+                    Verdict::Real => "real",
+                    Verdict::False => "false",
+                },
+                answer.margin(),
+            );
+        }
+
+        // **The pass happened.** Both groups non-empty, because the separation
+        // statistic below is `None` for an empty one and a printed `n/a` must mean
+        // "the corpus has no such rows", never "the loop did nothing".
+        assert_eq!(real.len() + known_false.len(), corpus.rows().len());
+        assert!(
+            !real.is_empty() && !known_false.is_empty(),
+            "one group is empty"
+        );
+
+        let said_yes = real.iter().filter(|p| **p > PPM_SCALE / 2).count()
+            + known_false.iter().filter(|p| **p > PPM_SCALE / 2).count();
+        let _ = writeln!(
+            out,
+            "\n  rows                        {} real, {} known-false\
+             \n  base rate (answer yes)      {:.3}\
+             \n  said yes at P > 0.5         {said_yes}/{}\
+             \n  mean P(yes) on real         {:.4}\
+             \n  mean P(yes) on known-false  {:.4}\
+             \n  separation P(real>false)    {}\
+             \n  option mass min / mean      {:.4} / {:.4}\
+             \n  margin (nats) min / max     {:.3} / {:.3}\
+             \n  separation by MARGIN        {}\
+             \n\n  A separation of 0.5 is no ordering, and it is the only number \
+             here the 22:5 base rate cannot flatter.\n",
+            real.len(),
+            known_false.len(),
+            real.len() as f64 / (real.len() + known_false.len()) as f64,
+            real.len() + known_false.len(),
+            mean(&real),
+            mean(&known_false),
+            separation(&real, &known_false)
+                .map_or_else(|| "n/a (one group empty)".to_owned(), |s| format!("{s:.4}")),
+            masses.iter().copied().min().map_or(f64::NAN, fraction),
+            mean(&masses),
+            margins.iter().copied().fold(f32::INFINITY, f32::min),
+            margins.iter().copied().fold(f32::NEG_INFINITY, f32::max),
+            separation(&real_margins, &false_margins)
+                .map_or_else(|| "n/a (one group empty)".to_owned(), |s| format!("{s:.4}")),
+        );
     }
 }
