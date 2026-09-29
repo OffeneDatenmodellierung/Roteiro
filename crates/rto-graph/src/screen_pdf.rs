@@ -307,13 +307,19 @@ fn scan_page(doc: &Document, page_id: ObjectId, out: &mut Vec<Concealed>, budget
                     });
                 }
             }
+            // `BT` resets the text and text-line matrices and **nothing else**
+            // (§9.4.1); the font, size, leading and rendering mode persist
+            // across text objects because they are graphics state.
             "BT" => text = TextState::default(),
-            "Tf" | "Tr" | "TL" | "Tm" | "Td" | "TD" | "T*" => {
-                text.apply(op.operator.as_str(), operands);
+            "Tf" | "Tr" | "TL" => {
+                gs.text.apply(op.operator.as_str(), operands);
+            }
+            "Tm" | "Td" | "TD" | "T*" => {
+                text.apply(op.operator.as_str(), operands, &mut gs.text.leading);
             }
             "Tj" | "TJ" | "'" | "\"" => {
                 if op.operator == "'" || op.operator == "\"" {
-                    text.next_line(0.0, -text.leading);
+                    text.next_line(0.0, -gs.text.leading);
                 }
                 let strings = match op.operator.as_str() {
                     // `"` is `aw Tw ac Tc T* Tj`: the string is the third operand.
@@ -371,7 +377,7 @@ struct Run<'a> {
 fn inspect_run(run: &Run<'_>, strings: &[Object], out: &mut Vec<Concealed>, budget: &mut usize) {
     let trm = run.text.tm.then(run.gs.ctm);
     let (x, y) = trm.apply(0.0, 0.0);
-    let effective = run.text.size.abs() * trm.vertical_scale();
+    let effective = run.gs.text.size.abs() * trm.vertical_scale();
     let behind = topmost(run.painted, x, y);
 
     let mut found: Vec<(&'static str, String)> = Vec::new();
@@ -380,7 +386,7 @@ fn inspect_run(run: &Run<'_>, strings: &[Object], out: &mut Vec<Concealed>, budg
     // Modes 3 and 7 paint nothing at all. 7 adds to the clipping path, which is
     // not a mark on the page either; listing both is the difference between
     // detecting the mechanism and detecting one spelling of it.
-    if matches!(run.text.render_mode, 3 | 7) {
+    if matches!(run.gs.text.render_mode, 3 | 7) {
         if matches!(behind, Paint::Opaque) {
             unreported = Some(
                 "invisible text layer over a page image (the ordinary searchable-scan shape)"
@@ -389,10 +395,10 @@ fn inspect_run(run: &Run<'_>, strings: &[Object], out: &mut Vec<Concealed>, budg
         } else {
             found.push((
                 mechanism::INVISIBLE_RENDER_MODE,
-                format!("text rendering mode {}", run.text.render_mode),
+                format!("text rendering mode {}", run.gs.text.render_mode),
             ));
         }
-    } else if fills(run.text.render_mode)
+    } else if fills(run.gs.text.render_mode)
         && let Some(ink) = run.gs.fill
         && let Paint::Solid(background) = behind
         && indistinguishable(ink, background)
@@ -417,12 +423,12 @@ fn inspect_run(run: &Run<'_>, strings: &[Object], out: &mut Vec<Concealed>, budg
         ));
     }
 
-    // `run.text.font.is_some()` is exactly "a `Tf` has executed in this text
+    // `run.gs.text.font.is_some()` is exactly "a `Tf` has executed in this text
     // object": the operator sets the font and the size together. Without it a
     // malformed document that shows text with no font selected would be reported
     // as concealing it at the default size of zero, which is a claim about the
     // parser's state rather than about the page.
-    if run.text.font.is_some() && effective < MIN_LEGIBLE_SIZE {
+    if run.gs.text.font.is_some() && effective < MIN_LEGIBLE_SIZE {
         found.push((
             mechanism::DEGENERATE_SIZE,
             format!("effective text size {effective:.4} pt"),
@@ -432,7 +438,7 @@ fn inspect_run(run: &Run<'_>, strings: &[Object], out: &mut Vec<Concealed>, budg
     if found.is_empty() && unreported.is_none() {
         return;
     }
-    let decoded = decode_run(run.doc, run.fonts, run.text.font.as_deref(), strings);
+    let decoded = decode_run(run.doc, run.fonts, run.gs.text.font.as_deref(), strings);
     // A run with no reportable mechanism exists only to have its *content*
     // scanned, so one that decoded to nothing has neither half and is dropped.
     // A run *with* a mechanism is kept whatever it decoded to: a subset font
@@ -604,6 +610,17 @@ struct GraphicsState {
     /// pattern, a separation, an indexed space. Unknown suppresses the colour
     /// test; it never stands in for a value.
     fill: Option<[f64; 3]>,
+    /// The **text state**, which is part of the graphics state and therefore
+    /// saved and restored by `q`/`Q` (PDF 32000-1 §9.3).
+    ///
+    /// It lives here rather than in [`TextState`] because that is what the
+    /// specification says, and getting it wrong is wrong in both directions: a
+    /// stream that sets `3 Tr` inside a `q` and then restores leaves a reader
+    /// that kept the mode flagging **visible** prose as concealed, and one that
+    /// sets `3 Tr`, saves, sets `0 Tr`, restores, then shows text is a
+    /// concealment a reader that reset the mode never sees. Fixtures 15 and 16
+    /// are those two cases.
+    text: TextParameters,
 }
 
 impl Default for GraphicsState {
@@ -611,7 +628,46 @@ impl Default for GraphicsState {
         Self {
             ctm: Matrix::IDENTITY,
             fill: Some([0.0, 0.0, 0.0]),
+            text: TextParameters::default(),
         }
+    }
+}
+
+/// The text-state parameters this reader uses: the selected font and size, the
+/// leading, and the rendering mode.
+///
+/// Part of the **graphics** state (see [`GraphicsState::text`]), so `q`/`Q` save
+/// and restore them and `BT` does **not** reset them — `BT` initialises only the
+/// text and text-line matrices (§9.4.1), which is why those two live in
+/// [`TextState`] instead.
+#[derive(Debug, Clone, Default)]
+struct TextParameters {
+    size: f64,
+    leading: f64,
+    render_mode: i64,
+    font: Option<Vec<u8>>,
+}
+
+impl TextParameters {
+    /// Apply one text-state operator, or report that this is not one.
+    fn apply(&mut self, operator: &str, operands: &[Object]) -> bool {
+        match operator {
+            "Tf" => {
+                self.font = operands
+                    .first()
+                    .and_then(|o| o.as_name().ok())
+                    .map(<[u8]>::to_vec);
+                self.size = operands.get(1).and_then(number).unwrap_or(0.0);
+            }
+            // The operand is an integer by the specification, so this reads it as
+            // one rather than rounding a float: a `Tr` operand that is not a
+            // whole number is malformed, and mode 0 (fill) is the value the
+            // specification itself defaults to.
+            "Tr" => self.render_mode = operands.first().and_then(integer).unwrap_or(0),
+            "TL" => self.leading = operands.first().and_then(number).unwrap_or(0.0),
+            _ => return false,
+        }
+        true
     }
 }
 
@@ -623,10 +679,6 @@ struct TextState {
     /// resets alongside `tm`. Tracking only `tm` makes every line after the
     /// first land wherever the previous one started.
     tlm: Matrix,
-    size: f64,
-    leading: f64,
-    render_mode: i64,
-    font: Option<Vec<u8>>,
 }
 
 impl Default for TextState {
@@ -634,34 +686,17 @@ impl Default for TextState {
         Self {
             tm: Matrix::IDENTITY,
             tlm: Matrix::IDENTITY,
-            size: 0.0,
-            leading: 0.0,
-            render_mode: 0,
-            font: None,
         }
     }
 }
 
 impl TextState {
-    /// Apply one text-state operator. Split out of the content-stream walk so
-    /// that the state a text object carries is changed in exactly one place.
-    fn apply(&mut self, operator: &str, operands: &[Object]) {
+    /// Apply one text-**positioning** operator. `TD` also sets the leading,
+    /// which lives in the graphics state, so that is passed in.
+    fn apply(&mut self, operator: &str, operands: &[Object], leading: &mut f64) {
         let first = operands.first().and_then(number).unwrap_or(0.0);
         let second = operands.get(1).and_then(number).unwrap_or(0.0);
         match operator {
-            "Tf" => {
-                self.font = operands
-                    .first()
-                    .and_then(|o| o.as_name().ok())
-                    .map(<[u8]>::to_vec);
-                self.size = second;
-            }
-            // The operand is an integer by the specification, so this reads it as
-            // one rather than rounding a float: a `Tr` operand that is not a
-            // whole number is malformed, and mode 0 (fill) is the value the
-            // specification itself defaults to.
-            "Tr" => self.render_mode = operands.first().and_then(integer).unwrap_or(0),
-            "TL" => self.leading = first,
             "Tm" => {
                 if let Some(m) = matrix(operands) {
                     self.tm = m;
@@ -671,10 +706,10 @@ impl TextState {
             "Td" => self.next_line(first, second),
             // `TD` is `-ty TL` followed by `tx ty Td`.
             "TD" => {
-                self.leading = -second;
+                *leading = -second;
                 self.next_line(first, second);
             }
-            "T*" => self.next_line(0.0, -self.leading),
+            "T*" => self.next_line(0.0, -*leading),
             _ => {}
         }
     }
@@ -992,10 +1027,13 @@ mod tests {
         "12-inherited-boxes-control",
         "13-ctm-shrunk-text",
         "13-ctm-shrunk-text-control",
+        "16-render-mode-across-q",
+        "16-render-mode-across-q-control",
         "08-scaled-text-matrix",
         "09-white-text-over-image",
         "10-searchable-scan",
         "14-scaled-placement",
+        "15-restored-render-mode",
     ];
 
     /// What each fixture must decide: `(verdict, classes, reportable mechanisms)`.
@@ -1018,7 +1056,12 @@ mod tests {
             "04-degenerate-size" | "13-ctm-shrunk-text" => {
                 (Verdict::Block, BOTH, &[mechanism::DEGENERATE_SIZE])
             }
-            "05-render-mode-3" => (Verdict::Block, BOTH, &[mechanism::INVISIBLE_RENDER_MODE]),
+            // `16` is `05` with the mode set outside the text object and restored
+            // by a `Q`: it is the fixture that fails unless the text state is
+            // carried in the *graphics* state, per PDF 32000-1 §9.3.
+            "05-render-mode-3" | "16-render-mode-across-q" => {
+                (Verdict::Block, BOTH, &[mechanism::INVISIBLE_RENDER_MODE])
+            }
             // The lying layer reaches `Block` through what it *says*, not through
             // the mechanism: mode 3 over a page image is how searchable scans are
             // built, so its existence is deliberately not a finding. Compare
@@ -1056,18 +1099,48 @@ mod tests {
         )
     }
 
+    /// Every row is checked and **every** mismatch is reported.
+    ///
+    /// Not `assert_eq!` in the loop, which stops at the first row that differs.
+    /// A single injected fault usually moves several fixtures at once — the
+    /// `q`/`Q` defect found in review on PR #912 moved both `15` and `16`, in
+    /// opposite directions — and a test that names only the first turns a
+    /// two-sided bug into a one-sided one in the reader's mind. It also makes an
+    /// injection run undercount its own coverage, which is how a fixture comes
+    /// to look redundant and gets deleted.
     #[test]
     fn every_fixture_reaches_its_recorded_verdict() {
+        let mut wrong: Vec<String> = Vec::new();
         for (name, bytes) in CORPUS {
             let (screened, runs) = screen(bytes);
             let (verdict, classes, mechanisms) = expected(name);
-            assert_eq!(screened.verdict, verdict, "{name}: verdict");
-            assert_eq!(screened.classes(), classes, "{name}: classes");
             let mut reported: Vec<&str> = runs.iter().filter_map(|r| r.mechanism).collect();
             reported.sort_unstable();
             reported.dedup();
-            assert_eq!(reported, mechanisms, "{name}: reported mechanisms");
+            if screened.verdict != verdict {
+                wrong.push(format!(
+                    "{name}: verdict {:?}, expected {verdict:?}",
+                    screened.verdict
+                ));
+            }
+            if screened.classes() != classes {
+                wrong.push(format!(
+                    "{name}: classes {:?}, expected {classes:?}",
+                    screened.classes()
+                ));
+            }
+            if reported != mechanisms {
+                wrong.push(format!(
+                    "{name}: mechanisms {reported:?}, expected {mechanisms:?}"
+                ));
+            }
         }
+        assert!(
+            wrong.is_empty(),
+            "{} row(s) wrong:\n  {}",
+            wrong.len(),
+            wrong.join("\n  ")
+        );
     }
 
     /// The payload is recoverable from every fixture that plants one.
@@ -1080,6 +1153,7 @@ mod tests {
     /// above a consequence of reading the payload rather than a coincidence.
     #[test]
     fn the_concealed_payload_is_recovered_not_merely_detected() {
+        let mut wrong: Vec<&str> = Vec::new();
         for (name, bytes) in CORPUS {
             let runs = concealed_runs(bytes);
             let planted = matches!(
@@ -1092,12 +1166,16 @@ mod tests {
                     | "06-lying-layer"
                     | "12-inherited-boxes"
                     | "13-ctm-shrunk-text"
+                    | "16-render-mode-across-q"
             );
             let recovered = runs
                 .iter()
                 .any(|r| r.text.contains("Ignore all previous instructions"));
-            assert_eq!(recovered, planted, "{name}: payload recovery");
+            if recovered != planted {
+                wrong.push(name);
+            }
         }
+        assert!(wrong.is_empty(), "payload recovery wrong on: {wrong:?}");
     }
 
     /// No concealment fixture's body survives the screen.
@@ -1107,6 +1185,7 @@ mod tests {
     /// is caused by the payload and not by the fixture's shape.
     #[test]
     fn a_directive_bearing_pdf_contributes_no_body_and_a_clean_one_keeps_its_own() {
+        let mut wrong: Vec<&str> = Vec::new();
         for (name, bytes) in CORPUS {
             let (screened, _) = screen(bytes);
             // The line is *direction*, not concealment. A directive cannot be
@@ -1115,12 +1194,11 @@ mod tests {
             // its body entirely. `11-concealed-note` is the case that separates
             // the two: concealed, quarantined, and it keeps a body.
             let directive = expected(name).1.contains(&"model-directive");
-            assert_eq!(
-                screened.admit.is_none(),
-                directive,
-                "{name}: admit withheld"
-            );
+            if screened.admit.is_none() != directive {
+                wrong.push(name);
+            }
         }
+        assert!(wrong.is_empty(), "admit/withhold wrong on: {wrong:?}");
     }
 
     /// The concealed run is **removed** from the body a quarantined PDF keeps.
@@ -1282,11 +1360,46 @@ mod tests {
     #[test]
     fn a_fractional_render_mode_operand_does_not_become_mode_three() {
         use pdf_extract::Object::{Integer, Real};
-        let mut text = TextState::default();
-        text.apply("Tr", &[Real(3.7)]);
-        assert_eq!(text.render_mode, 0, "a malformed operand changes nothing");
-        text.apply("Tr", &[Integer(3)]);
-        assert_eq!(text.render_mode, 3);
+        let mut params = TextParameters::default();
+        params.apply("Tr", &[Real(3.7)]);
+        assert_eq!(params.render_mode, 0, "a malformed operand changes nothing");
+        params.apply("Tr", &[Integer(3)]);
+        assert_eq!(params.render_mode, 3);
+    }
+
+    /// The text state is part of the **graphics** state, so `q`/`Q` carry it and
+    /// `BT` does not reset it (PDF 32000-1 §9.3 and §9.4.1).
+    ///
+    /// Caught in review on PR #912. The two directions are both wrong and both
+    /// live: a mode set inside a `q` that leaks past the `Q` reports visible
+    /// prose as concealed, and a mode reset at `BT` misses a concealment the
+    /// page really carries. Fixtures `15` and `16` are those two cases
+    /// end-to-end; this is the unit-level statement of the rule.
+    #[test]
+    fn the_text_state_is_saved_by_q_and_survives_bt() {
+        use pdf_extract::Object::Integer;
+        let mut gs = GraphicsState::default();
+        gs.text.apply("Tr", &[Integer(3)]);
+
+        let saved = gs.clone();
+        gs.text.apply("Tr", &[Integer(0)]);
+        assert_eq!(gs.text.render_mode, 0);
+
+        // `Q`.
+        gs = saved;
+        assert_eq!(
+            gs.text.render_mode, 3,
+            "`Q` must restore the rendering mode"
+        );
+
+        // `BT` resets only the matrices — the mode is untouched by construction,
+        // because it does not live in `TextState` at all.
+        let text = TextState::default();
+        assert_eq!(text.tm, Matrix::IDENTITY);
+        assert_eq!(
+            gs.text.render_mode, 3,
+            "`BT` must not reset the rendering mode"
+        );
     }
 
     /// `Td` moves the text *line* matrix, so successive lines stack rather than
@@ -1295,12 +1408,13 @@ mod tests {
     fn successive_text_lines_advance_from_the_line_matrix() {
         use pdf_extract::Object::Integer;
         let mut text = TextState::default();
-        text.apply("Td", &[Integer(72), Integer(700)]);
+        let mut leading = 0.0;
+        text.apply("Td", &[Integer(72), Integer(700)], &mut leading);
         assert_eq!(text.tm.apply(0.0, 0.0), (72.0, 700.0));
-        text.apply("Td", &[Integer(0), Integer(-14)]);
+        text.apply("Td", &[Integer(0), Integer(-14)], &mut leading);
         assert_eq!(text.tm.apply(0.0, 0.0), (72.0, 686.0));
-        text.apply("TL", &[Integer(14)]);
-        text.apply("T*", &[]);
+        leading = 14.0;
+        text.apply("T*", &[], &mut leading);
         assert_eq!(text.tm.apply(0.0, 0.0), (72.0, 672.0));
     }
 

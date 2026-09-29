@@ -4693,7 +4693,13 @@ fn report_content_failures(report: &rto_graph::SyncReport) {
 /// Printed only when the graph actually holds screened PDF text: a repository
 /// with no PDFs in it is told nothing, because a standing notice nobody's work
 /// relates to is a line people learn to skip.
-fn report_pdf_screening(count: usize) {
+///
+/// The `--json` branch does not print prose, but it is not left silent either:
+/// `SyncReport::blobs_pdf_screened` carries the same fact, and its doc comment
+/// carries the same limits. A machine consumer that accepts PDFs can see that
+/// it did.
+fn report_pdf_screening(report: &rto_graph::SyncReport) {
+    let count = report.blobs_pdf_screened;
     if count == 0 {
         return;
     }
@@ -4744,7 +4750,7 @@ fn run_sync(
     } else {
         report_foreign_worktree(&report);
         report_content_failures(&report);
-        report_pdf_screening(store.screened_pdf_count()?);
+        report_pdf_screening(&report);
         let tree = &report.tree[..report.tree.len().min(12)];
         let dirty = if report.blobs_dirty > 0 {
             format!(" +{} uncommitted", report.blobs_dirty)

@@ -19,7 +19,7 @@
 //! The matched control is not decoration. A concealment fixture proves nothing
 //! unless the payload is genuinely invisible on the rendered page, and the way
 //! to establish that is to render both and find **zero differing pixels** — see
-//! `scripts/pdf-fixture-pixel-proof.sh`, which does exactly that with macOS's
+//! `scripts/pdf-fixture-pixel-proof.py`, which does exactly that with macOS's
 //! `sips`. A fixture that turns out to be visible is a test that proves the
 //! opposite of what it claims.
 //!
@@ -309,6 +309,24 @@ fn image_fixtures() -> Vec<Fixture> {
 fn colour_fixtures() -> Vec<Fixture> {
     let mut out: Vec<Fixture> = Vec::new();
 
+    // 16 — the rendering mode survives `q`/`Q`. `3 Tr` is set outside any text
+    // object, a `q` block sets `0 Tr` and draws the visible line, and `Q`
+    // restores mode 3 — so the payload after it is invisible. A reader that
+    // kept the text state outside the graphics state, or reset it at `BT`,
+    // sees mode 0 and misses this entirely.
+    out.extend(pair(
+        "16-render-mode-across-q",
+        Page {
+            content: format!(
+                "3 Tr\nq\n{}Q\nBT\n/F1 12 Tf\n72 660 Td\n({}) Tj\nET\n",
+                text_op(&["0 Tr"], 72, 700, 12, VISIBLE),
+                escape(PAYLOAD),
+            ),
+            ..Page::default()
+        },
+        format!("3 Tr\nq\n{}Q\n", text_op(&["0 Tr"], 72, 700, 12, VISIBLE)),
+    ));
+
     // 11 — white-on-white again, carrying prose rather than an instruction. The
     // page shows one thing and its text layer says another, but nothing in what
     // it says is aimed at a model, so the document quarantines rather than
@@ -428,6 +446,22 @@ fn negative_fixtures() -> Vec<Fixture> {
             content: format!(
                 "q\n0.5 0 0 0.5 0 0 cm\nBT\n/F1 24 Tf\n72 1400 Td\n({}) Tj\nET\nQ\n",
                 escape(VISIBLE)
+            ),
+            ..Page::default()
+        },
+        control_of: None,
+    });
+
+    // 15 — `3 Tr` set inside a `q` block that shows nothing, then restored. The
+    // line after it is ordinary, visible prose. A reader whose `q`/`Q` stack
+    // does not carry the text state keeps mode 3 past the `Q` and reports a
+    // perfectly visible page as concealing its only sentence.
+    out.push(Fixture {
+        name: "15-restored-render-mode.pdf",
+        page: Page {
+            content: format!(
+                "q\nBT\n/F1 12 Tf\n3 Tr\nET\nQ\n{}",
+                text_op(&[], 72, 700, 12, VISIBLE)
             ),
             ..Page::default()
         },
@@ -694,7 +728,7 @@ fn fixtures_are_byte_reproducible() {
 /// The fixtures differ from their controls in exactly the planted text.
 ///
 /// Byte-level, not pixel-level: the pixel proof needs a renderer and lives in
-/// `scripts/pdf-fixture-pixel-proof.sh`. What this asserts is the property that
+/// `scripts/pdf-fixture-pixel-proof.py`. What this asserts is the property that
 /// makes the pixel proof *meaningful* — that the control is the same page minus
 /// the payload, so a zero-pixel diff between them can only mean the payload
 /// drew nothing.

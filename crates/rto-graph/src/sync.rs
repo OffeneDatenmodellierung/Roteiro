@@ -79,6 +79,28 @@ pub struct SyncReport {
     /// accumulated during extraction — see that method for why a counter would
     /// read zero on every sync after the first.
     pub blobs_content_failed: usize,
+    /// `file` nodes for `.pdf` paths that carry a `meta.content` body — the
+    /// documents whose text passed the screen and is now reachable by the
+    /// model-facing `search` / `explain` / `context` tools (#813).
+    ///
+    /// # Why a count of *accepted* documents is in a report
+    ///
+    /// Not as a statistic. A PDF `pass` is a **narrower statement** than a
+    /// markdown `pass` — the content-stream reader covers render mode, fill
+    /// colour, page position and font size, and does not cover a text layer
+    /// painted over by an opaque image, one hidden by clipping or alpha, or a
+    /// lying layer whose lie is not directive-shaped. #813 requires that limit
+    /// to be declared "in the ingest command's own output at the point a
+    /// document is accepted", precisely because a screen that runs and passes
+    /// implies a check it did not perform.
+    ///
+    /// This field is what lets that declaration reach a `--json` consumer as
+    /// well as a human one; `roteiro sync` prints the prose form when it is
+    /// non-zero. Zero means no PDF contributed text, and nothing needs saying.
+    ///
+    /// Derived from the assembled graph via [`Store::screened_pdf_count`], for
+    /// the reason [`Self::blobs_content_failed`] above records.
+    pub blobs_pdf_screened: usize,
     /// Nodes in the store after syncing.
     pub nodes: u64,
     /// Edges in the store after syncing.
@@ -178,6 +200,7 @@ pub fn sync(
         return Ok(SyncReport {
             no_op: true,
             blobs_content_failed: store.content_failure_count()?,
+            blobs_pdf_screened: store.screened_pdf_count()?,
             nodes: store.node_count()?,
             edges: store.edge_count()?,
             tree,
@@ -215,6 +238,7 @@ pub fn sync(
         blobs_cached: committed.cached,
         blobs_dirty: 0,
         blobs_content_failed: store.content_failure_count()?,
+        blobs_pdf_screened: store.screened_pdf_count()?,
         nodes: store.node_count()?,
         edges: store.edge_count()?,
         tree,
@@ -368,6 +392,7 @@ fn try_incremental(
         blobs_cached: cached,
         blobs_dirty: 0,
         blobs_content_failed: store.content_failure_count()?,
+        blobs_pdf_screened: store.screened_pdf_count()?,
         nodes: store.node_count()?,
         edges: store.edge_count()?,
         tree: head_tree.to_owned(),
@@ -509,6 +534,7 @@ pub fn sync_worktree(
             blobs_total: total,
             blobs_dirty: dirty_count,
             blobs_content_failed: store.content_failure_count()?,
+            blobs_pdf_screened: store.screened_pdf_count()?,
             nodes: store.node_count()?,
             edges: store.edge_count()?,
             tree,
@@ -534,6 +560,7 @@ pub fn sync_worktree(
         blobs_cached: committed.cached,
         blobs_dirty: dirty_count,
         blobs_content_failed: store.content_failure_count()?,
+        blobs_pdf_screened: store.screened_pdf_count()?,
         nodes: store.node_count()?,
         edges: store.edge_count()?,
         tree,
@@ -585,6 +612,7 @@ pub fn sync_index(
             // does not claim excluded files are in the graph.
             blobs_total: store.file_node_count()?,
             blobs_content_failed: store.content_failure_count()?,
+            blobs_pdf_screened: store.screened_pdf_count()?,
             nodes: store.node_count()?,
             edges: store.edge_count()?,
             tree: state,
@@ -614,6 +642,7 @@ pub fn sync_index(
         blobs_cached: extracted.cached,
         blobs_dirty: 0,
         blobs_content_failed: store.content_failure_count()?,
+        blobs_pdf_screened: store.screened_pdf_count()?,
         nodes: store.node_count()?,
         edges: store.edge_count()?,
         tree: state,
@@ -661,6 +690,7 @@ pub fn sync_tree(
         blobs_cached: extracted.cached,
         blobs_dirty: 0,
         blobs_content_failed: store.content_failure_count()?,
+        blobs_pdf_screened: store.screened_pdf_count()?,
         nodes: store.node_count()?,
         edges: store.edge_count()?,
         tree: rev.to_owned(),
