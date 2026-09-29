@@ -15848,7 +15848,12 @@ fn serve_okf_only(
         // exactly when the port is `0`, which is how a caller asks for a free
         // one — and a line naming `:0` would be useless to the human and unusable
         // to the test that reads it back (issue #906).
-        let socket = listener.local_addr().unwrap_or(socket);
+        //
+        // `?`, not `unwrap_or(socket)`. Falling back to the requested socket is
+        // the one outcome this line exists to prevent: the server would be up on
+        // a port it had just failed to learn, announcing `:0`, reachable by
+        // nobody and findable by nothing. Refusing to start says so.
+        let socket = listener.local_addr()?;
         eprintln!(
             "roteiro explorer listening on http://{socket}{OKF_BASE} — \
              {reason}, so {} OKF bundle(s) only: {}",
@@ -15923,10 +15928,11 @@ fn serve_graph_ui(
         .build()?;
     rt.block_on(async move {
         let listener = tokio::net::TcpListener::bind(socket).await?;
-        // The bound address, not the requested one — see `serve_okf_only`. The
-        // loopback warning above deliberately stays on the requested socket: it
-        // is about the IP, which binding does not change.
-        let socket = listener.local_addr().unwrap_or(socket);
+        // The bound address, not the requested one, and `?` rather than a
+        // fallback — see `serve_okf_only` for both. The loopback warning above
+        // deliberately stays on the requested socket: it is about the IP, which
+        // binding does not change.
+        let socket = listener.local_addr()?;
         let default_note = default
             .as_deref()
             .map_or_else(String::new, |d| format!(" (default workspace: {d})"));

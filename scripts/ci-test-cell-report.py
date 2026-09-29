@@ -33,11 +33,20 @@ Exit codes:
     0  every compiled test binary was started
     1  at least one was not, or the inputs are unusable
 
-Note what this does NOT claim. It says which *binaries* ran, not which tests
-inside them: `--no-fail-fast` makes cargo run every binary, and a binary that
-aborts part-way through still reports its own totals. Doc-tests are listed
+Two kinds of incompleteness are reported, and they are different failures:
+
+    NOT RUN     — compiled, never started. A truncated cell.
+    NO RESULT   — started, never printed `test result:`. The binary did not
+                  finish: an OOM kill, a signal, `process::abort`, a harness
+                  that exited early. Its tests are in the same position as a
+                  binary that never ran — unverified — so it counts as
+                  incomplete too. A blank row would have understated it.
+
+Note what this does NOT claim. Within a binary that *did* report, it says
+nothing about individual tests beyond libtest's own totals. Doc-tests are listed
 because they are part of the run, but they are not in the compiled-artifact
-list, so their absence is reported rather than gated.
+list, so this script has no independent expectation for them and reports rather
+than gates them.
 """
 
 from __future__ import annotations
@@ -210,8 +219,17 @@ def render(
         )
         return "\n".join(lines), False
 
+    # Started and never reported: the binary did not finish. libtest prints
+    # `test result:` even for `running 0 tests`, so its absence is not a quiet
+    # target — it is one that was killed or aborted, and its tests are as
+    # unverified as those in a binary that never started.
+    silent = [t for t in targets if t.started and t.verdict is None]
     ran = len(targets) - len(missing)
-    lines.append(f"**{ran} of {len(targets)} compiled test binaries were started.**")
+    lines.append(
+        f"**{ran} of {len(targets)} compiled test binaries were started"
+        + (f", and {len(silent)} of those never reported a result" if silent else "")
+        + ".**"
+    )
     lines.append("")
     if ran == 0 and saw_test_output:
         # Not a truncation. The log plainly contains test results, so the tests
@@ -240,10 +258,22 @@ def render(
             lines.append(f"- ❌ **NOT RUN** — {target.label}")
         lines.append("")
 
+    if silent:
+        lines.append(
+            "These binaries **started and never reported a result**, so they did "
+            "not finish — an OOM kill, a signal, an abort, or a harness that "
+            "exited early. Nothing in them was verified by this run either, and "
+            "`--no-fail-fast` does not help with this one:"
+        )
+        lines.append("")
+        for target in silent:
+            lines.append(f"- ⚠️ **NO RESULT** — {target.label}")
+        lines.append("")
+
     lines.append("| Package | Target | Ran | Result | passed | failed | ignored |")
     lines.append("| --- | --- | --- | --- | ---: | ---: | ---: |")
     for target in sorted(targets, key=lambda t: (t.package, t.kind, t.name)):
-        verdict = target.verdict or ("—" if target.started else "never started")
+        verdict = target.verdict or ("no result" if target.started else "never started")
         mark = "✅" if target.started else "❌"
         counts = target.counts
         lines.append(
@@ -265,7 +295,7 @@ def render(
         "Doc-tests are reported, not gated: they are not compiled artefacts, so "
         "this script has no independent list of which ones *should* have run."
     )
-    return "\n".join(lines), not missing
+    return "\n".join(lines), not missing and not silent
 
 
 def main() -> int:

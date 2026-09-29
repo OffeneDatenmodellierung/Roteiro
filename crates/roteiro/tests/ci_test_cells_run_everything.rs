@@ -37,6 +37,12 @@
 
 mod common;
 
+use yaml_rust2::Yaml;
+
+/// The job holding the `--all-features` test cell. A required status check on
+/// `main`; see `ci_release_pr_parity.rs`, which owns that list.
+const ALL_FEATURES_JOB: &str = "checks";
+
 /// Cargo subcommands that RUN tests, as opposed to merely compiling them.
 ///
 /// `llvm-cov` is here because it is `cargo test` with instrumentation: it stops
@@ -66,6 +72,15 @@ fn workflows() -> Option<Vec<(String, String)>> {
         Err(e) => panic!("cannot read {} ({:?}: {e})", dir.display(), e.kind()),
     };
     let mut out = Vec::new();
+    // Non-regular entries with a workflow extension are collected rather than
+    // skipped. `read_to_string` on a FIFO blocks until somebody writes to it,
+    // which in CI is not a failure but a **hang**, and a hung test reads as
+    // infrastructure trouble rather than as the regression it is — the lesson
+    // `run_refusing` in `serve_mode_selection_cli.rs` records having learned the
+    // expensive way. But silently passing over one would be the other failure
+    // this file is about, a scan that covers less than it claims, so anything
+    // skipped is named and fails instead.
+    let mut irregular = Vec::new();
     for entry in entries {
         let path = entry.expect("dir entry").path();
         if path.extension().is_none_or(|e| e != "yml" && e != "yaml") {
@@ -76,8 +91,29 @@ fn workflows() -> Option<Vec<(String, String)>> {
             .expect("file name")
             .to_string_lossy()
             .into_owned();
+        // `symlink_metadata`, so a symlink is reported rather than followed: a
+        // workflow reached through one is not a file GitHub would run, and
+        // reading it would make this guard assert about something outside the
+        // checkout.
+        let regular = std::fs::symlink_metadata(&path)
+            .expect("stat workflow entry")
+            .is_file();
+        if !regular {
+            irregular.push(name);
+            continue;
+        }
         out.push((name, std::fs::read_to_string(&path).expect("read workflow")));
     }
+    assert!(
+        irregular.is_empty(),
+        "{irregular:?} in .github/workflows/ carry a workflow extension but are \
+         not regular files (a symlink, a directory, a FIFO). This guard will not \
+         read them — a FIFO would hang the suite rather than fail it — and will \
+         not pass over them in silence either, because a scan that quietly \
+         covers less than it claims is the defect this file exists to prevent. \
+         If one of these is a legitimate workflow, teach this function how to \
+         resolve it."
+    );
     assert!(
         !out.is_empty(),
         "no workflow files were found in {}. This guard reads the cells out of \
@@ -177,21 +213,59 @@ fn every_test_cell_carries_no_fail_fast() {
 fn the_all_features_cell_reports_which_binaries_it_ran() {
     const SCRIPT: &str = "scripts/ci-test-cell-report.py";
 
-    let Some(ci) = common::repo_file(".github/workflows/ci.yml") else {
+    let Some(text) = common::repo_file(".github/workflows/ci.yml") else {
         return; // not a source checkout
     };
-    let uncommented: String = ci
-        .lines()
-        .filter(|l| !l.trim_start().starts_with('#'))
-        .collect::<Vec<_>>()
-        .join("\n");
+    // Read out of the parsed YAML and scoped to ONE job, because `contains` over
+    // the file is satisfiable by the script appearing anywhere — in another job,
+    // in a workflow_dispatch branch, beside a cell that is not the one this
+    // guard names. That is the same "matches something, asserts nothing" shape
+    // the cells above exist to catch, one level up.
+    let docs = yaml_rust2::YamlLoader::load_from_str(&text)
+        .unwrap_or_else(|e| panic!("ci.yml is not parseable YAML: {e}"));
+    let doc = docs.first().expect("ci.yml is an empty YAML document");
+    let job = doc
+        .as_hash()
+        .and_then(|h| h.get(&Yaml::String("jobs".to_owned())))
+        .and_then(Yaml::as_hash)
+        .and_then(|jobs| jobs.get(&Yaml::String(ALL_FEATURES_JOB.to_owned())))
+        .unwrap_or_else(|| {
+            panic!(
+                "ci.yml has no job `{ALL_FEATURES_JOB}`. That is the \
+                 `--all-features` cell this guard is about; if it was renamed, \
+                 rename it here — and in branch protection — in the same change."
+            )
+        });
+    let runs: Vec<&str> = job
+        .as_hash()
+        .and_then(|h| h.get(&Yaml::String("steps".to_owned())))
+        .and_then(Yaml::as_vec)
+        .map_or_else(Vec::new, |steps| {
+            steps
+                .iter()
+                .filter_map(|s| s.as_hash()?.get(&Yaml::String("run".to_owned()))?.as_str())
+                .collect()
+        });
     assert!(
-        uncommented.contains(SCRIPT),
-        "no step in ci.yml runs `{SCRIPT}`, so the `--all-features` cell no \
-         longer says which test binaries it ran. A cell that cannot state its \
-         own coverage is one whose failures read as covering everything — see \
-         issue #906. If the reporting moved somewhere else, point this guard at \
-         it in the same change."
+        !runs.is_empty(),
+        "the `{ALL_FEATURES_JOB}` job has no `run:` steps at all, so this guard \
+         would pass having looked at nothing."
+    );
+    assert!(
+        runs.iter()
+            .any(|r| r.contains("--all-features") && r.contains("cargo test")),
+        "the `{ALL_FEATURES_JOB}` job runs no `cargo test --all-features`. This \
+         guard asserts that THAT cell reports its coverage; with no such cell in \
+         this job it would be asserting about nothing."
+    );
+    assert!(
+        runs.iter().any(|r| r.contains(SCRIPT)),
+        "no step of the `{ALL_FEATURES_JOB}` job runs `{SCRIPT}`, so the \
+         `--all-features` cell no longer says which test binaries it ran. A cell \
+         that cannot state its own coverage is one whose failures read as \
+         covering everything — see issue #906. The script appearing elsewhere in \
+         ci.yml does not satisfy this: the report has to be in the job whose \
+         scope it describes."
     );
     assert!(
         common::repo_file(SCRIPT).is_some(),

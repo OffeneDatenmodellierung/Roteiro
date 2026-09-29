@@ -1711,7 +1711,12 @@ pub fn serve_http(
     let router = mcp_router(workspace, advertised);
     runtime()?.block_on(async move {
         let listener = tokio::net::TcpListener::bind(addr).await?;
-        on_listen(listener.local_addr().unwrap_or(addr));
+        // `?`, not a fallback to `addr`: handing the caller the address it
+        // asked for would break this callback's whole contract in exactly the
+        // case it exists for. For `:0` the caller would announce `:0` while the
+        // server ran somewhere else — unreachable, and indistinguishable from
+        // success. Failing to learn the bound address is a startup failure.
+        on_listen(listener.local_addr()?);
         axum::serve(listener, router).await?;
         Ok(())
     })

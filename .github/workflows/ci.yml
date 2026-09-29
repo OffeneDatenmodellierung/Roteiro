@@ -906,8 +906,18 @@ jobs:
       # exists to produce the input to a threshold decision; a silently partial
       # input is worse than no input. It is the second of the two cells that
       # lacked the flag — the other five already had it.
+      #
+      # `set -o pipefail` is the second half of the same defect and was there
+      # before this change. GitHub runs `run:` under `bash -e {0}` — **without**
+      # `pipefail` — so `cargo llvm-cov … | tee` reports `tee`'s status, and
+      # `tee` succeeds whatever cargo did. A failing measurement therefore ran on
+      # to the reporting step below, which published whatever landed in
+      # `coverage-summary.txt` under the heading "the input to deciding whether
+      # the floor should be enforced". A partial figure presented as the figure
+      # is precisely what this job must not do.
       - name: Measure coverage (per file + workspace total)
         run: |
+          set -o pipefail
           cargo llvm-cov --workspace --all-features --no-fail-fast \
             --ignore-filename-regex '(tests?/|/target/)' \
             --summary-only | tee coverage-summary.txt
