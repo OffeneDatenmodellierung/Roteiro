@@ -190,6 +190,9 @@ pub struct Config {
     pub media: MediaConfig,
     /// `roteiro serve --models` local endpoint settings.
     pub serve: ServeConfig,
+    /// `[provider]` — the local OpenAI-compatible server models run in
+    /// (ADR-0027). Unset ⇒ the in-process engine, while it still exists.
+    pub provider: ProviderConfig,
     /// `[mcp]` — the MCP graph server's advertised tool surface (issue #584).
     /// **The one table here whose list layers by intersection**; see
     /// [`ToolAllowList`].
@@ -1070,6 +1073,32 @@ impl TelemetryConfig {
     }
 }
 
+/// `[provider]` — the OpenAI-compatible server Roteiro's models run in (ADR-0027),
+/// e.g. Ollama or `llama-server`.
+///
+/// A *value* under ADR-0007, not a capability: a non-loopback `base_url` is
+/// refused where it is used (ADR-0027 §1), so a committed project file cannot
+/// use this key to send repository content off the machine. The credential, if
+/// the server wants one, is the `ROTEIRO_PROVIDER_API_KEY` environment variable
+/// and never a key here, because `roteiro.toml` is committed.
+#[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ProviderConfig {
+    /// The server's OpenAI-compatible base, ending in `/v1` — for example
+    /// `http://127.0.0.1:11434/v1` (Ollama) or `http://127.0.0.1:8080/v1`
+    /// (`llama-server`).
+    pub base_url: Option<String>,
+}
+
+impl ProviderConfig {
+    /// Overlay `over` on top of `self`, taking `over`'s value wherever set.
+    fn overlaid_with(&self, over: &Self) -> Self {
+        Self {
+            base_url: over.base_url.clone().or_else(|| self.base_url.clone()),
+        }
+    }
+}
+
 /// `[workspace]` — the repos one `roteiro serve` can host (ADR-0008). Naturally a
 /// user-layer setting (machine-specific), but merged like any table. Combined
 /// with `serve --workspace <root>`; empty ⇒ single-repo serve (the cwd's repo).
@@ -1934,6 +1963,7 @@ impl Config {
             },
             mcp: self.mcp.overlaid_with(&over.mcp),
             serve: serve_overlaid(&self.serve, &over.serve),
+            provider: self.provider.overlaid_with(&over.provider),
             // `[debt] ignore` is the one list-valued key that **merges** rather
             // than replaces; see `merge_ignore` for why, and why the other lists
             // deliberately do not.

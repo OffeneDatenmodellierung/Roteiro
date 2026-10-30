@@ -58,6 +58,9 @@ tracing-appender = "0.2"
 # `inference-local-models` only: consent-gated model download (rustls, no
 # platform TLS). Blocking + pure-Rust.
 ureq = { version = "3", optional = true }
+# Image and audio parts sent to the external model provider (ADR-0027). Already
+# in the lock through `rto-serve`, so it adds nothing to the tree.
+base64 = { version = "0.23", optional = true }
 # Restore the default SIGPIPE disposition (`SIG_DFL`) at startup so the CLI dies
 # quietly on a closed stdout pipe (`roteiro query … | head`) instead of panicking
 # with a broken-pipe backtrace — the classic Rust-CLI footgun (Rust sets SIGPIPE
@@ -376,7 +379,7 @@ audio-metadata = ["rto-graph/audio-metadata"]
 # OpenAI-compatible `/v1` endpoint over installed models (ADR-0006). Pulls
 # `rto-serve` with its llama.cpp engine; also enables the internal llama.cpp uses
 # (`infer --model`, `spec draft`) via `inference-local-models`.
-serve = ["dep:rto-serve", "rto-serve/llama", "rto-serve/tls", "inference-local-models", "dep:tokio"]
+serve = ["dep:rto-serve", "rto-serve/llama", "rto-serve/tls", "inference-local-models", "dep:tokio", "dep:base64"]
 
 [lints]
 workspace = true
