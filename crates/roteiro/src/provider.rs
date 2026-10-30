@@ -114,6 +114,14 @@ impl ProviderEngine {
         if status == 404 {
             return Err(EngineError::UnknownModel(model.to_owned()));
         }
+        // A 400/422 is the provider refusing *this request* (an image sent to a
+        // text-only model, say): a client error to fix, not a failure to retry.
+        if status == 400 || status == 422 {
+            return Err(EngineError::InvalidRequest(format!(
+                "the provider refused the request ({status}): {}",
+                said.trim()
+            )));
+        }
         Err(EngineError::Inference(format!(
             "the provider at {url} answered {status}: {}",
             said.trim()
@@ -465,6 +473,19 @@ mod tests {
             matches!(err, EngineError::UnknownModel(ref m) if m == "nope"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn a_refused_request_is_a_client_error_not_a_failure() {
+        for status in [400, 422] {
+            let (base, _server) = stub(status, "{\"error\":\"model does not support images\"}");
+            let engine = ProviderEngine::new(&base, Vec::new()).expect("loopback");
+            let err = engine.chat(&request("qwen3:8b")).expect_err("refused");
+            assert!(
+                matches!(err, EngineError::InvalidRequest(ref m) if m.contains("does not support images")),
+                "{status}: {err}"
+            );
+        }
     }
 
     #[test]

@@ -19095,12 +19095,15 @@ fn serve_mcp(
 /// The provider model ids `serve` offers under `[provider]` (ADR-0027): the
 /// `[models]` keys `/v1` can use, generative first because the Ask panel sends
 /// `models[0]`, with duplicates dropped. `audio` and `ocr` are ingestion models,
-/// not endpoints, exactly as in [`served_models`].
+/// not endpoints, exactly as in [`served_models`]. Narrowed by the
+/// `[serve] models` allow-list if set, as [`served_models`] is.
 #[cfg(feature = "serve")]
 fn provider_model_ids(cfg: &config::Config) -> Vec<String> {
+    let wanted = cfg.serve.models.as_deref();
     let mut ids: Vec<String> = Vec::new();
     for key in ["generative", "vision", "embedding"] {
         if let Some(id) = cfg.models.get(key)
+            && wanted.is_none_or(|w| w.iter().any(|n| n == id))
             && !ids.iter().any(|seen| seen == id)
         {
             ids.push(id.to_owned());
@@ -19300,6 +19303,19 @@ mod chat_model_selection {
     }
 
     #[test]
+    fn a_provider_honours_the_serve_allow_list() {
+        // `[serve] models` narrows the provider's ids exactly as it narrows the
+        // registry's, so an allow-list of one does not expose vision/embedding.
+        let mut cfg = config::Config::default();
+        cfg.provider.base_url = Some("http://127.0.0.1:11434/v1".to_owned());
+        cfg.models.generative = Some("qwen3:8b".to_owned());
+        cfg.models.vision = Some("qwen2.5vl:3b".to_owned());
+        cfg.models.embedding = Some("bge-m3".to_owned());
+        cfg.serve.models = Some(ids(&["qwen3:8b"]));
+        assert_eq!(super::provider_model_ids(&cfg), ids(&["qwen3:8b"]));
+    }
+
+    #[test]
     fn vision_models_stay_in_the_pool_but_a_generative_leads() {
         // Vision models can chat, so they remain — but a generative is the default.
         let served = ids(&["bge-small-en-v1.5-gguf", "smolvlm-500m-gguf", "qwen3-0.6b"]);
@@ -19396,7 +19412,8 @@ fn serve_engine(
         if ids.is_empty() {
             anyhow::bail!(
                 "`[provider] base_url` is set but no `[models]` key names a model to \
-                 serve — set `[models] generative` to a model id your provider has \
+                 serve (or `[serve] models` allows none of them) — set \
+                 `[models] generative` to a model id your provider has \
                  (for example `qwen3:8b`); see docs/MODEL_SETUP.md"
             );
         }

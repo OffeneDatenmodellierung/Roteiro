@@ -62,7 +62,12 @@ Two rules worth knowing:
 
 ## 3. Check it
 
+`roteiro serve` and the explorer are not in the default build, so install with
+their features. `serve` still links the in-process engine, so it needs the same
+C++ toolchain (cmake and clang) as before:
+
 ```sh
+cargo install roteiro --features serve,explorer   # explorer: the Ask panel
 roteiro serve
 curl -s http://127.0.0.1:8017/v1/models
 ```
