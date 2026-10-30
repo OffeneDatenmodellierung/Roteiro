@@ -57,7 +57,7 @@ boxlite = { version = "=0.10.4", optional = true }
 # break, in a patch that deletes public fields too. This line is what keeps that
 # class of release out of a fresh resolution. Keep the two versions equal.
 # ADR-0014 v1.10 records the duty and this second instance.
-boxlite-shared = { version = "=0.10.7", optional = true }
+boxlite-shared = { version = "=0.10.4", optional = true }
 # `exec-boxlite` only: `AnalyzerRunner::run` is synchronous and boxlite's API is
 # async, so the runner drives a current-thread runtime it owns. No reactor is
 # shared with the CLI, and nothing here spawns a background thread.
