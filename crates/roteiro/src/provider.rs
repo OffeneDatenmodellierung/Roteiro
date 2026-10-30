@@ -1,7 +1,7 @@
 //! The external model provider — models run in a server the user already has
 //! ([[docs/adr/0027-external-model-provider.md]]).
 //!
-//! [`ProviderEngine`] implements [`rto_serve::Engine`] over HTTP against any
+//! [`ProviderEngine`] implements [`rto_llama::Engine`] over HTTP against any
 //! OpenAI-compatible server: Ollama, `llama-server`, LM Studio. Everything that
 //! already talks to a model through that trait — the `/v1` tool loop, the Ask
 //! panel — runs against it unchanged.
@@ -28,7 +28,7 @@
 //! first call, and a failure names the URL.
 
 use base64::Engine as _;
-use rto_serve::{ChatRequest, CompletionStats, Engine, EngineError, FinishReason, ModelInfo};
+use rto_llama::{ChatRequest, CompletionStats, Engine, EngineError, FinishReason, ModelInfo};
 
 /// The environment variable holding the provider's credential, if it needs one.
 ///
@@ -377,7 +377,7 @@ mod tests {
     fn request(model: &str) -> ChatRequest {
         ChatRequest {
             model: model.to_owned(),
-            messages: vec![rto_serve::Message {
+            messages: vec![rto_llama::Message {
                 role: "user".to_owned(),
                 content: "hello".to_owned(),
             }],

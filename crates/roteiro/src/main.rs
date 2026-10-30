@@ -36,8 +36,8 @@ mod pins;
 #[cfg(feature = "remote")]
 mod remote_transport;
 // The external model provider (ADR-0027): an `Engine` over a local
-// OpenAI-compatible server. Behind `serve` until the in-process engine goes.
-#[cfg(feature = "serve")]
+// OpenAI-compatible server.
+#[cfg(feature = "provider")]
 mod provider;
 // Ask over the remote model tier: the served `Engine`, wrapped so the hosted
 // model is one more served id and `rto-serve` gains nothing (ADR-0019, Stage 34
@@ -9895,7 +9895,8 @@ fn run_spec_scaffold(
 #[cfg(any(
     feature = "serve",
     feature = "inference-local-models",
-    feature = "remote"
+    feature = "remote",
+    feature = "provider"
 ))]
 fn run_spec_draft(
     cfg: &config::Loaded,
@@ -9922,6 +9923,26 @@ fn run_spec_draft(
         });
     #[cfg(not(feature = "remote"))]
     let tier = rto_graph::RemoteTier::Unavailable;
+
+    // An external provider names its models by its own ids, which the registry
+    // does not list, so the resolver below has nothing to resolve them against
+    // (ADR-0027). A granted remote tier still wins: the run asked for it.
+    #[cfg(feature = "provider")]
+    if let Some(base_url) = cfg.effective.provider.base_url.as_deref() {
+        #[cfg(feature = "remote")]
+        if let Some(grant) = grant {
+            return spec_draft_remote(&grant, topic, &scaffold, &label, &ctx, out);
+        }
+        return spec_draft_provider(
+            &cfg.effective,
+            base_url,
+            topic,
+            &scaffold,
+            &label,
+            &ctx,
+            out,
+        );
+    }
 
     // Model pick, via the one resolver (Stage 33): the remote tier if this run
     // granted it, else `[models] generative` if it pins one, else the low-tier
@@ -9994,11 +10015,52 @@ fn spec_draft_local(
              release build (`cargo build --release`) for usable speed."
         );
     }
-    let drafts = draft_sections(model, scaffold, topic, ctx)?;
+    let engine = rto_llama::llama::LlamaEngine::new(
+        vec![rto_llama::llama::Served {
+            name: model.to_owned(),
+            path: rto_graph::model_dir(model).join("model.gguf"),
+            mmproj: None,
+        }],
+        0,
+    )
+    .map_err(|e| anyhow::anyhow!("starting llama.cpp: {e}"))?;
+    let drafts = draft_sections(&engine, model, scaffold, topic, ctx)?;
     eprintln!(
         "drafted {} section(s) with {} (via {GEN_BACKEND})",
         drafts.len(),
         model
+    );
+    let md = rto_spec::apply_drafts(scaffold, &drafts);
+    emit_artifact(&md, &format!("{label} draft"), out)
+}
+
+/// Draft through the external provider (ADR-0027) with `[models] generative`,
+/// which names one of the provider's models.
+///
+/// There is no default model here, unlike the in-process path: a provider id
+/// that happens to exist on one machine names nothing on the next, so an unset
+/// key is an error naming it rather than a guess.
+#[cfg(feature = "provider")]
+fn spec_draft_provider(
+    cfg: &config::Config,
+    base_url: &str,
+    topic: &str,
+    scaffold: &str,
+    label: &str,
+    ctx: &rto_spec::SpecContext,
+    out: Option<&str>,
+) -> anyhow::Result<()> {
+    let Some(model) = cfg.models.get("generative") else {
+        anyhow::bail!(
+            "`[provider] base_url` is set but `[models] generative` is not — set it to a \
+             model your provider has (for example `qwen3:8b`); see docs/MODEL_SETUP.md"
+        );
+    };
+    let engine = provider::ProviderEngine::new(base_url, vec![model.to_owned()])?;
+    let drafts = draft_sections(&engine, model, scaffold, topic, ctx)?;
+    eprintln!(
+        "drafted {} section(s) with {model} (via {base_url})",
+        drafts.len()
     );
     let md = rto_spec::apply_drafts(scaffold, &drafts);
     emit_artifact(&md, &format!("{label} draft"), out)
@@ -10013,7 +10075,7 @@ fn spec_draft_local(
 /// `spec scaffold` is the command for that, and quietly substituting it here
 /// would answer a question nobody asked.
 #[cfg(all(
-    feature = "remote",
+    any(feature = "remote", feature = "provider"),
     not(any(feature = "serve", feature = "inference-local-models"))
 ))]
 fn spec_draft_local(
@@ -10025,10 +10087,9 @@ fn spec_draft_local(
     _out: Option<&str>,
 ) -> anyhow::Result<()> {
     anyhow::bail!(
-        "this build has the remote model tier but no local generation backend, and this run \
-         did not grant the tier — so there is nothing to draft with. Pass `--allow-remote` \
-         (your `~/.roteiro/config.toml` must grant it too — see `roteiro remote status`), or \
-         rebuild with `--features inference-local-models`. (`spec scaffold` works with no \
+        "no model to draft with: set `[provider] base_url` to a local model server such as \
+         Ollama and `[models] generative` to one of its models (see docs/MODEL_SETUP.md), or \
+         pass `--allow-remote` for the consented hosted tier. (`spec scaffold` works with no \
          model at all.)"
     )
 }
@@ -10195,31 +10256,28 @@ fn remote_context_nodes(ctx: &rto_spec::SpecContext) -> anyhow::Result<Vec<rto_g
 const GEN_BACKEND: &str = "llama.cpp";
 
 /// Max tokens generated per drafted section.
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+#[cfg(any(
+    feature = "serve",
+    feature = "inference-local-models",
+    feature = "provider"
+))]
 const DRAFT_MAX_TOKENS: u32 = 800;
 
-/// Draft each unfilled section of `scaffold` with the local generative model
-/// through the shared **llama.cpp** engine (`rto-llama`, ADR-0003 v1.2) — no
-/// candle. Available under either `serve` or `inference-local-models`.
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+/// Draft each unfilled section of `scaffold` with `model` on `engine` — the
+/// in-process llama.cpp engine or the external provider (ADR-0027), which answer
+/// the same request and are held to the same `<think>` rule.
+#[cfg(any(
+    feature = "serve",
+    feature = "inference-local-models",
+    feature = "provider"
+))]
 fn draft_sections(
+    engine: &dyn rto_llama::Engine,
     model: &str,
     scaffold: &str,
     topic: &str,
     ctx: &rto_spec::SpecContext,
 ) -> anyhow::Result<Vec<(String, String)>> {
-    use rto_llama::Engine as _; // brings `.chat` into scope
-
-    let engine = rto_llama::llama::LlamaEngine::new(
-        vec![rto_llama::llama::Served {
-            name: model.to_owned(),
-            path: rto_graph::model_dir(model).join("model.gguf"),
-            mmproj: None,
-        }],
-        0,
-    )
-    .map_err(|e| anyhow::anyhow!("starting llama.cpp: {e}"))?;
-
     let mut drafts = Vec::new();
     for (heading, hint) in rto_spec::draft_targets(scaffold) {
         let prompt = rto_spec::draft_prompt(topic, ctx, &heading, &hint);
@@ -10276,7 +10334,8 @@ fn draft_sections(
 #[cfg(any(
     feature = "serve",
     feature = "inference-local-models",
-    feature = "remote"
+    feature = "remote",
+    feature = "provider"
 ))]
 fn unanswered_draft(
     heading: &str,
@@ -10311,7 +10370,8 @@ fn unanswered_draft(
 #[cfg(not(any(
     feature = "serve",
     feature = "inference-local-models",
-    feature = "remote"
+    feature = "remote",
+    feature = "provider"
 )))]
 fn run_spec_draft(
     _cfg: &config::Loaded,
@@ -10322,9 +10382,9 @@ fn run_spec_draft(
     _out: Option<&str>,
 ) -> anyhow::Result<()> {
     anyhow::bail!(
-        "`spec draft` needs a generation backend: build with `--features serve` \
-         or `--features inference-local-models` (both llama.cpp), then \
-         `roteiro model pull qwen3-0.6b` — or `--features remote` for the \
+        "`spec draft` needs a generation backend: build with `--features provider` \
+         (the default) and point `[provider] base_url` at a local model server \
+         (docs/MODEL_SETUP.md) — or `--features remote` for the \
          explicitly-consented hosted tier (ADR-0019), which needs no local model \
          and sends only what `roteiro remote dry-run` shows. \
          (`spec scaffold` works with no model at all.)"
