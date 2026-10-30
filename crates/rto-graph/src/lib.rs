@@ -97,6 +97,12 @@ pub mod review_score;
 pub mod okf_consent;
 pub mod reviewer;
 pub mod screen;
+// The PDF-native half of the screen (#813). Gated on `pdf-text` because it is
+// only reachable through that feature's extractor and it reads `pdf-extract`'s
+// re-exported `lopdf`; without the feature no PDF yields text to screen, so
+// there is nothing for it to decide.
+#[cfg(feature = "pdf-text")]
+mod screen_pdf;
 mod store;
 mod sync;
 mod text;
