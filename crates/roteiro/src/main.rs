@@ -3284,6 +3284,49 @@ fn print_models_section(loaded: &config::Loaded) {
     print_model_resolution(loaded);
 }
 
+/// What `[provider]` makes of `task` (ADR-0027): `None` when no provider is set
+/// or `task`'s surface still uses the in-process engine, else the provider id it
+/// uses and why — or why it has none.
+///
+/// Only Ask and `spec draft` have moved to the provider; they read
+/// `[models] generative` as a provider id the registry does not list, so the
+/// registry resolution would report a working pin as unresolved.
+#[cfg(feature = "provider")]
+fn provider_resolution(
+    cfg: &config::Config,
+    task: rto_graph::ModelTask,
+) -> Option<Result<(String, String), String>> {
+    let base_url = cfg.provider.base_url.as_deref()?;
+    if !matches!(
+        task,
+        rto_graph::ModelTask::Chat | rto_graph::ModelTask::Draft
+    ) {
+        return None;
+    }
+    Some(
+        cfg.models
+            .get("generative")
+            .map(|id| {
+                (
+                    id.to_owned(),
+                    format!("served by the provider at {base_url}"),
+                )
+            })
+            .ok_or_else(|| {
+                "`[provider] base_url` is set but `[models] generative` is not".to_owned()
+            }),
+    )
+}
+
+/// Without the `provider` feature `[provider]` is read and never used.
+#[cfg(all(feature = "models", not(feature = "provider")))]
+fn provider_resolution(
+    _cfg: &config::Config,
+    _task: rto_graph::ModelTask,
+) -> Option<Result<(String, String), String>> {
+    None
+}
+
 /// The model resolution as JSON: one entry per surface, each carrying the model,
 /// the rule, the layer a pin came from, and whether the weights are on disk — or
 /// the error, for a key that cannot be honoured.
@@ -3296,27 +3339,48 @@ fn model_resolution_json(loaded: &config::Loaded) -> serde_json::Value {
     let pins = loaded.effective.models.resolve();
     let entries: Vec<serde_json::Value> = rto_graph::resolve_models(&pins)
         .into_iter()
-        .map(|(task, result)| match result {
-            Ok(choice) => serde_json::json!({
-                "task": task.as_str(),
-                "surface": task.surface(),
-                "config_key": task.config_key(),
-                "model": choice.model,
-                "source": choice.source.as_str(),
-                "layer": (choice.source == rto_graph::ModelSource::Pinned).then(|| provenance(
-                    loaded.project.models.get(task.config_key()).is_some(),
-                    loaded.user.models.get(task.config_key()).is_some(),
-                )),
-                "installed": choice.installed,
-                "why": choice.why(),
-            }),
-            Err(err) => serde_json::json!({
-                "task": task.as_str(),
-                "surface": task.surface(),
-                "config_key": task.config_key(),
-                "error": err.to_string(),
-            }),
-        })
+        .map(
+            |(task, result)| match (provider_resolution(&loaded.effective, task), result) {
+                (Some(Ok((model, why))), _) => serde_json::json!({
+                    "task": task.as_str(),
+                    "surface": task.surface(),
+                    "config_key": task.config_key(),
+                    "model": model,
+                    "source": "provider",
+                    "layer": provenance(
+                        loaded.project.models.get(task.config_key()).is_some(),
+                        loaded.user.models.get(task.config_key()).is_some(),
+                    ),
+                    "installed": null,
+                    "why": why,
+                }),
+                (Some(Err(err)), _) => serde_json::json!({
+                    "task": task.as_str(),
+                    "surface": task.surface(),
+                    "config_key": task.config_key(),
+                    "error": err,
+                }),
+                (None, Ok(choice)) => serde_json::json!({
+                    "task": task.as_str(),
+                    "surface": task.surface(),
+                    "config_key": task.config_key(),
+                    "model": choice.model,
+                    "source": choice.source.as_str(),
+                    "layer": (choice.source == rto_graph::ModelSource::Pinned).then(|| provenance(
+                        loaded.project.models.get(task.config_key()).is_some(),
+                        loaded.user.models.get(task.config_key()).is_some(),
+                    )),
+                    "installed": choice.installed,
+                    "why": choice.why(),
+                }),
+                (None, Err(err)) => serde_json::json!({
+                    "task": task.as_str(),
+                    "surface": task.surface(),
+                    "config_key": task.config_key(),
+                    "error": err.to_string(),
+                }),
+            },
+        )
         .collect();
     serde_json::Value::Array(entries)
 }
@@ -3349,6 +3413,29 @@ fn print_model_resolution(loaded: &config::Loaded) {
     println!("  resolution — the model each surface uses, and the rule that chose it:");
     for (task, result) in rto_graph::resolve_models(&pins) {
         let key = task.config_key();
+        match provider_resolution(&loaded.effective, task) {
+            Some(Ok((model, why))) => {
+                println!(
+                    "    {:<12}{:<30}{model:<34}  ({why}, pinned in {} config)",
+                    task.as_str(),
+                    task.surface(),
+                    provenance(
+                        loaded.project.models.get(key).is_some(),
+                        loaded.user.models.get(key).is_some(),
+                    ),
+                );
+                continue;
+            }
+            Some(Err(err)) => {
+                println!(
+                    "    {:<12}{:<30}UNRESOLVED — {err}",
+                    task.as_str(),
+                    task.surface()
+                );
+                continue;
+            }
+            None => {}
+        }
         match result {
             Ok(choice) => {
                 // Where a pin came from, on the same `project`/`user` terms as
@@ -19108,7 +19195,10 @@ fn chat_capable_model_ids(
     // engine's set of registry names, so that case is unreachable, and dropping
     // an unrecognised id would be a silent narrowing of the Ask pool.
     // Under `[provider]` the ids are not registry names, so the registry cannot
-    // say which one embeds; the `[models] embedding` key can (ADR-0027).
+    // say which one embeds or which one generates — a provider id that happens to
+    // spell a registry name says nothing about the model behind it. The
+    // `[models]` keys say instead (ADR-0027).
+    let provider = cfg.provider.base_url.is_some();
     let provider_embedding = cfg
         .provider
         .base_url
@@ -19116,7 +19206,7 @@ fn chat_capable_model_ids(
         .and(cfg.models.get("embedding"));
     let mut ids: Vec<String> = served_ids
         .iter()
-        .filter(|id| find_model(id).is_none_or(|s| ModelTask::Chat.capable(s.kind)))
+        .filter(|id| provider || find_model(id).is_none_or(|s| ModelTask::Chat.capable(s.kind)))
         .filter(|id| provider_embedding != Some(id.as_str()))
         .cloned()
         .collect();
@@ -19125,6 +19215,10 @@ fn chat_capable_model_ids(
         && let Some(pos) = ids.iter().position(|id| id == remote)
     {
         ids[..=pos].rotate_right(1);
+        return ids;
+    }
+    // `provider_model_ids` already put `[models] generative` first.
+    if provider {
         return ids;
     }
     // Pick the default and rotate it to the front, preserving the order of the
@@ -19189,6 +19283,20 @@ mod chat_model_selection {
         assert_eq!(served, ids(&["qwen3:8b", "qwen2.5vl:3b", "bge-m3"]));
         let out = chat_capable_model_ids(&cfg, &served, None);
         assert_eq!(out, ids(&["qwen3:8b", "qwen2.5vl:3b"]));
+
+        // Provider ids that spell registry names are still provider ids: a
+        // vision tag matching a registry *generative* does not take the default
+        // slot, and a generative tag matching a registry *embedding* is not
+        // dropped.
+        cfg.models.generative = Some("my-chat".to_owned());
+        cfg.models.vision = Some("qwen3-0.6b".to_owned());
+        let served = super::provider_model_ids(&cfg);
+        let out = chat_capable_model_ids(&cfg, &served, None);
+        assert_eq!(out, ids(&["my-chat", "qwen3-0.6b"]));
+        cfg.models.generative = Some("bge-small-en-v1.5-gguf".to_owned());
+        let served = super::provider_model_ids(&cfg);
+        let out = chat_capable_model_ids(&cfg, &served, None);
+        assert_eq!(out, ids(&["bge-small-en-v1.5-gguf", "qwen3-0.6b"]));
     }
 
     #[test]

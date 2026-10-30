@@ -66,6 +66,9 @@ impl ProviderEngine {
             // A redirect could move the call off this machine after the
             // loopback check passed.
             .max_redirects(0)
+            // An `HTTP(S)_PROXY`/`ALL_PROXY` in the environment would otherwise
+            // carry the call, credential included, to wherever the proxy is.
+            .proxy(None)
             .timeout_connect(Some(CONNECT_TIMEOUT))
             .timeout_global(Some(CALL_TIMEOUT))
             .http_status_as_error(false)
@@ -248,7 +251,17 @@ fn audio_format(bytes: &[u8]) -> &'static str {
 }
 
 /// Read an OpenAI server-sent-event stream, passing each content delta to
-/// `on_token`, until `data: [DONE]` or the end of the body.
+/// `on_token`, until `data: [DONE]`.
+///
+/// Reasoning a server sends apart from the answer (`reasoning_content`, as
+/// `llama-server` does, or Ollama's `reasoning`) is passed on wrapped in
+/// `<think>…</think>`, the shape the in-process engine produces, so
+/// `rto_llama::thinking` strips it — and refuses a generation that never got
+/// past it — exactly as it does there.
+///
+/// # Errors
+/// If the body ends before a finish reason or `[DONE]`: a stream cut short is
+/// not a completed answer.
 fn read_stream(
     reader: impl std::io::BufRead,
     on_token: &mut dyn FnMut(&str),
@@ -258,12 +271,15 @@ fn read_stream(
         completion_tokens: 0,
         finish_reason: FinishReason::Stop,
     };
+    let mut finished = false;
+    let mut in_reasoning = false;
     for line in reader.lines() {
         let line = line.map_err(|e| EngineError::Inference(format!("reading the stream: {e}")))?;
         let Some(data) = line.strip_prefix("data:").map(str::trim) else {
             continue;
         };
         if data == "[DONE]" {
+            finished = true;
             break;
         }
         let event: serde_json::Value = serde_json::from_str(data).map_err(|e| {
@@ -275,13 +291,33 @@ fn read_stream(
             )));
         }
         if let Some(choice) = event.pointer("/choices/0") {
-            if let Some(piece) = choice.pointer("/delta/content").and_then(|v| v.as_str())
-                && !piece.is_empty()
-            {
+            let delta = |key: &str| {
+                choice
+                    .pointer(&format!("/delta/{key}"))
+                    .and_then(|v| v.as_str())
+                    .filter(|piece| !piece.is_empty())
+            };
+            if let Some(piece) = delta("reasoning_content").or_else(|| delta("reasoning")) {
+                if !in_reasoning {
+                    on_token("<think>");
+                    in_reasoning = true;
+                }
                 on_token(piece);
             }
-            if choice.get("finish_reason").and_then(|v| v.as_str()) == Some("length") {
-                stats.finish_reason = FinishReason::Length;
+            if let Some(piece) = delta("content") {
+                if in_reasoning {
+                    on_token("</think>");
+                    in_reasoning = false;
+                }
+                on_token(piece);
+            }
+            match choice.get("finish_reason").and_then(|v| v.as_str()) {
+                Some("length") => {
+                    stats.finish_reason = FinishReason::Length;
+                    finished = true;
+                }
+                Some(_) => finished = true,
+                None => {}
             }
         }
         if let Some(usage) = event.get("usage").filter(|u| !u.is_null()) {
@@ -295,6 +331,13 @@ fn read_stream(
             stats.prompt_tokens = count("prompt_tokens");
             stats.completion_tokens = count("completion_tokens");
         }
+    }
+    if !finished {
+        return Err(EngineError::Inference(
+            "the provider's stream ended before it finished — no finish reason and no \
+             `[DONE]`, so what arrived may be only part of the answer"
+                .to_owned(),
+        ));
     }
     Ok(stats)
 }
@@ -447,6 +490,108 @@ mod tests {
             .and_then(|v| v.as_str())
             .expect("an image part");
         assert!(url.starts_with("data:image/png;base64,"), "{url}");
+    }
+
+    /// Run `read_stream` over `body`, returning what it assembled.
+    fn read(body: &str) -> Result<(String, CompletionStats), EngineError> {
+        let mut content = String::new();
+        let stats = read_stream(body.as_bytes(), &mut |piece| content.push_str(piece))?;
+        Ok((content, stats))
+    }
+
+    #[test]
+    fn reasoning_sent_apart_from_the_answer_meets_the_think_guard() {
+        // Budget spent inside the reasoning: no answer, and the guard says so
+        // rather than handing over an empty reply as though it were one.
+        let (content, stats) = read(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Let me think\"}}]}\n\n\
+             data: {\"choices\":[{\"delta\":{\"reasoning_content\":\" more\"},\"finish_reason\":\"length\"}]}\n\n\
+             data: [DONE]\n\n",
+        )
+        .expect("a complete stream");
+        assert_eq!(
+            rto_llama::thinking::answer(&content, stats.finish_reason),
+            Err(rto_llama::Unterminated::CutAtTokenCap)
+        );
+
+        // Reasoning that reached an answer (Ollama's `reasoning` key) is stripped.
+        let (content, stats) = read(
+            "data: {\"choices\":[{\"delta\":{\"reasoning\":\"2+2\"}}]}\n\n\
+             data: {\"choices\":[{\"delta\":{\"content\":\"four\"},\"finish_reason\":\"stop\"}]}\n\n",
+        )
+        .expect("a complete stream");
+        assert_eq!(
+            rto_llama::thinking::answer(&content, stats.finish_reason),
+            Ok("four")
+        );
+    }
+
+    #[test]
+    fn a_stream_that_ends_before_it_finishes_is_an_error() {
+        for unfinished in [
+            "",
+            "{\"not\":\"sse\"}",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n",
+        ] {
+            assert!(
+                matches!(read(unfinished), Err(EngineError::Inference(_))),
+                "{unfinished:?}"
+            );
+        }
+        // Either terminal marker on its own is enough.
+        read("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
+            .expect("a finish reason ends it");
+        read("data: [DONE]\n\n").expect("[DONE] ends it");
+    }
+
+    /// The loopback check governs the real connection: a proxy in the
+    /// environment must not carry the call (and its credential) elsewhere.
+    /// Re-runs itself in a child, because setting a process's environment from a
+    /// test is `unsafe` and this crate forbids that.
+    #[test]
+    fn a_proxy_in_the_environment_does_not_carry_the_call() {
+        const CHILD: &str = "ROTEIRO_PROVIDER_PROXY_TEST_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let (base, _server) = stub(200, "data: [DONE]\n\n");
+            let engine = ProviderEngine::new(&base, Vec::new()).expect("loopback");
+            engine
+                .chat(&request("m"))
+                .expect("the stub was reached directly, not through the proxy");
+            return;
+        }
+        let name = format!(
+            "{}::a_proxy_in_the_environment_does_not_carry_the_call",
+            module_path!()
+                .split_once("::")
+                .map_or(module_path!(), |(_, rest)| rest)
+        );
+        let mut child = std::process::Command::new(std::env::current_exe().expect("test binary"));
+        child
+            .args(["--exact", &name, "--nocapture"])
+            .env(CHILD, "1");
+        // Port 9 (discard) has nothing listening, so a proxied call fails.
+        for var in [
+            "ALL_PROXY",
+            "HTTPS_PROXY",
+            "HTTP_PROXY",
+            "all_proxy",
+            "https_proxy",
+            "http_proxy",
+        ] {
+            child.env(var, "http://127.0.0.1:9");
+        }
+        for var in ["NO_PROXY", "no_proxy"] {
+            child.env_remove(var);
+        }
+        let out = child.output().expect("run the child");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "{stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // Zero passed would be a filter that matched nothing, not a pass.
+        assert!(stdout.contains("1 passed"), "{stdout}");
     }
 
     #[test]
