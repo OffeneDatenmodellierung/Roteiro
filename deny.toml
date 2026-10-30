@@ -248,4 +248,17 @@ ignore = [
     # 0.11.0 still requires `oci-client` ^0.15, so no bump removes it yet.
     # Revisit when `oci-client` drops `jwt` or `boxlite` moves past 0.15.
     "RUSTSEC-2016-0007",
+
+    # ── The three below are **vulnerabilities**, unlike every boxlite entry
+    # above, and are ignored as a recorded decision (2026-10-30), not to make
+    # CI green. All enter through `zstd` 0.13 → `boxlite` (opt-in
+    # `exec-boxlite`), which requires `zstd` ^0.13 in every release up to
+    # 0.11.0; the fixes are only in `zstd` 0.14.3 / `zstd-safe` 8.2. `boxlite`
+    # uses zstd to unpack sandbox image layers, and those images are pinned by
+    # digest, so the decoder only ever sees bytes we verified. The default
+    # build does not compile `boxlite` at all. Mirrored in `.cargo/audit.toml`.
+    # Revisit on every `boxlite` bump and remove as soon as it reaches zstd 0.14.
+    "RUSTSEC-2026-0391", # abandoned stream leaks into the next on a reused context
+    "RUSTSEC-2026-0398", # Seekable::decompress sets Vec length past capacity
+    "RUSTSEC-2026-0403", # uninitialised memory on failed legacy-frame streaming
 ]
