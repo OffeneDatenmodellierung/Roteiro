@@ -69,6 +69,14 @@
 //! temperature, because choosing one is a fit and a fit needs a labelled set
 //! bigger than 27 rows.
 //!
+//! **And the answer turned out to be "it depends on the task", so the margin does
+//! not inherit a general licence.** Asked a fourteen-option class question, it
+//! ordered a correct answer above a wrong one on human-written corpus descriptions
+//! at 0.81; ranking the model's *own* 446 findings by it put none of the six real
+//! ones in the top ten (0.5178 against a null of 0.4999, `P = 0.4411`). Both
+//! figures are on [`Answer::margin`], with what separates them and what the
+//! ranking produced; read them before ranking anything by it.
+//!
 //! # `option_mass` is what stops the guarantee being vacuous
 //!
 //! "Off-schema is unrepresentable" is a claim about the return type, and a
@@ -389,10 +397,15 @@ impl<T> Answer<T> {
 
     /// `1 − H(p)/ln K` over the options: `1.0` all on one, `0.0` uniform.
     ///
-    /// **Not a confidence.** Nothing here has been fitted against a labelled
-    /// set, so this says how concentrated the mass was and not how likely the
-    /// answer is to be right. The module docs set out why the distinction is
-    /// load-bearing rather than pedantic.
+    /// **Not a confidence, and on the models in this repository not informative
+    /// either.** Measured over 27 adjudicated corpus rows on
+    /// `qwen3-coder-30b-a3b` it returned exactly `1.0` on 26 of them, four of the
+    /// five wrong answers included — so a `1.0` here says what this model almost
+    /// always says and not that it was right. [`Answer::margin`] summarises the
+    /// same distribution on a scale that does not saturate — not the same number
+    /// rescaled, since this figure consumes every option and the margin keeps only
+    /// the winner's lead over the runner-up. The module docs set both out at
+    /// length.
     #[must_use]
     pub fn sharpness(&self) -> f32 {
         self.sharpness
@@ -401,8 +414,10 @@ impl<T> Answer<T> {
     /// The winner's logit lead over the runner-up, in **nats** — `ln(p₁/p₂)` on
     /// the option-only distribution.
     ///
-    /// The same thing [`Answer::sharpness`] is about, on a scale that does not
-    /// saturate. Read it when sharpness is pinned at `1.0`, which is the ordinary
+    /// The same distribution [`Answer::sharpness`] summarises, read as the top-two
+    /// gap rather than as entropy over every option — so the two are different
+    /// summaries and this one does not saturate. Read it when sharpness is pinned
+    /// at `1.0`, which is the ordinary
     /// case for a greedy distribution from a large model: a lead of 12 nats and a
     /// lead of 40 both give `H(p) = 0` to `f32`, and are very different readings.
     ///
@@ -410,8 +425,36 @@ impl<T> Answer<T> {
     /// be presented as one. It is also **not comparable across questions with
     /// different option counts** the way sharpness is normalised to be — a lead
     /// over one alternative and a lead over thirteen are different quantities.
-    /// What it is good for is ordering two readings of the *same* question, which
-    /// is exactly what ranking findings by class confidence would need.
+    ///
+    /// # Measured scope: NOT usable for self-assessment
+    ///
+    /// An earlier version of this paragraph said the number was good for
+    /// "ordering two readings of the same question, which is exactly what ranking
+    /// findings by class confidence would need". Being on one scale turned out to
+    /// be necessary and not sufficient. Three separations were recorded downstream
+    /// on `qwen3-coder-30b-a3b`, over **two different questions** — and which
+    /// question was asked is part of the reading, not context for it:
+    ///
+    /// * a **fourteen-option** class question over 27 corpus rows a **human**
+    ///   wrote: **0.81**, ordering a correct class above a wrong one;
+    /// * that same fourteen-option question over 446 findings the **model itself**
+    ///   wrote: **0.5178**, ordering real above noise, against a random-ordering
+    ///   null of 0.4999, `P = 0.4411`. Ordering those 446 by it put the six real
+    ///   ones at ranks 16, 32, 129, 327, 359 and 431 — **none in the top ten**;
+    /// * a **two-option** yes/no asking whether a finding was real, over those same
+    ///   27 human-written rows: **0.98**, ordering real above known-false.
+    ///
+    /// So a caller who ranked a model's own findings by this and read the top of
+    /// the list would have found none of the real ones there. That is what the
+    /// ordering produced; the `P` beside it says the separation was not
+    /// distinguishable from random on that sample, which is a failure to find a
+    /// signal rather than proof of its absence, and neither is stated as the
+    /// other. The remaining figures are not a licence either — 0.98 and 0.81 are
+    /// *different questions* over the same rows, and between 0.81 and 0.5178 both
+    /// the author of the prose and the relation being separated changed, so
+    /// neither variable alone accounts for the drop.
+    /// `rto_graph::review_score::CandidateFinding::class_margin_micronats`
+    /// carries the full figures.
     ///
     /// Computed from the logits rather than from the reported probabilities,
     /// because the probabilities are where the information was lost: `p₂`

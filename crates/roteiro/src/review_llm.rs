@@ -452,16 +452,41 @@ pub fn review_file(
 /// right" would make the recorded class a function of two mechanisms and of which
 /// agreed, and nothing downstream could then say which instrument it was scoring.
 ///
-/// # Three numbers, and the one that was measured to work
+/// # Three numbers, and none of them ranks what this function produces
 ///
-/// The reading records its sharpness, its option mass and its **margin**. That
-/// looks redundant and is not: measured against the 27 adjudicated corpus rows,
-/// the sharpness came back as exactly `1_000_000` on 26 of them — including four
-/// of the five wrong answers — so it cannot order two findings, while the margin
-/// ran 8.7 to 32.1 nats and ordered a correct answer above a wrong one in 0.81 of
-/// the pairs. `CandidateFinding::class_margin_micronats` carries that argument in
-/// full. All three are kept because a different model may saturate differently,
-/// and the comparison is what would show it.
+/// The reading records its sharpness, its option mass and its **margin**, and the
+/// measured scope of each is on
+/// `CandidateFinding::class_margin_micronats` and
+/// `CandidateFinding::class_sharpness_ppm` in full. In short, on
+/// `qwen3-coder-30b-a3b`:
+///
+/// * the **sharpness** is saturated — exactly `1_000_000` on 26 of the 27
+///   adjudicated corpus rows, four of the five wrong answers included — so there
+///   is nothing in it to order two findings by;
+/// * the **margin** ordered a correct class above a wrong one on those same
+///   human-written corpus descriptions at 0.81. Over 446 of **the findings this
+///   function classifies**, ordering by it put the six credited to a real corpus
+///   row at ranks 16, 32, 129, 327, 359 and 431 — **none in the top ten**, one in
+///   the top twenty — at a separation of 0.5178 against a null of 0.4999,
+///   `P = 0.4411`.
+///
+/// So a caller who triaged the head of that list would have found nothing there.
+/// That is what the ordering produced; the statistic beside it says the separation
+/// was not distinguishable from random on this sample, which is a failure to find
+/// a signal rather than proof there is none. The advice rests on the first.
+///
+/// **Two** things separate those two margin figures rather than one — who wrote
+/// the prose, and whether what is being separated is a correct class from a wrong
+/// one or a real finding from noise — so neither alone accounts for the drop, and
+/// neither is offered here as the explanation.
+///
+/// The **0.98** recorded against this same corpus belongs to `REALITY_QUESTION`, a
+/// two-option yes/no that this function never asks and that nothing ships. It is
+/// not a reading of the margin recorded here, and quoting it for this number would
+/// credit a binary instrument's result to a fourteen-way one.
+///
+/// All three numbers are kept because a different model may behave differently,
+/// and a run that records only one cannot show it.
 ///
 /// # Errors
 /// If the engine fails on a question. One failure aborts the file rather than
@@ -1641,8 +1666,18 @@ fn print_file_findings(
             let scale = f64::from(rto_graph::review_score::PPM_SCALE);
             let frac = |v: Option<u32>| v.map_or(f64::NAN, |x| f64::from(x) / scale);
             println!(
+                // The scope, not a hedge: "may be unreliable" is what lets
+                // somebody use it anyway. But "does not rank them" asserts the
+                // null, which `P = 0.44` does not support. One line has room for
+                // neither argument, so it carries the *observation* instead —
+                // what ranking findings like these actually produced — which is
+                // both honest and the thing a reader can act on.
+                // `CandidateFinding::class_margin_micronats` has the full ranks,
+                // the precision@k and the test.
                 "      typed class: margin {:.2} nats, sharpness {:.4}, \
-                 option mass {:.4} (none of the three is a confidence)",
+                 option mass {:.4} — none is a confidence; ranking findings like \
+                 these by margin put 0 of 6 real ones in the top 10 of 446 \
+                 (0.52 vs null 0.4999, P = 0.44)",
                 f64::from(margin) / scale,
                 frac(f.class_sharpness_ppm),
                 frac(f.class_option_mass_ppm),
