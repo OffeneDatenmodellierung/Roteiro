@@ -1,0 +1,8 @@
+# Mirrors the zstd vulnerability ignores in deny.toml; the reasoning lives
+# there. Remove these when `boxlite` moves to zstd 0.14.
+[advisories]
+ignore = [
+    "RUSTSEC-2026-0391",
+    "RUSTSEC-2026-0398",
+    "RUSTSEC-2026-0403",
+]

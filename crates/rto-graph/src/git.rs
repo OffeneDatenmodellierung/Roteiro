@@ -1348,7 +1348,7 @@ impl Repo {
                     // Deletion + Addition; this arm is unreachable in practice.
                     Change::Rewrite { .. } => {}
                 }
-                Ok::<_, std::convert::Infallible>(gix::object::tree::diff::Action::Continue(()))
+                Ok::<_, gix::Exn>(gix::object::tree::diff::Action::Continue(()))
             })
             .map_err(ge)?;
 
