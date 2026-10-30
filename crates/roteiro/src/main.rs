@@ -35,6 +35,10 @@ mod pins;
 // leave is not the code that can make them leave.
 #[cfg(feature = "remote")]
 mod remote_transport;
+// The external model provider (ADR-0027): an `Engine` over a local
+// OpenAI-compatible server. Behind `serve` until the in-process engine goes.
+#[cfg(feature = "serve")]
+mod provider;
 // Ask over the remote model tier: the served `Engine`, wrapped so the hosted
 // model is one more served id and `rto-serve` gains nothing (ADR-0019, Stage 34
 // part 2b). Needs `serve` as well as `remote` — without a chat endpoint there is
@@ -17363,7 +17367,7 @@ fn run_serve_network(
     // actually installed — otherwise fall through to the llama-free UI below.
     #[cfg(feature = "serve")]
     {
-        if !served_models(cfg).is_empty() {
+        if cfg.provider.base_url.is_some() || !served_models(cfg).is_empty() {
             return serve_models_endpoint(cfg, set, flat, workspace_name, opts);
         }
     }
@@ -18883,6 +18887,23 @@ fn serve_mcp(
     )
 }
 
+/// The provider model ids `serve` offers under `[provider]` (ADR-0027): the
+/// `[models]` keys `/v1` can use, generative first because the Ask panel sends
+/// `models[0]`, with duplicates dropped. `audio` and `ocr` are ingestion models,
+/// not endpoints, exactly as in [`served_models`].
+#[cfg(feature = "serve")]
+fn provider_model_ids(cfg: &config::Config) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    for key in ["generative", "vision", "embedding"] {
+        if let Some(id) = cfg.models.get(key)
+            && !ids.iter().any(|seen| seen == id)
+        {
+            ids.push(id.to_owned());
+        }
+    }
+    ids
+}
+
 /// Serve installed generative models over the loopback, OpenAI-compatible `/v1`
 /// endpoint (ADR-0006). Serves only installed models; never downloads.
 /// Collect the installed GGUF models eligible to serve over `/v1` (ADR-0006):
@@ -18968,9 +18989,17 @@ fn chat_capable_model_ids(
     // registry does not know is kept, exactly as before — `served_ids` is the
     // engine's set of registry names, so that case is unreachable, and dropping
     // an unrecognised id would be a silent narrowing of the Ask pool.
+    // Under `[provider]` the ids are not registry names, so the registry cannot
+    // say which one embeds; the `[models] embedding` key can (ADR-0027).
+    let provider_embedding = cfg
+        .provider
+        .base_url
+        .as_ref()
+        .and(cfg.models.get("embedding"));
     let mut ids: Vec<String> = served_ids
         .iter()
         .filter(|id| find_model(id).is_none_or(|s| ModelTask::Chat.capable(s.kind)))
+        .filter(|id| provider_embedding != Some(id.as_str()))
         .cloned()
         .collect();
     // The granted tier leads, and nothing below reorders past it.
@@ -19027,6 +19056,21 @@ mod chat_model_selection {
         let served = ids(&["bge-small-en-v1.5-gguf", "qwen3-0.6b", "qwen3-8b"]);
         let out = chat_capable_model_ids(&cfg, &served, None);
         assert_eq!(out, ids(&["qwen3-8b", "qwen3-0.6b"]));
+    }
+
+    #[test]
+    fn a_provider_offers_its_generative_first_and_never_its_embedding_model() {
+        // Provider ids are not registry names, so only `[models]` says which one
+        // embeds (ADR-0027).
+        let mut cfg = config::Config::default();
+        cfg.provider.base_url = Some("http://127.0.0.1:11434/v1".to_owned());
+        cfg.models.generative = Some("qwen3:8b".to_owned());
+        cfg.models.vision = Some("qwen2.5vl:3b".to_owned());
+        cfg.models.embedding = Some("bge-m3".to_owned());
+        let served = super::provider_model_ids(&cfg);
+        assert_eq!(served, ids(&["qwen3:8b", "qwen2.5vl:3b", "bge-m3"]));
+        let out = chat_capable_model_ids(&cfg, &served, None);
+        assert_eq!(out, ids(&["qwen3:8b", "qwen2.5vl:3b"]));
     }
 
     #[test]
@@ -19112,6 +19156,69 @@ fn serve_remote_tier(_opts: &ServeOptions) -> rto_graph::RemoteTier {
     rto_graph::RemoteTier::Unavailable
 }
 
+/// The engine `serve` answers with, and the served names it logs: the external
+/// provider when `[provider] base_url` is set (ADR-0027), else the in-process
+/// llama.cpp engine over `served`.
+#[cfg(feature = "serve")]
+fn serve_engine(
+    cfg: &config::Config,
+    provider: Option<&str>,
+    served: Vec<rto_serve::llama::Served>,
+) -> anyhow::Result<(std::sync::Arc<dyn rto_serve::Engine>, String)> {
+    Ok(if let Some(base_url) = provider {
+        let ids = provider_model_ids(cfg);
+        if ids.is_empty() {
+            anyhow::bail!(
+                "`[provider] base_url` is set but no `[models]` key names a model to \
+                 serve — set `[models] generative` to a model id your provider has \
+                 (for example `qwen3:8b`); see docs/MODEL_SETUP.md"
+            );
+        }
+        let names = ids.join(", ");
+        (
+            std::sync::Arc::new(provider::ProviderEngine::new(base_url, ids)?),
+            names,
+        )
+    } else {
+        let names = served
+            .iter()
+            .map(|s| s.name.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
+        // Keep models resident up to the configured budget (MiB → bytes), loading on
+        // demand and unloading the least-recently-used past it (ADR-0006). Unset ⇒ 0
+        // ⇒ a single resident model.
+        let budget_bytes = cfg
+            .serve
+            .memory_budget_mb
+            .unwrap_or(0)
+            .saturating_mul(1024 * 1024);
+        // The ceiling a request's context may grow to, not the window every request
+        // gets (issue #486). This argument was the literal `0` — which fell through
+        // to a hardcoded 4,096 that no configuration key could reach, on every model
+        // from one trained at 262,144 tokens to one trained at 512. Unset ⇒ 0 ⇒ each
+        // model's own trained window; a value bounds every served model at once.
+        let max_context_tokens = cfg.serve.max_context_tokens.unwrap_or(0);
+        let engine = rto_serve::llama::LlamaEngine::new_with_budget(
+            served,
+            max_context_tokens,
+            budget_bytes,
+        )
+        .map(|e| {
+            // `[serve] prefix_cache_mb` reaches the engine here and nowhere
+            // else. `0` — the default — leaves the cache inert, so a server
+            // whose operator has not asked for it behaves exactly as before.
+            e.with_prefix_cache_bytes(
+                usize::try_from(cfg.serve.prefix_cache_mb.unwrap_or(0))
+                    .unwrap_or(usize::MAX)
+                    .saturating_mul(1024 * 1024),
+            )
+        })
+        .map_err(|e| anyhow::anyhow!("starting llama.cpp: {e}"))?;
+        (std::sync::Arc::new(engine), names)
+    })
+}
+
 #[cfg(feature = "serve")]
 fn serve_models_endpoint(
     cfg: &config::Config,
@@ -19136,14 +19243,25 @@ fn serve_models_endpoint(
     // directions: a broken pin still fails here even on a server that will answer
     // remotely, because a broken configuration is broken whether or not this
     // process reads it (`resolve_with_remote`).
-    rto_graph::resolve_model_with_remote(
-        rto_graph::ModelTask::Chat,
-        &cfg.models.resolve(),
-        serve_remote_tier(opts),
-    )?;
+    //
+    // With an external provider (ADR-0027) `[models]` names the provider's ids,
+    // which the registry does not list, so there is nothing to resolve them
+    // against; an unknown id is the provider's 404 instead.
+    let provider = cfg.provider.base_url.as_deref();
+    if provider.is_none() {
+        rto_graph::resolve_model_with_remote(
+            rto_graph::ModelTask::Chat,
+            &cfg.models.resolve(),
+            serve_remote_tier(opts),
+        )?;
+    }
 
-    let served = served_models(cfg);
-    if served.is_empty() {
+    let served = if provider.is_some() {
+        Vec::new()
+    } else {
+        served_models(cfg)
+    };
+    if provider.is_none() && served.is_empty() {
         anyhow::bail!(
             "no installed GGUF models to serve — pull one first \
              (`roteiro model pull qwen3-0.6b` for chat, \
@@ -19167,39 +19285,7 @@ fn serve_models_endpoint(
         );
     }
 
-    let names = served
-        .iter()
-        .map(|s| s.name.clone())
-        .collect::<Vec<_>>()
-        .join(", ");
-    // Keep models resident up to the configured budget (MiB → bytes), loading on
-    // demand and unloading the least-recently-used past it (ADR-0006). Unset ⇒ 0
-    // ⇒ a single resident model.
-    let budget_bytes = cfg
-        .serve
-        .memory_budget_mb
-        .unwrap_or(0)
-        .saturating_mul(1024 * 1024);
-    // The ceiling a request's context may grow to, not the window every request
-    // gets (issue #486). This argument was the literal `0` — which fell through
-    // to a hardcoded 4,096 that no configuration key could reach, on every model
-    // from one trained at 262,144 tokens to one trained at 512. Unset ⇒ 0 ⇒ each
-    // model's own trained window; a value bounds every served model at once.
-    let max_context_tokens = cfg.serve.max_context_tokens.unwrap_or(0);
-    let engine =
-        rto_serve::llama::LlamaEngine::new_with_budget(served, max_context_tokens, budget_bytes)
-            .map(|e| {
-                // `[serve] prefix_cache_mb` reaches the engine here and nowhere
-                // else. `0` — the default — leaves the cache inert, so a server
-                // whose operator has not asked for it behaves exactly as before.
-                e.with_prefix_cache_bytes(
-                    usize::try_from(cfg.serve.prefix_cache_mb.unwrap_or(0))
-                        .unwrap_or(usize::MAX)
-                        .saturating_mul(1024 * 1024),
-                )
-            })
-            .map_err(|e| anyhow::anyhow!("starting llama.cpp: {e}"))?;
-    let engine: std::sync::Arc<dyn rto_serve::Engine> = std::sync::Arc::new(engine);
+    let (engine, names) = serve_engine(cfg, provider, served)?;
     // With the tier granted for this process, the hosted model joins the served
     // set as one more id — `rto-serve` is not modified, and the socket stays in
     // `remote_transport`. See `remote_engine` for the reduction that keeps the

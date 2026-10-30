@@ -32,6 +32,7 @@
 | [0024](0024-screening-widened.md) | Widening the content screen — what a peer's bundle can carry, and what we never say about it | Draft |
 | [0025](0025-document-extraction-consent.md) | Documents are decoded, screened, and extracted only where somebody said yes | Draft |
 | [0026](0026-research-knowledge-layer.md) | A research knowledge layer — raw sources in, an authored wiki out | For Review |
+| [0027](0027-external-model-provider.md) | External model provider — models run in a local server the user already has, not inside Roteiro | For Review |
 
 > **ADR 0018** is the third of the analyzer trio: 0012 decides how findings are
 > stored, 0014 how analyzers are executed and provisioned, and 0018 *which*
