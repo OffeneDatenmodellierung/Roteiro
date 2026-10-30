@@ -11,7 +11,7 @@ Studio. Roteiro does not download or run those models itself
 ([ADR-0027](adr/0027-external-model-provider.md)).
 
 > **Migration status.** `roteiro serve` (the `/v1` endpoint and the explorer's
-> Ask panel) uses the provider today. `spec draft`, `review --llm`,
+> Ask panel) and `roteiro spec draft` use the provider today. `review --llm`,
 > `infer --model` and `media build` still use the in-process engine and
 > `roteiro model pull` until they are moved over; this page grows as each one
 > does.
@@ -75,7 +75,7 @@ by name.
 
 | Feature | `[models]` key | Suggested | Needed? |
 |---|---|---|---|
-| Ask panel, `/v1` chat | `generative` | `qwen3:8b`; `qwen3:0.6b` on small machines; `qwen2.5-coder:3b` for code | for chat |
+| Ask panel, `/v1` chat, `spec draft` | `generative` | `qwen3:8b`; `qwen3:0.6b` on small machines; `qwen2.5-coder:3b` for code | for chat |
 | `/v1/embeddings` | `embedding` | `bge-m3` or `nomic-embed-text` | optional |
 | Image description | `vision` | `qwen2.5vl:3b` | optional |
 | Audio transcription | `audio` | Voxtral Mini 3B via `llama-server` | optional |
