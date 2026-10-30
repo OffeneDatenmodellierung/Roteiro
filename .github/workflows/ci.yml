@@ -262,7 +262,7 @@ jobs:
       #
       # A toolchain the canary has already flagged is a toolchain this bump is
       # overdue for; see `toolchain-canary.yml`.
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: "1.98"
           components: rustfmt, clippy
@@ -281,7 +281,7 @@ jobs:
       # Restoring (and re-saving) ~1.4 GB of build artefacts to run `cargo
       # metadata` would cost far more than the check it serves, so a release PR
       # skips the cache entirely rather than warming one it will not use.
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         if: env.RELEASE_PR != 'true'
         with:
           cache-on-failure: true
@@ -513,13 +513,13 @@ jobs:
       # why, and for what raising it involves. Bumped with the other six, in one
       # commit, never alone — three of them now live in `graph-artifact.yml` and
       # `release-plz.yml`, so the bump is not confined to this file.
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: "1.98"
           components: rustfmt, clippy
       # A failed run must still save its cache, as above. Skipped on a release
       # PR for the reason given in the `checks` job.
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         if: env.RELEASE_PR != 'true'
         with:
           cache-on-failure: true
@@ -662,13 +662,13 @@ jobs:
       # why, and for what raising it involves. Bumped with the other six, in one
       # commit, never alone — three of them now live in `graph-artifact.yml` and
       # `release-plz.yml`, so the bump is not confined to this file.
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: "1.98"
           components: clippy
       # A failed run must still save its cache, as above. Skipped on a release
       # PR for the reason given in the `checks` job.
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         if: env.RELEASE_PR != 'true'
         with:
           cache-on-failure: true
@@ -843,12 +843,12 @@ jobs:
       #
       # So all four sites are pinned, and the toolchain does not move anywhere
       # in this file without a commit.
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: "1.98"
           components: llvm-tools-preview
       # A failed run must still save its cache, as above.
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           cache-on-failure: true
       # No apt install of cmake/clang/libclang, deliberately — `ubuntu-24.04`
@@ -895,7 +895,7 @@ jobs:
       - name: Provision the pinned sandbox runtime (`exec-boxlite` feature)
         run: python3 scripts/provision-sandbox-runtime.py --github-env
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-llvm-cov
       # `--no-fail-fast` for the reason the `checks` job records at length
@@ -936,7 +936,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Upload the full per-file report
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-summary
           path: coverage-summary.txt
@@ -955,12 +955,12 @@ jobs:
       # This job only runs `cargo check`, which reads none, so full history would
       # buy nothing. If a `cargo test` is ever added here, add the depth with it.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: "1.96"
       # A failed run must still save its cache, as above. Skipped on a release
       # PR for the reason given in the `checks` job.
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         if: env.RELEASE_PR != 'true'
         with:
           cache-on-failure: true
