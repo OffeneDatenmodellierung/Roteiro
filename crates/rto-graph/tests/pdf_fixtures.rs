@@ -133,6 +133,8 @@ struct Page {
     /// components. Through `/CS0` they can; through `/CS1` they cannot, and
     /// `1 scn` there is full ink rather than white.
     colour_spaces: ColourSpaces,
+    /// Write `/Resources` as an indirect object rather than inline (§7.3.10).
+    indirect_resources: bool,
     /// A greyscale image `XObject` painted by the content stream, as
     /// `(width, height, samples)`. `None` leaves `/XObject` out of
     /// `/Resources`
@@ -164,6 +166,7 @@ fn fixtures() -> Vec<Fixture> {
     out.extend(image_fixtures());
     out.extend(colour_fixtures());
     out.extend(colour_space_fixtures());
+    out.extend(shape_fixtures());
     out.extend(negative_fixtures());
     out
 }
@@ -578,6 +581,68 @@ fn colour_space_fixtures() -> Vec<Fixture> {
         text_op(&[], 72, 700, 12, VISIBLE),
     ));
 
+    // 30 — `23` with the page's `/Resources` itself an indirect object, which
+    // is how most real writers emit it. A reader that only took an inline
+    // `/Resources` saw no colour spaces at all and skipped the check.
+    out.extend(pair(
+        "30-indirect-resources",
+        Page {
+            colour_spaces: ColourSpaces::Inline,
+            indirect_resources: true,
+            content: format!(
+                "{}{}",
+                text_op(&[], 72, 700, 12, VISIBLE),
+                text_op(&["/CS0 cs", "1 1 1 scn"], 72, 660, 12, PAYLOAD),
+            ),
+            ..Page::default()
+        },
+        text_op(&[], 72, 700, 12, VISIBLE),
+    ));
+
+    out
+}
+
+/// Concealment that is not a colour: an invisible layer over a panel that is
+/// not an image, and a glyph squashed between two long axes.
+fn shape_fixtures() -> Vec<Fixture> {
+    let mut out: Vec<Fixture> = Vec::new();
+
+    // 28 — mode 3 over a **spot-coloured panel**, not an image. The colour of
+    // the panel is unreadable, but that does not make it a scanned page: the
+    // searchable-scan exemption is for text over images, and granting it here
+    // admits a concealed sentence with no image anywhere on the page.
+    let panel = "q\n/CS1 cs\n0.3 scn\n0 600 612 150 re\nf\nQ\n";
+    out.extend(pair(
+        "28-invisible-over-spot-panel",
+        Page {
+            colour_spaces: ColourSpaces::Inline,
+            content: format!(
+                "{panel}{}{}",
+                text_op(&[], 72, 700, 12, VISIBLE),
+                text_op(&["3 Tr"], 72, 660, 12, NOTE),
+            ),
+            ..Page::default()
+        },
+        format!("{panel}{}", text_op(&[], 72, 700, 12, VISIBLE)),
+    ));
+
+    // 29 — a glyph squashed between two **long, nearly parallel** axes:
+    // `1 0 1 0.0001 … Tm` keeps both axes at least 12 pt, so a reader that
+    // measured each axis alone saw ordinary type, while the glyph is 0.0012 pt
+    // across them.
+    out.extend(pair(
+        "29-near-parallel-axes",
+        Page {
+            content: format!(
+                "{}BT\n/F1 12 Tf\n1 0 1 0.0001 72 660 Tm\n({}) Tj\nET\n",
+                text_op(&[], 72, 700, 12, VISIBLE),
+                escape(NOTE),
+            ),
+            ..Page::default()
+        },
+        text_op(&[], 72, 700, 12, VISIBLE),
+    ));
+
     out
 }
 
@@ -740,6 +805,7 @@ fn pair(stem: &'static str, concealed: Page, control_content: String) -> Vec<Fix
     let control = Page {
         crop: concealed.crop,
         colour_spaces: concealed.colour_spaces,
+        indirect_resources: concealed.indirect_resources,
         inherit_boxes: concealed.inherit_boxes,
         content: control_content,
         image: concealed.image.clone(),
@@ -850,13 +916,26 @@ fn render(page: &Page) -> Vec<u8> {
     // object number stays 6.
     let first_extra = 6 + usize::from(page.image.is_some());
     let colour_spaces = colour_space_resource(page.colour_spaces, first_extra);
+    let resources_dict = format!("<< /Font << /F1 5 0 R >>{xobject}{colour_spaces} >>");
+    // After the colour-space objects, which are the only other extras.
+    let resources_id = first_extra
+        + if page.colour_spaces == ColourSpaces::Indirect {
+            2
+        } else {
+            0
+        };
+    let resources = if page.indirect_resources {
+        format!("{resources_id} 0 R")
+    } else {
+        resources_dict.clone()
+    };
 
     let mut objects: Vec<Vec<u8>> = vec![
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
         format!("<< /Type /Pages /Kids [3 0 R] /Count 1{on_pages} >>").into_bytes(),
         format!(
             "<< /Type /Page /Parent 2 0 R{on_page} \
-             /Resources << /Font << /F1 5 0 R >>{xobject}{colour_spaces} >> /Contents 4 0 R >>"
+             /Resources {resources} /Contents 4 0 R >>"
         )
         .into_bytes(),
         stream(
@@ -878,6 +957,9 @@ fn render(page: &Page) -> Vec<u8> {
     if page.colour_spaces == ColourSpaces::Indirect {
         objects.push(format!("<< /CS0 {} 0 R >>", first_extra + 1).into_bytes());
         objects.push(b"[/DeviceRGB]".to_vec());
+    }
+    if page.indirect_resources {
+        objects.push(resources_dict.into_bytes());
     }
 
     let mut out = b"%PDF-1.4\n".to_vec();

@@ -360,7 +360,7 @@ fn scan_page(doc: &Document, page_id: ObjectId, out: &mut Vec<Concealed>, budget
             // Every fill operator. A stroke-only `S`/`s` paints a hairline, not a
             // region, so it does not cover what is behind it and is not recorded.
             "f" | "F" | "f*" | "B" | "B*" | "b" | "b*" => {
-                let paint = gs.fill.map_or(Paint::Opaque, Paint::Solid);
+                let paint = gs.fill.map_or(Paint::UnknownFill, Paint::Solid);
                 painted.extend(path.drain(..).map(|rect| Painted { rect, paint }));
             }
             "n" | "S" | "s" => path.clear(),
@@ -375,7 +375,7 @@ fn scan_page(doc: &Document, page_id: ObjectId, out: &mut Vec<Concealed>, budget
                 {
                     painted.push(Painted {
                         rect: Rect::unit().transform(gs.ctm),
-                        paint: Paint::Opaque,
+                        paint: Paint::Image,
                     });
                 }
             }
@@ -452,10 +452,11 @@ fn inspect_run(run: &Run<'_>, strings: &[Object], out: &mut Vec<Concealed>, budg
         .then(run.text.tm)
         .then(run.gs.ctm);
     let (x, y) = trm.apply(0.0, 0.0);
-    // Both axes. A glyph is illegible if *either* collapses — `0 Tz` leaves the
-    // vertical scale at a perfectly ordinary 12 pt while the glyph occupies no
-    // width at all.
-    let effective = trm.vertical_scale().min(trm.horizontal_scale());
+    // The smallest stretch in *any* direction. A glyph is illegible if either
+    // axis collapses (`0 Tz` leaves the height an ordinary 12 pt at no width),
+    // and also when both axes are long but nearly parallel, which squashes the
+    // glyph between them.
+    let effective = trm.smallest_scale();
     let behind = topmost(run.painted, x, y);
 
     let mut found: Vec<(&'static str, String)> = Vec::new();
@@ -465,7 +466,7 @@ fn inspect_run(run: &Run<'_>, strings: &[Object], out: &mut Vec<Concealed>, budg
     // not a mark on the page either; listing both is the difference between
     // detecting the mechanism and detecting one spelling of it.
     if matches!(run.gs.text.render_mode, 3 | 7) {
-        if matches!(behind, Paint::Opaque) {
+        if behind == Paint::Image {
             unreported = Some(
                 "invisible text layer over a page image (the ordinary searchable-scan shape)"
                     .to_owned(),
@@ -680,13 +681,33 @@ fn is_device_space(name: &[u8]) -> bool {
     matches!(name, b"DeviceGray" | b"DeviceRGB" | b"DeviceCMYK")
 }
 
+/// The page's effective `/Resources`: its own, else the nearest ancestor's
+/// (an inheritable attribute, Table 31), resolved if indirect (§7.3.10).
+///
+/// Not `Document::get_page_resources`, which returns a dictionary only when the
+/// page writes one inline: an indirect or inherited `/Resources` came back as
+/// none, and the colour and image checks ran against an empty page.
+fn page_resources(doc: &Document, page_id: ObjectId) -> Option<&Dictionary> {
+    let mut node = doc.get_dictionary(page_id).ok()?;
+    // Bounded: a `/Parent` cycle is malformed, and must end rather than hang.
+    for _ in 0..64 {
+        if let Ok(resources) = node.get(b"Resources") {
+            return doc.dereference(resources).ok()?.1.as_dict().ok();
+        }
+        node = doc
+            .get_dictionary(node.get(b"Parent").ok()?.as_reference().ok()?)
+            .ok()?;
+    }
+    None
+}
+
 /// The page's `/Resources /ColorSpace` entries, classified.
 ///
 /// Only the aliases that resolve to a device space are worth recording; an
 /// entry this does not list is [`ColourSpace::Other`] by
 /// [`colour_space`]'s fallback, which is the safe direction.
 fn page_colour_spaces(doc: &Document, page_id: ObjectId) -> BTreeMap<Vec<u8>, ColourSpace> {
-    let Ok((Some(resources), _)) = doc.get_page_resources(page_id) else {
+    let Some(resources) = page_resources(doc, page_id) else {
         return BTreeMap::new();
     };
     // Either level may be an indirect reference (§7.3.10), and an unresolved
@@ -724,7 +745,7 @@ fn page_colour_spaces(doc: &Document, page_id: ObjectId) -> BTreeMap<Vec<u8>, Co
 /// it as page coverage would claim an opaque rectangle this reader never looked
 /// inside.
 fn image_names(doc: &Document, page_id: ObjectId) -> Vec<Vec<u8>> {
-    let Ok((Some(resources), _)) = doc.get_page_resources(page_id) else {
+    let Some(resources) = page_resources(doc, page_id) else {
         return Vec::new();
     };
     let Ok(xobjects) = resources.get(b"XObject").and_then(Object::as_dict) else {
@@ -1036,22 +1057,24 @@ impl Matrix {
         )
     }
 
-    /// How far this transform stretches a unit step up the y axis — the factor a
-    /// `Tf` size is multiplied by to get points on the page.
+    /// The smallest factor this transform stretches *any* unit step by — its
+    /// smallest singular value, the size in points of a `Tf` 1 glyph's
+    /// thinnest dimension.
     ///
-    /// `(c*c + d*d).sqrt()` rather than `f64::hypot`: `sqrt` is an IEEE-754
-    /// exact operation and identical on every platform, while `hypot` is a libm
-    /// call that need not be. A size threshold that moved by a ulp between macOS
-    /// and Linux would make this reader's verdict platform-dependent, and a
-    /// verdict that is not a pure function of the bytes cannot be a graph fact.
-    fn vertical_scale(self) -> f64 {
-        (self.c * self.c + self.d * self.d).sqrt()
-    }
-
-    /// The same, across. `0 Tz` drives this to zero while
-    /// [`Self::vertical_scale`] stays at an ordinary 12.
-    fn horizontal_scale(self) -> f64 {
-        (self.a * self.a + self.b * self.b).sqrt()
+    /// `|det| / σ_max` rather than `σ_max − …`, which cancels to garbage for
+    /// nearly parallel axes, the case it exists to catch. `sqrt` rather than
+    /// `f64::hypot`: `sqrt` is IEEE-754 exact on every platform and `hypot` is
+    /// a libm call that need not be, and a threshold that moved by a ulp
+    /// between macOS and Linux would make the verdict platform-dependent.
+    fn smallest_scale(self) -> f64 {
+        let sum = self.a * self.a + self.b * self.b + self.c * self.c + self.d * self.d;
+        let det = self.a * self.d - self.b * self.c;
+        let largest = f64::midpoint(sum, (sum * sum - 4.0 * det * det).max(0.0).sqrt()).sqrt();
+        if largest == 0.0 {
+            0.0
+        } else {
+            det.abs() / largest
+        }
     }
 }
 
@@ -1152,10 +1175,13 @@ enum ColourSpace {
 enum Paint {
     /// A solid fill in a colour this reader read.
     Solid([f64; 3]),
-    /// An image, or a fill in a colour space this reader does not read — the
-    /// colour behind a glyph here is unknown, so the colour test is skipped
-    /// rather than guessed.
-    Opaque,
+    /// An image: colours this reader does not read, and the one surface an
+    /// invisible text layer over is ordinary (a searchable scan).
+    Image,
+    /// A fill in a colour space this reader does not read (a spot colour,
+    /// say). The colour behind a glyph is unknown, so the colour test is
+    /// skipped — but it is not an image, so it earns no searchable-scan pass.
+    UnknownFill,
 }
 
 /// A painted region, in the order the content stream painted it.
@@ -1363,6 +1389,12 @@ mod tests {
         "25-indirect-device-space-control",
         "27-device-colour-after-separation",
         "27-device-colour-after-separation-control",
+        "28-invisible-over-spot-panel",
+        "28-invisible-over-spot-panel-control",
+        "29-near-parallel-axes",
+        "29-near-parallel-axes-control",
+        "30-indirect-resources",
+        "30-indirect-resources-control",
         "08-scaled-text-matrix",
         "09-white-text-over-image",
         "10-searchable-scan",
@@ -1391,9 +1423,22 @@ mod tests {
             | "21-stroke-only-background"
             | "23-aliased-device-space"
             | "25-indirect-device-space"
-            | "27-device-colour-after-separation" => {
-                (Verdict::Block, BOTH, &[mechanism::BACKGROUND_COLOUR])
-            }
+            | "27-device-colour-after-separation"
+            | "30-indirect-resources" => (Verdict::Block, BOTH, &[mechanism::BACKGROUND_COLOUR]),
+            // `11`'s shape — concealed prose, no directive — by two other
+            // mechanisms: mode 3 over a spot-coloured panel that is not an image
+            // (so no searchable-scan pass), and a glyph squashed between two
+            // nearly parallel axes.
+            "28-invisible-over-spot-panel" => (
+                Verdict::Quarantine,
+                CONCEALED,
+                &[mechanism::INVISIBLE_RENDER_MODE],
+            ),
+            "29-near-parallel-axes" => (
+                Verdict::Quarantine,
+                CONCEALED,
+                &[mechanism::DEGENERATE_SIZE],
+            ),
             // `19` is off-page by **text rise** rather than by `Td`: the
             // positioning operators read as ordinary and `Ts` does the moving.
             "03-outside-mediabox" | "19-text-rise-off-page" => {
@@ -1538,6 +1583,7 @@ mod tests {
                     | "23-aliased-device-space"
                     | "25-indirect-device-space"
                     | "27-device-colour-after-separation"
+                    | "30-indirect-resources"
             );
             let recovered = runs
                 .iter()
@@ -1684,8 +1730,35 @@ mod tests {
         assert_eq!(shift.then(scale).apply(0.0, 0.0), (20.0, 40.0));
         // Scale then translate: it is not.
         assert_eq!(scale.then(shift).apply(0.0, 0.0), (10.0, 20.0));
-        assert_eq!(scale.vertical_scale(), 2.0);
-        assert_eq!(Matrix::IDENTITY.vertical_scale(), 1.0);
+        assert_eq!(scale.smallest_scale(), 2.0);
+        assert_eq!(Matrix::IDENTITY.smallest_scale(), 1.0);
+    }
+
+    /// Two long but nearly parallel axes squash a glyph as surely as a short
+    /// one. `12 Tf` under `1 0 1 0.0001 … Tm` has both axes at least 12 pt
+    /// long, and a glyph 0.0012 pt across them.
+    #[test]
+    fn nearly_parallel_axes_are_a_degenerate_size() {
+        let trm = Matrix {
+            a: 12.0,
+            b: 0.0,
+            c: 12.0,
+            d: 0.0012,
+            e: 72.0,
+            f: 700.0,
+        };
+        let smallest = trm.smallest_scale();
+        assert!(smallest > 0.0 && smallest < 0.001, "{smallest}");
+        // A rotation stretches nothing.
+        let quarter_turn = Matrix {
+            a: 0.0,
+            b: 12.0,
+            c: -12.0,
+            d: 0.0,
+            e: 0.0,
+            f: 0.0,
+        };
+        assert!((quarter_turn.smallest_scale() - 12.0).abs() < 1e-9);
     }
 
     /// A `MediaBox` given by its opposite corners in the other order is the same
@@ -1872,8 +1945,7 @@ mod tests {
 
         let plain = params.rendering_matrix();
         assert_eq!(plain.apply(0.0, 0.0), (0.0, 0.0));
-        assert_eq!(plain.vertical_scale(), 12.0);
-        assert_eq!(plain.horizontal_scale(), 12.0);
+        assert_eq!(plain.smallest_scale(), 12.0);
 
         // A rise moves the glyph off the origin `Td` chose.
         params.rise = 500.0;
@@ -1883,7 +1955,7 @@ mod tests {
         params.rise = 0.0;
         params.horizontal_scale = 0.0;
         let collapsed = params.rendering_matrix();
-        assert_eq!(collapsed.vertical_scale(), 12.0);
-        assert_eq!(collapsed.horizontal_scale(), 0.0);
+        assert_eq!((collapsed.c, collapsed.d), (0.0, 12.0));
+        assert_eq!(collapsed.smallest_scale(), 0.0);
     }
 }
