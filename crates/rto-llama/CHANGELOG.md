@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.2.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v6.1.0...rto-llama-v6.2.0) - 2026-10-31
+
+### Other
+
+- *(review)* state what the ranking produced, not what the test implies
+- *(review)* attribute each separation to the question that produced it
+- *(review)* label the margin with its measured scope, on every surface
+
 ## [6.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v6.0.2...rto-llama-v6.1.0) - 2026-09-29
 
 ### Added

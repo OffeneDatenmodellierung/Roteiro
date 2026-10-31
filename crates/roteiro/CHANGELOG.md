@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.2.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v6.1.0...roteiro-v6.2.0) - 2026-10-31
+
+### Added
+
+- *(spec)* draft through the external model provider (ADR-0027)
+- *(serve)* answer /v1 and Ask from an external model provider (ADR-0027)
+- *(screen)* detect PDF-native concealment from the content stream
+
+### Fixed
+
+- *(serve)* honour the allow-list and report provider refusals as 400 (ADR-0027)
+- *(serve)* hold the provider to its loopback and to a finished answer (ADR-0027)
+
+### Other
+
+- Merge pull request #914 from OffeneDatenmodellierung/polly/recover-margin-scope
+- Merge pull request #912 from OffeneDatenmodellierung/polly/pdf-concealment
+- *(review)* state what the ranking produced, not what the test implies
+- *(review)* attribute each separation to the question that produced it
+- *(review)* label the margin with its measured scope, on every surface
+
 ## [6.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v6.0.2...roteiro-v6.1.0) - 2026-09-29
 
 ### Fixed
