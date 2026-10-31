@@ -4693,19 +4693,52 @@ fn report_content_failures(report: &rto_graph::SyncReport) {
 /// Printed only when the graph actually holds screened PDF text: a repository
 /// with no PDFs in it is told nothing, because a standing notice nobody's work
 /// relates to is a line people learn to skip.
-fn report_pdf_screening(count: usize) {
+///
+/// The `--json` branch does not print prose, but it is not left silent either:
+/// [`sync_json`] carries the same lists under `pdf_screening`, so a machine
+/// consumer that accepts PDFs is told what was not checked, not just a count.
+fn report_pdf_screening(report: &rto_graph::SyncReport) {
+    let count = report.blobs_pdf_screened;
     if count == 0 {
         return;
     }
     eprintln!(
-        "note: {count} PDF(s) contributed screened text. A PDF `pass` covers \
-         directive text, invisible characters, and concealment by render mode, \
-         fill colour, page position and font size read from the content stream. \
-         It does NOT cover a text layer painted over by an opaque image, hidden \
-         by clipping or alpha, or disagreeing with the page in words that are \
-         not directives. A PDF `pass` therefore means less than a markdown \
-         `pass` — see docs/SCREENING.md."
+        "note: {count} PDF(s) contributed screened text. A PDF `pass` covers {}. \
+         It does NOT cover {}. A PDF `pass` therefore means less than a markdown \
+         `pass` — see {PDF_SCREENING_LIMITS}.",
+        PDF_SCREENING_COVERS.join("; "),
+        PDF_SCREENING_NOT_COVERED.join("; "),
     );
+}
+
+/// What a PDF `pass` checked, for both surfaces of [`report_pdf_screening`].
+const PDF_SCREENING_COVERS: [&str; 3] = [
+    "directive text",
+    "invisible characters",
+    "concealment by render mode, fill or stroke colour, page position and font \
+     size read from the content stream",
+];
+/// What a PDF `pass` did not check (#813's declaration).
+const PDF_SCREENING_NOT_COVERED: [&str; 3] = [
+    "a text layer painted over by an opaque image",
+    "a text layer hidden by clipping or alpha",
+    "a text layer that disagrees with the page in words that are not directives",
+];
+/// Where those limits are written down.
+const PDF_SCREENING_LIMITS: &str = "docs/SCREENING.md";
+
+/// `sync --json`: the report, plus a `pdf_screening` declaration when any PDF
+/// contributed screened text — the JSON form of [`report_pdf_screening`].
+fn sync_json(report: &rto_graph::SyncReport) -> anyhow::Result<serde_json::Value> {
+    let mut value = serde_json::to_value(report)?;
+    if report.blobs_pdf_screened > 0 {
+        value["pdf_screening"] = serde_json::json!({
+            "covers": PDF_SCREENING_COVERS,
+            "not_covered": PDF_SCREENING_NOT_COVERED,
+            "limits": PDF_SCREENING_LIMITS,
+        });
+    }
+    Ok(value)
 }
 
 /// Sync the graph for the current repository, optionally including uncommitted
@@ -4740,11 +4773,11 @@ fn run_sync(
     };
 
     if json {
-        emit_json(&report)?;
+        emit_json(&sync_json(&report)?)?;
     } else {
         report_foreign_worktree(&report);
         report_content_failures(&report);
-        report_pdf_screening(store.screened_pdf_count()?);
+        report_pdf_screening(&report);
         let tree = &report.tree[..report.tree.len().min(12)];
         let dirty = if report.blobs_dirty > 0 {
             format!(" +{} uncommitted", report.blobs_dirty)
