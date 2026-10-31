@@ -58,6 +58,9 @@ tracing-appender = "0.2"
 # `inference-local-models` only: consent-gated model download (rustls, no
 # platform TLS). Blocking + pure-Rust.
 ureq = { version = "3", optional = true }
+# Image and audio parts sent to the external model provider (ADR-0027). Already
+# in the lock through `rto-serve`, so it adds nothing to the tree.
+base64 = { version = "0.23", optional = true }
 # Restore the default SIGPIPE disposition (`SIG_DFL`) at startup so the CLI dies
 # quietly on a closed stdout pipe (`roteiro query … | head`) instead of panicking
 # with a broken-pipe backtrace — the classic Rust-CLI footgun (Rust sets SIGPIPE
@@ -140,7 +143,7 @@ yaml-rust2 = { version = "0.13.0", default-features = false }
 #     a missing one is a named error, not a fetch.
 #   * A run records `isolation=none` in its evidence either way.
 # `serve` is the one thing that stays off, for the reasons above.
-default = ["execution", "models", "exec-subprocess"]
+default = ["execution", "models", "exec-subprocess", "provider"]
 # The `AnalyzerRunner` seam, `roteiro security ingest|list`, and — since the
 # provisioning/execution split — `security prefetch|status` (ADR-0012, ADR-0014).
 # It also carries `roteiro lint`'s command surface, because that reads types from
@@ -348,6 +351,16 @@ inference-local-models = [
 # cmake/libclang between a user and the remote tier, which is one of the costs
 # this tier exists to avoid.
 #   * `rto-llama` — the `<think>` rule and `FinishReason`. No C/C++ toolchain.
+# The external model provider (ADR-0027): an `Engine` over a local
+# OpenAI-compatible server — Ollama, `llama-server`, LM Studio. **On by default**,
+# because it is how a stock install reaches a model at all once the in-process
+# engine is gone, and it is cheap: `rto-llama` *without* its `llama` feature is
+# the pure-Rust trait, `ureq` is already in the default set for `model pull`, and
+# `base64` is already in the lock through `rto-serve`. No C/C++ toolchain, and no
+# new network capability a user has not configured — a non-loopback
+# `[provider] base_url` is refused (ADR-0027 §1). It takes `models` as `remote`
+# does, because `spec draft` reaches the shared resolver either way.
+provider = ["dep:rto-llama", "dep:ureq", "dep:base64", "models"]
 remote = ["dep:rto-remote", "dep:rto-exec", "dep:ureq", "dep:rto-llama", "models"]
 # Ingest text from PDF documents during `roteiro sync` (off by default; pulls a
 # large PDF/font-parsing tree). See [`rto_graph::extract`].
@@ -376,7 +389,7 @@ audio-metadata = ["rto-graph/audio-metadata"]
 # OpenAI-compatible `/v1` endpoint over installed models (ADR-0006). Pulls
 # `rto-serve` with its llama.cpp engine; also enables the internal llama.cpp uses
 # (`infer --model`, `spec draft`) via `inference-local-models`.
-serve = ["dep:rto-serve", "rto-serve/llama", "rto-serve/tls", "inference-local-models", "dep:tokio"]
+serve = ["dep:rto-serve", "rto-serve/llama", "rto-serve/tls", "inference-local-models", "dep:tokio", "provider"]
 
 [lints]
 workspace = true

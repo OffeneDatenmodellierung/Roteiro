@@ -415,6 +415,149 @@ fn spec_draft_refuses_a_generative_pin_of_the_wrong_kind() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// A loopback stand-in for Ollama: answers every `/v1/chat/completions` with one
+/// streamed sentence, and sends each request body it receives down the channel.
+#[cfg(feature = "provider")]
+fn stub_provider() -> (String, std::sync::mpsc::Receiver<String>) {
+    use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let base = format!("http://{}/v1", listener.local_addr().expect("addr"));
+    let (sent, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("header");
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = v.trim().parse().expect("length");
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).expect("body");
+            sent.send(String::from_utf8_lossy(&body).into_owned()).ok();
+            let events = "data: {\"choices\":[{\"delta\":{\"content\":\"Drafted by the provider.\"}}]}\n\n\
+                          data: [DONE]\n\n";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\
+                 connection: close\r\n\r\n{events}",
+                events.len()
+            )
+            .ok();
+        }
+    });
+    (base, received)
+}
+
+/// With `[provider]` set, `spec draft` drafts through it — in a stock build with
+/// no llama.cpp — using the provider's own model id, which the registry has
+/// never heard of (ADR-0027).
+#[test]
+#[cfg(feature = "provider")]
+fn spec_draft_drafts_through_the_configured_provider() {
+    let (base, requests) = stub_provider();
+    let dir = fresh_repo("spec-draft-provider");
+    std::fs::write(
+        dir.join("roteiro.toml"),
+        format!("[provider]\nbase_url = \"{base}\"\n\n[models]\ngenerative = \"qwen3:8b\"\n"),
+    )
+    .expect("write project");
+
+    let out = roteiro(&dir, &["spec", "draft", "fixture"]);
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "drafts: {err}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("Drafted by the provider."),
+        "the provider's prose lands in the document: {out:?}"
+    );
+    assert!(err.contains("with qwen3:8b"), "names the model: {err}");
+
+    let first = requests.try_recv().expect("the provider was called");
+    assert!(first.contains("\"model\":\"qwen3:8b\""), "{first}");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// `[provider]` with no `[models] generative` is refused by key — there is no
+/// provider id a default could safely name.
+#[test]
+#[cfg(feature = "provider")]
+fn spec_draft_under_a_provider_needs_a_generative_model() {
+    let dir = fresh_repo("spec-draft-provider-unset");
+    std::fs::write(
+        dir.join("roteiro.toml"),
+        "[provider]\nbase_url = \"http://127.0.0.1:9/v1\"\n",
+    )
+    .expect("write project");
+
+    let out = roteiro(&dir, &["spec", "draft", "fixture"]);
+    assert!(!out.status.success(), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    // The provider's refusal, not the no-backend fallback, which names the same
+    // key for a different reason.
+    assert!(
+        err.contains("`[provider] base_url` is set but `[models] generative` is not"),
+        "names the key: {err}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Under `[provider]`, `roteiro config` reports the surfaces that moved to it
+/// (Ask and `spec draft`) as using the provider id `serve` and `spec draft`
+/// accept, rather than calling a working pin unresolved because the registry
+/// does not list it — and leaves the surfaces that have not moved on the
+/// registry (ADR-0027).
+#[test]
+#[cfg(feature = "provider")]
+fn config_reports_the_provider_id_for_the_surfaces_that_use_it() {
+    let dir = fresh_repo("config-provider");
+    std::fs::write(
+        dir.join("roteiro.toml"),
+        "[provider]\nbase_url = \"http://127.0.0.1:11434/v1\"\n\n[models]\ngenerative = \"qwen3:8b\"\n",
+    )
+    .expect("write project");
+
+    let out = roteiro(&dir, &["config"]);
+    assert!(out.status.success(), "{out:?}");
+    let text = stdout(&out);
+    for task in ["chat", "draft"] {
+        let line = resolution_line(&text, task);
+        assert!(
+            line.contains("qwen3:8b") && line.contains("provider") && !line.contains("UNRESOLVED"),
+            "{task}: {line}"
+        );
+    }
+    // `review --llm` has not moved, so the registry still cannot honour the pin.
+    assert!(
+        resolution_line(&text, "review").contains("UNRESOLVED"),
+        "{text}"
+    );
+
+    let json = roteiro(&dir, &["config", "--json"]);
+    assert!(json.status.success(), "{json:?}");
+    let cfg: serde_json::Value = serde_json::from_slice(&json.stdout).expect("json");
+    let entries = cfg["model_resolution"].as_array().expect("array");
+    for task in ["chat", "draft"] {
+        let e = entry(entries, task);
+        assert_eq!(e["model"], "qwen3:8b", "{e}");
+        assert_eq!(e["source"], "provider", "{e}");
+    }
+    assert!(
+        entry(entries, "review").get("error").is_some(),
+        "{entries:?}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// The resolution line for `task`, or a panic naming what was printed instead —
 /// an assertion against a missing line is far less useful than one that shows the
 /// table it looked in.

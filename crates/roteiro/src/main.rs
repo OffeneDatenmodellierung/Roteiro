@@ -35,6 +35,10 @@ mod pins;
 // leave is not the code that can make them leave.
 #[cfg(feature = "remote")]
 mod remote_transport;
+// The external model provider (ADR-0027): an `Engine` over a local
+// OpenAI-compatible server.
+#[cfg(feature = "provider")]
+mod provider;
 // Ask over the remote model tier: the served `Engine`, wrapped so the hosted
 // model is one more served id and `rto-serve` gains nothing (ADR-0019, Stage 34
 // part 2b). Needs `serve` as well as `remote` — without a chat endpoint there is
@@ -3280,6 +3284,49 @@ fn print_models_section(loaded: &config::Loaded) {
     print_model_resolution(loaded);
 }
 
+/// What `[provider]` makes of `task` (ADR-0027): `None` when no provider is set
+/// or `task`'s surface still uses the in-process engine, else the provider id it
+/// uses and why — or why it has none.
+///
+/// Only Ask and `spec draft` have moved to the provider; they read
+/// `[models] generative` as a provider id the registry does not list, so the
+/// registry resolution would report a working pin as unresolved.
+#[cfg(feature = "provider")]
+fn provider_resolution(
+    cfg: &config::Config,
+    task: rto_graph::ModelTask,
+) -> Option<Result<(String, String), String>> {
+    let base_url = cfg.provider.base_url.as_deref()?;
+    if !matches!(
+        task,
+        rto_graph::ModelTask::Chat | rto_graph::ModelTask::Draft
+    ) {
+        return None;
+    }
+    Some(
+        cfg.models
+            .get("generative")
+            .map(|id| {
+                (
+                    id.to_owned(),
+                    format!("served by the provider at {base_url}"),
+                )
+            })
+            .ok_or_else(|| {
+                "`[provider] base_url` is set but `[models] generative` is not".to_owned()
+            }),
+    )
+}
+
+/// Without the `provider` feature `[provider]` is read and never used.
+#[cfg(all(feature = "models", not(feature = "provider")))]
+fn provider_resolution(
+    _cfg: &config::Config,
+    _task: rto_graph::ModelTask,
+) -> Option<Result<(String, String), String>> {
+    None
+}
+
 /// The model resolution as JSON: one entry per surface, each carrying the model,
 /// the rule, the layer a pin came from, and whether the weights are on disk — or
 /// the error, for a key that cannot be honoured.
@@ -3292,27 +3339,48 @@ fn model_resolution_json(loaded: &config::Loaded) -> serde_json::Value {
     let pins = loaded.effective.models.resolve();
     let entries: Vec<serde_json::Value> = rto_graph::resolve_models(&pins)
         .into_iter()
-        .map(|(task, result)| match result {
-            Ok(choice) => serde_json::json!({
-                "task": task.as_str(),
-                "surface": task.surface(),
-                "config_key": task.config_key(),
-                "model": choice.model,
-                "source": choice.source.as_str(),
-                "layer": (choice.source == rto_graph::ModelSource::Pinned).then(|| provenance(
-                    loaded.project.models.get(task.config_key()).is_some(),
-                    loaded.user.models.get(task.config_key()).is_some(),
-                )),
-                "installed": choice.installed,
-                "why": choice.why(),
-            }),
-            Err(err) => serde_json::json!({
-                "task": task.as_str(),
-                "surface": task.surface(),
-                "config_key": task.config_key(),
-                "error": err.to_string(),
-            }),
-        })
+        .map(
+            |(task, result)| match (provider_resolution(&loaded.effective, task), result) {
+                (Some(Ok((model, why))), _) => serde_json::json!({
+                    "task": task.as_str(),
+                    "surface": task.surface(),
+                    "config_key": task.config_key(),
+                    "model": model,
+                    "source": "provider",
+                    "layer": provenance(
+                        loaded.project.models.get(task.config_key()).is_some(),
+                        loaded.user.models.get(task.config_key()).is_some(),
+                    ),
+                    "installed": null,
+                    "why": why,
+                }),
+                (Some(Err(err)), _) => serde_json::json!({
+                    "task": task.as_str(),
+                    "surface": task.surface(),
+                    "config_key": task.config_key(),
+                    "error": err,
+                }),
+                (None, Ok(choice)) => serde_json::json!({
+                    "task": task.as_str(),
+                    "surface": task.surface(),
+                    "config_key": task.config_key(),
+                    "model": choice.model,
+                    "source": choice.source.as_str(),
+                    "layer": (choice.source == rto_graph::ModelSource::Pinned).then(|| provenance(
+                        loaded.project.models.get(task.config_key()).is_some(),
+                        loaded.user.models.get(task.config_key()).is_some(),
+                    )),
+                    "installed": choice.installed,
+                    "why": choice.why(),
+                }),
+                (None, Err(err)) => serde_json::json!({
+                    "task": task.as_str(),
+                    "surface": task.surface(),
+                    "config_key": task.config_key(),
+                    "error": err.to_string(),
+                }),
+            },
+        )
         .collect();
     serde_json::Value::Array(entries)
 }
@@ -3345,6 +3413,29 @@ fn print_model_resolution(loaded: &config::Loaded) {
     println!("  resolution — the model each surface uses, and the rule that chose it:");
     for (task, result) in rto_graph::resolve_models(&pins) {
         let key = task.config_key();
+        match provider_resolution(&loaded.effective, task) {
+            Some(Ok((model, why))) => {
+                println!(
+                    "    {:<12}{:<30}{model:<34}  ({why}, pinned in {} config)",
+                    task.as_str(),
+                    task.surface(),
+                    provenance(
+                        loaded.project.models.get(key).is_some(),
+                        loaded.user.models.get(key).is_some(),
+                    ),
+                );
+                continue;
+            }
+            Some(Err(err)) => {
+                println!(
+                    "    {:<12}{:<30}UNRESOLVED — {err}",
+                    task.as_str(),
+                    task.surface()
+                );
+                continue;
+            }
+            None => {}
+        }
         match result {
             Ok(choice) => {
                 // Where a pin came from, on the same `project`/`user` terms as
@@ -9891,7 +9982,8 @@ fn run_spec_scaffold(
 #[cfg(any(
     feature = "serve",
     feature = "inference-local-models",
-    feature = "remote"
+    feature = "remote",
+    feature = "provider"
 ))]
 fn run_spec_draft(
     cfg: &config::Loaded,
@@ -9918,6 +10010,26 @@ fn run_spec_draft(
         });
     #[cfg(not(feature = "remote"))]
     let tier = rto_graph::RemoteTier::Unavailable;
+
+    // An external provider names its models by its own ids, which the registry
+    // does not list, so the resolver below has nothing to resolve them against
+    // (ADR-0027). A granted remote tier still wins: the run asked for it.
+    #[cfg(feature = "provider")]
+    if let Some(base_url) = cfg.effective.provider.base_url.as_deref() {
+        #[cfg(feature = "remote")]
+        if let Some(grant) = grant {
+            return spec_draft_remote(&grant, topic, &scaffold, &label, &ctx, out);
+        }
+        return spec_draft_provider(
+            &cfg.effective,
+            base_url,
+            topic,
+            &scaffold,
+            &label,
+            &ctx,
+            out,
+        );
+    }
 
     // Model pick, via the one resolver (Stage 33): the remote tier if this run
     // granted it, else `[models] generative` if it pins one, else the low-tier
@@ -9990,11 +10102,52 @@ fn spec_draft_local(
              release build (`cargo build --release`) for usable speed."
         );
     }
-    let drafts = draft_sections(model, scaffold, topic, ctx)?;
+    let engine = rto_llama::llama::LlamaEngine::new(
+        vec![rto_llama::llama::Served {
+            name: model.to_owned(),
+            path: rto_graph::model_dir(model).join("model.gguf"),
+            mmproj: None,
+        }],
+        0,
+    )
+    .map_err(|e| anyhow::anyhow!("starting llama.cpp: {e}"))?;
+    let drafts = draft_sections(&engine, model, scaffold, topic, ctx)?;
     eprintln!(
         "drafted {} section(s) with {} (via {GEN_BACKEND})",
         drafts.len(),
         model
+    );
+    let md = rto_spec::apply_drafts(scaffold, &drafts);
+    emit_artifact(&md, &format!("{label} draft"), out)
+}
+
+/// Draft through the external provider (ADR-0027) with `[models] generative`,
+/// which names one of the provider's models.
+///
+/// There is no default model here, unlike the in-process path: a provider id
+/// that happens to exist on one machine names nothing on the next, so an unset
+/// key is an error naming it rather than a guess.
+#[cfg(feature = "provider")]
+fn spec_draft_provider(
+    cfg: &config::Config,
+    base_url: &str,
+    topic: &str,
+    scaffold: &str,
+    label: &str,
+    ctx: &rto_spec::SpecContext,
+    out: Option<&str>,
+) -> anyhow::Result<()> {
+    let Some(model) = cfg.models.get("generative") else {
+        anyhow::bail!(
+            "`[provider] base_url` is set but `[models] generative` is not — set it to a \
+             model your provider has (for example `qwen3:8b`); see docs/MODEL_SETUP.md"
+        );
+    };
+    let engine = provider::ProviderEngine::new(base_url, vec![model.to_owned()])?;
+    let drafts = draft_sections(&engine, model, scaffold, topic, ctx)?;
+    eprintln!(
+        "drafted {} section(s) with {model} (via {base_url})",
+        drafts.len()
     );
     let md = rto_spec::apply_drafts(scaffold, &drafts);
     emit_artifact(&md, &format!("{label} draft"), out)
@@ -10009,7 +10162,7 @@ fn spec_draft_local(
 /// `spec scaffold` is the command for that, and quietly substituting it here
 /// would answer a question nobody asked.
 #[cfg(all(
-    feature = "remote",
+    any(feature = "remote", feature = "provider"),
     not(any(feature = "serve", feature = "inference-local-models"))
 ))]
 fn spec_draft_local(
@@ -10021,10 +10174,9 @@ fn spec_draft_local(
     _out: Option<&str>,
 ) -> anyhow::Result<()> {
     anyhow::bail!(
-        "this build has the remote model tier but no local generation backend, and this run \
-         did not grant the tier — so there is nothing to draft with. Pass `--allow-remote` \
-         (your `~/.roteiro/config.toml` must grant it too — see `roteiro remote status`), or \
-         rebuild with `--features inference-local-models`. (`spec scaffold` works with no \
+        "no model to draft with: set `[provider] base_url` to a local model server such as \
+         Ollama and `[models] generative` to one of its models (see docs/MODEL_SETUP.md), or \
+         pass `--allow-remote` for the consented hosted tier. (`spec scaffold` works with no \
          model at all.)"
     )
 }
@@ -10191,31 +10343,28 @@ fn remote_context_nodes(ctx: &rto_spec::SpecContext) -> anyhow::Result<Vec<rto_g
 const GEN_BACKEND: &str = "llama.cpp";
 
 /// Max tokens generated per drafted section.
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+#[cfg(any(
+    feature = "serve",
+    feature = "inference-local-models",
+    feature = "provider"
+))]
 const DRAFT_MAX_TOKENS: u32 = 800;
 
-/// Draft each unfilled section of `scaffold` with the local generative model
-/// through the shared **llama.cpp** engine (`rto-llama`, ADR-0003 v1.2) — no
-/// candle. Available under either `serve` or `inference-local-models`.
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+/// Draft each unfilled section of `scaffold` with `model` on `engine` — the
+/// in-process llama.cpp engine or the external provider (ADR-0027), which answer
+/// the same request and are held to the same `<think>` rule.
+#[cfg(any(
+    feature = "serve",
+    feature = "inference-local-models",
+    feature = "provider"
+))]
 fn draft_sections(
+    engine: &dyn rto_llama::Engine,
     model: &str,
     scaffold: &str,
     topic: &str,
     ctx: &rto_spec::SpecContext,
 ) -> anyhow::Result<Vec<(String, String)>> {
-    use rto_llama::Engine as _; // brings `.chat` into scope
-
-    let engine = rto_llama::llama::LlamaEngine::new(
-        vec![rto_llama::llama::Served {
-            name: model.to_owned(),
-            path: rto_graph::model_dir(model).join("model.gguf"),
-            mmproj: None,
-        }],
-        0,
-    )
-    .map_err(|e| anyhow::anyhow!("starting llama.cpp: {e}"))?;
-
     let mut drafts = Vec::new();
     for (heading, hint) in rto_spec::draft_targets(scaffold) {
         let prompt = rto_spec::draft_prompt(topic, ctx, &heading, &hint);
@@ -10272,7 +10421,8 @@ fn draft_sections(
 #[cfg(any(
     feature = "serve",
     feature = "inference-local-models",
-    feature = "remote"
+    feature = "remote",
+    feature = "provider"
 ))]
 fn unanswered_draft(
     heading: &str,
@@ -10307,7 +10457,8 @@ fn unanswered_draft(
 #[cfg(not(any(
     feature = "serve",
     feature = "inference-local-models",
-    feature = "remote"
+    feature = "remote",
+    feature = "provider"
 )))]
 fn run_spec_draft(
     _cfg: &config::Loaded,
@@ -10318,9 +10469,9 @@ fn run_spec_draft(
     _out: Option<&str>,
 ) -> anyhow::Result<()> {
     anyhow::bail!(
-        "`spec draft` needs a generation backend: build with `--features serve` \
-         or `--features inference-local-models` (both llama.cpp), then \
-         `roteiro model pull qwen3-0.6b` — or `--features remote` for the \
+        "`spec draft` needs a generation backend: build with `--features provider` \
+         (the default) and point `[provider] base_url` at a local model server \
+         (docs/MODEL_SETUP.md) — or `--features remote` for the \
          explicitly-consented hosted tier (ADR-0019), which needs no local model \
          and sends only what `roteiro remote dry-run` shows. \
          (`spec scaffold` works with no model at all.)"
@@ -17421,7 +17572,7 @@ fn run_serve_network(
     // actually installed — otherwise fall through to the llama-free UI below.
     #[cfg(feature = "serve")]
     {
-        if !served_models(cfg).is_empty() {
+        if cfg.provider.base_url.is_some() || !served_models(cfg).is_empty() {
             return serve_models_endpoint(cfg, set, flat, workspace_name, opts);
         }
     }
@@ -18941,6 +19092,26 @@ fn serve_mcp(
     )
 }
 
+/// The provider model ids `serve` offers under `[provider]` (ADR-0027): the
+/// `[models]` keys `/v1` can use, generative first because the Ask panel sends
+/// `models[0]`, with duplicates dropped. `audio` and `ocr` are ingestion models,
+/// not endpoints, exactly as in [`served_models`]. Narrowed by the
+/// `[serve] models` allow-list if set, as [`served_models`] is.
+#[cfg(feature = "serve")]
+fn provider_model_ids(cfg: &config::Config) -> Vec<String> {
+    let wanted = cfg.serve.models.as_deref();
+    let mut ids: Vec<String> = Vec::new();
+    for key in ["generative", "vision", "embedding"] {
+        if let Some(id) = cfg.models.get(key)
+            && wanted.is_none_or(|w| w.iter().any(|n| n == id))
+            && !ids.iter().any(|seen| seen == id)
+        {
+            ids.push(id.to_owned());
+        }
+    }
+    ids
+}
+
 /// Serve installed generative models over the loopback, OpenAI-compatible `/v1`
 /// endpoint (ADR-0006). Serves only installed models; never downloads.
 /// Collect the installed GGUF models eligible to serve over `/v1` (ADR-0006):
@@ -19026,9 +19197,20 @@ fn chat_capable_model_ids(
     // registry does not know is kept, exactly as before — `served_ids` is the
     // engine's set of registry names, so that case is unreachable, and dropping
     // an unrecognised id would be a silent narrowing of the Ask pool.
+    // Under `[provider]` the ids are not registry names, so the registry cannot
+    // say which one embeds or which one generates — a provider id that happens to
+    // spell a registry name says nothing about the model behind it. The
+    // `[models]` keys say instead (ADR-0027).
+    let provider = cfg.provider.base_url.is_some();
+    let provider_embedding = cfg
+        .provider
+        .base_url
+        .as_ref()
+        .and(cfg.models.get("embedding"));
     let mut ids: Vec<String> = served_ids
         .iter()
-        .filter(|id| find_model(id).is_none_or(|s| ModelTask::Chat.capable(s.kind)))
+        .filter(|id| provider || find_model(id).is_none_or(|s| ModelTask::Chat.capable(s.kind)))
+        .filter(|id| provider_embedding != Some(id.as_str()))
         .cloned()
         .collect();
     // The granted tier leads, and nothing below reorders past it.
@@ -19036,6 +19218,10 @@ fn chat_capable_model_ids(
         && let Some(pos) = ids.iter().position(|id| id == remote)
     {
         ids[..=pos].rotate_right(1);
+        return ids;
+    }
+    // `provider_model_ids` already put `[models] generative` first.
+    if provider {
         return ids;
     }
     // Pick the default and rotate it to the front, preserving the order of the
@@ -19085,6 +19271,48 @@ mod chat_model_selection {
         let served = ids(&["bge-small-en-v1.5-gguf", "qwen3-0.6b", "qwen3-8b"]);
         let out = chat_capable_model_ids(&cfg, &served, None);
         assert_eq!(out, ids(&["qwen3-8b", "qwen3-0.6b"]));
+    }
+
+    #[test]
+    fn a_provider_offers_its_generative_first_and_never_its_embedding_model() {
+        // Provider ids are not registry names, so only `[models]` says which one
+        // embeds (ADR-0027).
+        let mut cfg = config::Config::default();
+        cfg.provider.base_url = Some("http://127.0.0.1:11434/v1".to_owned());
+        cfg.models.generative = Some("qwen3:8b".to_owned());
+        cfg.models.vision = Some("qwen2.5vl:3b".to_owned());
+        cfg.models.embedding = Some("bge-m3".to_owned());
+        let served = super::provider_model_ids(&cfg);
+        assert_eq!(served, ids(&["qwen3:8b", "qwen2.5vl:3b", "bge-m3"]));
+        let out = chat_capable_model_ids(&cfg, &served, None);
+        assert_eq!(out, ids(&["qwen3:8b", "qwen2.5vl:3b"]));
+
+        // Provider ids that spell registry names are still provider ids: a
+        // vision tag matching a registry *generative* does not take the default
+        // slot, and a generative tag matching a registry *embedding* is not
+        // dropped.
+        cfg.models.generative = Some("my-chat".to_owned());
+        cfg.models.vision = Some("qwen3-0.6b".to_owned());
+        let served = super::provider_model_ids(&cfg);
+        let out = chat_capable_model_ids(&cfg, &served, None);
+        assert_eq!(out, ids(&["my-chat", "qwen3-0.6b"]));
+        cfg.models.generative = Some("bge-small-en-v1.5-gguf".to_owned());
+        let served = super::provider_model_ids(&cfg);
+        let out = chat_capable_model_ids(&cfg, &served, None);
+        assert_eq!(out, ids(&["bge-small-en-v1.5-gguf", "qwen3-0.6b"]));
+    }
+
+    #[test]
+    fn a_provider_honours_the_serve_allow_list() {
+        // `[serve] models` narrows the provider's ids exactly as it narrows the
+        // registry's, so an allow-list of one does not expose vision/embedding.
+        let mut cfg = config::Config::default();
+        cfg.provider.base_url = Some("http://127.0.0.1:11434/v1".to_owned());
+        cfg.models.generative = Some("qwen3:8b".to_owned());
+        cfg.models.vision = Some("qwen2.5vl:3b".to_owned());
+        cfg.models.embedding = Some("bge-m3".to_owned());
+        cfg.serve.models = Some(ids(&["qwen3:8b"]));
+        assert_eq!(super::provider_model_ids(&cfg), ids(&["qwen3:8b"]));
     }
 
     #[test]
@@ -19170,6 +19398,70 @@ fn serve_remote_tier(_opts: &ServeOptions) -> rto_graph::RemoteTier {
     rto_graph::RemoteTier::Unavailable
 }
 
+/// The engine `serve` answers with, and the served names it logs: the external
+/// provider when `[provider] base_url` is set (ADR-0027), else the in-process
+/// llama.cpp engine over `served`.
+#[cfg(feature = "serve")]
+fn serve_engine(
+    cfg: &config::Config,
+    provider: Option<&str>,
+    served: Vec<rto_serve::llama::Served>,
+) -> anyhow::Result<(std::sync::Arc<dyn rto_serve::Engine>, String)> {
+    Ok(if let Some(base_url) = provider {
+        let ids = provider_model_ids(cfg);
+        if ids.is_empty() {
+            anyhow::bail!(
+                "`[provider] base_url` is set but no `[models]` key names a model to \
+                 serve (or `[serve] models` allows none of them) — set \
+                 `[models] generative` to a model id your provider has \
+                 (for example `qwen3:8b`); see docs/MODEL_SETUP.md"
+            );
+        }
+        let names = ids.join(", ");
+        (
+            std::sync::Arc::new(provider::ProviderEngine::new(base_url, ids)?),
+            names,
+        )
+    } else {
+        let names = served
+            .iter()
+            .map(|s| s.name.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
+        // Keep models resident up to the configured budget (MiB → bytes), loading on
+        // demand and unloading the least-recently-used past it (ADR-0006). Unset ⇒ 0
+        // ⇒ a single resident model.
+        let budget_bytes = cfg
+            .serve
+            .memory_budget_mb
+            .unwrap_or(0)
+            .saturating_mul(1024 * 1024);
+        // The ceiling a request's context may grow to, not the window every request
+        // gets (issue #486). This argument was the literal `0` — which fell through
+        // to a hardcoded 4,096 that no configuration key could reach, on every model
+        // from one trained at 262,144 tokens to one trained at 512. Unset ⇒ 0 ⇒ each
+        // model's own trained window; a value bounds every served model at once.
+        let max_context_tokens = cfg.serve.max_context_tokens.unwrap_or(0);
+        let engine = rto_serve::llama::LlamaEngine::new_with_budget(
+            served,
+            max_context_tokens,
+            budget_bytes,
+        )
+        .map(|e| {
+            // `[serve] prefix_cache_mb` reaches the engine here and nowhere
+            // else. `0` — the default — leaves the cache inert, so a server
+            // whose operator has not asked for it behaves exactly as before.
+            e.with_prefix_cache_bytes(
+                usize::try_from(cfg.serve.prefix_cache_mb.unwrap_or(0))
+                    .unwrap_or(usize::MAX)
+                    .saturating_mul(1024 * 1024),
+            )
+        })
+        .map_err(|e| anyhow::anyhow!("starting llama.cpp: {e}"))?;
+        (std::sync::Arc::new(engine), names)
+    })
+}
+
 #[cfg(feature = "serve")]
 fn serve_models_endpoint(
     cfg: &config::Config,
@@ -19194,14 +19486,25 @@ fn serve_models_endpoint(
     // directions: a broken pin still fails here even on a server that will answer
     // remotely, because a broken configuration is broken whether or not this
     // process reads it (`resolve_with_remote`).
-    rto_graph::resolve_model_with_remote(
-        rto_graph::ModelTask::Chat,
-        &cfg.models.resolve(),
-        serve_remote_tier(opts),
-    )?;
+    //
+    // With an external provider (ADR-0027) `[models]` names the provider's ids,
+    // which the registry does not list, so there is nothing to resolve them
+    // against; an unknown id is the provider's 404 instead.
+    let provider = cfg.provider.base_url.as_deref();
+    if provider.is_none() {
+        rto_graph::resolve_model_with_remote(
+            rto_graph::ModelTask::Chat,
+            &cfg.models.resolve(),
+            serve_remote_tier(opts),
+        )?;
+    }
 
-    let served = served_models(cfg);
-    if served.is_empty() {
+    let served = if provider.is_some() {
+        Vec::new()
+    } else {
+        served_models(cfg)
+    };
+    if provider.is_none() && served.is_empty() {
         anyhow::bail!(
             "no installed GGUF models to serve — pull one first \
              (`roteiro model pull qwen3-0.6b` for chat, \
@@ -19225,39 +19528,7 @@ fn serve_models_endpoint(
         );
     }
 
-    let names = served
-        .iter()
-        .map(|s| s.name.clone())
-        .collect::<Vec<_>>()
-        .join(", ");
-    // Keep models resident up to the configured budget (MiB → bytes), loading on
-    // demand and unloading the least-recently-used past it (ADR-0006). Unset ⇒ 0
-    // ⇒ a single resident model.
-    let budget_bytes = cfg
-        .serve
-        .memory_budget_mb
-        .unwrap_or(0)
-        .saturating_mul(1024 * 1024);
-    // The ceiling a request's context may grow to, not the window every request
-    // gets (issue #486). This argument was the literal `0` — which fell through
-    // to a hardcoded 4,096 that no configuration key could reach, on every model
-    // from one trained at 262,144 tokens to one trained at 512. Unset ⇒ 0 ⇒ each
-    // model's own trained window; a value bounds every served model at once.
-    let max_context_tokens = cfg.serve.max_context_tokens.unwrap_or(0);
-    let engine =
-        rto_serve::llama::LlamaEngine::new_with_budget(served, max_context_tokens, budget_bytes)
-            .map(|e| {
-                // `[serve] prefix_cache_mb` reaches the engine here and nowhere
-                // else. `0` — the default — leaves the cache inert, so a server
-                // whose operator has not asked for it behaves exactly as before.
-                e.with_prefix_cache_bytes(
-                    usize::try_from(cfg.serve.prefix_cache_mb.unwrap_or(0))
-                        .unwrap_or(usize::MAX)
-                        .saturating_mul(1024 * 1024),
-                )
-            })
-            .map_err(|e| anyhow::anyhow!("starting llama.cpp: {e}"))?;
-    let engine: std::sync::Arc<dyn rto_serve::Engine> = std::sync::Arc::new(engine);
+    let (engine, names) = serve_engine(cfg, provider, served)?;
     // With the tier granted for this process, the hosted model joins the served
     // set as one more id — `rto-serve` is not modified, and the socket stays in
     // `remote_transport`. See `remote_engine` for the reduction that keeps the
