@@ -132,13 +132,28 @@ struct Page {
     /// question — whether `sc`/`scn`'s bare numbers can be read as device
     /// components. Through `/CS0` they can; through `/CS1` they cannot, and
     /// `1 scn` there is full ink rather than white.
-    colour_spaces: bool,
+    colour_spaces: ColourSpaces,
     /// A greyscale image `XObject` painted by the content stream, as
     /// `(width, height, samples)`. `None` leaves `/XObject` out of
     /// `/Resources`
     /// entirely, so a fixture without an image is not merely one that never
     /// draws it.
     image: Option<(usize, usize, Vec<u8>)>,
+}
+
+/// Which `/Resources /ColorSpace` a page declares; see [`Page::colour_spaces`].
+#[derive(Clone, Copy, Default, PartialEq)]
+enum ColourSpaces {
+    #[default]
+    None,
+    /// `/CS0` → `/DeviceRGB` and `/CS1` → `/Separation`, written inline.
+    Inline,
+    /// `/CS0` → `[/DeviceRGB]` with **both** the dictionary and that definition
+    /// as indirect objects (§7.3.10) — the two levels a reader must resolve.
+    Indirect,
+    /// `/RGB` → `/Separation`. `RGB` abbreviates `DeviceRGB` only inside an
+    /// inline image's dictionary, so as a resource name it is just a name.
+    MisleadingName,
 }
 
 /// Every fixture: the seven concealment pairs #813's table names, then the
@@ -148,6 +163,7 @@ fn fixtures() -> Vec<Fixture> {
     out.extend(geometry_fixtures());
     out.extend(image_fixtures());
     out.extend(colour_fixtures());
+    out.extend(colour_space_fixtures());
     out.extend(negative_fixtures());
     out
 }
@@ -508,11 +524,54 @@ fn colour_fixtures() -> Vec<Fixture> {
     out.extend(pair(
         "23-aliased-device-space",
         Page {
-            colour_spaces: true,
+            colour_spaces: ColourSpaces::Inline,
             content: format!(
                 "{}{}",
                 text_op(&[], 72, 700, 12, VISIBLE),
                 text_op(&["/CS0 cs", "1 1 1 scn"], 72, 660, 12, PAYLOAD),
+            ),
+            ..Page::default()
+        },
+        text_op(&[], 72, 700, 12, VISIBLE),
+    ));
+
+    out
+}
+
+/// `23` again through the two other routes to a device space a reader must
+/// follow: indirect references, and the space `rg` re-selects.
+fn colour_space_fixtures() -> Vec<Fixture> {
+    let mut out: Vec<Fixture> = Vec::new();
+
+    // 25 — `23` with the `/ColorSpace` dictionary **and** its `/CS0` entry as
+    // indirect references, both legal (§7.3.10). An unresolved reference at
+    // either level reads as an unknown space and suppresses the colour check.
+    out.extend(pair(
+        "25-indirect-device-space",
+        Page {
+            colour_spaces: ColourSpaces::Indirect,
+            content: format!(
+                "{}{}",
+                text_op(&[], 72, 700, 12, VISIBLE),
+                text_op(&["/CS0 cs", "1 1 1 scn"], 72, 660, 12, PAYLOAD),
+            ),
+            ..Page::default()
+        },
+        text_op(&[], 72, 700, 12, VISIBLE),
+    ));
+
+    // 27 — `rg` selects `/DeviceRGB` as well as a colour (§8.6.8), so after a
+    // `/Separation` was selected, `0 0 0 rg` makes the next `scn` a device
+    // colour again — here white on white. Keeping the `/Separation` would leave
+    // the space unknown and suppress the check.
+    out.extend(pair(
+        "27-device-colour-after-separation",
+        Page {
+            colour_spaces: ColourSpaces::Inline,
+            content: format!(
+                "{}{}",
+                text_op(&[], 72, 700, 12, VISIBLE),
+                text_op(&["/CS1 cs", "0 0 0 rg", "1 1 1 scn"], 72, 660, 12, PAYLOAD),
             ),
             ..Page::default()
         },
@@ -623,11 +682,29 @@ fn negative_fixtures() -> Vec<Fixture> {
     out.push(Fixture {
         name: "24-separation-spot-colour.pdf",
         page: Page {
-            colour_spaces: true,
+            colour_spaces: ColourSpaces::Inline,
             content: format!(
                 "{}{}",
                 text_op(&[], 72, 700, 12, VISIBLE),
                 text_op(&["/CS1 cs", "1 scn"], 72, 660, 12, VISIBLE),
+            ),
+            ..Page::default()
+        },
+        control_of: None,
+    });
+
+    // 26 — `24` with the spot colour under a resource **named** `/RGB`. That is
+    // an ordinary resource name; `RGB` means `DeviceRGB` only in an inline
+    // image's dictionary. Read as the device space, `1 scn` would be white and
+    // this visible text a white-on-white report.
+    out.push(Fixture {
+        name: "26-separation-named-rgb.pdf",
+        page: Page {
+            colour_spaces: ColourSpaces::MisleadingName,
+            content: format!(
+                "{}{}",
+                text_op(&[], 72, 700, 12, VISIBLE),
+                text_op(&["/RGB cs", "1 scn"], 72, 660, 12, VISIBLE),
             ),
             ..Page::default()
         },
@@ -769,15 +846,10 @@ fn render(page: &Page) -> Vec<u8> {
     } else {
         ""
     };
-    // Both entries are written inline. A `/Separation` array may carry its tint
-    // transform as a direct dictionary when the function is type 2, so neither
-    // needs an indirect object and the image's object number stays 6.
-    let colour_spaces = if page.colour_spaces {
-        " /ColorSpace << /CS0 /DeviceRGB /CS1 [/Separation /Spot /DeviceCMYK \
-         << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [0 0 0 1] /N 1 >>] >>"
-    } else {
-        ""
-    };
+    // Only `Indirect` needs extra objects; they go after the image so its
+    // object number stays 6.
+    let first_extra = 6 + usize::from(page.image.is_some());
+    let colour_spaces = colour_space_resource(page.colour_spaces, first_extra);
 
     let mut objects: Vec<Vec<u8>> = vec![
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
@@ -803,6 +875,10 @@ fn render(page: &Page) -> Vec<u8> {
             &[("{w}", *w), ("{h}", *h)],
         ));
     }
+    if page.colour_spaces == ColourSpaces::Indirect {
+        objects.push(format!("<< /CS0 {} 0 R >>", first_extra + 1).into_bytes());
+        objects.push(b"[/DeviceRGB]".to_vec());
+    }
 
     let mut out = b"%PDF-1.4\n".to_vec();
     let mut offsets = Vec::with_capacity(objects.len());
@@ -827,6 +903,22 @@ fn render(page: &Page) -> Vec<u8> {
         .as_bytes(),
     );
     out
+}
+
+/// A `/Separation` spot colour. Its tint transform may be a direct dictionary
+/// when the function is type 2, so it needs no indirect object.
+const SEPARATION: &str = "[/Separation /Spot /DeviceCMYK \
+     << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [0 0 0 1] /N 1 >>]";
+
+/// The page's `/ColorSpace` resource entry; `Indirect` refers to object
+/// `first_extra`, which [`render`] appends.
+fn colour_space_resource(spaces: ColourSpaces, first_extra: usize) -> String {
+    match spaces {
+        ColourSpaces::None => String::new(),
+        ColourSpaces::Inline => format!(" /ColorSpace << /CS0 /DeviceRGB /CS1 {SEPARATION} >>"),
+        ColourSpaces::Indirect => format!(" /ColorSpace {first_extra} 0 R"),
+        ColourSpaces::MisleadingName => format!(" /ColorSpace << /RGB {SEPARATION} >>"),
+    }
 }
 
 /// A stream object: `dict` with `{len}` (and any extra placeholders) filled in,

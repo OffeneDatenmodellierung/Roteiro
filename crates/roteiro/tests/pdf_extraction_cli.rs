@@ -20,6 +20,9 @@
 //! honest choice, and it keeps a fourth copy of a PDF builder out of the tree.
 #![cfg(feature = "pdf-text")]
 
+mod common;
+
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -145,10 +148,25 @@ fn sync_is_silent_when_every_document_extracted() {
 /// artefact costs one path and keeps `rto-graph/tests/pdf_fixtures.rs` the
 /// workspace's only PDF writer. If it is ever renamed this fails loudly with the
 /// path, which is the outcome worth having.
-fn clean_pdf() -> Vec<u8> {
+///
+/// `None` only in a packaged crate, which carries no sibling crates: there the
+/// skip is said on stderr. In a checkout a missing fixture still panics.
+fn clean_pdf() -> Option<Vec<u8>> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../rto-graph/tests/fixtures/pdf/01-clean-control.pdf");
-    std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    match std::fs::read(&path) {
+        Ok(bytes) => Some(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && !common::is_repository_checkout() => {
+            // libtest discards a passing test's captured output; write past it.
+            let _ = writeln!(
+                std::io::stderr(),
+                "SKIPPED: {} is absent and this is a packaged crate, not a checkout",
+                path.display()
+            );
+            None
+        }
+        Err(e) => panic!("read {}: {e}", path.display()),
+    }
 }
 
 /// **What a PDF `pass` does not cover reaches `--json`, not only the terminal.**
@@ -169,7 +187,8 @@ fn clean_pdf() -> Vec<u8> {
 fn sync_json_carries_the_pdf_screening_declaration() {
     let dir = fresh_dir("screened-json");
     git(&dir, &["init", "-q"]);
-    std::fs::write(dir.join("paper.pdf"), clean_pdf()).expect("write pdf");
+    let Some(pdf) = clean_pdf() else { return };
+    std::fs::write(dir.join("paper.pdf"), pdf).expect("write pdf");
     std::fs::write(dir.join("notes.md"), "# Notes\n\nbody\n").expect("write md");
     git(&dir, &["add", "."]);
     git(&dir, &["commit", "-q", "-m", "corpus"]);
@@ -181,6 +200,19 @@ fn sync_json_carries_the_pdf_screening_declaration() {
     assert_eq!(
         report["blobs_pdf_screened"], 1,
         "--json must say a PDF contributed screened text; got {report}",
+    );
+    // A count alone does not say what went unchecked (#813): the declaration
+    // itself must be serialised, with the mechanisms and where they are written.
+    let declared = &report["pdf_screening"];
+    assert_eq!(declared["limits"], "docs/SCREENING.md", "got {report}");
+    let not_covered = declared["not_covered"]
+        .as_array()
+        .unwrap_or_else(|| panic!("pdf_screening.not_covered must be a list; got {report}"));
+    assert!(
+        not_covered
+            .iter()
+            .any(|m| m.as_str().is_some_and(|m| m.contains("opaque image"))),
+        "the opaque-image limit must be declared; got {report}",
     );
 
     // The human surface still says it too, in prose — the two halves are one

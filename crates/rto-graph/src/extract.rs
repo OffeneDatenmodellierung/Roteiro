@@ -148,7 +148,15 @@ pub(crate) const EXTRACT_VERSION: u32 = EXTRACT_BASE_VERSION
 /// no narrower key to move. Over-invalidating a default build's PDF-free cache
 /// costs a re-extraction; under-invalidating a `pdf-text` build's costs the
 /// defect.
-pub(crate) const EXTRACT_BASE_VERSION: u32 = 16;
+///
+/// **16 → 17** (#930, the #912 review): the content-stream reader now models
+/// the graphics state PDF 32000-1 §9.3 defines — `q`/`Q` save the text state,
+/// `Ts`/`Tz` move and squash glyphs, stroke-only modes ink with the stroking
+/// colour, `rg`/`g`/`k` re-select a device space, and colour spaces resolve
+/// through indirect references. PDFs that 16 passed can now block, and some it
+/// flagged (outlined headings, spot colours) now pass, so `meta.screen` and
+/// `meta.content` change on unchanged bytes — the 13 → 14 reason again.
+pub(crate) const EXTRACT_BASE_VERSION: u32 = 17;
 
 /// The stride between feature namespaces above. Each of the three
 /// extraction-affecting features occupies a distinct power-of-ten *bit* slot

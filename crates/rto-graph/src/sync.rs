@@ -95,8 +95,10 @@ pub struct SyncReport {
     /// implies a check it did not perform.
     ///
     /// This field is what lets that declaration reach a `--json` consumer as
-    /// well as a human one; `roteiro sync` prints the prose form when it is
-    /// non-zero. Zero means no PDF contributed text, and nothing needs saying.
+    /// well as a human one: when it is non-zero `roteiro sync` prints the prose
+    /// form, and `sync --json` adds a `pdf_screening` object listing what was
+    /// and was not checked. Zero means no PDF contributed text, and nothing
+    /// needs saying.
     ///
     /// Derived from the assembled graph via [`Store::screened_pdf_count`], for
     /// the reason [`Self::blobs_content_failed`] above records.

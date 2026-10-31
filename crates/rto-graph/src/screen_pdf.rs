@@ -324,9 +324,9 @@ fn scan_page(doc: &Document, page_id: ObjectId, out: &mut Vec<Concealed>, budget
             }
             // These three set the space *and* the colour in one operator, so
             // they also re-establish that the next `sc`/`scn` is readable.
-            "g" | "G" => set_colour(&mut gs, op.operator.as_str(), gray(operands)),
-            "rg" | "RG" => set_colour(&mut gs, op.operator.as_str(), rgb(operands)),
-            "k" | "K" => set_colour(&mut gs, op.operator.as_str(), cmyk(operands)),
+            "g" | "G" => set_device_colour(&mut gs, op.operator.as_str(), gray(operands)),
+            "rg" | "RG" => set_device_colour(&mut gs, op.operator.as_str(), rgb(operands)),
+            "k" | "K" => set_device_colour(&mut gs, op.operator.as_str(), cmyk(operands)),
             "cs" | "CS" => {
                 let space = colour_space(operands, &spaces);
                 if op.operator == "cs" {
@@ -671,11 +671,13 @@ fn colour_space(operands: &[Object], spaces: &BTreeMap<Vec<u8>, ColourSpace>) ->
 }
 
 /// The three spaces whose components `components` can read.
+///
+/// Full names only: `G`, `RGB` and `CMYK` abbreviate device spaces in an
+/// inline image's dictionary (Table 91), not as `cs` operands or resource
+/// definitions. Read as device names there, a resource *called* `/RGB` that
+/// is a `/Separation` would turn `1 scn` spot ink into "white".
 fn is_device_space(name: &[u8]) -> bool {
-    matches!(
-        name,
-        b"DeviceGray" | b"DeviceRGB" | b"DeviceCMYK" | b"G" | b"RGB" | b"CMYK"
-    )
+    matches!(name, b"DeviceGray" | b"DeviceRGB" | b"DeviceCMYK")
 }
 
 /// The page's `/Resources /ColorSpace` entries, classified.
@@ -687,7 +689,13 @@ fn page_colour_spaces(doc: &Document, page_id: ObjectId) -> BTreeMap<Vec<u8>, Co
     let Ok((Some(resources), _)) = doc.get_page_resources(page_id) else {
         return BTreeMap::new();
     };
-    let Ok(declared) = resources.get(b"ColorSpace").and_then(Object::as_dict) else {
+    // Either level may be an indirect reference (§7.3.10), and an unresolved
+    // one would read as `Other` and suppress the colour check on it.
+    let deref = |object| doc.dereference(object).map_or(object, |(_, o)| o);
+    let Ok(declared) = resources
+        .get(b"ColorSpace")
+        .and_then(|o| deref(o).as_dict())
+    else {
         return BTreeMap::new();
     };
     declared
@@ -697,9 +705,9 @@ fn page_colour_spaces(doc: &Document, page_id: ObjectId) -> BTreeMap<Vec<u8>, Co
             // array; anything longer is a parameterised space (`Separation`,
             // `Indexed`, `ICCBased`, `Lab`) whose components are not device
             // components.
-            let resolved = match object {
+            let resolved = match deref(object) {
                 Object::Name(n) if is_device_space(n) => ColourSpace::Device,
-                Object::Array(items) if items.len() == 1 => match &items[0] {
+                Object::Array(items) if items.len() == 1 => match deref(&items[0]) {
                     Object::Name(n) if is_device_space(n) => ColourSpace::Device,
                     _ => ColourSpace::Other,
                 },
@@ -1223,6 +1231,18 @@ fn set_colour(gs: &mut GraphicsState, operator: &str, value: Option<[f64; 3]>) {
     }
 }
 
+/// `g`/`rg`/`k` and their stroking forms select their device space as well as
+/// the colour (§8.6.8), so a later `sc`/`scn` reads device components even
+/// after a `/Separation` was selected with `cs`.
+fn set_device_colour(gs: &mut GraphicsState, operator: &str, value: Option<[f64; 3]>) {
+    if operator.starts_with(char::is_lowercase) {
+        gs.fill_space = ColourSpace::Device;
+    } else {
+        gs.stroke_space = ColourSpace::Device;
+    }
+    set_colour(gs, operator, value);
+}
+
 fn gray(operands: &[Object]) -> Option<[f64; 3]> {
     match operands.iter().filter_map(number).collect::<Vec<_>>()[..] {
         [g] => Some([g, g, g]),
@@ -1339,6 +1359,10 @@ mod tests {
         "21-stroke-only-background-control",
         "23-aliased-device-space",
         "23-aliased-device-space-control",
+        "25-indirect-device-space",
+        "25-indirect-device-space-control",
+        "27-device-colour-after-separation",
+        "27-device-colour-after-separation-control",
         "08-scaled-text-matrix",
         "09-white-text-over-image",
         "10-searchable-scan",
@@ -1346,6 +1370,7 @@ mod tests {
         "15-restored-render-mode",
         "22-outlined-heading",
         "24-separation-spot-colour",
+        "26-separation-named-rgb",
     ];
 
     /// What each fixture must decide: `(verdict, classes, reportable mechanisms)`.
@@ -1359,8 +1384,14 @@ mod tests {
             // so the *stroking* colour is the only ink on the page.
             // `23` is `02` written through a `/Resources /ColorSpace` alias for
             // a device space — indirection, not a different mechanism, and the
-            // alias has to be resolved or the check is suppressed.
-            "02-white-on-white" | "21-stroke-only-background" | "23-aliased-device-space" => {
+            // alias has to be resolved or the check is suppressed. `25` is `23`
+            // through indirect references; `27` is the device space `rg`
+            // re-selects after a `/Separation`.
+            "02-white-on-white"
+            | "21-stroke-only-background"
+            | "23-aliased-device-space"
+            | "25-indirect-device-space"
+            | "27-device-colour-after-separation" => {
                 (Verdict::Block, BOTH, &[mechanism::BACKGROUND_COLOUR])
             }
             // `19` is off-page by **text rise** rather than by `Td`: the
@@ -1505,6 +1536,8 @@ mod tests {
                     | "20-zero-horizontal-scale"
                     | "21-stroke-only-background"
                     | "23-aliased-device-space"
+                    | "25-indirect-device-space"
+                    | "27-device-colour-after-separation"
             );
             let recovered = runs
                 .iter()
