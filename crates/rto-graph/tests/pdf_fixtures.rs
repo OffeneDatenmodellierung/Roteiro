@@ -138,13 +138,24 @@ struct Page {
     /// Declare `/F2`, a Type 3 font whose one glyph (`A`) paints a black
     /// square in a colour of its own (`d0`), whatever `Tr` and the graphics
     /// state's colours say.
-    type3_font: bool,
+    type3_font: Type3Font,
     /// A greyscale image `XObject` painted by the content stream, as
     /// `(width, height, samples)`. `None` leaves `/XObject` out of
     /// `/Resources`
     /// entirely, so a fixture without an image is not merely one that never
     /// draws it.
     image: Option<(usize, usize, Vec<u8>)>,
+}
+
+/// Whether a page declares the Type 3 font `/F2`, and how it spells `/Subtype`.
+#[derive(Clone, Copy, Default, PartialEq)]
+enum Type3Font {
+    #[default]
+    None,
+    /// `/Subtype /Type3`.
+    Direct,
+    /// `/Subtype N 0 R`, with object `N` the name `/Type3` (§7.3.10).
+    IndirectSubtype,
 }
 
 /// Which `/Resources /ColorSpace` a page declares; see [`Page::colour_spaces`].
@@ -866,7 +877,23 @@ fn font_fixtures() -> Vec<Fixture> {
     out.push(Fixture {
         name: "31-type3-stroke-mode.pdf",
         page: Page {
-            type3_font: true,
+            type3_font: Type3Font::Direct,
+            content: format!(
+                "{}BT\n1 Tr\n1 1 1 RG\n/F2 12 Tf\n72 660 Td\n(AAAA) Tj\nET\n",
+                text_op(&[], 72, 700, 12, VISIBLE),
+            ),
+            ..Page::default()
+        },
+        control_of: None,
+    });
+
+    // 35 — `31` with `/Subtype` an **indirect reference** to `/Type3`, which
+    // is legal for any value (§7.3.10). Read as a direct name only, the font
+    // is not recognised as Type 3 and the visible glyphs quarantine again.
+    out.push(Fixture {
+        name: "35-type3-indirect-subtype.pdf",
+        page: Page {
+            type3_font: Type3Font::IndirectSubtype,
             content: format!(
                 "{}BT\n1 Tr\n1 1 1 RG\n/F2 12 Tf\n72 660 Td\n(AAAA) Tj\nET\n",
                 text_op(&[], 72, 700, 12, VISIBLE),
@@ -1006,10 +1033,10 @@ fn render(page: &Page) -> Vec<u8> {
             0
         };
     let type3_id = resources_id + usize::from(page.indirect_resources);
-    let type3 = if page.type3_font {
-        format!(" /F2 {type3_id} 0 R")
-    } else {
+    let type3 = if page.type3_font == Type3Font::None {
         String::new()
+    } else {
+        format!(" /F2 {type3_id} 0 R")
     };
     let resources_dict = format!("<< /Font << /F1 5 0 R{type3} >>{xobject}{colour_spaces} >>");
     let resources = if page.indirect_resources {
@@ -1049,8 +1076,8 @@ fn render(page: &Page) -> Vec<u8> {
     if page.indirect_resources {
         objects.push(resources_dict.into_bytes());
     }
-    if page.type3_font {
-        objects.extend(type3_font(type3_id + 1));
+    if page.type3_font != Type3Font::None {
+        objects.extend(type3_font(type3_id + 1, page.type3_font));
     }
 
     let mut out = b"%PDF-1.4\n".to_vec();
@@ -1097,10 +1124,17 @@ fn colour_space_resource(spaces: ColourSpaces, first_extra: usize) -> String {
 /// A Type 3 font mapping `A` to a glyph procedure (object `proc_id`) that sets
 /// its own black fill under `d0` and paints a square — ink that no `Tr` or
 /// text-state colour describes.
-fn type3_font(proc_id: usize) -> Vec<Vec<u8>> {
-    vec![
+///
+/// With [`Type3Font::IndirectSubtype`] the `/Subtype` is object `proc_id + 1`.
+fn type3_font(proc_id: usize, spelling: Type3Font) -> Vec<Vec<u8>> {
+    let subtype = if spelling == Type3Font::IndirectSubtype {
+        format!("{} 0 R", proc_id + 1)
+    } else {
+        "/Type3".to_owned()
+    };
+    let mut objects = vec![
         format!(
-            "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000] \
+            "<< /Type /Font /Subtype {subtype} /FontBBox [0 0 1000 1000] \
              /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /sq {proc_id} 0 R >> \
              /Encoding << /Type /Encoding /Differences [65 /sq] >> \
              /FirstChar 65 /LastChar 65 /Widths [1000] /Resources << >> >>"
@@ -1111,7 +1145,11 @@ fn type3_font(proc_id: usize) -> Vec<Vec<u8>> {
             b"1000 0 d0\n0 0 0 rg\n100 0 800 1000 re\nf\n",
             &[],
         ),
-    ]
+    ];
+    if spelling == Type3Font::IndirectSubtype {
+        objects.push(b"/Type3".to_vec());
+    }
+    objects
 }
 
 /// A stream object: `dict` with `{len}` (and any extra placeholders) filled in,

@@ -1,0 +1,68 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R /F2 6 0 R >> >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length 172 >>
+stream
+q
+1 1 1 rg
+0 0 612 792 re
+f
+Q
+BT
+/F1 12 Tf
+72 700 Td
+(Roteiro fixture page. Ordinary prose about knowledge graphs.) Tj
+ET
+BT
+1 Tr
+1 1 1 RG
+/F2 12 Tf
+72 660 Td
+(AAAA) Tj
+ET
+
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+6 0 obj
+<< /Type /Font /Subtype 8 0 R /FontBBox [0 0 1000 1000] /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /sq 7 0 R >> /Encoding << /Type /Encoding /Differences [65 /sq] >> /FirstChar 65 /LastChar 65 /Widths [1000] /Resources << >> >>
+endobj
+7 0 obj
+<< /Length 39 >>
+stream
+1000 0 d0
+0 0 0 rg
+100 0 800 1000 re
+f
+
+endstream
+endobj
+8 0 obj
+/Type3
+endobj
+xref
+0 9
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000251 00000 n 
+0000000474 00000 n 
+0000000571 00000 n 
+0000000819 00000 n 
+0000000908 00000 n 
+trailer
+<< /Size 9 /Root 1 0 R >>
+startxref
+930
+%%EOF

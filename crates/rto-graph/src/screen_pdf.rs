@@ -161,6 +161,7 @@
 //! the reason `block` is not claimed to be universally reachable, only reachable.
 
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use pdf_extract::{Dictionary, Document, Object, ObjectId};
 
@@ -595,7 +596,9 @@ fn is_type3(run: &Run<'_>) -> bool {
         .as_deref()
         .and_then(|name| run.fonts.get(name))
         .and_then(|font| font.get(b"Subtype").ok())
-        .and_then(|subtype| subtype.as_name().ok())
+        // `/Subtype` may be an indirect reference (§7.3.10) like any value.
+        .and_then(|subtype| run.doc.dereference(subtype).ok())
+        .and_then(|(_, subtype)| subtype.as_name().ok())
         == Some(b"Type3".as_slice())
 }
 
@@ -885,7 +888,9 @@ struct TextParameters {
     rise: f64,
     leading: f64,
     render_mode: i64,
-    font: Option<Vec<u8>>,
+    /// Shared, not owned: every `q` clones the graphics state, and an owned
+    /// name made `N` nested saves of an `N`-byte name cost `N²` bytes.
+    font: Option<Rc<[u8]>>,
 }
 
 impl Default for TextParameters {
@@ -951,7 +956,7 @@ impl TextParameters {
                 self.font = operands
                     .first()
                     .and_then(|o| o.as_name().ok())
-                    .map(<[u8]>::to_vec);
+                    .map(Rc::from);
                 self.size = operands.get(1).and_then(number).unwrap_or(0.0);
             }
             // The operand is an integer by the specification, so this reads it as
@@ -1472,6 +1477,7 @@ mod tests {
         "24-separation-spot-colour",
         "26-separation-named-rgb",
         "31-type3-stroke-mode",
+        "35-type3-indirect-subtype",
     ];
 
     /// What each fixture must decide: `(verdict, classes, reportable mechanisms)`.
@@ -2036,6 +2042,19 @@ mod tests {
         let mut unknown = state(2);
         unknown.stroke = None;
         assert_eq!(ink_colours(&unknown), None);
+    }
+
+    /// Saving the graphics state shares the font name rather than copying it:
+    /// `N` nested `q` over an `N`-byte name must not retain `N²` bytes.
+    #[test]
+    fn a_saved_text_state_shares_its_font_name() {
+        let mut params = TextParameters::default();
+        assert!(params.apply("Tf", &[Object::Name(vec![b'F'; 4096]), Object::Integer(12)]));
+        let saved = params.clone();
+        let (Some(a), Some(b)) = (&params.font, &saved.font) else {
+            panic!("Tf must set the font");
+        };
+        assert!(Rc::ptr_eq(a, b));
     }
 
     /// `Tz` and `Ts` are part of the transform that puts a glyph on the page,
