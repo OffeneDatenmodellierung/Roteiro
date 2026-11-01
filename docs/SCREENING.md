@@ -58,10 +58,16 @@ Checked, from the content stream:
 | class | signal |
 |---|---|
 | invisible text | text rendering mode 3 or 7 — neither filled nor stroked |
-| white-on-white | fill colour equal to whatever is painted behind the glyph |
-| off-page | glyph origin outside the page `MediaBox` |
+| white-on-white | the colour the mode actually paints — fill, stroke, or both — equal to whatever is painted behind the glyph |
+| off-page | glyph origin outside the page `MediaBox`, including when text rise (`Ts`) is what put it there |
 | off-page | glyph origin outside the page `CropBox` |
-| degenerate size | effective size below 1 pt once the text and current transformation matrices are composed |
+| degenerate size | either axis of the glyph collapsing below 1 pt once the §9.4.4 text rendering matrix is composed — so `0 Tz` counts as well as a vanishing `Tf` |
+
+Each of these is read from the **graphics state** as the specification defines
+it, which means `q`/`Q` save and restore all of it — including the text-state
+parameters `Tf`, `Tr`, `Tz`, `Ts` and `TL`. A reader that kept any of those
+outside the save stack could be defeated by setting a mechanism, wrapping an
+ordinary value in a `q`…`Q`, and letting the `Q` put the mechanism back.
 
 The read is deterministic and in-process: a pure function of the bytes, with no
 clock, no network and no model. That is what makes the verdict eligible to be a
@@ -86,9 +92,21 @@ stamp is printed rotated down the left margin, the OCR engine does not read
 rotated text, and 237 of 310 readable first pages in that corpus carry the same
 stamp.
 
-**Text hidden by clipping or by a zero alpha.** Graphics-state save/restore and
-the current transformation matrix are tracked; clipping paths (`W`, `W*`),
-`ExtGState` alpha (`gs`), soft masks and blend modes are not.
+**Text hidden by clipping or by a zero alpha.** Clipping paths (`W`, `W*`),
+`ExtGState` alpha (`gs`), soft masks and blend modes are not tracked. This is
+the largest gap on this page and it is a real bypass rather than a theoretical
+one: it is declared rather than closed because each needs a resource resolved
+and a path-intersection model, neither of which is a small addition to a
+content-stream walk.
+
+**Text inside a form XObject.** `Do` on a form is not followed into its own
+content stream. Its rectangle is likewise not treated as covering the page,
+which is the safe direction — claiming coverage over something never inspected
+would suppress findings rather than raise them.
+
+**Text pushed off the page by character or word spacing.** `Tc` and `Tw` change
+the advance between glyphs, and only the *origin* of each text-showing operator
+is tested (see "no glyph advance" below).
 
 **A lying text layer that is not directive-shaped.** An invisible text layer
 over a page image is how every searchable scan is built — OCR output drawn in
@@ -106,6 +124,14 @@ read.
 **No glyph advance.** The origin of each text-showing operator is tested, not
 the box the run sweeps out. A line that begins on the page and runs off the edge
 is not reported.
+
+**Colours this reader cannot read are not guessed at.** `sc`/`scn` carry bare
+numbers whose meaning depends on the colour space in effect. In a device space
+they are read; in a `/Separation`, `/Indexed`, `/Lab` or `/Pattern` space they
+are not, and the colour check is skipped for that run rather than resolved
+wrongly. That suppression is deliberate — in a spot-colour space `1` is *full
+ink*, and reading it as white would report ordinary published typography as
+white-on-white concealment.
 
 ## What a PDF `pass` therefore means
 

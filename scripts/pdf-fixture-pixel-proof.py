@@ -48,7 +48,7 @@ from pathlib import Path
 
 FIXTURES = Path(__file__).resolve().parent.parent / "crates/rto-graph/tests/fixtures/pdf"
 
-# The two degenerate-size fixtures are the only ones that do not diff to exactly
+# The degenerate-size fixtures are the only ones that do not diff to exactly
 # zero, and that is a property of the class rather than a defect in them.
 # Concealment by size means the text cannot be **read**, not that it leaves no
 # mark: a 62-character run at 0.01 pt (fixture 04) and at 0.04 pt (fixture 13)
@@ -58,7 +58,13 @@ FIXTURES = Path(__file__).resolve().parent.parent / "crates/rto-graph/tests/fixt
 # The allowance is per-fixture and explicit rather than a global tolerance, so a
 # fixture that starts leaking is a failure rather than a number sitting under a
 # threshold nobody re-reads.
-ALLOWED_DIFFERING = {"04-degenerate-size": 1, "13-ctm-shrunk-text": 2}
+ALLOWED_DIFFERING = {
+    "04-degenerate-size": 1,
+    "13-ctm-shrunk-text": 2,
+    # The same 0.01 pt as 04, restored by a `Q` instead of written inline, so it
+    # leaves the same single pixel.
+    "17-degenerate-size-across-q": 1,
+}
 
 
 def decode_png(path: Path) -> tuple[int, int, int, bytes]:
