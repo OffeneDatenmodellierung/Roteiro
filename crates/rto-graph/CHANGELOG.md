@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.2.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v6.1.0...rto-graph-v6.2.0) - 2026-11-01
+
+### Added
+
+- *(screen)* detect PDF-native concealment from the content stream
+
+### Fixed
+
+- *(screen)* share the font name across q, dereference a Type 3 subtype
+- *(screen)* clip colour components, compensate the determinant
+- *(screen)* normalise the glyph scale by a power of two
+- *(screen)* skip the colour test for Type 3 glyphs, normalise before squaring
+- *(screen)* no scan pass without an image, true glyph size, effective resources
+- *(screen)* resolve colour spaces the way the spec does, declare limits in --json
+- *(screen)* model the graphics state the specification defines, not a subset
+
+### Other
+
+- *(screen)* satisfy the --all-features clippy cell
+- *(screen)* carry the text state in the graphics state, declare limits in --json
+- *(deps)* fold the open dependabot PRs into one, fix gix 0.88, patch advisories
+- *(deps)* bump rten from 0.26.0 to 0.27.0 in the ocr-stack group
+- *(deps)* bump gix from 0.87.1 to 0.88.0
+- Merge pull request #914 from OffeneDatenmodellierung/polly/recover-margin-scope
+- Merge pull request #912 from OffeneDatenmodellierung/polly/pdf-concealment
+- *(review)* state what the ranking produced, not what the test implies
+- *(review)* attribute each separation to the question that produced it
+- *(review)* label the margin with its measured scope, on every surface
+
 ## [6.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v6.0.2...rto-graph-v6.1.0) - 2026-09-29
 
 ### Fixed
