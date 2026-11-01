@@ -477,7 +477,8 @@ fn inspect_run(run: &Run<'_>, strings: &[Object], out: &mut Vec<Concealed>, budg
                 format!("text rendering mode {}", run.gs.text.render_mode),
             ));
         }
-    } else if let Some(inks) = ink_colours(run.gs)
+    } else if !is_type3(run)
+        && let Some(inks) = ink_colours(run.gs)
         && let Paint::Solid(background) = behind
         && inks.iter().all(|ink| indistinguishable(*ink, background))
     {
@@ -581,6 +582,21 @@ fn ink_colours(gs: &GraphicsState) -> Option<Vec<[f64; 3]>> {
         },
         _ => None,
     }
+}
+
+/// Whether the run's font is Type 3, whose glyphs are content streams that
+/// paint in colours of their own: `Tr` does not govern them (§9.3.6), so the
+/// fill and stroke this reader tracks are not the glyph's ink, and a colour
+/// test against them reports visible glyphs as concealed.
+fn is_type3(run: &Run<'_>) -> bool {
+    run.gs
+        .text
+        .font
+        .as_deref()
+        .and_then(|name| run.fonts.get(name))
+        .and_then(|font| font.get(b"Subtype").ok())
+        .and_then(|subtype| subtype.as_name().ok())
+        == Some(b"Type3".as_slice())
 }
 
 /// Whether two colours are closer than an 8-bit render can separate.
@@ -1066,15 +1082,27 @@ impl Matrix {
     /// `f64::hypot`: `sqrt` is IEEE-754 exact on every platform and `hypot` is
     /// a libm call that need not be, and a threshold that moved by a ulp
     /// between macOS and Linux would make the verdict platform-dependent.
+    ///
+    /// Computed on the coefficients divided by the largest of them, then scaled
+    /// back: squaring a large finite coefficient overflows to infinity, and
+    /// `inf - inf` is `NaN`, which compares false against every threshold and
+    /// let a collapsed glyph through. A transform that is already non-finite
+    /// draws nothing legible, so it reads as zero.
     fn smallest_scale(self) -> f64 {
-        let sum = self.a * self.a + self.b * self.b + self.c * self.c + self.d * self.d;
-        let det = self.a * self.d - self.b * self.c;
-        let largest = f64::midpoint(sum, (sum * sum - 4.0 * det * det).max(0.0).sqrt()).sqrt();
-        if largest == 0.0 {
-            0.0
-        } else {
-            det.abs() / largest
+        let norm = self
+            .a
+            .abs()
+            .max(self.b.abs())
+            .max(self.c.abs())
+            .max(self.d.abs());
+        if !norm.is_finite() || norm == 0.0 {
+            return 0.0;
         }
+        let (a, b, c, d) = (self.a / norm, self.b / norm, self.c / norm, self.d / norm);
+        let sum = a * a + b * b + c * c + d * d;
+        let det = a * d - b * c;
+        let largest = f64::midpoint(sum, (sum * sum - 4.0 * det * det).max(0.0).sqrt()).sqrt();
+        det.abs() / largest * norm
     }
 }
 
@@ -1395,6 +1423,8 @@ mod tests {
         "29-near-parallel-axes-control",
         "30-indirect-resources",
         "30-indirect-resources-control",
+        "32-overflowing-scale",
+        "32-overflowing-scale-control",
         "08-scaled-text-matrix",
         "09-white-text-over-image",
         "10-searchable-scan",
@@ -1403,6 +1433,7 @@ mod tests {
         "22-outlined-heading",
         "24-separation-spot-colour",
         "26-separation-named-rgb",
+        "31-type3-stroke-mode",
     ];
 
     /// What each fixture must decide: `(verdict, classes, reportable mechanisms)`.
@@ -1434,7 +1465,8 @@ mod tests {
                 CONCEALED,
                 &[mechanism::INVISIBLE_RENDER_MODE],
             ),
-            "29-near-parallel-axes" => (
+            // `32` is `29` at a scale whose square overflows `f64`.
+            "29-near-parallel-axes" | "32-overflowing-scale" => (
                 Verdict::Quarantine,
                 CONCEALED,
                 &[mechanism::DEGENERATE_SIZE],

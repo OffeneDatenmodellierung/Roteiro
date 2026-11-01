@@ -135,6 +135,10 @@ struct Page {
     colour_spaces: ColourSpaces,
     /// Write `/Resources` as an indirect object rather than inline (§7.3.10).
     indirect_resources: bool,
+    /// Declare `/F2`, a Type 3 font whose one glyph (`A`) paints a black
+    /// square in a colour of its own (`d0`), whatever `Tr` and the graphics
+    /// state's colours say.
+    type3_font: bool,
     /// A greyscale image `XObject` painted by the content stream, as
     /// `(width, height, samples)`. `None` leaves `/XObject` out of
     /// `/Resources`
@@ -168,6 +172,7 @@ fn fixtures() -> Vec<Fixture> {
     out.extend(colour_space_fixtures());
     out.extend(shape_fixtures());
     out.extend(negative_fixtures());
+    out.extend(font_fixtures());
     out
 }
 
@@ -643,6 +648,24 @@ fn shape_fixtures() -> Vec<Fixture> {
         text_op(&[], 72, 700, 12, VISIBLE),
     ));
 
+    // 32 — the same rank-one collapse at a **scale that overflows** `f64`
+    // when squared: eighteen `1e9` scalings, then `1 1 1 1 0 0 Tm`. Every
+    // coefficient is finite, but `a * a` is not, and `inf - inf` is `NaN`,
+    // which compares false against every threshold.
+    let scales = "1000000000 0 0 1000000000 0 0 cm\n".repeat(18);
+    out.extend(pair(
+        "32-overflowing-scale",
+        Page {
+            content: format!(
+                "{}q\n{scales}BT\n/F1 12 Tf\n1 1 1 1 0 0 Tm\n({}) Tj\nET\nQ\n",
+                text_op(&[], 72, 700, 12, VISIBLE),
+                escape(NOTE),
+            ),
+            ..Page::default()
+        },
+        text_op(&[], 72, 700, 12, VISIBLE),
+    ));
+
     out
 }
 
@@ -798,6 +821,29 @@ fn negative_fixtures() -> Vec<Fixture> {
     out
 }
 
+/// Negatives that turn on the **font**, not the page: glyphs whose ink no
+/// text-state colour describes.
+fn font_fixtures() -> Vec<Fixture> {
+    let mut out: Vec<Fixture> = Vec::new();
+    // 31 — **Type 3 glyphs** under `1 Tr` with a white stroke. A Type 3 glyph
+    // is a content stream that paints in its own colour, here black squares,
+    // and `Tr` does not govern it (§9.3.6). Comparing the unused white stroke
+    // against the white page calls plainly visible glyphs concealed.
+    out.push(Fixture {
+        name: "31-type3-stroke-mode.pdf",
+        page: Page {
+            type3_font: true,
+            content: format!(
+                "{}BT\n1 Tr\n1 1 1 RG\n/F2 12 Tf\n72 660 Td\n(AAAA) Tj\nET\n",
+                text_op(&[], 72, 700, 12, VISIBLE),
+            ),
+            ..Page::default()
+        },
+        control_of: None,
+    });
+    out
+}
+
 /// A concealment fixture and its matched control: the same page with the payload
 /// drawing removed and **nothing else** changed, so a pixel diff between the two
 /// isolates exactly the planted text.
@@ -806,6 +852,7 @@ fn pair(stem: &'static str, concealed: Page, control_content: String) -> Vec<Fix
         crop: concealed.crop,
         colour_spaces: concealed.colour_spaces,
         indirect_resources: concealed.indirect_resources,
+        type3_font: concealed.type3_font,
         inherit_boxes: concealed.inherit_boxes,
         content: control_content,
         image: concealed.image.clone(),
@@ -916,14 +963,21 @@ fn render(page: &Page) -> Vec<u8> {
     // object number stays 6.
     let first_extra = 6 + usize::from(page.image.is_some());
     let colour_spaces = colour_space_resource(page.colour_spaces, first_extra);
-    let resources_dict = format!("<< /Font << /F1 5 0 R >>{xobject}{colour_spaces} >>");
-    // After the colour-space objects, which are the only other extras.
+    // Extras in order: colour-space objects, the resources dictionary, then the
+    // Type 3 font and its glyph procedure.
     let resources_id = first_extra
         + if page.colour_spaces == ColourSpaces::Indirect {
             2
         } else {
             0
         };
+    let type3_id = resources_id + usize::from(page.indirect_resources);
+    let type3 = if page.type3_font {
+        format!(" /F2 {type3_id} 0 R")
+    } else {
+        String::new()
+    };
+    let resources_dict = format!("<< /Font << /F1 5 0 R{type3} >>{xobject}{colour_spaces} >>");
     let resources = if page.indirect_resources {
         format!("{resources_id} 0 R")
     } else {
@@ -960,6 +1014,9 @@ fn render(page: &Page) -> Vec<u8> {
     }
     if page.indirect_resources {
         objects.push(resources_dict.into_bytes());
+    }
+    if page.type3_font {
+        objects.extend(type3_font(type3_id + 1));
     }
 
     let mut out = b"%PDF-1.4\n".to_vec();
@@ -1001,6 +1058,26 @@ fn colour_space_resource(spaces: ColourSpaces, first_extra: usize) -> String {
         ColourSpaces::Indirect => format!(" /ColorSpace {first_extra} 0 R"),
         ColourSpaces::MisleadingName => format!(" /ColorSpace << /RGB {SEPARATION} >>"),
     }
+}
+
+/// A Type 3 font mapping `A` to a glyph procedure (object `proc_id`) that sets
+/// its own black fill under `d0` and paints a square — ink that no `Tr` or
+/// text-state colour describes.
+fn type3_font(proc_id: usize) -> Vec<Vec<u8>> {
+    vec![
+        format!(
+            "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000] \
+             /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /sq {proc_id} 0 R >> \
+             /Encoding << /Type /Encoding /Differences [65 /sq] >> \
+             /FirstChar 65 /LastChar 65 /Widths [1000] /Resources << >> >>"
+        )
+        .into_bytes(),
+        stream(
+            "<< /Length {len} >>",
+            b"1000 0 d0\n0 0 0 rg\n100 0 800 1000 re\nf\n",
+            &[],
+        ),
+    ]
 }
 
 /// A stream object: `dict` with `{len}` (and any extra placeholders) filled in,
