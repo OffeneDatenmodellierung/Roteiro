@@ -684,6 +684,22 @@ fn shape_fixtures() -> Vec<Fixture> {
         text_op(&[], 72, 700, 12, VISIBLE),
     ));
 
+    // 34 — `11` in stroke-only mode with an **out-of-range** white: `2 2 2 RG`
+    // clips to `1 1 1` (§8.6.4), so it paints white on white, while the raw
+    // `[2, 2, 2]` matches no background a reader compares it with.
+    out.extend(pair(
+        "34-out-of-range-stroke",
+        Page {
+            content: format!(
+                "{}{}",
+                text_op(&[], 72, 700, 12, VISIBLE),
+                text_op(&["1 Tr", "2 2 2 RG"], 72, 660, 12, NOTE),
+            ),
+            ..Page::default()
+        },
+        text_op(&[], 72, 700, 12, VISIBLE),
+    ));
+
     out
 }
 

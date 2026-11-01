@@ -1120,7 +1120,13 @@ impl Matrix {
             self.d * scale,
         );
         let sum = a * a + b * b + c * c + d * d;
-        let det = a * d - b * c;
+        // Kahan's determinant: `a*d - b*c` cancels catastrophically when the
+        // products nearly agree — the near-singular case this exists to catch —
+        // so the rounding error of `b*c` is recovered with a fused multiply-add
+        // and added back. `mul_add` is correctly rounded by IEEE-754, so this
+        // stays a pure function of the bytes on every platform.
+        let bc = b * c;
+        let det = a.mul_add(d, -bc) + (-b).mul_add(c, bc);
         let largest = f64::midpoint(sum, (sum * sum - 4.0 * det * det).max(0.0).sqrt()).sqrt();
         det.abs() / largest / scale
     }
@@ -1317,15 +1323,23 @@ fn set_device_colour(gs: &mut GraphicsState, operator: &str, value: Option<[f64;
     set_colour(gs, operator, value);
 }
 
+/// One device-colour component, clipped to `[0, 1]` as a renderer clips it
+/// (§8.6.4): `2 2 2 RG` paints white, and compared unclipped it would read as a
+/// colour no page background matches. Clipped on the way *in*, before any
+/// CMYK conversion, because clipping the converted value is not the same.
+fn component(object: &Object) -> Option<f64> {
+    number(object).map(|v| v.clamp(0.0, 1.0))
+}
+
 fn gray(operands: &[Object]) -> Option<[f64; 3]> {
-    match operands.iter().filter_map(number).collect::<Vec<_>>()[..] {
+    match operands.iter().filter_map(component).collect::<Vec<_>>()[..] {
         [g] => Some([g, g, g]),
         _ => None,
     }
 }
 
 fn rgb(operands: &[Object]) -> Option<[f64; 3]> {
-    match operands.iter().filter_map(number).collect::<Vec<_>>()[..] {
+    match operands.iter().filter_map(component).collect::<Vec<_>>()[..] {
         [r, g, b] => Some([r, g, b]),
         _ => None,
     }
@@ -1337,7 +1351,7 @@ fn rgb(operands: &[Object]) -> Option<[f64; 3]> {
 /// what is behind it?* — because the same conversion is applied to both sides.
 /// It is not a colour-managed conversion and is not used for anything else.
 fn cmyk(operands: &[Object]) -> Option<[f64; 3]> {
-    match operands.iter().filter_map(number).collect::<Vec<_>>()[..] {
+    match operands.iter().filter_map(component).collect::<Vec<_>>()[..] {
         [c, m, y, k] => Some([
             1.0 - (c + k).min(1.0),
             1.0 - (m + k).min(1.0),
@@ -1357,7 +1371,7 @@ fn components(space: ColourSpace, operands: &[Object]) -> Option<[f64; 3]> {
     if space != ColourSpace::Device {
         return None;
     }
-    match operands.iter().filter_map(number).collect::<Vec<_>>()[..] {
+    match operands.iter().filter_map(component).collect::<Vec<_>>()[..] {
         [g] => Some([g, g, g]),
         [r, g, b] => Some([r, g, b]),
         [c, m, y, k] => Some([
@@ -1447,6 +1461,8 @@ mod tests {
         "32-overflowing-scale-control",
         "33-rank-one-at-scale",
         "33-rank-one-at-scale-control",
+        "34-out-of-range-stroke",
+        "34-out-of-range-stroke-control",
         "08-scaled-text-matrix",
         "09-white-text-over-image",
         "10-searchable-scan",
@@ -1542,7 +1558,9 @@ mod tests {
             // model-facing `meta.content`. Now the document quarantines, and —
             // unlike every other fixture here — it keeps a body, with the
             // concealed sentence removed from it.
-            "11-concealed-note" => (
+            // `34` is `11` in a stroke-only mode with an out-of-range white:
+            // `2 2 2 RG` clips to white.
+            "11-concealed-note" | "34-out-of-range-stroke" => (
                 Verdict::Quarantine,
                 CONCEALED,
                 &[mechanism::BACKGROUND_COLOUR],
@@ -1831,6 +1849,26 @@ mod tests {
             "{}",
             rank_one.smallest_scale()
         );
+
+        // Near-singular but not singular: `12 Tf` under consecutive-Fibonacci
+        // `63245986 102334155 102334155 165580141 0 0 Tm` (determinant ±1) in a
+        // CTM scaled by 2^24. The naive `a*d - b*c` cancels to 1.5641 pt; the
+        // represented transform's smallest scale is 0.8798 pt, under the 1 pt
+        // threshold.
+        let scale = 12.0 * 2f64.powi(24);
+        let near_singular = Matrix {
+            a: scale * 63_245_986.0,
+            b: scale * 102_334_155.0,
+            c: scale * 102_334_155.0,
+            d: scale * 165_580_141.0,
+            e: 0.0,
+            f: 0.0,
+        };
+        let smallest = near_singular.smallest_scale();
+        assert!(
+            (smallest - 0.879_823_447_783_128).abs() < 1e-9,
+            "{smallest}"
+        );
     }
 
     /// A `MediaBox` given by its opposite corners in the other order is the same
@@ -1873,6 +1911,13 @@ mod tests {
             Some([1.0, 1.0, 1.0])
         );
         assert_eq!(components(ColourSpace::Other, &[Integer(1)]), None);
+        // Components clip to `[0, 1]` before conversion, as a renderer clips
+        // them: `2 2 2` is white, and a CMYK `-1` cyan is no cyan.
+        assert_eq!(rgb(&[Integer(2), Integer(2), Integer(2)]), Some([1.0; 3]));
+        assert_eq!(
+            cmyk(&[Integer(-1), Integer(0), Integer(0), Real(0.5)]),
+            Some([0.5; 3])
+        );
         assert!(indistinguishable([1.0; 3], [1.0 - 1.0 / 255.0; 3]));
         assert!(!indistinguishable([1.0; 3], [0.99, 1.0, 1.0]));
     }
