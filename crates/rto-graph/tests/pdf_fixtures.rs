@@ -666,6 +666,24 @@ fn shape_fixtures() -> Vec<Fixture> {
         text_op(&[], 72, 700, 12, VISIBLE),
     ));
 
+    // 33 — rank one at a scale that is large but does not overflow: sixty
+    // `2 0 0 2 0 0 cm`, then `1 5 5 25 0 0 Tm`. The determinant is exactly
+    // zero, and a normalisation that divided by the largest coefficient
+    // rounded it into a 2,300 pt glyph; only a power of two keeps it zero.
+    let doublings = "2 0 0 2 0 0 cm\n".repeat(60);
+    out.extend(pair(
+        "33-rank-one-at-scale",
+        Page {
+            content: format!(
+                "{}q\n{doublings}BT\n/F1 12 Tf\n1 5 5 25 0 0 Tm\n({}) Tj\nET\nQ\n",
+                text_op(&[], 72, 700, 12, VISIBLE),
+                escape(NOTE),
+            ),
+            ..Page::default()
+        },
+        text_op(&[], 72, 700, 12, VISIBLE),
+    ));
+
     out
 }
 

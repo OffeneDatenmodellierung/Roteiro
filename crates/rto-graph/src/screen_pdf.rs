@@ -1083,11 +1083,17 @@ impl Matrix {
     /// a libm call that need not be, and a threshold that moved by a ulp
     /// between macOS and Linux would make the verdict platform-dependent.
     ///
-    /// Computed on the coefficients divided by the largest of them, then scaled
-    /// back: squaring a large finite coefficient overflows to infinity, and
-    /// `inf - inf` is `NaN`, which compares false against every threshold and
-    /// let a collapsed glyph through. A transform that is already non-finite
-    /// draws nothing legible, so it reads as zero.
+    /// Computed on the coefficients scaled into `[1, 2)` by a **power of two**,
+    /// then scaled back: squaring a large finite coefficient overflows to
+    /// infinity, `inf - inf` is `NaN`, and `NaN` compares false against every
+    /// threshold, which let a collapsed glyph through. A power of two because
+    /// multiplying by one is exact, so a determinant that is exactly zero stays
+    /// zero; dividing by the largest coefficient itself rounds, and turned a
+    /// rank-one transform into a 2,300 pt glyph.
+    ///
+    /// A transform that is non-finite, or whose largest coefficient is below
+    /// `1e-300` (beyond which the scaling would overflow), draws nothing
+    /// legible, and reads as zero.
     fn smallest_scale(self) -> f64 {
         let norm = self
             .a
@@ -1095,14 +1101,28 @@ impl Matrix {
             .max(self.b.abs())
             .max(self.c.abs())
             .max(self.d.abs());
-        if !norm.is_finite() || norm == 0.0 {
+        if !norm.is_finite() || norm < 1e-300 {
             return 0.0;
         }
-        let (a, b, c, d) = (self.a / norm, self.b / norm, self.c / norm, self.d / norm);
+        let (mut scaled, mut scale) = (norm, 1.0_f64);
+        while scaled >= 2.0 {
+            scaled *= 0.5;
+            scale *= 0.5;
+        }
+        while scaled < 1.0 {
+            scaled *= 2.0;
+            scale *= 2.0;
+        }
+        let (a, b, c, d) = (
+            self.a * scale,
+            self.b * scale,
+            self.c * scale,
+            self.d * scale,
+        );
         let sum = a * a + b * b + c * c + d * d;
         let det = a * d - b * c;
         let largest = f64::midpoint(sum, (sum * sum - 4.0 * det * det).max(0.0).sqrt()).sqrt();
-        det.abs() / largest * norm
+        det.abs() / largest / scale
     }
 }
 
@@ -1425,6 +1445,8 @@ mod tests {
         "30-indirect-resources-control",
         "32-overflowing-scale",
         "32-overflowing-scale-control",
+        "33-rank-one-at-scale",
+        "33-rank-one-at-scale-control",
         "08-scaled-text-matrix",
         "09-white-text-over-image",
         "10-searchable-scan",
@@ -1465,8 +1487,9 @@ mod tests {
                 CONCEALED,
                 &[mechanism::INVISIBLE_RENDER_MODE],
             ),
-            // `32` is `29` at a scale whose square overflows `f64`.
-            "29-near-parallel-axes" | "32-overflowing-scale" => (
+            // `32` is `29` at a scale whose square overflows `f64`; `33` is an
+            // exact rank-one collapse at a large scale that must not round.
+            "29-near-parallel-axes" | "32-overflowing-scale" | "33-rank-one-at-scale" => (
                 Verdict::Quarantine,
                 CONCEALED,
                 &[mechanism::DEGENERATE_SIZE],
@@ -1791,6 +1814,23 @@ mod tests {
             f: 0.0,
         };
         assert!((quarter_turn.smallest_scale() - 12.0).abs() < 1e-9);
+
+        // Rank one at a scale normalisation must not round: `12 Tf` under
+        // `1 5 5 25 0 0 Tm` and sixty `2 0 0 2 0 0 cm` has a determinant of
+        // exactly zero, and must stay exactly zero.
+        let rank_one = Matrix {
+            a: 12.0 * 2f64.powi(60),
+            b: 60.0 * 2f64.powi(60),
+            c: 60.0 * 2f64.powi(60),
+            d: 300.0 * 2f64.powi(60),
+            e: 0.0,
+            f: 0.0,
+        };
+        assert!(
+            rank_one.smallest_scale().abs() < f64::EPSILON,
+            "{}",
+            rank_one.smallest_scale()
+        );
     }
 
     /// A `MediaBox` given by its opposite corners in the other order is the same
