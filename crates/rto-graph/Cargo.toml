@@ -86,7 +86,7 @@ pdf-extract = { version = "0.12", optional = true }
 # C++ FFI). `image` is pinned to minimal codecs — its default features pull an
 # AVIF → libfuzzer-sys (NCSA) chain that is not on the `cargo deny` allow-list.
 ocrs = { version = "0.13", optional = true }
-rten = { version = "0.26", optional = true }
+rten = { version = "0.27", optional = true }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"], optional = true }
 # `default-features = false`: the `encoding` feature gates only `YamlDecoder`'s
 # bytes API, which `config_keys` does not use, and its `encoding_rs = "< 0.8.40"`
