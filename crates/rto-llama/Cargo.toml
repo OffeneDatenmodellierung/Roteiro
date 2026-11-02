@@ -36,7 +36,7 @@ tracing = "0.1"
 # (`startswith`) these templates use — both established by rendering every
 # template in this repository's registry before either was added.
 minijinja = { version = "2", default-features = false, features = ["builtins", "loop_controls", "macros", "json", "serde"] }
-minijinja-contrib = { version = "2", default-features = false, features = ["pycompat"] }
+minijinja-contrib = { version = "3", default-features = false, features = ["pycompat"] }
 serde_json = { workspace = true }
 # The llama.cpp engine. Opt-in: pulls a C/C++ toolchain (cmake, clang, libclang)
 # to build vendored llama.cpp. The pure-Rust `Engine` trait + request/result
