@@ -831,15 +831,10 @@ fn page(title: &str, root: &str, nav: &str, body: &str) -> String {
     )
 }
 
-/// Strip a leading `---`-delimited YAML frontmatter block.
+/// Strip a leading `---`-delimited YAML frontmatter block, by the same rule
+/// `rto_spec` reads it with.
 fn strip_frontmatter(text: &str) -> &str {
-    let Some(rest) = text.strip_prefix("---\n") else {
-        return text;
-    };
-    match rest.find("\n---\n") {
-        Some(end) => &rest[end + 5..],
-        None => rest.strip_suffix("\n---").unwrap_or(text),
-    }
+    rto_graph::split_frontmatter(text).1
 }
 
 /// The visible text of the document's first level-1 heading — what the reader

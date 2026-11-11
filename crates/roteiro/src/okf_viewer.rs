@@ -879,21 +879,9 @@ fn page(title: &str, base: &str, nav: &Nav, body: &str) -> Response {
 /// The body HTML is the renderer's and is already safe; a title, an id, a
 /// screener class and a path are all bundle-controlled text being put into
 /// markup here, so they are escaped at the point of use rather than trusted to
-/// have been escaped earlier.
-fn escape(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    for c in raw.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            _ => out.push(c),
-        }
-    }
-    out
-}
+/// have been escaped earlier. The same five-character escape the overview page
+/// uses, rather than a second copy of it.
+use crate::overview::esc as escape;
 
 /// Bundle-controlled text on its way into **element content**.
 ///

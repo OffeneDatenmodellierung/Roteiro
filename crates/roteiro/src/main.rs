@@ -9360,22 +9360,11 @@ fn run_spec_draft(
     )
 }
 
-/// Today's UTC date as `YYYY-MM-DD`, dependency-free (Hinnant's civil-from-days).
+/// Today's UTC date as `YYYY-MM-DD` — the date half of an RFC 3339 timestamp.
 fn today_utc() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let days = i64::try_from(secs / 86_400).unwrap_or(0) + 719_468;
-    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
-    let doe = days - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let year = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = year + i64::from(month <= 2);
-    format!("{year:04}-{month:02}-{day:02}")
+    let mut now = rto_graph::rfc3339_utc(std::time::SystemTime::now());
+    now.truncate(10);
+    now
 }
 
 /// Assemble and print graph-grounded context for a topic (ADR-0004 Tier 0): the
@@ -9429,19 +9418,20 @@ fn run_spec_context(
     Ok(())
 }
 
-/// Query the graph: explain a node's provenance-labelled neighbourhood, or list
-/// all nodes of a kind. Builds the full (derived + authored) graph first so
-/// results reflect the current source and ADRs.
 /// The source-file component of a `config_key` node key (`cfgkey:<file>#<dotted>`),
 /// or `None` for any other node key. Neither the file path nor the dotted key
 /// contains `#`, so the first `#` cleanly separates them. Used to classify a
-/// config key as app vs tooling config for `--app-config-only`.
+/// config key as app vs tooling config — by `--app-config-only` and the
+/// explorer's graph API.
 fn cfgkey_file(node_key: &str) -> Option<&str> {
     node_key
         .strip_prefix("cfgkey:")
         .map(|rest| rest.split_once('#').map_or(rest, |(file, _)| file))
 }
 
+/// Query the graph: explain a node's provenance-labelled neighbourhood, or list
+/// all nodes of a kind. Builds the full (derived + authored) graph first so
+/// results reflect the current source and ADRs.
 fn run_query(
     ingest: rto_graph::IngestConfig,
     key: Option<String>,
@@ -20194,13 +20184,9 @@ fn okf_bodies(
 /// Only a block at the very start counts: a `---` further down is a rule, and
 /// consuming to it would swallow the document.
 fn strip_frontmatter(text: &str) -> &str {
-    let Some(rest) = text.strip_prefix("---\n") else {
-        return text;
-    };
-    match rest.find("\n---\n") {
-        Some(end) => rest[end + 5..].trim_start_matches('\n'),
-        None => text,
-    }
+    rto_graph::split_frontmatter(text)
+        .1
+        .trim_start_matches('\n')
 }
 
 /// The OKF `status` for an ADR, from the `status:` its frontmatter declares.

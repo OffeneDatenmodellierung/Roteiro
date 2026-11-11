@@ -1,20 +1,16 @@
 //! Small Markdown text helpers shared by the ADR and annotation scanners.
 
-/// Best-effort language token from a file extension, **lowercased** to mirror the
-/// extractor (which treats extensions case-insensitively, so `FOO.RS` and
-/// `foo.rs` both yield `rust`) — otherwise an authored `[[FOO.RS#Bar]]` link would
-/// build `sym:RS:…` while the graph holds `sym:rust:…` and never resolve. Shared
-/// by the ADR and lat.md symbol-key builders.
+/// The language token in a `sym:<lang>:` key for `path` — the extractor's own
+/// label ([`rto_graph::language_for_path`]), so an authored `[[x.py#Foo]]` or
+/// `[[FOO.RS#Bar]]` builds the key the graph holds. An extension no extractor
+/// handles falls back to itself, lowercased; no extension to `text`. Shared by
+/// the ADR and lat.md symbol-key builders.
 pub(crate) fn lang_for(path: &str) -> String {
-    match path
-        .rsplit_once('.')
-        .map(|(_, ext)| ext.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("rs") => "rust".to_owned(),
-        Some(other) => other.to_owned(),
-        None => "text".to_owned(),
+    if let Some(lang) = rto_graph::language_for_path(path) {
+        return lang.to_owned();
     }
+    path.rsplit_once('.')
+        .map_or_else(|| "text".to_owned(), |(_, ext)| ext.to_ascii_lowercase())
 }
 
 /// A URL-safe slug for the ADR, site-page and lat.md section keys.
@@ -139,7 +135,8 @@ mod tests {
     fn lang_for_lowercases_extension_to_match_the_extractor() {
         assert_eq!(lang_for("src/FOO.RS"), "rust", "case-insensitive rust");
         assert_eq!(lang_for("a/b.rs"), "rust");
-        assert_eq!(lang_for("x.PY"), "py", "other extensions lowercased");
+        assert_eq!(lang_for("x.PY"), "python", "the extractor's label");
+        assert_eq!(lang_for("x.XYZ"), "xyz", "unhandled extensions lowercased");
         assert_eq!(lang_for("README"), "text", "no extension");
     }
 
