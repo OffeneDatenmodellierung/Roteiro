@@ -31,16 +31,6 @@
 //! `every_corpus_commit_reconstructs_a_diff_touching_its_anchor` holds it to every
 //! row. The fixture README states the same rule in prose; the two agree because
 //! this test and `rto-graph`'s assert the same property against the same data.
-//!
-//! # Local only, and not by omission
-//!
-//! [`rto_graph::ModelTask::Review`] reports `goes_remote() == true`: it is a
-//! command-level generative surface, which is what ADR-0019 §3 asks. But a remote
-//! review would have to send the diff, and ADR-0019 §4's payload allow-list
-//! carries node identities and prose — never source. That needs a new
-//! allow-listed field, which is an ADR amendment, not a flag. So there is no
-//! `--allow-remote` here, and a test says so rather than leaving its absence to
-//! read as an oversight.
 
 use std::path::Path;
 use std::process::Command;
@@ -2895,49 +2885,6 @@ mod tests {
             Some("#[cfg(feature = \"exec-boxlite\")]\npub mod boxlite;"),
             "`boxlite/mod.rs` is declared in `src`, not in `src/boxlite`"
         );
-    }
-
-    /// **`review --llm` is local-only, and that is enforced rather than
-    /// remembered.** `ModelTask::Review` reports `goes_remote() == true` — it is a
-    /// command-level generative surface — but ADR-0019 §4's payload allow-list
-    /// carries node identities and prose and says *"You are not given source
-    /// code"*. A remote review sends the diff, so it needs a new allow-listed
-    /// field: an ADR amendment, not a flag. Until then the flag must not exist,
-    /// because a `--allow-remote` that worked here would have gone around the
-    /// allow-list rather than through it.
-    #[test]
-    fn review_llm_has_no_allow_remote_flag_until_the_allow_list_carries_source() {
-        use clap::CommandFactory;
-
-        let cli = <crate::Cli as CommandFactory>::command();
-        let review = cli
-            .get_subcommands()
-            .find(|c| c.get_name() == "review")
-            .expect("`review` is a subcommand");
-        let flags: Vec<&str> = review
-            .get_arguments()
-            .map(clap::Arg::get_id)
-            .map(clap::Id::as_str)
-            .collect();
-        assert!(flags.contains(&"llm"), "the surface exists: {flags:?}");
-        assert!(flags.contains(&"replay"), "the harness exists: {flags:?}");
-        assert!(
-            !flags.contains(&"allow_remote"),
-            "review must not offer the remote tier while the payload allow-list \
-             cannot carry source: {flags:?}"
-        );
-        // And the task itself still qualifies, so this is a missing payload rather
-        // than a task ruled out — the two are different facts and the fix differs.
-        //
-        // Gated because `ModelTask` is re-exported behind `rto-graph/models`,
-        // which only this crate's `models` feature turns on — so in a
-        // `--no-default-features --features execution` build the type does not
-        // exist and this line was a compile error (issue #445). The gate is on
-        // the assertion alone rather than on the test, because the flag
-        // assertions above are the property under protection and they hold in
-        // *every* build, including the one with no remote tier to offer.
-        #[cfg(feature = "models")]
-        assert!(rto_graph::ModelTask::Review.goes_remote());
     }
 }
 

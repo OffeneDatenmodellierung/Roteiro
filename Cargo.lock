@@ -4263,7 +4263,6 @@ dependencies = [
  "rto-exec",
  "rto-graph",
  "rto-llama",
- "rto-remote",
  "rto-render",
  "rto-serve",
  "rto-spec",
@@ -4503,16 +4502,6 @@ dependencies = [
  "tree-sitter-python",
  "tree-sitter-rust",
  "tree-sitter-typescript",
-]
-
-[[package]]
-name = "rto-remote"
-version = "6.2.0"
-dependencies = [
- "rto-graph",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
 ]
 
 [[package]]

@@ -767,9 +767,9 @@ pub fn chat_with_client_tools(
     // all.
     //
     // Otherwise here, in the system turn. `carries_tools` is what decides, and it
-    // has to be asked rather than assumed: a request routed to a remote tier is
-    // sent as an ADR-0019 allow-listed payload with no `tools` field at all, so
-    // for that model the conversation is the only way tools can travel.
+    // has to be asked rather than assumed: an external provider is sent no
+    // `tools` field (ADR-0027 §3), so for it the conversation is the only way
+    // tools can travel.
     //
     // The rest of the system turn goes out either way, because it is not the tool
     // list: it states the `<tool_call>` protocol this server parses, and the
@@ -956,7 +956,7 @@ fn truncate(s: &str) -> String {
 /// Since #492 a model whose engine reports [`Engine::carries_tools`] gets the
 /// tools from its own chat template instead, and this listing is not sent to it
 /// at all — it receives the grounding rules alone. The full listing still goes to
-/// engines that cannot carry tools, the remote tier among them, so this remains
+/// engines that cannot carry tools, the external provider among them, so this remains
 /// the number to shrink: it is what the worst-served model pays, and no model
 /// pays more.
 #[must_use]
@@ -2901,9 +2901,9 @@ mod tests {
 
     /// An engine that does *not* carry them still gets the full listing.
     ///
-    /// The remote tier is this case: its ADR-0019 payload has no `tools` field,
-    /// so the conversation is the only way a tool can reach the model. Dropping
-    /// the listing for everyone would have left that path advertising nothing.
+    /// The external provider is this case: it is sent no `tools` field, so the
+    /// conversation is the only way a tool can reach the model. Dropping the
+    /// listing for everyone would have left that path advertising nothing.
     #[test]
     fn an_engine_that_carries_nothing_still_gets_the_listing() {
         let engine = RecordingEngine::new("done");

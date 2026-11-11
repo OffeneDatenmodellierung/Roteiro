@@ -555,8 +555,7 @@ mod tests {
     ///
     /// [`check`] is supposed to be incapable of reading code, reaching the
     /// network or invoking a model, and "supposed to" is worth nothing on its
-    /// own. Reading the manifest is how that becomes checkable — the same reason
-    /// `rto_remote`'s `remote_is_not_a_default_feature` reads a `Cargo.toml`
+    /// own. Reading the manifest is how that becomes checkable — a `Cargo.toml`
     /// rather than a value: whether somebody could add an HTTP client is a
     /// property of the text, not of any run.
     ///
@@ -637,7 +636,7 @@ mod tests {
 
     /// Every public enum here has had the `#[non_exhaustive]` question answered.
     ///
-    /// The same guard `rto-remote` carries (#391), applied to this crate's own
+    /// The guard #391 introduced, applied to this crate's own
     /// source: the workspace publishes at 1.x, so a variant added to a bare
     /// public enum is a breaking change. Taking the attribute is a decision and
     /// saying in the docs why the set is closed is a decision; only silence is

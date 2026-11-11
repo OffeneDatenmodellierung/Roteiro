@@ -24,7 +24,7 @@
 | [0016](0016-audio-metadata-extraction.md) | Audio metadata as derived facts — symphonia for format reads, MPL-2.0 allowed | Accepted |
 | [0017](0017-dependency-security-policy.md) | Dependency security — current by default, monitored, held for a minimum release age of at least 48 hours | Accepted |
 | [0018](0018-analyzer-coverage-matrix.md) | Analyzer coverage — which analyzers deliver which languages, and on which axis | Accepted |
-| [0019](0019-remote-model-tier.md) | Remote model tier — an explicitly consented egress path, and the promises it changes | Accepted |
+| [0019](0019-remote-model-tier.md) | Remote model tier — an explicitly consented egress path, and the promises it changes | Superseded by 0028 |
 | [0020](0020-build-capable-sandboxed-execution.md) | Build-capable sandboxed execution — running the repository's own build, and the non-goal it narrows | Draft |
 | [0021](0021-open-knowledge-format-bundle.md) | The graph's shareable form is an OKF bundle — replacing the Obsidian vault | Accepted |
 | [0022](0022-dynamic-okf-viewer.md) | A dynamic OKF viewer — the bundle is the source, and it is somebody else's | Accepted |
@@ -33,6 +33,7 @@
 | [0025](0025-document-extraction-consent.md) | Documents are decoded, screened, and extracted only where somebody said yes | Draft |
 | [0026](0026-research-knowledge-layer.md) | A research knowledge layer — raw sources in, an authored wiki out | For Review |
 | [0027](0027-external-model-provider.md) | External model provider — models run in a local server the user already has, not inside Roteiro | For Review |
+| [0028](0028-one-engine-local-or-hosted.md) | One engine, local or hosted — the provider may be off this machine, and the remote tier is removed | Accepted |
 
 > **ADR 0018** is the third of the analyzer trio: 0012 decides how findings are
 > stored, 0014 how analyzers are executed and provisioned, and 0018 *which*

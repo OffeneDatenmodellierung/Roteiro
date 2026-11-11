@@ -3,7 +3,7 @@
 //!
 //! # Why this is here and not in one crate
 //!
-//! #391 added this rule to `rto-remote`, where it scanned **that crate's own
+//! #391 added this rule to `rto-remote` (since removed, ADR-0028), where it scanned **that crate's own
 //! sources** — eight enums of the workspace's hundred and eight. `rto-graph`,
 //! `rto-spec`, `rto-exec`, `rto-serve`, `rto-render`, `rto-llama` and `roteiro`
 //! were unguarded, which is how `rto_spec::ViolationKind` — a plain-derive enum
@@ -43,8 +43,8 @@
 //! `NotRun` into a wildcard arm is the precise defect its third state exists to
 //! prevent.
 //!
-//! `rto-remote`'s own test stays: it also covers types re-exported from outside
-//! `src/`, which a directory walk cannot see.
+//! `rto-remote`'s own test, which also covered re-exports, went with the crate
+//! (ADR-0028); everything it re-exported lives under a `src/` walked here.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -99,7 +99,6 @@ const GRANDFATHERED: &[(&str, &str)] = &[
     ("crates/rto-graph/src/model_choice.rs", "ModelChoiceError"),
     ("crates/rto-graph/src/model_choice.rs", "ModelSource"),
     ("crates/rto-graph/src/model_choice.rs", "ModelTask"),
-    ("crates/rto-graph/src/model_choice.rs", "RemoteTier"),
     ("crates/rto-graph/src/models.rs", "DownloadError"),
     ("crates/rto-graph/src/models.rs", "DownloadEvent"),
     ("crates/rto-graph/src/models.rs", "ModelKind"),

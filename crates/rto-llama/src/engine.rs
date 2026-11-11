@@ -90,9 +90,8 @@ pub struct ChatRequest {
     /// cannot know and so cannot render itself. A model whose template ignores
     /// `tools`, or which resolves to a builtin template *name* with no such
     /// slot, gets a plain advertisement spliced into the conversation instead.
-    /// A request routed to the remote tier gets neither: `payload_for` builds an
-    /// ADR-0019 allow-listed body that has no `tools` field at all, so for that
-    /// model the conversation is the only channel there is.
+    /// An external provider (`ProviderEngine`) is sent no `tools` field, so for
+    /// it the conversation is the only channel there is (ADR-0027 §3).
     ///
     /// [`Engine::carries_tools`] is how a caller finds out which, and it must be
     /// asked rather than assumed — it is what decides whether the caller states
@@ -204,9 +203,8 @@ pub trait Engine: Send + Sync + 'static {
     /// advertisements is not merely wasteful: they are two different shapes for
     /// one set of tools, and the model has to reconcile them.
     ///
-    /// Per model rather than per engine, because an engine may serve both kinds
-    /// — `RemoteBackedEngine` renders a chat template locally and posts a plain
-    /// payload remotely, and only the local path carries tools.
+    /// Per model rather than per engine, because a model's own template decides
+    /// whether it has a `tools` slot.
     ///
     /// Defaults to `false`, the safe answer: an engine that ignores `tools`
     /// without saying so leaves the model with instructions about tools it was

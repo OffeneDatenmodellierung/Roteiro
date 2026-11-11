@@ -329,8 +329,7 @@ out of a standing grant. It refuses today, and **it never falls back**: asking
 for isolation and getting execution is the one outcome this command will not
 produce.
 
-The grant is layered the way [ADR-0019](adr/0019-remote-model-tier.md) layers the
-remote tier, and for the same reason — `roteiro.toml` is committed and shared:
+The grant is inverted, because `roteiro.toml` is committed and shared:
 
 | Layer | May deny | May grant |
 |---|---|---|
@@ -341,10 +340,9 @@ remote tier, and for the same reason — `roteiro.toml` is committed and shared:
 
 A merged line that starts running builds on every teammate's machine is consent
 granted by someone else and noticed by nobody, so a committed file may switch the
-sandbox *on* for everyone and may never switch it *off* for anyone. It differs
-from `[remote] enabled` in one respect: there the user layer and the flag must
-**both** grant, here **either** suffices — otherwise you would still type the
-flag every run and the key would be pointless. `roteiro config` prints the key,
+sandbox *on* for everyone and may never switch it *off* for anyone. **Either**
+the user layer or the flag suffices — requiring both would mean typing the flag
+every run, and the key would be pointless. `roteiro config` prints the key,
 both layers, and which one decided.
 
 ```sh

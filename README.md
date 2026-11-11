@@ -67,56 +67,33 @@ preference. A project's committed `roteiro.toml` may deny it for everyone and ma
 never grant it. Nothing ever falls back: asking for the sandbox and getting a
 host run is the one thing this command will not do.
 
-### One capability sends your repository's content elsewhere. It is off.
+### Models run where you point them — on this machine by default
 
-Everything above runs on your machine. **One optional feature does not**, and it
-is named here rather than left to be discovered: `--features remote` compiles the
-**remote model tier** ([ADR-0019](docs/adr/0019-remote-model-tier.md)), which can
-send graph-derived context to a hosted model.
+Everything above runs on your machine, and so does the default model setup: a
+local OpenAI-compatible server such as Ollama, named by `[provider] base_url`
+([docs/MODEL_SETUP.md](docs/MODEL_SETUP.md)). Roteiro makes no network call of
+its own with that configuration.
 
-- **It is not in the default build.** `cargo install roteiro` cannot send
-  anything, and no release will change that. It *is* included in
-  `--all-features`, so a build made that way can — with consent.
-- **Enabling the feature does not enable the tier.** A run must be granted by
-  your own `~/.roteiro/config.toml` **and** by the invocation
-  (`--allow-remote`, or answering a prompt that shows you the exact bytes).
-  Neither alone suffices. A committed `roteiro.toml` may **deny** it for a whole
-  repository but can never grant it — a merged line must not authorise egress on
-  a teammate's machine.
-- **Three commands can send, and each has to be told to.** `roteiro remote call`
-  is the one that exists to; `roteiro spec draft --allow-remote` drafts with the
-  hosted model instead of a local one; `roteiro serve --allow-remote` makes it
-  the model the Ask panel uses. Without the flag all three are local, and **only
-  `remote call` ever prompts** — on the other two the flag is the only way,
-  because a prompt on a command whose default is local turns a habituated "yes"
-  into consent you never quite gave.
-- **`serve --allow-remote` grants for the life of the server process**, not one
-  request at a time, and that is a materially larger exposure than a one-shot
-  command: every Ask that server answers sends context to the hosted model for as
-  long as it runs, including requests from anyone else who can reach the port.
-  `serve` binds loopback by default, your user config still has to have granted,
-  and every call is on the ledger. The grant dies with the process and is never
-  persisted.
-- **A refused `--allow-remote` stops the run.** If you asked for the hosted model
-  and a layer said no, Roteiro names the layer and does *not* answer from a local
-  model instead — that would be a different answer with nothing to signal the
-  change.
-- **What would be sent is inspectable first, and what did is recorded.**
-  `roteiro remote dry-run` prints the exact body and sends nothing;
-  `roteiro remote log` reads the append-only ledger of what left, and when.
-- **Source code is not sent** — function bodies are not in the graph. That is
-  *not* the same as nothing identifying being sent: symbol names, file paths and
-  captured prose go, they identify a codebase, and there is no redaction
-  chokepoint on a prompt. `roteiro remote status` says so in full.
-- **It never falls back quietly.** With the tier on and the endpoint
-  unreachable, Roteiro fails with an error naming the endpoint rather than
-  answering from a local model — a different model is a different answer.
+`base_url` may instead name a **hosted** endpoint — an enterprise Anthropic or
+OpenAI subscription, or a company gateway
+([ADR-0028](docs/adr/0028-one-engine-local-or-hosted.md)). Then the model gets
+the same full context the local one does: the conversation, graph tool results,
+symbol names, paths and captured prose. Function bodies are not in the graph,
+but what is sent still identifies a codebase.
 
-So *"nothing leaves the machine"* is true of Roteiro **as shipped and as
-configured**, and is no longer a property of the software as a whole.
-[ADR-0006](docs/adr/0006-local-model-serving.md) states the same sentence scoped
-to `roteiro serve`, which still exposes only installed models and still never
-downloads.
+- **Every run says so.** Whenever the provider is not on this machine, Roteiro
+  prints its host on stderr before the first request.
+- **Any config layer may set it**, including a committed `roteiro.toml`, so a
+  team can standardise on one endpoint. Read a project's `[provider]` table
+  before running Roteiro in a repository you did not configure.
+- **Plaintext is refused off this machine**: a hosted `base_url` must be
+  `https://`. The credential is `ROTEIRO_PROVIDER_API_KEY`, never a config key.
+- **Roteiro keeps no log of what it sent.** A hosted provider's own audit log is
+  the record.
+
+So *"nothing leaves the machine"* is true of Roteiro **as configured by
+default**. [ADR-0006](docs/adr/0006-local-model-serving.md) states the same
+sentence scoped to `roteiro serve`, which still never downloads.
 
 Planning to work on a train or a plane? Models and analyzer databases must be
 fetched once, deliberately, before you disconnect —

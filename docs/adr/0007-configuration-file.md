@@ -11,8 +11,8 @@ architectural-significance: MEDIUM  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.9"
-last-modified: 2026-09-14
+version: "1.10"
+last-modified: 2026-11-11
 confluence-url:
 ---
 
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | Accepted |
 | **Architectural Significance** | MEDIUM |
 | **Domain** | Developer Tooling |
-| **Document version** | 1.9 |
+| **Document version** | 1.10 |
 
 ## Reference
 
@@ -57,7 +57,7 @@ Everything else is a **value**, and values follow the ordinary order above. Most
 
 | Key | Class | Why |
 |---|---|---|
-| `[remote] enabled` | **capability** | test 1 — [[docs/adr/0019-remote-model-tier.md]] §3 |
+| `[provider] base_url` | value — **by decision** | meets test 1 when it names another machine, and is a value anyway so a team can standardise on one endpoint; bounded by a notice on every run, not by precedence — [[docs/adr/0028-one-engine-local-or-hosted.md]] §2 |
 | `[serve] max_client_tool_bytes` | **capability** | test 4. The built-in denies everything above 32 KiB, so a project raising it spends materially more of every teammate's machine — and the mirror image of `[serve] max_context_tokens` one row below, which is a *value* only because its built-in already grants. See [[docs/adr/0006-local-model-serving.md]] §1.11 |
 | `[serve] prefix_cache_mb` | **capability** | test 4. The built-in is `0` — off — so a project raising it claims hundreds of MiB per entry on every teammate's machine that would not otherwise be claimed. See [[docs/adr/0006-local-model-serving.md]] §1.12 |
 | host execution for builders | **capability** | test 2 — [[docs/adr/0020-build-capable-sandboxed-execution.md]] §6 |
@@ -285,3 +285,4 @@ Project direction incorporated: add a config file, but keep it **optional and fu
 | 1.7 | 2026-09-07 | Amended (issue #578). Adds `[serve] prefix_cache_mb` to the table above as a **capability**, by the same clause 4 as `max_client_tool_bytes` and with the same `Grant` carrying it. Recorded because it is the first key added *after* v1.6 built the shared type, and so the first evidence that §111's requirement — that declaring a key a capability and getting its precedence right be *one act* — actually holds in practice rather than only in principle: the key's whole layering is `Grant::from_layers(project, user, 0).as_effective()`, one line, with no new rule written and none available to get wrong. It is also the first key at a *different width* to reach the type, `u64` where the others are `bool` and `usize`, which is what the generalisation was for. |
 | 1.8 | 2026-09-08 | Amended (no issue). **Re-grounds v1.5's reason for `--tools` narrowing rather than winning, which cited issue #579 — now closed *not planned*.** The conclusion is unchanged and the argument is stronger without it. v1.5 argued the invocation "is not reliably written by a person" because *Roteiro itself might one day* write a `roteiro mcp …` line into a third-party agent's config (#579). That will not happen, and it was always the weaker form of the point: it rested on a hypothetical feature rather than on what an MCP invocation already is. It is **argv in a client's configuration file** — written once by whoever wired the client up, then committed and shared with a team. Observed rather than supposed: a bundle in use against this server carried `args: [mcp, --tools, query]` in a checked-in `config.yaml`, which is precisely the "consent by pull request, granted by someone else, noticed by nobody" shape [[docs/adr/0019-remote-model-tier.md]] §3 names — reached here through a *narrowing* flag rather than a granting one, which is why intersection is the right regime whoever writes it. No key changes class and no precedence moves; this replaces a citation that no longer points at anything with the reason that was underneath it. |
 | 1.9 | 2026-09-14 | Amended (issue #840, [[docs/adr/0026-research-knowledge-layer.md]] step 1). **Two new keys — `[paths] exclude` and `[paths] opaque` — the first in this file that decide what is *in the graph* rather than how it is reported.** Until now the only exclusion list here was `[debt] ignore`, which is scoped to markers and filters the **report**: the node stays in the store and `search`, `explain`, `list_kind`, `path` and `export` all still see it, so a repository could mute a false finding from the report it reads and still publish it to a consumer. The new keys remove the node instead, which needs no per-surface honouring — a node that was never stored cannot be exported. **Three states, not two**, because *"do not mine this as configuration"* and *"do not put this in the graph"* are different requests that two live decisions need one each: `opaque` keeps a `file` node with identity and no derived content, so a committed corpus manifest stays **detectable rather than silent** while not being mined; `exclude` produces no node and never reads the bytes, so a document reached by an explicit ingest path is graphed once rather than twice. A fourth state — mined but muted — already exists and is `[debt] ignore`, deliberately not reproduced. Both classify as **values** under v1.4's test, which no clause of can fire on a key that only subtracts. Both lists **merge** across layers as `[debt] ignore` does, and neither takes a **reset**: a reset on an exclusion would let a committed project file widen what is read over a user's own declaration, and narrowing is the safe direction. **Nothing is excluded by a built-in default**, because a built-in would drop a directory out of every existing repository's graph on upgrade with nothing said. Records the requirement that decides whether the mechanism works at all: the policy is consulted by **every** reader of repository bytes, not by extraction alone — the authored layer walks every path independently and classifies by *content*, so a `type: adr` declaration is honoured wherever the file sits, and an exclusion reaching one reader and not the other would remove a manifest's `config_key` nodes while still parsing a stranger's paper as one of this project's decisions. |
+| 1.10 | 2026-11-11 | Amended by [[docs/adr/0028-one-engine-local-or-hosted.md]]. `[remote] enabled` is removed with the remote tier (the v1.2 inversion no longer applies to any key), and `[provider] base_url` is recorded as a **value by decision**: it would meet test 1 when it names another machine, and is kept a value so a committed file can point a team at one endpoint, with a per-run notice in place of precedence. |

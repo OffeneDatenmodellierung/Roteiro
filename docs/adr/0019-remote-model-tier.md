@@ -6,13 +6,13 @@ Parent: ADRs
 # ADR-specific metadata (unknown keys are ignored; used for indexing/search)
 type: adr
 adr-id: "0019"
-status: Accepted                    # Draft | For Review | Accepted | Rejected | Superseded
+status: Superseded                  # Draft | For Review | Accepted | Rejected | Superseded
 architectural-significance: VERY HIGH  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Inference
 decision-makers: ["The Roteiro Project Team"]
-superseded-by:
-version: "1.2"
-last-modified: 2026-08-17
+superseded-by: "0028"
+version: "1.3"
+last-modified: 2026-11-11
 confluence-url:
 ---
 
@@ -20,10 +20,10 @@ confluence-url:
 
 |  |  |
 |---|---|
-| **State** | Accepted |
+| **State** | Superseded |
 | **Architectural Significance** | VERY HIGH |
 | **Domain** | Inference |
-| **Document version** | 1.2 |
+| **Document version** | 1.3 |
 
 ## Reference
 
@@ -280,6 +280,8 @@ because it produces a different answer with no signal that anything changed.
 
 ## Status
 
+**Superseded** by [[docs/adr/0028-one-engine-local-or-hosted.md]] (2026-11-11): the tier, its crate and its commands are removed, and a hosted model is now a `[provider] base_url`. What follows is the record as accepted.
+
 **Accepted** (2026-08-17), and **unbuilt** — a departure from this repository's
 habit, worth stating rather than leaving to be noticed. Every ADR accepted before
 this one was accepted alongside working code. This is a decision about a
@@ -298,3 +300,4 @@ row — never a quiet deviation in code.
 | 1.0 | 2026-08-17 | Initial. Written to unblock Stage 34. |
 | 1.1 | 2026-08-17 | **Accepted.** No content changed; Stage 34 is unblocked. |
 | 1.2 | 2026-08-17 | Scoped "the invocation" for long-lived processes: `serve --allow-remote` grants for the life of the server process, decided by the owner. Records why a per-request grant is unworkable (nobody is present at an HTTP request to ask), states the exposure plainly, and names the three existing bounds. No change to the grant/deny table. |
+| 1.3 | 2026-11-11 | **Superseded** by [[docs/adr/0028-one-engine-local-or-hosted.md]]. The remote tier is removed; one provider engine serves local and hosted models alike. |

@@ -75,36 +75,18 @@ no rebuild. Nothing is ever fetched without an explicit <code>[y/N]</code> conse
 Everything heavier — running local models, PDF/image ingestion, the model server, the
 sandboxed analyzer backend — stays opt-in behind a feature flag.</div>
 
-<div class="note" id="remote-tier"><strong>One optional feature sends your content
-elsewhere, and it is off.</strong> <code>--features remote</code> compiles the
-<strong>remote model tier</strong>
-(<a href="https://github.com/OffeneDatenmodellierung/Roteiro/blob/main/docs/adr/0019-remote-model-tier.md">ADR-0019</a>)
-— the one capability in Roteiro that can send graph-derived context to a hosted model. It
-is <em>not</em> in the default build and no release will put it there; it <em>is</em> in
-<code>--all-features</code>. Compiling it does not enable it: a run needs a grant from your
-own <code>~/.roteiro/config.toml</code> <em>and</em> from the invocation
-(<code>--allow-remote</code>, or a prompt that shows you the exact bytes) — neither alone
-suffices, and a committed <code>roteiro.toml</code> may <strong>deny</strong> it for a whole
-repository but can never grant it, because a merged line must not authorise egress on a
-teammate's machine. Three commands can send, and each has to be told to: <code>roteiro remote call</code> is the
-one that exists to, <code>roteiro spec draft --allow-remote</code> drafts with the hosted
-model instead of a local one, and <code>roteiro serve --allow-remote</code> makes it the
-model the Ask panel uses — <em>only</em> <code>remote call</code> ever prompts, because a
-prompt on a command whose default is local turns a habituated “yes” into consent you never
-quite gave. <code>serve --allow-remote</code> grants for the life of the server
-<em>process</em>: every Ask it answers sends context to the hosted model for as long as it
-runs, including requests from anyone else who can reach the port — bounded by
-loopback-by-default binding, by your user config having granted independently, and by the
-ledger; it is never persisted and dies with the process. A refused
-<code>--allow-remote</code> stops the run and names the layer that refused, rather than
-answering from a local model. <code>roteiro remote dry-run</code> prints exactly what would
-be sent; <code>roteiro remote log</code> reads the append-only record of what did. Source
-code is not sent — function bodies are not in the graph — but symbol names, paths and captured prose
-are, they identify a codebase, and there is no redaction chokepoint on a prompt. And it
-never degrades quietly: an unreachable endpoint is an error naming that endpoint, not a
-local model's answer handed over in its place. So <em>“nothing leaves the machine”</em> is
-true of Roteiro as shipped and as configured, and is not a property of the software as a
-whole.</div>
+<div class="note" id="remote-tier"><strong>Models run where you point them — on this
+machine by default.</strong> The default model setup is a local OpenAI-compatible server
+such as Ollama, named by <code>[provider] base_url</code>. That URL may instead name a
+<strong>hosted</strong> endpoint — an enterprise Anthropic or OpenAI subscription
+(<a href="https://github.com/OffeneDatenmodellierung/Roteiro/blob/main/docs/adr/0028-one-engine-local-or-hosted.md">ADR-0028</a>)
+— and then the model receives the same full context a local one does: the conversation,
+graph tool results, symbol names, paths and captured prose. Every run prints the host on
+stderr when it is not this machine; a hosted URL must be <code>https://</code>; the
+credential is <code>ROTEIRO_PROVIDER_API_KEY</code>, never a config key. Any config layer
+may set it, including a committed <code>roteiro.toml</code>, so read a repository's
+<code>[provider]</code> table before running Roteiro in it. So <em>“nothing leaves the
+machine”</em> is true of Roteiro as configured by default.</div>
 
 <h2 id="replaces">One graph, not a stack of tools</h2>
 
@@ -224,8 +206,8 @@ All local models are GGUF, run through the shared llama.cpp engine. <a href="mod
 
 <p>A config file is optional. Roteiro merges a per-user <code>~/.roteiro/config.toml</code>
 with a per-project <code>roteiro.toml</code> (project wins) — except
-<code>[remote] enabled</code>, which the committed file may switch <em>off</em> but
-never <em>on</em>. <a href="config.html">Configuration →</a></p>
+<code>[lint] allow_unsandboxed</code>, which the committed file may switch <em>off</em>
+but never <em>on</em>. <a href="config.html">Configuration →</a></p>
 
 <h2 id="crossrepo">Cross-repo: a hub and its spokes</h2>
 

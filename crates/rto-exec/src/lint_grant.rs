@@ -45,16 +45,8 @@ use crate::guidance::{Guidance, Line};
 /// nobody. Denial has none of those problems, so the project layer keeps it: a
 /// repository that wants the sandbox enforced for everyone can say so.
 ///
-/// # Its twin in `rto-remote`, and the one place they part company
-///
-/// `rto_remote::ConfigGrant` implements the same inversion for ADR-0019's remote
-/// tier, and the two agree exactly on this half — a cross-check in the binary's
-/// test suite pins all nine layer combinations against each other, because two
-/// implementations of one rule are a rule that will drift.
-///
-/// They are two implementations rather than one because `rto-remote` is an
-/// optional, off-by-default crate and `lint` ships in the default feature set,
-/// so this could not depend on that.
+/// It had a twin in `rto-remote` for the remote tier's `[remote] enabled`; that
+/// crate and key were removed by ADR-0028, leaving this the only grant key.
 ///
 /// Where they deliberately differ is the **invocation**, and that difference is
 /// in `decide` rather than here: ADR-0019 needs the user layer *and* the flag,
@@ -97,10 +89,8 @@ impl ConfigGrant {
     /// instead.
     ///
     /// Delegates the rule itself to [`rto_graph::layering::Grant`], the
-    /// workspace's one implementation of ADR-0007 v1.4's inversion. This type and
-    /// `rto_remote::ConfigGrant` had each carried a private copy of it — the third
-    /// copy is the decay ADR-0007 §111 names by name — and they now differ only in
-    /// which key they describe. The predicates below stay here because they report
+    /// workspace's one implementation of ADR-0007 v1.4's inversion, rather than
+    /// carrying a private copy — the decay ADR-0007 §111 names by name. The predicates below stay here because they report
     /// what this *file* said, which is a `bool`-shaped question, not a layering one.
     #[must_use]
     pub fn as_effective(self) -> Option<bool> {
@@ -136,7 +126,7 @@ impl ConfigGrant {
 ///
 /// Named `Requested` rather than `Invocation` only because that name is already
 /// taken in this crate by an analyzer's argv ([`crate::Invocation`]); it is the
-/// same concept as `rto_remote::Invocation`, minus the prompt form, because a
+/// invocation half of the grant, with no prompt form, because a
 /// linter is run non-interactively far more often than it is not and a prompt
 /// that a script cannot answer is a hang rather than a gate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

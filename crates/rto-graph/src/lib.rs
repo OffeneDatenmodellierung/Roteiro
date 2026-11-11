@@ -107,12 +107,6 @@ mod store;
 mod sync;
 mod text;
 pub mod topology;
-// Whether a producer's identity is measured or asserted (ADR-0019 §5). In *this*
-// crate rather than in `rto-remote` because `rto-remote` depends on this one, so
-// `ModelSource::Remote` cannot name a type that lives there — and because the
-// grade qualifies `Producer`, which is here. Two variants and a sentence: it
-// brings no transport with it.
-pub mod trust;
 mod workspace;
 
 pub use artifact::{ARTIFACT_SCHEMA, GraphArtifact};
@@ -175,9 +169,8 @@ pub use model::{Direction, Edge, EdgeKind, FactSet, Node, NodeKind, Span};
 #[cfg(feature = "models")]
 pub use model_choice::{
     DEFAULT_GENERATIVE, DEFAULT_OCR, ModelChoice, ModelChoiceError, ModelPins, ModelSource,
-    ModelTask, RemoteTier, TASKS as MODEL_TASKS, resolve as resolve_model,
-    resolve_all_with as resolve_models, resolve_with as resolve_model_with,
-    resolve_with_remote as resolve_model_with_remote, set_model_pins,
+    ModelTask, TASKS as MODEL_TASKS, resolve as resolve_model, resolve_all_with as resolve_models,
+    resolve_with as resolve_model_with, set_model_pins,
 };
 #[cfg(feature = "models")]
 pub use models::{
@@ -214,7 +207,6 @@ pub use text::{
     heading_text, headings, is_code_fence, link_scope, markdown_dialect, markdown_links, slugify,
     strip_code_spans, wiki_link_targets,
 };
-pub use trust::ProducerTrust;
 pub use workspace::{
     Follow, OKF_BUNDLE_DIR, OkfBundle, OnOpen, ReloadPlan, ResolvedWorkspace, RootScan,
     SetReloadPlan, Workspace, WorkspaceError, WorkspaceSet, Worktrees, discover_okf_bundles,

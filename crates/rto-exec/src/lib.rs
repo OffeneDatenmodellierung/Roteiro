@@ -188,9 +188,8 @@ pub use ingest::{
 #[cfg(feature = "exec-subprocess")]
 pub use lint::{LintError, LintOutcome, Toolchain, invocation as lint_invocation, run as run_lint};
 pub use rto_graph::{age_in_days, rfc3339_from_unix, rfc3339_utc, unix_from_rfc3339};
-// ADR-0020 §6's grant. Re-exported under `lint_`-prefixed names because the
-// concepts have twins in `rto-remote` (ADR-0019 §3) and a reader who meets
-// `ConfigGrant` in the binary must be able to see which of the two it is.
+// ADR-0020 §6's grant, re-exported under `lint_`-prefixed names so a reader who
+// meets `ConfigGrant` in the binary can see which key it governs.
 pub use lint_grant::{
     Backend as LintBackend, ConfigGrant as LintConfigGrant, Decision as LintDecision,
     Reason as LintReason, Requested as LintRequested, decide as decide_lint_host,

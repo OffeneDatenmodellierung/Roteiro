@@ -11,8 +11,8 @@ architectural-significance: VERY HIGH  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Inference
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "0.1"
-last-modified: 2026-10-30
+version: "0.2"
+last-modified: 2026-11-11
 confluence-url:
 ---
 
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | For Review |
 | **Architectural Significance** | VERY HIGH |
 | **Domain** | Inference |
-| **Document version** | 0.1 |
+| **Document version** | 0.2 |
 
 ## Reference
 
@@ -85,11 +85,10 @@ The Roteiro Project Team. D1–D3 below were decided by the project owner on
 credential, if the server wants one, is an environment variable and never a
 config key, for ADR-0019 §3's reason: `roteiro.toml` is committed.
 
-**A non-loopback `base_url` is refused.** Sending repository content to another
-machine is egress, and ADR-0019 already decides what egress requires. Until a
-non-loopback provider is routed through that gate, the refusal is the gate. With
-that rule the key is a *value* under ADR-0007 — a committed project file cannot
-use it to send anything off the machine.
+**Amended by [[docs/adr/0028-one-engine-local-or-hosted.md]] (v0.2):** a
+non-loopback `https://` `base_url` is accepted from any layer and announced on
+every run; plaintext to another machine is refused. As first written, this
+section refused every non-loopback `base_url` until ADR-0019's gate covered it.
 
 There is no reachability probe at startup. Whether the server answers is
 discovered by the first call, which names the URL when it fails.
@@ -141,7 +140,8 @@ returns no `logprobs` is refused by name rather than answered with a guess.
 - Performance features — speculative decoding, prefix cache, residency budgets —
   become the provider's. `[serve] prefix_cache_mb` and `memory_budget_mb` stop
   meaning anything and are removed with the engine.
-- "Offline" now depends on the provider being local, which §1 enforces.
+- "Offline" now depends on the provider being local, which the default
+  configuration is; ADR-0028 allows a hosted one.
 - `docs/MODEL_SETUP.md` becomes the place that says which models each task needs.
 
 ## Status
@@ -156,3 +156,4 @@ llama.cpp and uses it when `[provider] base_url` is unset.
 | Version | Date | Change |
 |---|---|---|
 | 0.1 | 2026-10-30 | Initial. Records D1 (keep `/v1`), D2 (keep OCR weights) and D3 (keep transcription via an audio-capable provider). |
+| 0.2 | 2026-11-11 | §1 amended by [[docs/adr/0028-one-engine-local-or-hosted.md]]: a hosted `https://` provider is allowed and announced; the loopback-only rule is withdrawn. |

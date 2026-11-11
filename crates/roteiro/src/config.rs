@@ -159,21 +159,6 @@ impl Loaded {
     }
 }
 
-#[cfg(feature = "remote")]
-impl Loaded {
-    /// What the two **config layers** say about the remote model tier, as the
-    /// consent gate reads them (ADR-0019 §3).
-    ///
-    /// Built from the *layers*, not from [`Loaded::effective`], because the
-    /// merge is lossy on purpose: a project-layer grant is discarded on the way
-    /// to the effective value, and `rto_remote::ConfigGrant` is what remembers
-    /// there was one to report. The invocation is the caller's to supply.
-    #[must_use]
-    pub fn remote_config_grant(&self) -> rto_remote::ConfigGrant {
-        rto_remote::ConfigGrant::from_layers(self.project.remote.enabled, self.user.remote.enabled)
-    }
-}
-
 /// Roteiro configuration. All fields optional; see the module docs.
 #[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
@@ -199,12 +184,13 @@ pub struct Config {
     pub mcp: McpConfig,
     /// `roteiro debt` tuning (paths excluded from the intent-debt scan).
     pub debt: DebtConfig,
-    /// `[remote]` — the optional, default-off remote model tier (ADR-0019).
-    /// **One of the two tables whose grant key does not follow this file's
-    /// precedence**; see [`RemoteConfig`], and [`LintConfig`] for the other.
-    pub remote: RemoteConfig,
+    /// `[remote]` — **removed** (ADR-0028): a hosted model is now just a
+    /// `[provider] base_url`. Still parsed, never serialized, so a config that
+    /// carries the old table loads and [`read_config`] warns that it is inert.
+    #[serde(skip_serializing)]
+    pub remote: Option<toml::Value>,
     /// `[lint]` — whether `roteiro lint` may run a linter on this host
-    /// (ADR-0020 §6). **The other inverted key**; see [`LintConfig`].
+    /// (ADR-0020 §6). **The inverted key**; see [`LintConfig`].
     pub lint: LintConfig,
     /// `[security]` — the images `roteiro security run` sandboxes analyzers in
     /// (ADR-0014). Ordinary precedence: these are locators, not permissions —
@@ -281,8 +267,8 @@ pub struct Config {
 /// code deliberately does **not** do that. Scanned for the shape it detects, the
 /// rule reports the documentation of its own fix: **0 true positives, 3 false
 /// positives**. Two of the three survive this change and cannot be retired —
-/// [`RemoteConfig::enabled`] and [`LintConfig::allow_unsandboxed`] still need the
-/// explanation — and the paragraph you are reading quotes all three again, so a
+/// `[remote] enabled` (since removed, ADR-0028) and
+/// [`LintConfig::allow_unsandboxed`] still needed the explanation — and the paragraph you are reading quotes all three again, so a
 /// rule shipped today would report **five**, every one of them prose. There is no
 /// `roteiro:ignore-file` escape either, because this is production code that has
 /// to stay scanned. Issue #438 is explicit that a rule which fires on correct code
@@ -293,10 +279,10 @@ pub struct Config {
 ///
 /// # The three keys that deliberately do *not* use it
 ///
-/// [`RemoteConfig::enabled`] (ADR-0019 §3), [`LintConfig::allow_unsandboxed`]
-/// (ADR-0020 §6) and [`McpConfig::tools`] also reject `.or()`, and they are still
-/// `Option`s. They are not non-inheritable: all three **read both layers** and
-/// combine them — an `AND` for the two grants, an intersection for the allow-list
+/// [`LintConfig::allow_unsandboxed`] (ADR-0020 §6) and [`McpConfig::tools`] also
+/// reject `.or()`, and they are still `Option`s. They are not non-inheritable:
+/// both **read both layers** and combine them — an `AND` for the grant, an
+/// intersection for the allow-list
 /// — so a lower layer's `false`, or its narrower list, is load-bearing. Wrapping
 /// them here would name their policy wrongly, which is the failure this type
 /// exists to prevent. Their type-level answer is the `ConfigGrant` /
@@ -502,53 +488,12 @@ pub fn ignore_problem(pattern: &str) -> Option<String> {
     ))
 }
 
-/// `[remote]` — the optional, **default-off** remote model tier (ADR-0019), and
-/// the one table in this file whose precedence is not the one the module docs
-/// describe.
-///
-/// # `enabled` inverts the layering, and only `enabled`
-///
-/// ADR-0007's order is **CLI flag > project > user > built-in default**. For
-/// [`RemoteConfig::enabled`] it is inverted, because `roteiro.toml` is
-/// *committed and shared by design* — this file's own reason for existing — so a
-/// merged line authorising egress on every teammate's machine would be consent
-/// granted by someone else and noticed by nobody:
-///
-/// | Layer | May deny | May grant |
-/// |---|---|---|
-/// | Built-in default | denied by default | — |
-/// | Project `roteiro.toml` | **yes** | **no** |
-/// | User `~/.roteiro/config.toml` | yes | yes — necessary, not sufficient |
-/// | Invocation (`--allow-remote`) | yes | yes — necessary, not sufficient |
-///
-/// [`RemoteConfig::endpoint`] and [`RemoteConfig::model`] are **ordinary keys**
-/// and layer ordinarily, project over user. A project may point the tier at its
-/// own gateway; it still cannot turn the tier on, and the endpoint it chose is
-/// printed by `roteiro remote status` and by every dry-run before anything is
-/// sent.
-#[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
-#[serde(default)]
-pub struct RemoteConfig {
-    /// Whether *this layer* opts into the remote model tier.
-    ///
-    /// Meaningful per layer rather than merged like a scalar — see the type's
-    /// docs, and [`remote_enabled_effective`] for the merge.
-    pub enabled: Option<bool>,
-    /// The URL a request goes to. Must be `https://`, or `http://` to a loopback
-    /// address for a gateway that terminates TLS itself.
-    pub endpoint: Option<String>,
-    /// The vendor's model string. It is a **mutable pointer**: the weights behind
-    /// it can change while the name does not, which is why anything recorded from
-    /// this tier is `vendor_asserted` rather than digest-pinned.
-    pub model: Option<String>,
-}
-
 impl ModelsConfig {
     /// Overlay the project layer (`over`) on the user layer (`self`).
     ///
     /// Five ordinary keys, ordinary precedence. It became its own function when
     /// `[lint]` was added and [`Config::overlaid_with`] crossed the length limit
-    /// — but it belongs here regardless: `[remote]`, `[lint]` and `[telemetry]`
+    /// — but it belongs here regardless: `[lint]` and `[telemetry]`
     /// already overlay themselves, and the largest table in the file was the odd
     /// one out for no reason beyond the order things were written in.
     fn overlaid_with(&self, over: &Self) -> Self {
@@ -563,42 +508,19 @@ impl ModelsConfig {
     }
 }
 
-impl RemoteConfig {
-    /// Overlay the project layer (`over`) on the user layer (`self`).
-    ///
-    /// Its own function, unlike the tables that inline their overlay in
-    /// [`Config::overlaid_with`], because **one of these three fields does not
-    /// follow the rule the other two do** and that difference deserves to be
-    /// visible at the point it is applied rather than inferred from a comment
-    /// twenty lines into a hundred-line merge.
-    fn overlaid_with(&self, over: &Self) -> Self {
-        Self {
-            // ADR-0019 §3. `over.enabled.or(self.enabled)` — the shape every
-            // other scalar in this file uses — would let a merged line in a
-            // committed `roteiro.toml` authorise egress on every teammate's
-            // machine, which is the failure the inversion exists to prevent.
-            enabled: remote_enabled_effective(self.enabled, over.enabled),
-            // Ordinary keys, ordinary precedence: a project may choose *where*
-            // its own gateway is without being able to turn the tier on.
-            endpoint: over.endpoint.clone().or_else(|| self.endpoint.clone()),
-            model: over.model.clone().or_else(|| self.model.clone()),
-        }
-    }
-}
-
 /// `[lint]` — whether `roteiro lint` may run a linter **on this host**
 /// (ADR-0020 §6), and the second table in this file whose key does not follow
 /// the module's precedence.
 ///
-/// # `allow_unsandboxed` inverts the layering, for [`RemoteConfig`]'s reason
+/// # `allow_unsandboxed` inverts the layering
 ///
 /// `roteiro lint` runs the linter sandboxed by default. `cargo clippy` has
 /// `cargo check` semantics, so running it on the host executes the tree's build
 /// scripts and loads its proc macros with the invoking user's filesystem and
 /// credentials — and that the *toolchain* is yours does not make the *code*
 /// yours when you are linting a branch you are reviewing. So the host is
-/// permitted rather than assumed, and the permission layers as ADR-0019 §3
-/// layers egress, because `roteiro.toml` is committed and shared:
+/// permitted rather than assumed, and the permission is inverted, because
+/// `roteiro.toml` is committed and shared:
 ///
 /// | Layer | May deny | May grant |
 /// |---|---|---|
@@ -610,17 +532,8 @@ impl RemoteConfig {
 /// A merged line that starts running builds on every teammate's machine is
 /// consent granted by someone else and noticed by nobody.
 ///
-/// # It differs from `[remote] enabled` in one respect, deliberately
-///
-/// There, the user layer and the invocation must **both** grant. Here **either
-/// suffices** (ADR-0020 §6). Remote egress sends your source elsewhere and is
-/// worth re-consenting to per run; building on your own machine with your own
-/// toolchain is a standing preference a person may reasonably express once —
-/// and requiring both would make this key useless, since you would still type
-/// the flag on every run. Do not reconcile the two.
-///
-/// The whole difference lives in `rto_exec::lint::decide`, not here: this table
-/// contributes the *config* half, which is the half the two tiers agree on.
+/// The decision lives in `rto_exec::lint::decide`, not here: this table
+/// contributes the *config* half.
 #[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct LintConfig {
@@ -650,8 +563,7 @@ pub struct LintConfig {
     ///
     /// # Ordinary precedence, unlike the key above it
     ///
-    /// Project over user, and `--image` over both — `[remote] gateway`'s rule
-    /// and for the same reason: a project may choose *where* its team's boundary
+    /// Project over user, and `--image` over both: a project may choose *where* its team's boundary
     /// comes from without being able to decide *whether* there is one. The
     /// inversion belongs to `allow_unsandboxed`, which is a permission; this is
     /// a locator.
@@ -664,7 +576,7 @@ pub struct LintConfig {
 impl LintConfig {
     /// Overlay the project layer (`over`) on the user layer (`self`).
     ///
-    /// Its own function for [`RemoteConfig::overlaid_with`]'s reason: the rule
+    /// Its own function because the rule
     /// this applies is not the rule the rest of the merge applies, and that
     /// belongs where it is applied rather than in a comment far away.
     fn overlaid_with(&self, over: &Self) -> Self {
@@ -677,7 +589,7 @@ impl LintConfig {
                 self.allow_unsandboxed,
                 over.allow_unsandboxed,
             ),
-            // Ordinary key, ordinary precedence — `[remote] gateway`'s rule: a
+            // Ordinary key, ordinary precedence: a
             // project may choose *where* its team's boundary comes from without
             // being able to decide *whether* there is one.
             image: over.image.clone().or(self.image.clone()),
@@ -689,8 +601,7 @@ impl LintConfig {
 /// invocation is consulted.
 ///
 /// Delegates to `rto_exec::lint::ConfigGrant`, so the value `roteiro config`
-/// echoes and the value the gate consults cannot drift apart — the same
-/// arrangement [`remote_enabled_effective`] has with `rto_remote`.
+/// echoes and the value the gate consults cannot drift apart.
 #[cfg(feature = "exec-subprocess")]
 fn lint_allow_unsandboxed_effective(user: Option<bool>, project: Option<bool>) -> Option<bool> {
     rto_exec::LintConfigGrant::from_layers(project, user).as_effective()
@@ -699,37 +610,12 @@ fn lint_allow_unsandboxed_effective(user: Option<bool>, project: Option<bool>) -
 /// Without a linter to run, the effective value is unset whatever the layers
 /// say.
 ///
-/// Reported as unset rather than echoed back, for the reason
-/// [`remote_enabled_effective`]'s counterpart gives: echoing
+/// Reported as unset rather than echoed back: echoing
 /// `allow_unsandboxed = true` from a build that cannot run a linter would
 /// describe a permission that permits nothing. The key still **parses**, so a
 /// config shared with a fuller build is never rejected by a leaner one.
 #[cfg(not(feature = "exec-subprocess"))]
 fn lint_allow_unsandboxed_effective(_user: Option<bool>, _project: Option<bool>) -> Option<bool> {
-    None
-}
-
-/// The `[remote] enabled` the config layers jointly produce, before the
-/// invocation is consulted.
-///
-/// Delegates to `rto_remote::ConfigGrant`, which is the workspace's single
-/// implementation of "a project may deny but never grant" — so the value
-/// `roteiro config` echoes and the value the gate consults cannot drift apart.
-#[cfg(feature = "remote")]
-fn remote_enabled_effective(user: Option<bool>, project: Option<bool>) -> Option<bool> {
-    rto_remote::ConfigGrant::from_layers(project, user).as_effective()
-}
-
-/// Without the `remote` feature there is no tier for a key to enable, so the
-/// effective value is unset whatever the layers say.
-///
-/// Reported as unset rather than echoed back, because echoing `enabled = true`
-/// from a build that cannot send anything would describe a capability that is not
-/// there. The key still **parses** in this build, so a config shared with a
-/// fuller one is never rejected by a leaner one (ADR-0007's forward-compatibility
-/// rule); `roteiro config` says the build has no remote tier.
-#[cfg(not(feature = "remote"))]
-fn remote_enabled_effective(_user: Option<bool>, _project: Option<bool>) -> Option<bool> {
     None
 }
 
@@ -778,8 +664,7 @@ fn remote_enabled_effective(_user: Option<bool>, _project: Option<bool>) -> Opti
 ///    refused; set, they run in a microVM. A key whose default grants nothing and
 ///    whose effect is to add a boundary is not a permission.
 ///
-/// So: **value**, ordinary precedence — project over user, exactly `[lint] image`
-/// and `[remote] endpoint`. A project may choose *where* its team's boundary
+/// So: **value**, ordinary precedence — project over user, exactly `[lint] image`. A project may choose *where* its team's boundary
 /// comes from without deciding *whether* there is one; and for a locator the
 /// inversion is not merely unnecessary but inexpressible, since there is no
 /// "deny" for a locator, only a different one.
@@ -1481,7 +1366,7 @@ fn serve_overlaid(user: &ServeConfig, over: &ServeConfig) -> ServeConfig {
 ///
 /// **Inverted precedence — a capability, not a value** (ADR-0007 v1.4): the
 /// project layer may lower this and never raise it. Named here rather than
-/// inlined into `overlaid_with` for the reason [`remote_enabled_effective`] is,
+/// inlined into `overlaid_with` so the rule is visible where it is applied,
 /// and delegating to [`rto_graph::layering::Grant`] rather than re-deriving the
 /// rule, because ADR-0007 §111 requires declaring a key a capability and getting
 /// its precedence right to be one act rather than two.
@@ -1746,7 +1631,7 @@ impl From<Vec<String>> for ToolAllowList {
 impl McpConfig {
     /// Overlay the project layer (`over`) on the user layer (`self`).
     ///
-    /// Its own function, like [`RemoteConfig::overlaid_with`], because the one
+    /// Its own function, like [`LintConfig::overlaid_with`], because the one
     /// key in it does not follow this file's ordinary precedence and that is
     /// worth seeing where it is applied.
     fn overlaid_with(&self, over: &Self) -> Self {
@@ -1984,11 +1869,10 @@ impl Config {
                 // inherited pattern was plainly still present.
                 ignore_reset: over.debt.ignore_reset,
             },
-            // The two tables in this merge whose grant key does **not** follow
-            // the project-over-user rule every line above uses; see
-            // [`RemoteConfig::overlaid_with`] (ADR-0019 §3) and
-            // [`LintConfig::overlaid_with`] (ADR-0020 §6).
-            remote: self.remote.overlaid_with(&over.remote),
+            // Inert since ADR-0028; each layer is warned about in `read_config`.
+            remote: None,
+            // The table in this merge whose grant key does **not** follow the
+            // project-over-user rule every line above uses (ADR-0020 §6).
             lint: self.lint.overlaid_with(&over.lint),
             // **Per key, project over user** — `[pins]`'s rule, not
             // `[debt] ignore`'s. Each entry is an independent locator for one
@@ -2521,6 +2405,15 @@ fn read_config(path: Option<&Path>) -> anyhow::Result<Config> {
     // list, the resolution table, the `--json` echo and the resolver cannot
     // disagree about whether a key is set (see [`ModelsConfig::normalize`]).
     config.models.normalize();
+    if config.remote.is_some() {
+        eprintln!(
+            "warning: {} has a `[remote]` table, which no longer does anything (ADR-0028). A \
+             hosted model is now `[provider] base_url` plus `ROTEIRO_PROVIDER_API_KEY`; see \
+             docs/MODEL_SETUP.md. A project that set `[remote] enabled = false` to keep content \
+             on this machine is no longer enforced.",
+            path.display()
+        );
+    }
     Ok(config)
 }
 
@@ -4246,8 +4139,7 @@ mod tests {
     /// The two keys sit in one table under two rules, which is unusual enough to
     /// be worth pinning: `allow_unsandboxed` is a *permission* and inverts, so a
     /// committed file may deny and never grant; `image` is a *locator* and does
-    /// not, so a project may choose where its team's boundary comes from — which
-    /// is `[remote] endpoint`'s rule beside `[remote] enabled`'s.
+    /// not, so a project may choose where its team's boundary comes from.
     #[test]
     fn the_lint_image_takes_ordinary_precedence_unlike_the_key_beside_it() {
         let image = |user: Option<&str>, project: Option<&str>| {

@@ -88,10 +88,9 @@ roteiro spec draft draft-adr.md         <span class="c"># fills placeholder sect
 <div class="note"><strong>“Online mode” means the download, not the inference.</strong>
 The one-time <code>model pull</code> is the only thing that touches the network here; after
 it, every model above runs on this machine and nothing you ask is sent anywhere. The
-separate, default-off capability that <em>does</em> call a hosted model at use time is the
-<a href="./#remote-tier"><strong>remote model tier</strong></a> — a different feature, a
-different name, and a consent model of its own. If you enabled
-<code>inference-local-models</code>, you did not enable that.</div>
+way a hosted model is called at use time is a <code>[provider] base_url</code> naming one —
+<a href="./#remote-tier">a configuration choice, announced on every run</a>, not a build
+feature. If you enabled <code>inference-local-models</code>, you did not enable that.</div>
 
 ## 3 · Serving mode — the network HTTP server {#serving}
 
