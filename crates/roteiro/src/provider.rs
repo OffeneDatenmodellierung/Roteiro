@@ -337,11 +337,20 @@ fn read_stream(
                 on_token(piece);
             }
             match choice.get("finish_reason").and_then(|v| v.as_str()) {
+                Some("stop") => finished = true,
                 Some("length") => {
                     stats.finish_reason = FinishReason::Length;
                     finished = true;
                 }
-                Some(_) => finished = true,
+                // `content_filter` and anything else: the provider ended the
+                // answer for its own reason, so what arrived may be partial.
+                // Refused rather than reported as a clean stop.
+                Some(other) => {
+                    return Err(EngineError::Inference(format!(
+                        "the provider stopped with finish_reason `{other}`, so what arrived \
+                         may be only part of the answer"
+                    )));
+                }
                 None => {}
             }
         }
@@ -600,10 +609,19 @@ mod tests {
                 .expect("the stub was reached directly, not through the proxy");
             let hosted = ProviderEngine::new("https://api.example.com/v1", Vec::new())
                 .expect("a hosted https endpoint");
+            let proxy = hosted
+                .agent
+                .config()
+                .proxy()
+                .expect("a hosted endpoint takes the environment's proxy");
+            // `HTTPS_PROXY` (port 9) is the one chosen, not `HTTP_PROXY` (port 8).
+            assert_eq!(proxy.port(), 9, "HTTPS_PROXY is honoured");
+            let uri = |u: &str| u.parse::<ureq::http::Uri>().expect("uri");
             assert!(
-                hosted.agent.config().proxy().is_some(),
-                "a hosted endpoint takes the environment's proxy"
+                proxy.is_no_proxy(&uri("https://bypass.example.com/v1")),
+                "NO_PROXY is honoured"
             );
+            assert!(!proxy.is_no_proxy(&uri("https://api.example.com/v1")));
             return;
         }
         let name = format!(
@@ -616,20 +634,18 @@ mod tests {
         child
             .args(["--exact", &name, "--nocapture"])
             .env(CHILD, "1");
-        // Port 9 (discard) has nothing listening, so a proxied call fails.
-        for var in [
-            "ALL_PROXY",
-            "HTTPS_PROXY",
-            "HTTP_PROXY",
-            "all_proxy",
-            "https_proxy",
-            "http_proxy",
-        ] {
+        // Nothing listens on ports 8 or 9, so a proxied loopback call fails.
+        // Distinct ports show which variable a hosted engine took.
+        for var in ["HTTPS_PROXY", "https_proxy"] {
             child.env(var, "http://127.0.0.1:9");
         }
-        for var in ["NO_PROXY", "no_proxy"] {
+        for var in ["HTTP_PROXY", "http_proxy"] {
+            child.env(var, "http://127.0.0.1:8");
+        }
+        for var in ["ALL_PROXY", "all_proxy", "no_proxy"] {
             child.env_remove(var);
         }
+        child.env("NO_PROXY", "bypass.example.com");
         let out = child.output().expect("run the child");
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -647,6 +663,23 @@ mod tests {
             stderr.contains("note: model provider is api.example.com"),
             "{stderr}"
         );
+    }
+
+    #[test]
+    fn a_filtered_or_unknown_finish_is_refused_not_reported_as_a_stop() {
+        for reason in ["content_filter", "tool_calls"] {
+            let (base, _server) = stub(
+                200,
+                format!(
+                    "data: {{\"choices\":[{{\"delta\":{{\"content\":\"part\"}},\"finish_reason\":\"{reason}\"}}]}}\n\n\
+                     data: [DONE]\n\n"
+                )
+                .leak(),
+            );
+            let engine = ProviderEngine::new(&base, Vec::new()).expect("a loopback stub");
+            let err = engine.chat(&request("m")).expect_err(reason);
+            assert!(err.to_string().contains(reason), "{err}");
+        }
     }
 
     #[test]
