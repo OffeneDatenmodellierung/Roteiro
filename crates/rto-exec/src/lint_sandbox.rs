@@ -121,16 +121,15 @@ use boxlite::runtime::options::VolumeSpec;
 use boxlite::{
     BoxCommand, BoxOptions, BoxliteOptions, BoxliteRuntime, LiteBox, NetworkSpec, RootfsSpec,
 };
-use futures::StreamExt as _;
 use rto_graph::{Isolation, SourceIdentity, rfc3339_utc};
 
 use crate::adapter::NativeContext;
 use crate::adapter::clippy::{self, Clippy, FeatureSet};
 use crate::boxlite::{
     EXEC_TIMEOUT, GUEST_CPUS, GUEST_INIT, GUEST_MEMORY_MIB, GUEST_WORKTREE, MAX_OUTPUT_BYTES,
-    SandboxError, SandboxProbe, pinned_digest, reference_is_present, sandbox_probe,
+    SandboxError, SandboxProbe, collect, pinned_digest, reference_is_present, sandbox_probe,
 };
-use crate::child_env::ChildEnv;
+use crate::child_env::{ChildEnv, stderr_tail};
 use crate::guidance::{Guidance, Line};
 use crate::lint::{LintError, LintOutcome, Toolchain, scratch_dir};
 use crate::lint_grant::Backend;
@@ -755,14 +754,14 @@ impl Builder<'_> {
         // module imposed, so explaining it is this module's job.
         if cold_cache(&output.stderr) {
             return Err(BuilderError::ColdCache {
-                stderr: stderr_tail(&output.stderr),
+                stderr: stderr_tail(output.stderr.as_bytes()),
             }
             .into());
         }
         if crate::lint::lockfile_refused(output.stderr.as_bytes()) {
             return Err(LintError::LockfileWouldBeWritten {
                 command: command.join(" "),
-                stderr: stderr_tail(&output.stderr),
+                stderr: stderr_tail(output.stderr.as_bytes()),
             });
         }
         if !invocation.success_statuses.contains(&output.status) {
@@ -793,7 +792,7 @@ impl Builder<'_> {
                 command: command.join(" "),
                 status: output.status,
                 hint: Some(BUILD_DEPENDENCY_HINT),
-                stderr: stderr_tail(&output.stderr),
+                stderr: stderr_tail(output.stderr.as_bytes()),
             });
         }
 
@@ -837,7 +836,7 @@ impl Builder<'_> {
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join(", "),
-            stderr: stderr_tail(&output.stderr),
+            stderr: stderr_tail(output.stderr.as_bytes()),
         }
         .into()
     }
@@ -865,7 +864,7 @@ impl Builder<'_> {
                 analyzer: self.analyzer.to_owned(),
                 reference: self.image.clone(),
                 probe: "cargo clippy --version".to_owned(),
-                stderr: stderr_tail(&clippy.stderr),
+                stderr: stderr_tail(clippy.stderr.as_bytes()),
             });
         }
         let rustc = self.exec(boxed, "rustc", &["-vV".to_owned()]).await?;
@@ -873,7 +872,7 @@ impl Builder<'_> {
             return Err(BuilderError::ProbeFailed {
                 probe: "rustc -vV".to_owned(),
                 reference: self.image.clone(),
-                stderr: stderr_tail(&rustc.stderr),
+                stderr: stderr_tail(rustc.stderr.as_bytes()),
             });
         }
         let (version, host) = crate::lint::parse_rustc_verbose(&rustc.stdout);
@@ -967,27 +966,6 @@ fn guest_environment() -> Vec<(String, String)> {
     .guest_pairs()
 }
 
-/// Reassemble a guest stream into the bytes the process wrote.
-///
-/// **Concatenated, never joined by lines** — [`crate::boxlite::collect`]'s
-/// reason: the chunk boundaries are wherever the guest's writes happened to
-/// land, not newlines, and a separator inserted here would corrupt the one JSON
-/// document cargo emits per line.
-async fn collect(stream: Option<impl futures::Stream<Item = String> + Unpin>) -> String {
-    let mut out = String::new();
-    if let Some(mut stream) = stream {
-        while let Some(chunk) = stream.next().await {
-            out.push_str(&chunk);
-            // Bounded here as well as after the fact: a runaway build must not
-            // be able to exhaust memory before anyone gets to check.
-            if out.len() > MAX_OUTPUT_BYTES {
-                break;
-            }
-        }
-    }
-    out
-}
-
 /// Whether cargo failed because the mounted package cache does not hold what the
 /// build needs.
 ///
@@ -1008,15 +986,6 @@ async fn collect(stream: Option<impl futures::Stream<Item = String> + Unpin>) ->
 /// caller back to the unhelpful answer this exists to replace.
 fn cold_cache(stderr: &str) -> bool {
     stderr.contains("but --offline was specified") || stderr.contains("failed to unpack package")
-}
-
-/// The last few lines of a guest process's standard error, for a message.
-///
-/// Delegates to [`crate::lint`]'s so the two backends' failures are shaped
-/// identically — a bound that differed between them would be a difference in
-/// how legible a failure is, decided by which backend you happened to use.
-fn stderr_tail(stderr: &str) -> String {
-    crate::subprocess::stderr_tail(stderr.as_bytes())
 }
 
 #[cfg(test)]

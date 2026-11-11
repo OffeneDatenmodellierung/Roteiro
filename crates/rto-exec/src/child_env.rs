@@ -191,9 +191,55 @@ pub(crate) fn scrub_environment(command: &mut std::process::Command, env: &Child
     }
 }
 
+/// The last few lines of an analyzer's standard error, for a failure message.
+///
+/// Bounded, because a failing analyzer can be extremely talkative and a wall of
+/// output in an error message hides the error. One implementation for both
+/// backends, so a failure is shaped identically whichever one ran it: a bound
+/// that differed between them would be a difference in how legible a failure
+/// is, decided by which backend you happened to use.
+pub(crate) fn stderr_tail(stderr: &[u8]) -> String {
+    const MAX_LINES: usize = 8;
+    const MAX_BYTES: usize = 4_000;
+    let text = String::from_utf8_lossy(stderr);
+    let trimmed = text.trim_end();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let tail: Vec<&str> = trimmed
+        .lines()
+        .rev()
+        .take(MAX_LINES)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let mut joined = tail.join("\n  ");
+    if joined.len() > MAX_BYTES {
+        // `truncate` panics off a char boundary, and stderr is not ASCII-only.
+        let mut cut = MAX_BYTES;
+        while !joined.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        joined.truncate(cut);
+        joined.push('…');
+    }
+    format!("\n  its stderr ended:\n  {joined}")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::BASE;
+    use super::{BASE, stderr_tail};
+
+    /// A multi-byte character straddling the byte bound must be cut before,
+    /// not through: `String::truncate` panics off a char boundary.
+    #[test]
+    fn a_stderr_tail_truncates_on_a_char_boundary() {
+        // 3,999 ASCII bytes then a 3-byte `€` covering bytes 3,999..4,002.
+        let stderr = format!("{}€€€", "a".repeat(3_999));
+        let tail = stderr_tail(stderr.as_bytes());
+        assert!(tail.ends_with("a…"), "{:?}", &tail[tail.len() - 8..]);
+    }
     // Only the guest half of this module has tests that need the type, and it is
     // the half that exists only in an `exec-boxlite` build.
     #[cfg(feature = "exec-boxlite")]

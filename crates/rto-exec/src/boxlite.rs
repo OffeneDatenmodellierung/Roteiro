@@ -65,7 +65,7 @@ use rto_graph::{Isolation, RunnerKind, rfc3339_utc};
 
 use crate::adapter::{Adapter, AssetPaths, Invocation, NativeContext};
 use crate::assets;
-use crate::child_env::ChildEnv;
+use crate::child_env::{ChildEnv, stderr_tail};
 use crate::ingest::assemble;
 use crate::runner::{AnalysisRequest, AnalysisResponse, AnalyzerRunner, ExecError, check_request};
 use crate::snippet::WorktreeSnippets;
@@ -1009,7 +1009,7 @@ impl BoxliteRunner {
                     .map(ToString::to_string)
                     .collect::<Vec<_>>()
                     .join(", "),
-                stderr: stderr_tail(&stderr),
+                stderr: stderr_tail(stderr.as_bytes()),
             });
         }
 
@@ -1027,7 +1027,7 @@ impl BoxliteRunner {
 /// guest's writes happened to land, not newlines. Inserting a separator here
 /// would corrupt any output that is not line-shaped — which is every analyzer
 /// this crate reads, since they all emit one JSON document.
-async fn collect(stream: Option<impl futures::Stream<Item = String> + Unpin>) -> String {
+pub(crate) async fn collect(stream: Option<impl futures::Stream<Item = String> + Unpin>) -> String {
     let mut out = String::new();
     if let Some(mut stream) = stream {
         while let Some(chunk) = stream.next().await {
@@ -1057,33 +1057,6 @@ async fn collect(stream: Option<impl futures::Stream<Item = String> + Unpin>) ->
 /// [`ChildEnv::guest_pairs`].
 fn guest_environment() -> Vec<(String, String)> {
     ChildEnv::default().guest_pairs()
-}
-
-/// The last few lines of an analyzer's standard error, for a failure message.
-///
-/// Mirrors [`crate::subprocess`]'s bound: a failing analyzer can be extremely
-/// talkative, and a wall of output in an error message hides the error.
-fn stderr_tail(stderr: &str) -> String {
-    const MAX_LINES: usize = 8;
-    const MAX_BYTES: usize = 4_000;
-    let trimmed = stderr.trim_end();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-    let tail: Vec<&str> = trimmed
-        .lines()
-        .rev()
-        .take(MAX_LINES)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    let mut joined = tail.join("\n  ");
-    if joined.len() > MAX_BYTES {
-        joined.truncate(MAX_BYTES);
-        joined.push('…');
-    }
-    format!("\n  its stderr ended:\n  {joined}")
 }
 
 /// Pull the image for `analyzer` into the local store.
@@ -1302,8 +1275,8 @@ pub fn reference_is_present(
 #[cfg(test)]
 mod tests {
     use super::{
-        GUEST_ASSETS, GUEST_WORKTREE, ImageSource, MAX_OUTPUT_BYTES, SANDBOX_IMAGES,
-        guest_environment, image_for, image_inventory, resolve_image, sandbox_probe, stderr_tail,
+        GUEST_ASSETS, GUEST_WORKTREE, ImageSource, SANDBOX_IMAGES, guest_environment, image_for,
+        image_inventory, resolve_image, sandbox_probe,
     };
 
     /// A digest-shaped reference nobody has to read twice.
@@ -1548,19 +1521,7 @@ mod tests {
     #[cfg(feature = "exec-subprocess")]
     #[test]
     fn both_backends_bound_analyzer_output_identically() {
-        assert_eq!(MAX_OUTPUT_BYTES, crate::subprocess::MAX_OUTPUT_BYTES);
-    }
-
-    #[test]
-    fn a_failure_message_carries_a_bounded_tail_of_stderr() {
-        assert_eq!(stderr_tail(""), "");
-        assert_eq!(stderr_tail("   \n  "), "");
-        assert!(stderr_tail("line1\nline2\nline3").contains("line3"));
-
-        let noisy: Vec<String> = (0..500).map(|i| format!("line {i}")).collect();
-        let tail = stderr_tail(&noisy.join("\n"));
-        assert!(tail.contains("line 499"), "the tail must be the end");
-        assert!(!tail.contains("line 100"), "and not the whole thing");
+        assert_eq!(super::MAX_OUTPUT_BYTES, crate::subprocess::MAX_OUTPUT_BYTES);
     }
 
     /// The probe must answer rather than panic, whatever the host is. A probe
