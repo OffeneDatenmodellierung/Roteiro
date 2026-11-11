@@ -29,6 +29,9 @@
 //!   - raise `checks` to 350 -> named by `a_job_bound_is_small_enough_to_be_one`
 //!   - drop `timeout-minutes` from an apt step -> named by
 //!     `every_apt_step_is_bounded`
+//!   - drop `timeout-minutes` from a `uses: ./.github/actions/provision-sandbox`
+//!     step (the apt fetch lives in the local action) -> named by
+//!     `every_apt_step_is_bounded`
 
 mod common;
 
@@ -155,6 +158,27 @@ fn a_job_bound_is_small_enough_to_be_one() {
     );
 }
 
+/// Whether a step reaches an apt mirror, directly or through a local action.
+///
+/// A local composite action (`uses: ./.github/actions/…`) is followed into its
+/// `action.yml`, because composite steps cannot carry `timeout-minutes` — the
+/// bound has to sit on the calling step, and a scan of `run:` alone would read
+/// the apt fetch moved into the action as no apt fetch at all.
+fn runs_apt(step: &Yaml) -> bool {
+    let field = |k: &str| {
+        step.as_hash()
+            .and_then(|h| h.get(&Yaml::String(k.to_owned())))
+            .and_then(Yaml::as_str)
+    };
+    if field("run").is_some_and(|run| run.contains("apt-get")) {
+        return true;
+    }
+    field("uses")
+        .and_then(|uses| uses.trim().strip_prefix("./"))
+        .and_then(|dir| common::repo_file(&format!("{}/action.yml", dir.trim_end_matches('/'))))
+        .is_some_and(|action| action.contains("apt-get"))
+}
+
 /// Every step that reaches an apt mirror is bounded at the step level.
 ///
 /// The job bound alone is not enough for these. A job bounded at 90 minutes
@@ -172,12 +196,7 @@ fn every_apt_step_is_bounded() {
     let mut unbounded: Vec<String> = Vec::new();
     for (name, job) in &jobs {
         for step in steps(job) {
-            let run = step
-                .as_hash()
-                .and_then(|h| h.get(&Yaml::String("run".to_owned())))
-                .and_then(Yaml::as_str)
-                .unwrap_or_default();
-            if run.contains("apt-get") && timeout_minutes(step).is_none() {
+            if runs_apt(step) && timeout_minutes(step).is_none() {
                 unbounded.push(format!("{name} / {}", step_label(step)));
             }
         }

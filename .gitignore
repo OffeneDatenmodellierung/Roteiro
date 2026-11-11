@@ -14,3 +14,6 @@ website/dist/
 
 # Agent worktrees and local Claude Code state — never part of the repository.
 .claude/
+
+# Python bytecode caches — a build artefact of running the scripts, not source.
+__pycache__/

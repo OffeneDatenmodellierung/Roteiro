@@ -321,47 +321,14 @@ jobs:
       # If a future dependency genuinely needs a package the image lacks, add a
       # step for THAT package and bound it the way the protoc step below is —
       # do not restore this one on the assumption the toolchain is missing.
-      # `--all-features` now includes `exec-boxlite` (ADR-0014, Stage 24), which
-      # brings two build requirements that are real and not optional.
-      #
-      # `protoc` is needed by `boxlite-shared`'s build script unconditionally —
-      # there is no stub path around it.
-      #
-      # This one IS a real install and stays: `protoc` is genuinely absent from
-      # `ubuntu-24.04` (`which protoc` finds nothing on a clean runner), unlike
-      # the cmake/clang/libclang step that used to sit above it.
-      #
-      # It runs WITHOUT a preceding `apt-get update`, which is not an oversight
-      # left behind when that step went: the runner image ships populated
-      # `/var/lib/apt/lists`, and `apt-get install -y protobuf-compiler` on a
-      # clean runner with no update at all resolved 3048 kB and finished in
-      # 5.07s. Measured, not assumed — an `update` is a full index refresh from
-      # the mirror and by far the more likely half to stall, so not needing it
-      # removes most of what remains of this hang surface.
-      #
-      # The sandbox runtime is a prebuilt archive that `boxlite`'s build script
-      # would otherwise fetch with an unverified `curl` and embed in the binary.
-      # This provisions it from the digests pinned in
-      # `crates/rto-exec/src/runtime_pins.rs` and exports BOXLITE_RUNTIME_URL, so
-      # boxlite's own fetch resolves to a local, verified file and never reaches
-      # the network.
-      #
-      # The build no longer *requires* it — `rto-exec/build.rs` verifies the files
-      # boxlite extracted against per-file pins either way (ADR-0014 v1.3). CI
-      # keeps provisioning deliberately, for two reasons: it is the strict,
-      # no-egress path and something should exercise it on every run, and it takes
-      # a 26 MB download out of three jobs' critical path. Do not remove this on
-      # the grounds that the build now works without it.
-      - name: Install protoc (`exec-boxlite` feature)
+      # protoc + the pinned sandbox runtime for `exec-boxlite`; the why is in
+      # the action. The step-level bound lives here because composite steps
+      # cannot carry one: 8 minutes for the apt fetch as before, plus 2 for the
+      # 26 MB runtime download.
+      - name: Provision the exec-boxlite build (protoc, sandbox runtime)
         if: env.RELEASE_PR != 'true'
-        timeout-minutes: 8
-        run: |
-          set -euo pipefail
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y protobuf-compiler \
-            || { echo "::error::apt-get failed while installing protobuf-compiler. This is often a transient mirror/network issue; re-run the job. See the apt output above for the exact failure."; exit 1; }
-      - name: Provision the pinned sandbox runtime (`exec-boxlite` feature)
-        if: env.RELEASE_PR != 'true'
-        run: python3 scripts/provision-sandbox-runtime.py --github-env
+        timeout-minutes: 10
+        uses: ./.github/actions/provision-sandbox
       # The whole of a release PR's verification in this job. See the
       # `RELEASE_PR` comment at the top of this file for what it catches, what
       # it deliberately does not, and why the job runs at all rather than being
@@ -855,45 +822,13 @@ jobs:
       # ships all three and bindgen loads libclang without `libclang-dev`. The
       # evidence, and the six-hour hang that made it worth establishing, are in
       # the `checks` job above. Do not add one back here either.
-      # `--all-features` now includes `exec-boxlite` (ADR-0014, Stage 24), which
-      # brings two build requirements that are real and not optional.
-      #
-      # `protoc` is needed by `boxlite-shared`'s build script unconditionally —
-      # there is no stub path around it.
-      #
-      # This one IS a real install and stays: `protoc` is genuinely absent from
-      # `ubuntu-24.04` (`which protoc` finds nothing on a clean runner), unlike
-      # the cmake/clang/libclang step that used to sit above it.
-      #
-      # It runs WITHOUT a preceding `apt-get update`, which is not an oversight
-      # left behind when that step went: the runner image ships populated
-      # `/var/lib/apt/lists`, and `apt-get install -y protobuf-compiler` on a
-      # clean runner with no update at all resolved 3048 kB and finished in
-      # 5.07s. Measured, not assumed — an `update` is a full index refresh from
-      # the mirror and by far the more likely half to stall, so not needing it
-      # removes most of what remains of this hang surface.
-      #
-      # The sandbox runtime is a prebuilt archive that `boxlite`'s build script
-      # would otherwise fetch with an unverified `curl` and embed in the binary.
-      # This provisions it from the digests pinned in
-      # `crates/rto-exec/src/runtime_pins.rs` and exports BOXLITE_RUNTIME_URL, so
-      # boxlite's own fetch resolves to a local, verified file and never reaches
-      # the network.
-      #
-      # The build no longer *requires* it — `rto-exec/build.rs` verifies the files
-      # boxlite extracted against per-file pins either way (ADR-0014 v1.3). CI
-      # keeps provisioning deliberately, for two reasons: it is the strict,
-      # no-egress path and something should exercise it on every run, and it takes
-      # a 26 MB download out of three jobs' critical path. Do not remove this on
-      # the grounds that the build now works without it.
-      - name: Install protoc (`exec-boxlite` feature)
-        timeout-minutes: 8
-        run: |
-          set -euo pipefail
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y protobuf-compiler \
-            || { echo "::error::apt could not reach the Ubuntu mirror after 3 bounded retries per file with a 30s socket timeout. This is a transient mirror failure, not a packaging error — re-run the job."; exit 1; }
-      - name: Provision the pinned sandbox runtime (`exec-boxlite` feature)
-        run: python3 scripts/provision-sandbox-runtime.py --github-env
+      # protoc + the pinned sandbox runtime for `exec-boxlite`; the why is in
+      # the action. The step-level bound lives here because composite steps
+      # cannot carry one: 8 minutes for the apt fetch as before, plus 2 for the
+      # 26 MB runtime download.
+      - name: Provision the exec-boxlite build (protoc, sandbox runtime)
+        timeout-minutes: 10
+        uses: ./.github/actions/provision-sandbox
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
@@ -968,47 +903,14 @@ jobs:
       # ships all three and bindgen loads libclang without `libclang-dev`. The
       # evidence, and the six-hour hang that made it worth establishing, are in
       # the `checks` job above. Do not add one back here either.
-      # `--all-features` now includes `exec-boxlite` (ADR-0014, Stage 24), which
-      # brings two build requirements that are real and not optional.
-      #
-      # `protoc` is needed by `boxlite-shared`'s build script unconditionally —
-      # there is no stub path around it.
-      #
-      # This one IS a real install and stays: `protoc` is genuinely absent from
-      # `ubuntu-24.04` (`which protoc` finds nothing on a clean runner), unlike
-      # the cmake/clang/libclang step that used to sit above it.
-      #
-      # It runs WITHOUT a preceding `apt-get update`, which is not an oversight
-      # left behind when that step went: the runner image ships populated
-      # `/var/lib/apt/lists`, and `apt-get install -y protobuf-compiler` on a
-      # clean runner with no update at all resolved 3048 kB and finished in
-      # 5.07s. Measured, not assumed — an `update` is a full index refresh from
-      # the mirror and by far the more likely half to stall, so not needing it
-      # removes most of what remains of this hang surface.
-      #
-      # The sandbox runtime is a prebuilt archive that `boxlite`'s build script
-      # would otherwise fetch with an unverified `curl` and embed in the binary.
-      # This provisions it from the digests pinned in
-      # `crates/rto-exec/src/runtime_pins.rs` and exports BOXLITE_RUNTIME_URL, so
-      # boxlite's own fetch resolves to a local, verified file and never reaches
-      # the network.
-      #
-      # The build no longer *requires* it — `rto-exec/build.rs` verifies the files
-      # boxlite extracted against per-file pins either way (ADR-0014 v1.3). CI
-      # keeps provisioning deliberately, for two reasons: it is the strict,
-      # no-egress path and something should exercise it on every run, and it takes
-      # a 26 MB download out of three jobs' critical path. Do not remove this on
-      # the grounds that the build now works without it.
-      - name: Install protoc (`exec-boxlite` feature)
+      # protoc + the pinned sandbox runtime for `exec-boxlite`; the why is in
+      # the action. The step-level bound lives here because composite steps
+      # cannot carry one: 8 minutes for the apt fetch as before, plus 2 for the
+      # 26 MB runtime download.
+      - name: Provision the exec-boxlite build (protoc, sandbox runtime)
         if: env.RELEASE_PR != 'true'
-        timeout-minutes: 8
-        run: |
-          set -euo pipefail
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y protobuf-compiler \
-            || { echo "::error::apt could not reach the Ubuntu mirror after 3 bounded retries per file with a 30s socket timeout. This is a transient mirror failure, not a packaging error — re-run the job."; exit 1; }
-      - name: Provision the pinned sandbox runtime (`exec-boxlite` feature)
-        if: env.RELEASE_PR != 'true'
-        run: python3 scripts/provision-sandbox-runtime.py --github-env
+        timeout-minutes: 10
+        uses: ./.github/actions/provision-sandbox
       # The whole of a release PR's verification in this job — see the
       # `RELEASE_PR` comment at the top of this file. Running it on the 1.96
       # toolchain rather than stable earns this job something the other two
