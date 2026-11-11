@@ -235,6 +235,13 @@ ignore = [
     # then be removable without anything else changing.
     "RUSTSEC-2025-0056",
 
+    # `pin-utils` unmaintained (no known vulnerability; `core::pin::pin!` replaces
+    # it). Enters through `nix` 0.26.4 → `qcow2-rs` 0.1.6 → `boxlite`, the same
+    # stale `qcow2-rs` pin as `adler` above; the rest of the tree is on `nix` 0.30.
+    # Revisit when `qcow2-rs` bumps `nix`, or if a *vulnerability* advisory is
+    # filed against `pin-utils` — then this entry must go rather than be widened.
+    "RUSTSEC-2026-0441",
+
     # `atty` unmaintained. Enters through `env_logger` 0.9.3 → `qcow2-rs` 0.1.6 →
     # `boxlite`. `atty`'s separate *vulnerability* advisory (RUSTSEC-2021-0145,
     # unaligned read on Windows) is NOT what is being silenced here — cargo-deny
@@ -261,4 +268,20 @@ ignore = [
     "RUSTSEC-2026-0391", # abandoned stream leaks into the next on a reused context
     "RUSTSEC-2026-0398", # Seekable::decompress sets Vec length past capacity
     "RUSTSEC-2026-0403", # uninitialised memory on failed legacy-frame streaming
+
+    # ── A **vulnerability**, ignored as a recorded decision (2026-11-11), not to
+    # make CI green. `libsqlite3-sys` < 0.39 bundles SQLite < 3.54, which can
+    # return stale page-cache memory when it opens a database together with a
+    # crafted `-wal` file of a different page size (CVE-2026-119375; local, needs
+    # the victim to open the files). Unlike the zstd entries this is in the
+    # **default** build too: `rto-graph`'s store uses `rusqlite`. The fix is
+    # `rusqlite` 0.41, but `libsqlite3-sys` is `links = "sqlite3"`, so the one
+    # lockfile holds one copy, and `boxlite` requires `rusqlite` ^0.39 in every
+    # release up to 0.12.0. Exposure: Roteiro's own stores are files it writes;
+    # the path that opens a database another tool wrote is
+    # `roteiro import --from codegraph <db>` (read-only). Do not run that on a
+    # database (and `-wal`) from a party you do not trust until this is removed.
+    # Mirrored in `.cargo/audit.toml`. Revisit on every `boxlite` bump and remove
+    # as soon as it allows `rusqlite` 0.41.
+    "RUSTSEC-2026-0459",
 ]

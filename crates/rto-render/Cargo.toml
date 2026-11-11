@@ -11,7 +11,7 @@ homepage.workspace = true
 authors.workspace = true
 
 [dependencies]
-pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
+pulldown-cmark = { version = "0.13.6", default-features = false, features = ["html"] }
 rto-graph = { workspace = true }
 # `execution`-only: the shared `security list` / `security status` tool documents
 # (`rto_exec::tool_security`), which the MCP `security_*` tools are thin wrappers
@@ -24,7 +24,7 @@ rto-exec = { workspace = true, optional = true }
 # `mcp`-only: a default `rto-render` build renders documents and needs none of it.
 rto-spec = { workspace = true, optional = true }
 # MCP-only (feature `mcp`): the official Rust MCP SDK + async runtime + HTTP.
-rmcp = { version = "3.4.0", default-features = false, features = [
+rmcp = { version = "3.9.0", default-features = false, features = [
     "server",
     "macros",
     "transport-io",
