@@ -609,12 +609,15 @@ pub fn parse_verdict(reviewed_sha: &str, reply: &str) -> Option<ParsedVerdict> {
                 Some((key, value)) if key.eq_ignore_ascii_case("stance") => {
                     stance = VerdictStance::from_token(&value.to_ascii_lowercase());
                 }
+                // Accumulated, never replaced: a later `cites=` overwriting an
+                // earlier one would hide a dangling id from the checker.
                 Some((key, value)) if key.eq_ignore_ascii_case("cites") => {
-                    cites = value
-                        .split([',', ';', ' '])
-                        .map(|id| id.trim().to_ascii_uppercase())
-                        .filter(|id| !id.is_empty() && id != "NONE" && id != "-")
-                        .collect();
+                    cites.extend(
+                        value
+                            .split([',', ';', ' '])
+                            .map(|id| id.trim().to_ascii_uppercase())
+                            .filter(|id| !id.is_empty() && id != "NONE" && id != "-"),
+                    );
                 }
                 _ => {
                     if !summary.is_empty() {
@@ -2059,6 +2062,19 @@ FINDING | **line**=42 | class=**contract-drift** | **compile**=YES | the **remot
             none.cites.is_empty(),
             "`none` is the absence of a citation, not an id"
         );
+    }
+
+    /// A second `cites=` adds to the first rather than replacing it, so a
+    /// dangling id in either one still reaches the faithfulness check.
+    #[test]
+    fn every_cites_field_is_kept() {
+        let parsed = parse_verdict(
+            SHA,
+            "VERDICT | stance=concerns | cites=F99 | the doc drifted | cites=P1\n",
+        )
+        .expect("a verdict");
+        assert_eq!(parsed.cites, ["F99", "P1"]);
+        assert_eq!(parsed.verdict.summary, "the doc drifted");
     }
 
     /// Every listed entry is numbered so a verdict can cite it, and the ids
