@@ -1203,6 +1203,82 @@ pub fn explain(store: &Store, key: &str) -> Result<Option<Explanation>, StoreErr
     }))
 }
 
+/// The `meta` field a [`NodeKind::Work`] node carries its
+/// [`Reference`](crate::reference::Reference) record under.
+///
+/// One constant shared by the writer (`rto_spec`'s reference register) and the
+/// readers below, so the two cannot spell the field differently.
+pub const WORK_RECORD: &str = "reference";
+
+/// The natural key of the [`NodeKind::Work`] node for register entry `id`.
+#[must_use]
+pub fn work_key(id: &str) -> String {
+    format!("work:{id}")
+}
+
+/// The record a work node carries, read back from its `meta`.
+fn work_record(node: &crate::Node) -> Result<crate::reference::Reference, StoreError> {
+    // A work node without a parseable record is not a work this binary can cite,
+    // and skipping it would drop a reference silently — so it is an error.
+    Ok(serde_json::from_value(
+        node.meta
+            .get(WORK_RECORD)
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+    )?)
+}
+
+/// Every work in the reference register, in id order (ADR-0029).
+///
+/// # Errors
+/// Returns [`StoreError`] on query failure, or when a work node's record does
+/// not parse.
+pub fn works(store: &Store) -> Result<Vec<crate::reference::Reference>, StoreError> {
+    let mut out = store
+        .nodes_by_kind(&NodeKind::Work)?
+        .iter()
+        .map(work_record)
+        .collect::<Result<Vec<_>, _>>()?;
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(out)
+}
+
+/// The works node `key` rests on, in id order: the work itself when `key` is a
+/// work, otherwise every work its outgoing `references` edges reach (ADR-0029).
+///
+/// One hop and no further. A document cites what it links; what *that* work
+/// cites is not something this document claimed.
+///
+/// # Errors
+/// Returns [`StoreError`] on query failure, or when a work node's record does
+/// not parse.
+pub fn works_cited(
+    store: &Store,
+    key: &str,
+) -> Result<Vec<crate::reference::Reference>, StoreError> {
+    let Some(node) = store.get_node(key)? else {
+        return Ok(Vec::new());
+    };
+    if node.kind == NodeKind::Work {
+        return Ok(vec![work_record(&node)?]);
+    }
+    let mut targets: BTreeSet<String> = BTreeSet::new();
+    for edge in store.edges_from(key)? {
+        if edge.kind == EdgeKind::References {
+            targets.insert(edge.dst);
+        }
+    }
+    let mut out = Vec::new();
+    for target in targets {
+        if let Some(work) = store.get_node(&target)?
+            && work.kind == NodeKind::Work
+        {
+            out.push(work_record(&work)?);
+        }
+    }
+    Ok(out)
+}
+
 /// List every node of the given `kind`, ordered by key.
 ///
 /// # Errors

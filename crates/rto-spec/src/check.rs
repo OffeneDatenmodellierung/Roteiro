@@ -13,13 +13,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use rto_graph::{Edge, EdgeKind, Store, StoreError};
+use rto_graph::{Edge, EdgeKind, Reference, Store, StoreError};
 use serde::Serialize;
 
 use crate::adr::{AdrDoc, AdrStatus};
 use crate::annotate::Annotation;
 use crate::blueprint::BlueprintDoc;
 use crate::layer::AuthoredDocs;
+use crate::reference::Citation;
 use crate::site::SitePage;
 
 /// The category of an authored-layer drift.
@@ -73,6 +74,10 @@ pub enum ViolationKind {
     /// because two distinct things then collapse into one and the later silently
     /// replaces the earlier.
     LossyIdentity,
+    /// An entry of the reference register (ADR-0029) that cannot be read as a
+    /// citable record — or the register itself does not parse. Named by entry,
+    /// because a register that skipped it would render a list quietly short.
+    MalformedReference,
 }
 
 impl ViolationKind {
@@ -90,6 +95,7 @@ impl ViolationKind {
             Self::DuplicateSiteSlug => "duplicate-site-slug",
             Self::UnjustifiedAllow => "unjustified-allow",
             Self::LossyIdentity => "lossy-identity",
+            Self::MalformedReference => "malformed-reference",
         }
     }
 }
@@ -117,6 +123,10 @@ pub struct CheckReport {
     pub links_ok: usize,
     /// `@rto:` annotations that resolved to an active ADR.
     pub annotations_ok: usize,
+    /// Reference-register entries applied as `work` nodes (ADR-0029).
+    pub works: usize,
+    /// Document → work citations that became edges.
+    pub citations_ok: usize,
     /// Drift findings; the check fails if this is non-empty.
     pub violations: Vec<Violation>,
 }
@@ -439,8 +449,12 @@ fn authored_overlay(
     docs: &[AdrDoc],
     blueprints: &[BlueprintDoc],
     site: &[SitePage],
+    references: &[Reference],
 ) -> AuthoredOverlay {
     let mut overlay = AuthoredOverlay::default();
+    overlay
+        .keys
+        .extend(references.iter().map(|r| rto_graph::work_key(&r.id)));
     for doc in docs {
         overlay
             .keys
@@ -476,7 +490,7 @@ pub fn validate(
     blueprints: &[BlueprintDoc],
     annotations: &[Annotation],
 ) -> Result<Validation, StoreError> {
-    validate_all(store, docs, blueprints, &[], annotations)
+    validate_all(store, docs, blueprints, &[], annotations, &[], &[])
 }
 
 /// [`validate`] over a whole [`AuthoredDocs`] — the same verdict, plus the
@@ -499,6 +513,8 @@ pub fn validate_layer(store: &Store, docs: &AuthoredDocs) -> Result<Validation, 
         &docs.layer.blueprints,
         &docs.site,
         &docs.layer.annotations,
+        &docs.references,
+        &docs.citations,
     )
 }
 
@@ -510,6 +526,8 @@ fn validate_all(
     blueprints: &[BlueprintDoc],
     site: &[SitePage],
     annotations: &[Annotation],
+    references: &[Reference],
+    citations: &[Citation],
 ) -> Result<Validation, StoreError> {
     // 1. Detect colliding ADR ids *before* anything is applied, so the report
     //    describes the authored file set rather than what survived the merge.
@@ -517,6 +535,7 @@ fn validate_all(
         adrs: docs.len(),
         blueprints: blueprints.len(),
         site_pages: site.len(),
+        works: references.len(),
         violations: duplicate_adr_ids(docs),
         ..CheckReport::default()
     };
@@ -526,7 +545,7 @@ fn validate_all(
     // *between* ADRs above: neither needs the graph, both are read off the
     // authored files exactly as they were parsed.
     report.violations.extend(adr_version_drift(docs));
-    let overlay = authored_overlay(docs, blueprints, site);
+    let overlay = authored_overlay(docs, blueprints, site, references);
     let mut edges = Vec::new();
 
     // 2. Validate ADR, blueprint and site-page `[[…]]` links against the code
@@ -613,7 +632,53 @@ fn validate_all(
         report.annotations_ok += 1;
     }
 
+    // 4. Citations: a document linking a work's URL rests on that work.
+    let cited = citation_edges(store, &overlay, references, citations)?;
+    report.citations_ok = cited.len();
+    edges.extend(cited);
+
     Ok(Validation { report, edges })
+}
+
+/// The `authored` `references` edges from each citing document to the work
+/// whose URL it links (ADR-0029).
+///
+/// Exact string match — a URL is the work's identity in the register, and a
+/// fuzzy match would be an inferred edge dressed as an authored one. A link no
+/// work claims is not drift: most links are not citations. One edge per
+/// document and work, however often the document repeats the link.
+fn citation_edges(
+    store: &Store,
+    overlay: &AuthoredOverlay,
+    references: &[Reference],
+    citations: &[Citation],
+) -> Result<Vec<Edge>, StoreError> {
+    let mut by_url: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for reference in references {
+        if let Some(url) = crate::reference::locator_url(reference) {
+            by_url
+                .entry(url)
+                .or_default()
+                .push(rto_graph::work_key(&reference.id));
+        }
+    }
+    let mut seen: BTreeSet<(&str, &str)> = BTreeSet::new();
+    let mut edges = Vec::new();
+    for citation in citations {
+        for work in by_url.get(citation.url.as_str()).into_iter().flatten() {
+            if !seen.insert((citation.from.as_str(), work.as_str())) {
+                continue;
+            }
+            if overlay.keys.contains(&citation.from) || store.get_node(&citation.from)?.is_some() {
+                edges.push(Edge::authored(
+                    citation.from.clone(),
+                    work.clone(),
+                    EdgeKind::References,
+                ));
+            }
+        }
+    }
+    Ok(edges)
 }
 
 /// Apply the authored layer to `store` and validate it against the derived
@@ -632,7 +697,7 @@ pub fn run(
     blueprints: &[BlueprintDoc],
     annotations: &[Annotation],
 ) -> Result<CheckReport, StoreError> {
-    run_all(store, docs, blueprints, &[], annotations)
+    run_all(store, docs, blueprints, &[], annotations, &[], &[])
 }
 
 /// [`run`] over a whole [`AuthoredDocs`], including its **site pages**. See
@@ -648,6 +713,8 @@ pub fn run_layer(store: &mut Store, docs: &AuthoredDocs) -> Result<CheckReport, 
         &docs.layer.blueprints,
         &docs.site,
         &docs.layer.annotations,
+        &docs.references,
+        &docs.citations,
     )
 }
 
@@ -658,6 +725,8 @@ fn run_all(
     blueprints: &[BlueprintDoc],
     site: &[SitePage],
     annotations: &[Annotation],
+    references: &[Reference],
+    citations: &[Citation],
 ) -> Result<CheckReport, StoreError> {
     // Materialise ADR/blueprint/site-page section nodes so links and annotations
     // can reference them (and so `@rto:` targets can be looked up by key).
@@ -670,8 +739,19 @@ fn run_all(
     for page in site {
         store.apply_factset(&page.facts())?;
     }
+    for reference in references {
+        store.apply_factset(&crate::reference::work_facts(reference))?;
+    }
 
-    let validation = validate_all(store, docs, blueprints, site, annotations)?;
+    let validation = validate_all(
+        store,
+        docs,
+        blueprints,
+        site,
+        annotations,
+        references,
+        citations,
+    )?;
     for edge in &validation.edges {
         store.insert_edge(edge)?;
     }
@@ -726,6 +806,79 @@ mod tests {
         // The authored edge is now in the graph.
         let edges = store.edges_from("adr:0001#design").expect("edges");
         assert!(edges.iter().any(|e| e.dst == "sym:rust:src/store.rs#Store"));
+    }
+
+    /// The register end to end, through the one classifier: a valid entry is an
+    /// authored `work` node, a page linking its URL gets an authored edge to it,
+    /// a page linking an unregistered URL gets none, and a bad entry is a
+    /// violation naming it.
+    #[test]
+    fn the_register_becomes_work_nodes_and_linking_documents_cite_them() {
+        const REGISTER: &str = r#"
+[[reference]]
+id = "spec"
+kind = "document"
+authors = [{ group = "Google Cloud" }]
+published = { known = { year = 2026 } }
+title = "Open Knowledge Format"
+version = { known = "0.2" }
+descriptor = "absent-from-work"
+publisher = { known = "Google Cloud" }
+locator = { known = { url = "https://example.org/SPEC.md" } }
+stability = "fixed-or-archived"
+
+[[reference]]
+id = "broken"
+kind = "pamphlet"
+"#;
+        const PAGE: &str = "---\nsite-page: okf\n---\n\n# OKF\n\n\
+            [OKF](https://example.org/SPEC.md) and [other](https://example.org/x).\n";
+        let files = [
+            (crate::reference::REGISTER_PATH, REGISTER),
+            ("docs/okf.md", PAGE),
+        ];
+        let blobs = files
+            .iter()
+            .map(|(path, _)| rto_graph::BlobRef {
+                path: (*path).to_owned(),
+                oid: String::new(),
+            })
+            .collect();
+        let docs = crate::authored_docs_from(
+            blobs,
+            &|blob: &rto_graph::BlobRef| -> Result<Option<Vec<u8>>, ()> {
+                Ok(files
+                    .iter()
+                    .find(|(p, _)| *p == blob.path)
+                    .map(|(_, t)| t.as_bytes().to_vec()))
+            },
+            rto_graph::PathPolicy::empty(),
+        )
+        .expect("classify");
+        assert_eq!(docs.layer.malformed.len(), 1, "{:?}", docs.layer.malformed);
+        assert_eq!(
+            docs.layer.malformed[0].kind,
+            ViolationKind::MalformedReference
+        );
+        assert!(docs.layer.malformed[0].message.contains("`broken`"));
+
+        let mut store = Store::open_in_memory().expect("store");
+        let report = run_layer(&mut store, &docs).expect("run");
+        assert_eq!((report.works, report.citations_ok), (1, 1));
+
+        let work = store
+            .get_node("work:spec")
+            .expect("query")
+            .expect("work node");
+        assert_eq!(work.kind, NodeKind::Work);
+        assert_eq!(work.provenance, rto_graph::Provenance::Authored);
+        let edges = store.edges_from("site:okf").expect("edges");
+        let cited: Vec<_> = edges.iter().filter(|e| e.dst == "work:spec").collect();
+        assert_eq!(cited.len(), 1, "{edges:?}");
+        assert_eq!(cited[0].provenance, rto_graph::Provenance::Authored);
+        let works = rto_graph::works_cited(&store, "site:okf").expect("cited");
+        assert_eq!(works.len(), 1);
+        assert_eq!(works[0].id, "spec");
     }
 
     #[test]

@@ -8,6 +8,9 @@
 // it. Pure — no I/O, no clock, no graph — and it refuses rather than emit a
 // reference with a field nobody has checked.
 pub mod apa;
+// The works a node rests on, attached to `explain` and `context` on every
+// surface that returns them (ADR-0029). Reads the graph; `apa` does not.
+pub mod cited;
 mod docs;
 pub mod okf;
 pub mod tool_class;

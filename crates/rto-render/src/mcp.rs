@@ -201,7 +201,7 @@ use rmcp::{
         },
     },
 };
-use rto_graph::{NodeKind, Store, StoreError, Workspace, debt, explain, list_kind, path, search};
+use rto_graph::{NodeKind, Store, StoreError, Workspace, debt, list_kind, path, search};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -742,7 +742,8 @@ impl GraphServer {
     async fn explain(&self, Parameters(args): Parameters<ExplainArgs>) -> CallToolResult {
         // A project-qualified key follows a cross-repo link into that project.
         let (proj, bare) = qualified_or(&args.key, args.project.as_deref());
-        let result = self.with_project(proj.as_deref(), |store| explain(store, &bare));
+        let result =
+            self.with_project(proj.as_deref(), |store| crate::cited::explain(store, &bare));
         match result {
             Ok(Ok(Some(ex))) => json_result(&ex),
             Ok(Ok(None)) => CallToolResult::success(vec![ContentBlock::text(format!(
@@ -775,7 +776,7 @@ impl GraphServer {
         // (ADR-0013) — and `--refresh` is why this tool takes a key and nothing
         // else. There is no argument here that could reach a write.
         let result = self.with_project(proj.as_deref(), |store| {
-            rto_graph::tool_context(store, &bare)
+            crate::cited::tool_context(store, &bare)
         });
         match result {
             Ok(Ok(Some(ctx))) => json_result(&ctx),

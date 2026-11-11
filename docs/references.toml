@@ -1,0 +1,78 @@
+# The reference register — the external works this repository cites (ADR-0029).
+#
+# Each `[[reference]]` is one `rto_graph::Reference` record, field for field.
+# `roteiro check` refuses an entry that does not parse, naming it; `roteiro refs`
+# renders the APA 7 list and prints every entry it cannot cite, with the fields
+# that stopped it. That refusal list is the worklist for this file.
+#
+# Rules for editing (issue #801):
+#
+# - Record only what somebody has established. A field nobody has looked up is
+#   `"unknown"`, and `"absent-from-work"` is a claim that the work itself has
+#   none (APA's `n.d.`). The two are different, and only the second is citable.
+# - A publication date is never a commit timestamp, and never the day somebody
+#   read the work. A retrieval date belongs only inside
+#   `stability = { unarchived-and-changing = { retrieved = { ... } } }`.
+# - Values fetched by a tool are proposals, not entries; a human moves them here.
+#
+# A document citing one of these by linking its URL gets an `authored`
+# `references` edge to the work, so `roteiro refs <node-key>` answers "what does
+# this document rest on".
+
+# The OKF specification. Every field below is stated in this repository's own
+# documents: ADR-0021 § Reference gives the URL, the version and "published 12
+# June 2026", and its Context names Google Cloud as the publisher. The title is
+# the name those documents use for it. `fixed-or-archived` because v0.2 is a
+# version, and the repository that publishes it keeps every version's history.
+[[reference]]
+id = "okf-spec"
+kind = "document"
+authors = [{ group = "Google Cloud" }]
+published = { known = { full = { year = 2026, month = "june", day = 12 } } }
+title = "Open Knowledge Format"
+version = { known = "0.2" }
+descriptor = "absent-from-work"
+publisher = { known = "Google Cloud" }
+locator = { known = { url = "https://github.com/GoogleCloudPlatform/open-knowledge-format/blob/main/SPEC.md" } }
+stability = "fixed-or-archived"
+
+# `okf-core` and `okf-validator` 0.2.6 — the crates docs/OKF_BUNDLE.md measures
+# against, both published from the `W4G1/okf` repository it links. The author is
+# that repository's account name, recorded as a `group` because a handle is not
+# a surname to take initials from; APA prints a username as given.
+#
+# **Not citable yet, deliberately.** docs/OKF_BUNDLE.md gives them as "0.2.6
+# (2026-08-27)" and does not say whether that is when 0.2.6 was published or when
+# it was read; two readers of that sentence disagreed (issue #801, constraint 4).
+# Until somebody establishes which, `published` stays `unknown` and `roteiro refs`
+# reports both as refused. Once it is settled the two will share an author and a
+# year, which is APA's `2026a`/`2026b` case — `roteiro refs` reports that
+# collision rather than inventing the suffixes.
+[[reference]]
+id = "okf-core"
+kind = "software"
+authors = [{ group = "W4G1" }]
+published = "unknown"
+title = "okf-core"
+version = { known = "0.2.6" }
+descriptor = { known = "Computer software" }
+publisher = { known = "GitHub" }
+locator = { known = { url = "https://github.com/W4G1/okf" } }
+stability = "fixed-or-archived"
+
+[[reference]]
+id = "okf-validator"
+kind = "software"
+authors = [{ group = "W4G1" }]
+published = "unknown"
+title = "okf-validator"
+version = { known = "0.2.6" }
+descriptor = { known = "Computer software" }
+publisher = { known = "GitHub" }
+locator = { known = { url = "https://github.com/W4G1/okf" } }
+stability = "fixed-or-archived"
+
+# llama.cpp is deliberately absent. The one dated mention (b10200, commit
+# `5f55650`, 2026-07-30) is a commit timestamp, which is not a publication date
+# (#799), so an entry could only ever refuse. Add it when a release date is
+# established.

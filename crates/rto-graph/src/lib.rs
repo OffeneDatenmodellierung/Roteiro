@@ -189,8 +189,9 @@ pub use query::{
     ConfigSecretItem, ConfigSecretReport, CouplingItem, CouplingOrder, CouplingReport,
     DEFAULT_MIN_LINES, DebtDensityReport, DebtItem, DebtReport, DensityItem, DensityOrder, EdgeRef,
     Explanation, GeneratedHit, Listing, MemoryHit, NodeSummary, Path, PathHop, RedactionState,
-    SCHEMA, SearchHit, SearchOptions, SearchResults, config_secrets, coupling, debt, debt_density,
-    explain, list_kind, path, search, search_channels, window,
+    SCHEMA, SearchHit, SearchOptions, SearchResults, WORK_RECORD, config_secrets, coupling, debt,
+    debt_density, explain, list_kind, path, search, search_channels, window, work_key, works,
+    works_cited,
 };
 pub use reference::{
     AccessDate, Attested, Author, Day, Doi, GivenName, Locator, Month, NotADay, NotADoi,

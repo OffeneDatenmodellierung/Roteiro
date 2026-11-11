@@ -42,6 +42,10 @@ pub enum NodeKind {
     Doc,
     /// An intent-debt marker (a `TODO`/`FIXME`/stub/deferred-work finding).
     Marker,
+    /// An external work this repository cites — one entry of the authored
+    /// reference register (ADR-0029), carrying its
+    /// [`Reference`](crate::reference::Reference) record in `meta`.
+    Work,
     /// Any kind not covered above, kept verbatim.
     Other(String),
 }
@@ -62,6 +66,7 @@ impl NodeKind {
             Self::Blueprint => "blueprint",
             Self::Doc => "doc",
             Self::Marker => "marker",
+            Self::Work => "work",
             Self::Other(s) => s,
         }
     }
@@ -82,6 +87,7 @@ impl NodeKind {
             "blueprint" => Self::Blueprint,
             "doc" => Self::Doc,
             "marker" => Self::Marker,
+            "work" => Self::Work,
             other => Self::Other(other.to_owned()),
         }
     }
@@ -420,6 +426,7 @@ mod tests {
             NodeKind::Blueprint,
             NodeKind::Doc,
             NodeKind::Marker,
+            NodeKind::Work,
             NodeKind::Other("weird".to_owned()),
         ];
         for k in kinds {

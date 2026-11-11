@@ -37,6 +37,9 @@ mod provider;
 // both need the same hunks — see the module doc for why that forced one home
 // rather than a second copy (issue #649).
 mod diff;
+// `roteiro refs` — the APA 7 reference list of the authored reference register
+// (ADR-0029). In its own file because this one is too large to parse reliably.
+mod refs;
 mod review;
 // The LLM reviewer's driver and the corpus replay that measures it (Stage 35b).
 // Present under `test` as well as under a generation backend: the diff
@@ -559,6 +562,19 @@ enum Command {
     Memory {
         #[command(subcommand)]
         action: MemoryAction,
+    },
+    /// The APA 7 reference list of the external works this repository cites
+    /// (ADR-0029). With no key, every work in `docs/references.toml`; with a
+    /// key, the works that node rests on. A record too incomplete to cite is
+    /// listed as refused, with the fields that stopped it — never guessed.
+    Refs {
+        /// Node key whose cited works to list. Omit for the whole register.
+        key: Option<String>,
+        /// Emit the result as JSON.
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        source: SourceArgs,
     },
     /// Fetch a node's cached context bundle (its provenance-labelled
     /// neighbourhood), or refresh all cached contexts that have gone stale.
@@ -2142,6 +2158,7 @@ fn is_long_lived_server(cmd: &Command) -> bool {
         | Command::Media { .. }
         | Command::Memory { .. }
         | Command::Context { .. }
+        | Command::Refs { .. }
         | Command::Config { .. }
         | Command::Debt { .. }
         | Command::DebtDensity { .. }
@@ -2367,6 +2384,7 @@ fn main() -> anyhow::Result<()> {
             json,
             source,
         } => run_context(ingest, key, refresh, json, source),
+        Command::Refs { key, json, source } => refs::run(ingest, key.as_deref(), json, source),
         Command::Debt { kind, json, source } => run_debt(ingest, &kind, json, debt_ignore, source),
         Command::DebtDensity {
             kind,
@@ -4198,6 +4216,13 @@ fn run_check(
             report.annotations_ok,
             report.violations.len(),
         );
+        // Its own line, so the long-standing summary above keeps its shape.
+        if report.works > 0 {
+            println!(
+                "reference register: {} work(s), {} citation(s) — `roteiro refs` lists them",
+                report.works, report.citations_ok,
+            );
+        }
         // Report intent debt alongside drift (a summary, not a gate).
         println!(
             "{}",
@@ -9464,14 +9489,16 @@ fn run_query(
                     "no node with key `{key}` (try `roteiro query --kind <kind>` to list nodes)"
                 );
             };
+            let works = rto_graph::works_cited(&store, &key)?;
             if json {
-                emit_json(&ex)?;
+                emit_json(&rto_render::cited::with_references(&ex, &works)?)?;
             } else {
                 println!("{}  ({})  {}", ex.node.key, ex.node.kind, ex.node.name);
                 if let Some(path) = &ex.node.path {
                     println!("  path: {path}");
                 }
                 print_audio_stream(&ex);
+                refs::print_cited(&works);
                 if !ex.outgoing.is_empty() {
                     println!("  outgoing:");
                     for e in &ex.outgoing {
@@ -10512,11 +10539,13 @@ fn run_context(
     let Some(ctx) = context(&store, &key)? else {
         anyhow::bail!("no node with key `{key}` (try `roteiro query --kind <kind>` to list nodes)");
     };
+    let works = rto_graph::works_cited(&store, &key)?;
     if json {
-        emit_json(&ctx)?;
+        emit_json(&rto_render::cited::with_references(&ctx, &works)?)?;
     } else {
         println!("{}  ({})  {}", ctx.node.key, ctx.node.kind, ctx.node.name);
         println!("  fingerprint: {}", ctx.fingerprint);
+        refs::print_cited(&works);
         if !ctx.outgoing.is_empty() {
             println!("  outgoing:");
             for e in &ctx.outgoing {
@@ -19536,7 +19565,7 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
                 // link into that project, overriding the `project` argument (ADR-0009).
                 let (proj, bare) = qualified_or(key, project);
                 self.run(proj.as_deref(), move |store| {
-                    rto_graph::explain(store, &bare)
+                    rto_render::cited::explain(store, &bare)
                 })
             }
             "search" => {
@@ -19575,7 +19604,7 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
                 // query never mutates the store (ADR-0013). Hence no `refresh`
                 // argument here — there is nothing a model could send that writes.
                 self.run(proj.as_deref(), move |store| {
-                    rto_graph::tool_context(store, &bare)
+                    rto_render::cited::tool_context(store, &bare)
                 })
             }
             "check" => {

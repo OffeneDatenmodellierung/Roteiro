@@ -152,6 +152,13 @@ pub struct AuthoredDocs {
     pub layer: AuthoredLayer,
     /// Documents that declared themselves published (`site-page:` frontmatter).
     pub site: Vec<SitePage>,
+    /// The valid entries of the reference register (ADR-0029). An entry that
+    /// does not parse is in [`AuthoredLayer::malformed`] instead.
+    pub references: Vec<rto_graph::Reference>,
+    /// Every external inline link in an authored markdown document, attributed
+    /// to that document's node — the candidates `crate::check` matches against
+    /// the register's URLs.
+    pub citations: Vec<crate::reference::Citation>,
 }
 
 /// Classify and parse the authored layer out of `blobs`, reading each blob's
@@ -296,9 +303,23 @@ pub fn authored_docs_from<E>(
         let is_adr = is_md
             && ((blob.path.starts_with("docs/adr/") && name != "README.md")
                 || crate::adr::declares_adr(&text));
+        if blob.path == crate::reference::REGISTER_PATH {
+            // The register is authored data, not prose: it carries no annotations
+            // and no links, so it stops here.
+            let (records, violations) = crate::reference::parse_register(&blob.path, &text);
+            out.references.extend(records);
+            layer.malformed.extend(violations);
+            continue;
+        }
+        // The node a citation in this document hangs from: the document's own
+        // authored node when it has one, its `file:` node otherwise.
+        let mut cited_from = format!("file:{}", blob.path);
         if is_adr {
             match crate::adr::parse_adr(&blob.path, &text) {
-                Ok(doc) => layer.docs.push(doc),
+                Ok(doc) => {
+                    cited_from = doc.key();
+                    layer.docs.push(doc);
+                }
                 Err(e) => layer.malformed.push(Violation {
                     kind: ViolationKind::MalformedAdr,
                     message: format!("{}: cannot parse ADR: {e}", blob.path),
@@ -311,7 +332,10 @@ pub fn authored_docs_from<E>(
             // rule so a published document is never demoted by a coincidence of
             // its path or its H1.
             match crate::site::parse_site_page(&blob.path, &text) {
-                Ok(page) => out.site.push(page),
+                Ok(page) => {
+                    cited_from = page.key();
+                    out.site.push(page);
+                }
                 Err(e) => layer.malformed.push(Violation {
                     kind: ViolationKind::MalformedSitePage,
                     message: format!("{}: cannot parse site page: {e}", blob.path),
@@ -320,9 +344,9 @@ pub fn authored_docs_from<E>(
         } else if is_md && crate::blueprint::is_blueprint(&blob.path, &text) {
             // House-style blueprints (no frontmatter) author `[[…]]` links like
             // ADRs; their links are drift-checked against the derived graph too.
-            layer
-                .blueprints
-                .push(crate::blueprint::parse_blueprint(&blob.path, &text));
+            let blueprint = crate::blueprint::parse_blueprint(&blob.path, &text);
+            cited_from = blueprint.key();
+            layer.blueprints.push(blueprint);
         } else {
             layer
                 .annotations
@@ -338,6 +362,10 @@ pub fn authored_docs_from<E>(
             layer
                 .conventions
                 .extend(crate::convention::scan_lossy_identity(&blob.path, &text));
+        }
+        if is_md {
+            out.citations
+                .extend(crate::reference::citations(&cited_from, &text));
         }
     }
     Ok(out)
