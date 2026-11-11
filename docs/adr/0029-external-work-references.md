@@ -11,7 +11,7 @@ architectural-significance: MEDIUM  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Knowledge Graph
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "0.1"
+version: "0.2"
 last-modified: 2026-11-11
 confluence-url:
 ---
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | For Review |
 | **Architectural Significance** | MEDIUM |
 | **Domain** | Knowledge Graph |
-| **Document version** | 0.1 |
+| **Document version** | 0.2 |
 
 ## Reference
 
@@ -143,6 +143,42 @@ Populated with what this repository's documents state:
   surface the `2026a`/`2026b` collision, which is reported rather than resolved.
 - **llama.cpp** — absent. Its only date is a commit timestamp (#799).
 
+### 6. The OKF bundle carries the works as `sources[]`, with footnotes
+
+`render okf` gives every concept whose node cites works a `sources[]` entry per
+work, after its own file: `resource` (the work's URL, or DOI URL; a work with no
+locator points at its register entry rather than at an invented URL), `id` (the
+register id), `title`, and `author` (the authors as APA alphabetises them,
+joined with `; `). The body gains a `## References` section with one `[^id]`
+footnote per source — the APA 7 entry, or the refusal naming what is missing.
+Works get their own `references/` section. See
+[[crates/rto-render/src/okf.rs#Source]].
+
+That is what lets the three attribution checks in
+[[crates/rto-render/src/okf/conform.rs]] fire at all: before this, our output
+carried no `sources[].id`, no `author` and no footnote, so none of
+`check_attribution`, `L5` or `L6` could ever trigger on it. Now the output is
+clean of the first two because it is right — each source is cited by its
+footnote — and `L6` reports, at `info`, that an APA author such as
+`Google Cloud` is not an OKF actor (`human:`/`process:`/`<producer>/<version>`).
+That is accurate, and it is left visible rather than worked around: a work's
+author is not the actor who wrote the concept.
+
+**Compatibility.** `id`, `title` and `author` are §5.1 fields, modelled by
+`okf-core`'s `Source` and round-tripped by its `to_yaml_value`. `okf-validator`
+0.2.6 (read from its source, not run) checks `sources` for shape, a required
+`resource` and **duplicate `id`** (V13), footnote attribution (V16) and
+derivation cycles (V18), and lints unused sources and the actor convention. None
+of those rejects the added keys; V13 cannot fire because register ids are unique;
+V18 cannot fire because a work's resource is an external URL, not a concept.
+Resource-only entries render byte-for-byte as before, and the bundle stays a
+pure function of the graph.
+
+**Import keeps a peer's bibliography.** The reader used to keep only
+`resource`. It now also records every entry's `id`, `title` and `author` under
+`meta.okf.source_entries` — only when at least one entry carries one, so a
+resource-only bundle imports exactly as before.
+
 ## Options considered + consequences
 
 **A derived `url:` node per external link, joined to the work at query time.**
@@ -170,13 +206,14 @@ spelled in two crates is the drift this repository keeps closing.
 
 ## Status
 
-**For Review.** Step 1 (this version): register, graph, `refs`, and the
-`references` field. Step 2: projection into the OKF bundle's `sources[]`.
-Step 3: an explicit, consent-gated enrichment command that proposes values for
-a human to commit.
+**For Review.** Step 1 (v0.1): register, graph, `refs`, and the `references`
+field. Step 2 (v0.2): projection into the OKF bundle's `sources[]`. Step 3: an
+explicit, consent-gated enrichment command that proposes values for a human to
+commit.
 
 ## Version history
 
 | Version | Date | Change |
 |---|---|---|
 | 0.1 | 2026-11-11 | Initial. Register, `work` nodes, authored citation edges, `roteiro refs`, and `references` on `explain`/`context`. |
+| 0.2 | 2026-11-11 | §6: works projected into OKF `sources[]` with `id`/`title`/`author` and a `[^id]` footnote; import keeps a peer's attribution keys. |

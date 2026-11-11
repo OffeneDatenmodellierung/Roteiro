@@ -177,7 +177,83 @@ pub struct Frontmatter {
     /// The origin, split into `generated` and `verified` on render.
     pub origin: Option<Origin>,
     /// `sources` — where the concept derives from, each with a `resource`.
-    pub sources: Vec<String>,
+    pub sources: Vec<Source>,
+}
+
+/// One `sources[]` entry (§5.1).
+///
+/// `resource` is the only key §5.1 requires; `id`, `title` and `author` are the
+/// attribution keys an external work carries (ADR-0029). Each optional key is
+/// omitted when absent, so a resource-only entry renders exactly as it always
+/// has.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Source {
+    /// `resource` — the artifact or scope the concept derives from.
+    pub resource: String,
+    /// `id` — the footnote label that joins a claim to this source.
+    pub id: Option<String>,
+    /// `title` — a human-readable label for the source.
+    pub title: Option<String>,
+    /// `author` — who produced the source.
+    pub author: Option<String>,
+    /// Not a frontmatter key: the text of the `[^id]` footnote the body carries
+    /// for this source — its APA 7 entry, or the reason it has none. Only read
+    /// when `id` is present.
+    pub citation: Option<String>,
+}
+
+impl Source {
+    /// A resource-only entry.
+    #[must_use]
+    pub fn resource(resource: impl Into<String>) -> Self {
+        Self {
+            resource: resource.into(),
+            ..Self::default()
+        }
+    }
+
+    /// The entry for a work from the reference register (ADR-0029).
+    ///
+    /// `resource` is the work's URL (or DOI URL); a work with no locator points
+    /// at its own register entry instead, because §5.1 requires a resource and
+    /// inventing a URL is the one thing this must not do. `author` lists the
+    /// authors as APA alphabetises them, joined with `; `. The footnote is the
+    /// APA 7 entry, or the refusal naming what is missing — never a guess.
+    #[must_use]
+    pub fn from_reference(reference: &rto_graph::Reference) -> Self {
+        use rto_graph::{Author, GivenName, Locator};
+        let resource = match reference.locator.known() {
+            Some(Locator::Url(url) | Locator::Both { url, .. }) => url.clone(),
+            Some(Locator::Doi(doi)) => doi.url(),
+            None => format!("/docs/references.toml#{}", reference.id),
+        };
+        let authors: Vec<String> = reference
+            .authors
+            .iter()
+            .map(|author| match author {
+                Author::Group(name) => name.clone(),
+                Author::Person { surname, given } => {
+                    let initials: Vec<String> = given.iter().map(GivenName::initial).collect();
+                    if initials.is_empty() {
+                        surname.clone()
+                    } else {
+                        format!("{surname}, {}", initials.join(" "))
+                    }
+                }
+            })
+            .collect();
+        let citation = match crate::apa::entry(reference) {
+            Ok(entry) => entry.plain_text(),
+            Err(refusal) => format!("Not citable in APA 7 — {refusal}."),
+        };
+        Self {
+            resource,
+            id: Some(reference.id.clone()),
+            title: Some(reference.title.clone()),
+            author: (!authors.is_empty()).then(|| authors.join("; ")),
+            citation: Some(citation),
+        }
+    }
 }
 
 /// Quote a scalar for YAML, always, and escape everything a double-quoted scalar
@@ -268,7 +344,12 @@ impl Frontmatter {
         if !self.sources.is_empty() {
             out.push_str("sources:\n");
             for s in &self.sources {
-                let _ = writeln!(out, "  - resource: {}", yaml_scalar(s));
+                let _ = writeln!(out, "  - resource: {}", yaml_scalar(&s.resource));
+                for (key, value) in [("id", &s.id), ("title", &s.title), ("author", &s.author)] {
+                    if let Some(value) = value {
+                        let _ = writeln!(out, "    {key}: {}", yaml_scalar(value));
+                    }
+                }
             }
         }
         out.push_str("---\n");
@@ -290,6 +371,8 @@ pub fn section_for(kind: &str) -> &'static str {
         "doc" => "docs",
         "file" => "files",
         "marker" => "debt",
+        // External works from the reference register (ADR-0029), not symbols.
+        "work" => "references",
         _ => "symbols",
     }
 }
@@ -455,6 +538,20 @@ pub fn render_concept(
     if let Some(text) = text {
         content.push_str(text);
         content.push_str("\n\n");
+    }
+    // A footnote per attributed source: `[^id]` is §5.1's join key between a
+    // claim and its source, and without it the `id` above attributes nothing.
+    let footnotes: Vec<(&str, &str)> = fm
+        .sources
+        .iter()
+        .filter_map(|s| Some((s.id.as_deref()?, s.citation.as_deref()?)))
+        .collect();
+    if !footnotes.is_empty() {
+        content.push_str("## References\n\n");
+        for (id, citation) in footnotes {
+            let _ = writeln!(content, "[^{id}]: {citation}");
+        }
+        content.push('\n');
     }
 
     // Group by edge kind so the prose above each list can name the relationship.

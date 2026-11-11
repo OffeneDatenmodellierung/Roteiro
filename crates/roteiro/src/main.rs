@@ -20107,7 +20107,8 @@ fn render_okf_workspace(
         let mut explanations = Vec::with_capacity(nodes.len());
         for node in &nodes {
             if let Some(ex) = rto_graph::explain(&store, &node.key)? {
-                explanations.push((node.provenance, ex));
+                let works = rto_graph::works_cited(&store, &node.key)?;
+                explanations.push((node.provenance, ex, works));
             }
         }
         per_member.push((
@@ -20122,7 +20123,7 @@ fn render_okf_workspace(
 
     let mut concepts = Vec::new();
     for (project, source_base, authors, at, explanations, bodies) in &per_member {
-        for (provenance, ex) in explanations {
+        for (provenance, ex, works) in explanations {
             let render = OkfRender {
                 source_base: source_base.as_deref(),
                 tool: &tool,
@@ -20130,7 +20131,13 @@ fn render_okf_workspace(
                 at,
                 bodies,
             };
-            concepts.push(okf_concept(ex, *provenance, Some(project.clone()), &render));
+            concepts.push(okf_concept(
+                ex,
+                *provenance,
+                works,
+                Some(project.clone()),
+                &render,
+            ));
         }
     }
 
@@ -20308,6 +20315,7 @@ fn authored_paths(nodes: &[rto_graph::Node]) -> std::collections::BTreeSet<Strin
 fn okf_concept<'a>(
     ex: &'a rto_graph::Explanation,
     provenance: rto_graph::Provenance,
+    works: &[rto_graph::Reference],
     member: Option<String>,
     r: &OkfRender<'_>,
 ) -> rto_render::okf::Concept<'a> {
@@ -20371,7 +20379,16 @@ fn okf_concept<'a>(
             // the laundering the carried tier exists to prevent, one step later.
             origin: okf::read::peer_origin(&ex.meta)
                 .or_else(|| Some(okf::origin_for(provenance, &at, r.tool, human.as_ref()))),
-            sources: ex.node.path.iter().map(|p| format!("/{p}")).collect(),
+            // The concept's own file, then each external work it cites from the
+            // reference register (ADR-0029), with `id`/`title`/`author` and a
+            // `[^id]` footnote carrying its APA 7 entry or refusal.
+            sources: ex
+                .node
+                .path
+                .iter()
+                .map(|p| okf::Source::resource(format!("/{p}")))
+                .chain(works.iter().map(okf::Source::from_reference))
+                .collect(),
         },
         // Only a node that *is* the file carries the file's prose. A symbol
         // inside it would otherwise repeat the whole document once per function,
@@ -20453,7 +20470,8 @@ fn render_okf(
     let mut explanations = Vec::with_capacity(nodes.len());
     for node in &nodes {
         if let Some(ex) = rto_graph::explain(&store, &node.key)? {
-            explanations.push((node, ex));
+            let works = rto_graph::works_cited(&store, &node.key)?;
+            explanations.push((node, ex, works));
         }
     }
     // One history walk for the whole authored layer. Only authored concepts can
@@ -20474,7 +20492,7 @@ fn render_okf(
     };
     let concepts: Vec<okf::Concept<'_>> = explanations
         .iter()
-        .map(|(node, ex)| okf_concept(ex, node.provenance, None, &render))
+        .map(|(node, ex, works)| okf_concept(ex, node.provenance, works, None, &render))
         .collect();
 
     let count = concepts.len();

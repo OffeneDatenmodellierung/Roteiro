@@ -291,6 +291,17 @@ upstream rather than encoding here:
   `acme_retail`, even though §5 states that *every* timestamp-valued key is an
   ISO 8601 datetime with an explicit UTC offset, and §5.5's own example is
   `2026-09-23T00:00:00Z`. This one is a bug in the tool, not in the spec.
+
+### External works in `sources[]`
+
+A concept whose node cites a work from `docs/references.toml` (ADR-0029)
+carries it as a `sources[]` entry with `id`, `title` and `author`, and its body
+ends with a `## References` section holding one `[^id]` footnote per work: the
+APA 7 entry, or the reason the record cannot be cited yet. The footnote is
+§5.1's join key, so the attribution checks are satisfied by our output rather
+than unable to see it. `L6` still reports a group author such as `Google Cloud`
+at `info`, which is the §5.1/§7 disagreement above showing up in our own bundle.
+
 ## The commands, and which of them gate
 
 Everything under `roteiro okf` **reads**. None of it writes to the graph, and none
