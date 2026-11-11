@@ -585,7 +585,8 @@ mod tests {
 
     /// A proxy in the environment never carries a call to this machine (and its
     /// credential) elsewhere, but a hosted endpoint does use it — a corporate
-    /// network may allow no other route out.
+    /// network may allow no other route out. Also pins the off-machine notice:
+    /// printed for the hosted engine, never for the loopback one.
     /// Re-runs itself in a child, because setting a process's environment from a
     /// test is `unsafe` and this crate forbids that.
     #[test]
@@ -631,13 +632,21 @@ mod tests {
         }
         let out = child.output().expect("run the child");
         let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(
-            out.status.success(),
-            "{stdout}{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{stdout}{stderr}");
         // Zero passed would be a filter that matched nothing, not a pass.
         assert!(stdout.contains("1 passed"), "{stdout}");
+        // The child built one loopback engine and one hosted one: exactly one
+        // notice, naming the hosted host (ADR-0028 §2).
+        assert_eq!(
+            stderr.matches("note: model provider is").count(),
+            1,
+            "only the hosted engine announces itself: {stderr}"
+        );
+        assert!(
+            stderr.contains("note: model provider is api.example.com"),
+            "{stderr}"
+        );
     }
 
     #[test]

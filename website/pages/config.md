@@ -23,8 +23,9 @@ audio      = "voxtral-mini-3b"          <span class="c"># speech transcription f
 ocr        = "ocrs-text"                <span class="c"># literal image text for `sync`</span>
 
 [provider]                              <span class="c"># the OpenAI-compatible model server (ADR-0027/0028); unset by default</span>
-base_url = "http://127.0.0.1:11434/v1"  <span class="c"># local Ollama — or a hosted https:// endpoint, announced on every run</span>
-                                        <span class="c"># credential: ROTEIRO_PROVIDER_API_KEY in the environment, never here</span>
+# base_url = "http://127.0.0.1:11434/v1"  <span class="c"># e.g. local Ollama, or a hosted https:// endpoint (announced on every run);</span>
+                                        <span class="c"># once set, [models] values are the provider's ids, not the registry names above.</span>
+                                        <span class="c"># Credential: ROTEIRO_PROVIDER_API_KEY in the environment, never here</span>
 
 [ingest]                                <span class="c"># which blob content `sync` embeds</span>
 prose  = true                           <span class="c"># Markdown / plain text bodies</span>

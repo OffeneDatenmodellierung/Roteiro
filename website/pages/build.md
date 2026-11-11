@@ -41,5 +41,5 @@ cargo build --release --all-features</code></pre>
 <tr><td><code>exec-boxlite</code></td><td>The same analyzers inside a digest-pinned OCI image in a microVM — read-only worktree, no egress. Needs <code>protoc</code> and a provisioned runtime; see the README.</td></tr>
 <tr><td><code>serve</code></td><td>An OpenAI-compatible <code>/v1</code> model endpoint over your installed models (llama.cpp).</td></tr>
 <tr><td><code>mcp</code></td><td>The MCP graph server, exposing the graph to AI agents (stdio or HTTP).</td></tr>
-<tr><td><code>--all-features</code></td><td>Every capability above at once — the largest build. Requires a C/C++ toolchain because the serving and vision features compile llama.cpp. <strong>This includes <code>remote</code></strong>, so such a build <em>can</em> call a hosted model once you grant it in your user config and per run; it still cannot without both.</td></tr>
+<tr><td><code>--all-features</code></td><td>Every capability above at once — the largest build. Requires a C/C++ toolchain because the serving and vision features compile llama.cpp.</td></tr>
 </table>
