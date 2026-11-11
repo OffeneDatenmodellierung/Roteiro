@@ -385,6 +385,40 @@ pub enum OkfError {
     },
 }
 
+/// The usable `sources[]` entries with their attribution keys, or none when no
+/// entry carries any — so a resource-only bundle's import is unchanged.
+///
+/// The same entries `ParsedFrontmatter::sources` keeps (a non-blank
+/// `resource`), each as `{resource, id?, title?, author?}`, in document order.
+fn attributed_sources(sources: &[okf_core::Source]) -> Vec<serde_json::Value> {
+    let usable: Vec<&okf_core::Source> = sources
+        .iter()
+        .filter(|s| s.resource.as_deref().is_some_and(|r| !r.trim().is_empty()))
+        .collect();
+    if !usable
+        .iter()
+        .any(|s| s.id.is_some() || s.title.is_some() || s.author.is_some())
+    {
+        return Vec::new();
+    }
+    usable
+        .into_iter()
+        .map(|s| {
+            let mut entry = serde_json::json!({ "resource": s.resource });
+            if let Some(id) = &s.id {
+                entry["id"] = id.clone().into();
+            }
+            if let Some(title) = &s.title {
+                entry["title"] = title.clone().into();
+            }
+            if let Some(author) = &s.author {
+                entry["author"] = author.as_str().into();
+            }
+            entry
+        })
+        .collect()
+}
+
 /// A concept document's parsed frontmatter, in the subset this reads.
 ///
 /// Separate from [`super::Frontmatter`], which is a *render* input: that one
@@ -400,6 +434,10 @@ struct ParsedFrontmatter {
     status: Option<String>,
     tags: Vec<String>,
     sources: Vec<String>,
+    /// Every usable `sources[]` entry with its attribution keys, kept only when
+    /// at least one entry carries `id`, `title` or `author` — a peer's
+    /// bibliography, which reading `resource` alone used to discard (#801).
+    attributed: Vec<serde_json::Value>,
     generated: Option<(String, String)>,
     verified: Vec<(String, String)>,
     /// The verification event that actually *supports* [`Self::tier`]: the
@@ -653,6 +691,7 @@ fn parse_frontmatter(block: &str) -> Result<ParsedFrontmatter, SkipReason> {
             .into_iter()
             .filter_map(|s| s.resource.filter(|r| !r.trim().is_empty()))
             .collect(),
+        attributed: attributed_sources(&fm.sources()),
         generated: fm.generated().and_then(|g| by_at(g.by, g.at)),
         verified: verified
             .iter()
@@ -1302,6 +1341,9 @@ fn concept_meta(
             "sources": c.fm.sources,
         },
     });
+    if !c.fm.attributed.is_empty() {
+        meta["okf"]["source_entries"] = serde_json::Value::from(c.fm.attributed.clone());
+    }
     if let Some(origin) = c.fm.effective_origin(opts.trust) {
         meta["okf"]["origin"] = serde_json::json!({
             "by": origin.by.as_token(),
@@ -1949,6 +1991,34 @@ mod tests {
             Vec::<String>::new(),
             "§5.1 makes `resource` REQUIRED within an entry; an entry without \
              one names nothing a consumer could follow"
+        );
+    }
+
+    /// A peer's bibliography survives import: `id`, `title` and `author` are
+    /// kept beside `resource` instead of being dropped (#801).
+    #[test]
+    fn a_peer_s_source_attribution_is_kept_on_import() {
+        let doc = "---\ntype: \"adr\"\nsources:\n  - resource: \"https://example.org/spec\"\n    id: \"spec\"\n    title: \"The spec\"\n    author: \"human:alice\"\n  - resource: \"/local.md\"\n---\n\nB\n";
+        let (block, _) = split_frontmatter(doc).expect("split");
+        let fm = parse_frontmatter(block).expect("parse");
+        assert_eq!(fm.sources, vec!["https://example.org/spec", "/local.md"]);
+        assert_eq!(
+            serde_json::Value::from(fm.attributed),
+            serde_json::json!([
+                { "resource": "https://example.org/spec", "id": "spec",
+                  "title": "The spec", "author": "human:alice" },
+                { "resource": "/local.md" },
+            ])
+        );
+
+        let plain = "---\ntype: \"adr\"\nsources:\n  - resource: \"/local.md\"\n---\n\nB\n";
+        let (block, _) = split_frontmatter(plain).expect("split");
+        assert!(
+            parse_frontmatter(block)
+                .expect("parse")
+                .attributed
+                .is_empty(),
+            "a resource-only bundle imports exactly as before"
         );
     }
 

@@ -664,3 +664,108 @@ fn a_bundle_with_no_concepts_can_still_fail() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A concept rendered through `render_concept` from a register work, as
+/// `render okf` emits it (#801).
+fn cited_concept() -> rto_render::okf::BundleFile {
+    use rto_graph::{
+        Attested, Author, Locator, Node, NodeKind, PublicationDate, Reference, Stability, Store,
+        WorkKind, Year,
+    };
+    use rto_render::okf;
+
+    let mut work = Reference::new(
+        "okf-spec",
+        WorkKind::Document,
+        "Open Knowledge Format",
+        Stability::FixedOrArchived,
+    );
+    work.authors = vec![Author::Group("Google Cloud".into())];
+    work.published = Attested::Known(PublicationDate::Year(Year::new(2026).expect("year")));
+    work.version = Attested::Known("0.2".into());
+    work.descriptor = Attested::AbsentFromWork;
+    work.publisher = Attested::Known("Google Cloud".into());
+    work.locator = Attested::Known(Locator::Url("https://example.org/SPEC.md".into()));
+
+    let store = Store::open_in_memory().expect("store");
+    store
+        .upsert_node(&Node::new("doc:guide", NodeKind::Doc, "Guide"))
+        .expect("node");
+    let ex = rto_graph::explain(&store, "doc:guide")
+        .expect("query")
+        .expect("node");
+    let fm = okf::Frontmatter {
+        type_: "doc".into(),
+        title: Some("Guide".into()),
+        sources: vec![okf::Source::from_reference(&work)],
+        ..okf::Frontmatter::default()
+    };
+    okf::render_concept(&ex, &fm, Some("The guide."), &|_| None)
+}
+
+/// The attribution lints could never fire on our own output: it carried no
+/// `sources[].id`, no `author` and no footnote. A register work now carries all
+/// three — so the output is clean of L5 and attribution warnings because it is
+/// *right*, L6 reports the group author, and each lint fires the moment its half
+/// of the join is removed.
+#[test]
+fn the_attribution_lints_fire_on_rendered_output() {
+    let concept = cited_concept();
+    assert!(
+        concept.content.contains("    id: \"okf-spec\"")
+            && concept.content.contains("    author: \"Google Cloud\"")
+            && concept
+                .content
+                .contains("[^okf-spec]: Google Cloud. (2026). Open Knowledge Format"),
+        "{}",
+        concept.content
+    );
+    let rel = concept.path.trim_start_matches('/').to_owned();
+    let run = |tag: &str, text: &str| {
+        let root = bundle(tag, &[("index.md", ROOT_INDEX), (rel.as_str(), text)]);
+        let lint = conform::lint_report(&root).expect("lint");
+        let valid = conform::validate_report(&root).expect("validate");
+        let _ = std::fs::remove_dir_all(&root);
+        (lint, valid)
+    };
+
+    let (lint, valid) = run("cited", &concept.content);
+    assert!(messages(&lint, Some("L5")).is_empty(), "{lint:?}");
+    assert!(
+        !messages(&valid, None)
+            .iter()
+            .any(|m| m.contains("matches no `sources[].id`")),
+        "{valid:?}"
+    );
+    assert!(
+        messages(&lint, Some("L6"))
+            .iter()
+            .any(|m| m.contains("Google Cloud")),
+        "an APA group author is not an OKF actor, and L6 says so: {lint:?}"
+    );
+
+    // The source without its footnote: declared, never cited.
+    let uncited = concept
+        .content
+        .lines()
+        .filter(|l| !l.starts_with("[^okf-spec]:"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (lint, _) = run("uncited", &uncited);
+    assert!(
+        messages(&lint, Some("L5"))
+            .iter()
+            .any(|m| m.contains("okf-spec")),
+        "{lint:?}"
+    );
+
+    // A footnote with no source behind it.
+    let dangling = concept.content.replace("[^okf-spec]:", "[^ghost]:");
+    let (_, valid) = run("dangling", &dangling);
+    assert!(
+        messages(&valid, None)
+            .iter()
+            .any(|m| m.contains("[^ghost] matches no `sources[].id`")),
+        "{valid:?}"
+    );
+}
