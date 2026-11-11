@@ -41,10 +41,11 @@ requires — no C++, no cmake, no libclang — and makes no network call on its 
 It includes everything needed to *prepare* for working offline —
 `roteiro model pull` and `roteiro security prefetch|status|run` — so
 [`docs/OFFLINE_SETUP.md`](docs/OFFLINE_SETUP.md) needs no special build. Nothing
-is fetched until you say yes to it. `security run` is sandboxed by default and
-refuses by name when this build has no sandbox; running the analyzer **on this
-host** instead still requires `--allow-unsandboxed` on every invocation, because
-that executes a third-party analyzer here with no isolation boundary. **The analyzers themselves are
+is fetched until you say yes to it. `security run` runs the analyzer **on this
+host** and requires `--allow-unsandboxed` on every invocation, because that
+executes a third-party analyzer here with no isolation boundary; without the flag
+it refuses. Roteiro has no sandbox — the opt-in microVM backend was removed
+([ADR-0030](docs/adr/0030-remove-the-microvm-sandbox.md)). **The analyzers themselves are
 yours to install** (`semgrep`, `osv-scanner`, `cargo install cargo-audit`) — the
 guide has the commands, and `roteiro security ingest` accepts a report produced
 anywhere if you would rather install none of them. Local *inference* and
@@ -57,15 +58,14 @@ nothing** — no findings layer, no history, no `lint list` — because an advis
 id is *assigned* and assignment is a promise, while a lint name is a symbol in a
 compiler, renamed or removed at its discretion: the first is a durable fact about
 the repository, the second an opinion about the code as it stands today. And it
-is **sandboxed by default**, which today means it refuses: linting compiles the
-tree, so it runs that tree's build scripts and proc macros here, and that the
-toolchain is yours does not make the code yours when you are reviewing somebody
-else's branch. The sandboxed builder is unbuilt, so until it lands you opt into
-host execution explicitly — `--allow-unsandboxed` for one run, or `[lint]
+**refuses until you grant host execution**: linting compiles the tree, so it runs
+that tree's build scripts and proc macros here, and that the toolchain is yours
+does not make the code yours when you are reviewing somebody else's branch. You
+opt in explicitly — `--allow-unsandboxed` for one run, or `[lint]
 allow_unsandboxed = true` in **your own** `~/.roteiro/config.toml` as a standing
 preference. A project's committed `roteiro.toml` may deny it for everyone and may
-never grant it. Nothing ever falls back: asking for the sandbox and getting a
-host run is the one thing this command will not do.
+never grant it, and the flag does not override that denial
+([`docs/SANDBOXED_LINTING.md`](docs/SANDBOXED_LINTING.md)).
 
 ### Models run where you point them — on this machine by default
 
@@ -105,70 +105,15 @@ config), and [ADR-0001](docs/adr/0001-build-roteiro-unified-codebase-knowledge-g
 plus [`docs/history/BUILD_PLAN.md`](docs/history/BUILD_PLAN.md) for the design and roadmap.
 Contribution + review standards live in [`AGENTS.md`](AGENTS.md).
 
-### Sandboxed analyzers (`--features exec-boxlite`)
+### Upgrading from a build with the sandbox
 
-Optional, off by default, and the only feature with build requirements the
-default install does not have. It runs `semgrep` inside a digest-pinned OCI image
-in a microVM — read-only worktree, no egress, no ambient credentials
-([ADR-0014](docs/adr/0014-sandboxed-analyzer-execution.md)).
-
-**1. `protoc >= 3.12` must be on the build host.** `boxlite-shared`'s build
-script requires it unconditionally, and without it the failure is a build-script
-error rather than a missing-feature message:
-
-```sh
-sudo apt-get install -y protobuf-compiler   # Debian/Ubuntu
-brew install protobuf                       # macOS
-```
-
-**2. The sandbox runtime is verified at build time, whichever way you build.**
-`boxlite` embeds a prebuilt runtime archive into the compiled library, which its
-own build script fetches with an unverified `curl`. Roteiro pins the SHA-256 of
-every file that archive contributes and checks them in `rto-exec`'s build script
-— against what `boxlite` actually extracted, before anything links. A mismatch,
-a missing file or an unpinned extra file fails the build.
-
-```sh
-# Just build it. The runtime is fetched by boxlite over TLS and every extracted
-# file is verified against the pins; the build says so on its own output.
-cargo install roteiro --features exec-boxlite
-
-# Then pull the pinned analyzer image. Only this build can: the image half of
-# `prefetch` is compiled out of any binary without `exec-boxlite`.
-roteiro security prefetch --analyzer semgrep --allow-download
-```
-
-The second step is separate for a reason of ordering rather than taste: the
-binary that can pull an image is the one the first step exists to produce.
-Because a run never pulls, skipping it means `roteiro security run` refuses with
-`ImageNotProvisioned` instead of fetching an image mid-scan.
-
-**For a build that touches no network at all**, provision the archive first and
-name it. `boxlite`'s `curl` then reads a local file and opens no socket, and the
-bytes are verified *before* they are extracted as well as after:
-
-```sh
-cargo install roteiro                                           # default set has `prefetch`
-roteiro security prefetch --analyzer sandbox --allow-download    # digest-pinned, ~26 MB
-BOXLITE_RUNTIME_URL="file://$HOME/.roteiro/security/boxlite-runtime/boxlite-runtime.tar.gz" \
-  cargo install roteiro --features exec-boxlite
-```
-
-Both paths are verified; only the second is offline. Do not describe the first
-as air-gapped, and do not describe the second as the only safe one — the
-difference is egress, not integrity
-([ADR-0014 v1.3](docs/adr/0014-sandboxed-analyzer-execution.md)).
-
-**3. It embeds third-party binaries, some of them GPL-2.0 and LGPL-2.0**, and
-distributing a binary built this way carries source-offer duties. `prefetch`
-prints the full notice before installing anything; it is also at
-[`crates/rto-exec/NOTICE-boxlite-runtime.md`](crates/rto-exec/NOTICE-boxlite-runtime.md).
-A default build embeds none of it.
-
-Platforms: `darwin-arm64`, `linux-x64-gnu`, `linux-arm64-gnu`. Running a scan
-also needs a usable hypervisor (`/dev/kvm` on Linux, `Hypervisor.framework` on
-Apple Silicon); where there is none, the run says so by name and the sandbox
-tests skip with a visible message.
+The `exec-boxlite` feature is gone
+([ADR-0030](docs/adr/0030-remove-the-microvm-sandbox.md)): drop
+`--features exec-boxlite` from install commands, `--sandboxed`/`--image` from
+scripts, and `[security]`/`[lint] image` from config files (they load, with a
+warning that they are inert). Delete `~/.roteiro/security/boxlite-home` and
+`~/.roteiro/security/boxlite-runtime` by hand if present — the first can hold
+many GB of images.
 
 ## Logging
 

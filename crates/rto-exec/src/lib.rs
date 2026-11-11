@@ -73,78 +73,22 @@
 //! ```
 
 pub mod adapter;
-/// Where the pinned-asset cache lives, and the precedence that decides it.
-///
-/// Its source carries no `//!` header because `build.rs` pulls the same file in
-/// with `include!`, where an inner doc comment is a syntax error — so the module
-/// documentation lives here instead. `build.rs` needs it to find the sandbox
-/// runtime `roteiro security prefetch` installed, which is the same cache
-/// [`asset_paths::asset_root`] names; read the file's own comments for why that
-/// is shared rather than copied.
 pub mod asset_paths;
-// Asset provisioning is **always compiled**, behind no feature at all.
-//
-// It used to be `cfg(any(exec-subprocess, exec-boxlite))`, on the reading that
-// provisioning belongs to whichever backend consumes the assets. That was the
-// wrong shape and this module half-said so already: it is shared between the
-// backends and owned by neither, and the note on `SANDBOX_RUNTIME_NOTICE` below
-// records that an `exec-subprocess`-only build provisions *for a later
-// `exec-boxlite` build* — provisioning already served a backend that was not
-// compiled in.
-//
-// The bootstrap argument settles it. `AGENTS.md` tells a contributor to run
-// `roteiro security prefetch --allow-download` *before* building
-// `--features exec-boxlite`, because that build script requires the verified
-// archive at compile time. If prefetch lived behind an execution feature, you
-// would need a build with a *different* execution backend compiled in before you
-// could provision the one you actually wanted. That is circular.
-//
-// Nothing here executes anything: it downloads, digests, pins and reports. Every
-// `Command::new` in this crate is in `subprocess.rs` or `boxlite.rs`, and both
-// stay behind their features. Provisioning is not execution.
+// Asset provisioning is **always compiled**, behind no feature at all: it
+// downloads, digests, pins and reports, and executes nothing. Every
+// `Command::new` in this crate is behind `exec-subprocess`. Provisioning is not
+// execution, so a build with no execution backend can still prefetch the rules
+// and advisory databases a later run, or CI, will use.
 pub mod assets;
-#[cfg(feature = "exec-boxlite")]
-pub mod boxlite;
-#[cfg(any(feature = "exec-subprocess", feature = "exec-boxlite"))]
+#[cfg(feature = "exec-subprocess")]
 mod child_env;
 pub mod crossref;
-/// Emitting a `file://` URL for a local path, and reading one back.
-///
-/// Its source carries no `//!` header because `build.rs` pulls the same file in
-/// with `include!`, where an inner doc comment is a syntax error — so the module
-/// documentation lives here instead. `build.rs` is this crate's only emitter: it
-/// prints the `BOXLITE_RUNTIME_URL=` recipe an operator pastes, and parses that
-/// variable back when it is set. What reads the URL in between is `boxlite`'s
-/// own `curl`, which percent-decodes and rejects an unencoded space outright —
-/// read the file's own comments for the measurements, and for why the encoder
-/// and the decoder have to be one file rather than two.
-pub mod file_url;
 pub mod guidance;
-pub mod image_ref;
 mod ingest;
 #[cfg(feature = "exec-subprocess")]
 pub mod lint;
 pub mod lint_grant;
-#[cfg(all(feature = "exec-boxlite", feature = "exec-subprocess"))]
-pub mod lint_sandbox;
 mod runner;
-/// The per-file digests of the extracted sandbox runtime — **generated**.
-///
-/// Derived from the archives in [`runtime_pins`] by
-/// `scripts/derive-runtime-file-pins.py`, and verified by `build.rs` against
-/// what `boxlite` actually extracted, since those files rather than the archive
-/// are what `include_bytes!` puts in the binary. Same `include!` arrangement,
-/// and so the same standalone constraint; its module documentation lives here
-/// for the same reason [`runtime_pins`]'s does.
-pub mod runtime_file_pins;
-/// The pinned sandbox-runtime archives, and the host-platform selection.
-///
-/// Its source carries no `//!` header because `build.rs` pulls the same file in
-/// with `include!`, where an inner doc comment is a syntax error — so the module
-/// documentation lives here instead. Read the file's own comments for what is
-/// pinned and why it has to be.
-pub mod runtime_pins;
-pub mod sandbox_store;
 pub mod snippet;
 #[cfg(feature = "exec-subprocess")]
 pub mod subprocess;
@@ -160,11 +104,9 @@ pub use adapter::{
 pub use adapter::clippy::{Clippy, FeatureSet};
 pub use assets::{
     ASSETS, AssetKind, AssetSource, AssetSpec, AssetStatus, DownloadFile, Fetcher, InstalledAsset,
-    MissingAsset, SANDBOX, asset, asset_path, asset_root, assets_for, provision, provision_with,
-    resolve, status,
+    MissingAsset, asset, asset_path, asset_root, assets_for, provision, provision_with, resolve,
+    status,
 };
-#[cfg(feature = "exec-boxlite")]
-pub use boxlite::{BoxliteRunner, SandboxError, SandboxProbe, sandbox_probe};
 // The RFC 3339 UTC formatter moved to `rto-graph` in #667: `rto-exec` is an
 // optional dependency of the CLI, and the CLI's render path — which is gated on
 // nothing — needs the same function to stamp a bundle's timestamps. It is
@@ -180,7 +122,6 @@ pub use crossref::{
     Correspondence, Report, across_analyzers as cross_reference_across_analyzers, cross_reference,
 };
 pub use guidance::{Guidance, Line as GuidanceLine};
-pub use image_ref::{NotPinned, PinDefect, pinned_digest as image_pinned_digest};
 pub use ingest::{
     IngestRunner, MAX_REPORT_FINDINGS, NormalizedReport, REPORT_SCHEMA, ReportFinding,
     normalize_native,
@@ -191,27 +132,12 @@ pub use rto_graph::{age_in_days, rfc3339_from_unix, rfc3339_utc, unix_from_rfc33
 // ADR-0020 §6's grant, re-exported under `lint_`-prefixed names so a reader who
 // meets `ConfigGrant` in the binary can see which key it governs.
 pub use lint_grant::{
-    Backend as LintBackend, ConfigGrant as LintConfigGrant, Decision as LintDecision,
-    Reason as LintReason, Requested as LintRequested, decide as decide_lint_host,
+    ConfigGrant as LintConfigGrant, Decision as LintDecision, Reason as LintReason,
+    Requested as LintRequested, decide as decide_lint_host,
 };
-#[cfg(all(feature = "exec-boxlite", feature = "exec-subprocess"))]
-pub use lint_sandbox::BuilderError as LintBuilderError;
 pub use runner::{
     AnalysisRequest, AnalysisResponse, AnalyzerRunner, Consent, ExecError, Worktree,
     check_reported_path, check_request, worktree_id,
-};
-pub use runtime_file_pins::{
-    PinnedFile, PinnedRuntimeFiles, RUNTIME_FILES, RUNTIME_FILES_VERSION, runtime_files_for,
-};
-pub use runtime_pins::{
-    PinnedArchive, RUNTIME_ARCHIVES, RUNTIME_ASSET, RUNTIME_FILE, RUNTIME_VERSION, archive_for,
-    runtime_target,
-};
-pub use sandbox_store::{
-    Attribution, CachedImage, ClearReport, ImageBytes, Objects, Preserved, RemovedImage,
-    SANDBOX_CLEAR_SCHEMA, SANDBOX_STATUS_SCHEMA, SANDBOX_STORE_DIR, SandboxStatus, Scope,
-    StoreError, Unattributed, VerifiedImage, clear as sandbox_clear, plan as sandbox_plan,
-    status as sandbox_status, store_root as sandbox_store_root,
 };
 pub use snippet::{NoSnippets, SnippetSource, WorktreeSnippets};
 #[cfg(feature = "exec-subprocess")]
@@ -222,17 +148,6 @@ pub use tool_security::{
     TOOL_SECURITY_STATUS_SCHEMA, ToolFindingsLayer, ToolSecurityList, ToolSecurityStatus,
     coverage_matrix, coverage_matrix_with, layer_staleness, security_list, security_status,
 };
-
-/// The licence notice for the third-party binaries an `exec-boxlite` build
-/// embeds, compiled in so it cannot be separated from what it describes.
-///
-/// `roteiro security prefetch` prints it before installing the sandbox runtime,
-/// which is the same disclose-then-consent shape `roteiro model pull` uses. It
-/// is compiled into every build, because every build can provision the runtime —
-/// including one with no execution backend at all, which prefetches it for a
-/// later `exec-boxlite` build — so the obligations travel with the artifact
-/// rather than living only in the repository.
-pub const SANDBOX_RUNTIME_NOTICE: &str = include_str!("../NOTICE-boxlite-runtime.md");
 
 /// Lowercase hex SHA-256 of `bytes`.
 ///

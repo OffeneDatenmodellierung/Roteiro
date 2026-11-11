@@ -3,9 +3,8 @@
 The analyzer execution seam for [Roteiro](https://roteiro.dev).
 
 External analyzers (`semgrep`, `cargo-audit`, and successors) can be run in more
-than one place: in CI, on a developer's own machine, or — later — locally inside
-a sandbox. This crate exists so those are **not competing architectures**. One
-trait, `AnalyzerRunner`, defines a single request and a single normalized
+than one place: in CI, or on a developer's own machine. This crate exists so
+those are **not competing architectures**. One trait, `AnalyzerRunner`, defines a single request and a single normalized
 response; every backend satisfies it, so callers never learn which one produced a
 result.
 
@@ -28,13 +27,13 @@ schema changes and no migration.
 |---|---|---|---|
 | `IngestRunner` | always | `ingested` | A report produced elsewhere. Zero install. |
 | `SubprocessRunner` | `exec-subprocess` | `none` | Executes on the host. Requires `--allow-unsandboxed`. |
-| *(boxlite)* | planned | `microvm` | ADR-0014, Stage 24. |
 
 **`isolation=none` is meant literally.** The subprocess backend switches the
 analyzer's own egress off and runs it against pinned inputs with a scrubbed
 environment — no `GITHUB_TOKEN`, no `AWS_*`, no agent socket — but a subprocess
-on the host can do what the host can do, and nothing here stops it. Only the
-sandboxed backend can enforce that boundary. The recorded label says so.
+on the host can do what the host can do, and nothing here stops it. There is no
+sandboxed backend — the microVM one was removed (ADR-0030) — so the consent flag
+is the only gate. The recorded label says so.
 
 ## Assets: provisioning writes, running reads
 
@@ -58,8 +57,8 @@ are never nodes or edges, never acquire a provenance class, and never appear in
 the exported graph artifact.
 
 See ADR-0012 (the findings artifact model), ADR-0014 (execution and
-provisioning) and ADR-0018 (which analyzers cover which languages, and on which
-axis).
+provisioning), ADR-0030 (the sandbox's removal) and ADR-0018 (which analyzers
+cover which languages, and on which axis).
 
 ## Stability
 

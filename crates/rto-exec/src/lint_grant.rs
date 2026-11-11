@@ -8,8 +8,10 @@
 //! is the same in a build that cannot run a linter as in one that can — see the
 //! module's own documentation.
 //!
-//! `roteiro lint` runs the linter sandboxed by default, and the host is
-//! something a person opts into. This module is the whole of that rule — the
+//! `roteiro lint` runs the linter on this host only when a person has opted
+//! into it, and refuses otherwise. (It ran sandboxed by default while a microVM
+//! backend existed; ADR-0030 removed it, and saying nothing went back to being
+//! a refusal.) This module is the whole of that rule — the
 //! layering, the precedence between layers, and the sentence each refusal shows
 //! the reader.
 //!
@@ -43,7 +45,7 @@ use crate::guidance::{Guidance, Line};
 /// it existing. A merged line that starts running builds on every teammate's
 /// machine is consent by pull request: granted by someone else, noticed by
 /// nobody. Denial has none of those problems, so the project layer keeps it: a
-/// repository that wants the sandbox enforced for everyone can say so.
+/// repository that wants no builds run by `roteiro lint` can say so.
 ///
 /// It had a twin in `rto-remote` for the remote tier's `[remote] enabled`; that
 /// crate and key were removed by ADR-0028, leaving this the only grant key.
@@ -131,34 +133,10 @@ impl ConfigGrant {
 /// that a script cannot answer is a hang rather than a gate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Requested {
-    /// Neither flag was passed. **Not a grant** — the default is the sandbox.
+    /// No flag was passed. **Not a grant.**
     #[default]
     Unset,
     /// `--allow-unsandboxed`: run it here.
-    Host,
-    /// `--sandboxed`: run it in the sandbox, or not at all.
-    Sandbox,
-}
-
-/// Which backend a decision selects.
-///
-/// The value that used to be a boolean called *granted*, and the rename is the
-/// substance rather than the style. While conditions 1-2 were unbuilt there were
-/// only two outcomes — run on the host, or refuse — so "granted" answered the
-/// whole question. Now there are two *backends*, and the layers choose between
-/// them rather than choosing between running and not.
-///
-/// Nothing in this type says whether the chosen backend is **available**. That
-/// is deliberate: availability is a property of the machine and the build, not
-/// of the policy, and a selection that quietly became a host run because a
-/// hypervisor was missing is the silent downgrade ADR-0020 §6 exists to prevent.
-/// The runner asks; this module only ever says which one to ask.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Backend {
-    /// A digest-pinned image in a microVM. The default.
-    Sandbox,
-    /// This machine, with this user's toolchain, filesystem and credentials.
     Host,
 }
 
@@ -167,7 +145,7 @@ pub enum Backend {
 /// Every variant carries one sentence of explanation, because a decision the
 /// person did not make is one they have to be able to account for — most of all
 /// when it overrules something they *did* say. `--allow-unsandboxed` in a
-/// repository that denies host execution runs sandboxed, and that has to be a
+/// repository that denies host execution is refused, and that has to be a
 /// sentence rather than a silence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -176,41 +154,27 @@ pub enum Reason {
     GrantedByInvocation,
     /// Host execution was granted by the user's own config, with no flag needed.
     GrantedByUserLayer,
-    /// Nobody asked for anything — **the default**, and the common case.
-    SandboxByDefault,
-    /// `--sandboxed` was passed.
-    SandboxByInvocation,
+    /// Nobody granted anything — **the default**, and refused.
+    RefusedByDefault,
     /// The user's own config says `false`, so the host is off the table.
-    SandboxByUserLayer,
+    RefusedByUserLayer,
     /// This repository's `roteiro.toml` denied host execution. Nothing
     /// overrides this, including `--allow-unsandboxed`.
-    SandboxByProjectDenial,
+    RefusedByProjectDenial,
 }
 
 impl Reason {
-    /// Which backend this reason selects.
-    #[must_use]
-    pub fn backend(self) -> Backend {
-        match self {
-            Self::GrantedByInvocation | Self::GrantedByUserLayer => Backend::Host,
-            Self::SandboxByDefault
-            | Self::SandboxByInvocation
-            | Self::SandboxByUserLayer
-            | Self::SandboxByProjectDenial => Backend::Sandbox,
-        }
-    }
-
     /// Whether the linter may run on this host.
     #[must_use]
     pub fn granted(self) -> bool {
-        self.backend() == Backend::Host
+        matches!(self, Self::GrantedByInvocation | Self::GrantedByUserLayer)
     }
 
     /// One sentence naming which layer decided, for the line printed before the
     /// run.
     ///
-    /// Phrased to complete "running clippy …", so the two backends' disclosures
-    /// read alike and a person can tell at a glance which one they got.
+    /// A granted reason completes "running clippy …"; a refused one completes
+    /// "refused: …", so a person can tell at a glance which one they got.
     #[must_use]
     pub fn explanation(self) -> &'static str {
         match self {
@@ -218,21 +182,20 @@ impl Reason {
             Self::GrantedByUserLayer => {
                 "on this host, granted by `[lint] allow_unsandboxed` in your own config"
             }
-            Self::SandboxByDefault => "sandboxed, which is the default",
-            Self::SandboxByInvocation => "sandboxed, as `--sandboxed` asked",
-            Self::SandboxByUserLayer => {
-                "sandboxed — your `~/.roteiro/config.toml` sets `[lint] allow_unsandboxed = false`"
+            Self::RefusedByDefault => "nothing granted host execution, and refusing is the default",
+            Self::RefusedByUserLayer => {
+                "your `~/.roteiro/config.toml` sets `[lint] allow_unsandboxed = false`"
             }
-            Self::SandboxByProjectDenial => {
-                "sandboxed — this repository's `roteiro.toml` sets `[lint] allow_unsandboxed = \
-                 false`, which denies host execution for everyone working in it and is not \
-                 overridden by `--allow-unsandboxed`"
+            Self::RefusedByProjectDenial => {
+                "this repository's `roteiro.toml` sets `[lint] allow_unsandboxed = false`, which \
+                 denies host execution for everyone working in it and is not overridden by \
+                 `--allow-unsandboxed`"
             }
         }
     }
 
-    /// How this person could run on the host instead, if the sandbox cannot be
-    /// had — or `None` when they could not.
+    /// How this person could grant a run on the host — or `None` when they
+    /// could not, or already have.
     ///
     /// Consulted only by a refusal, and it exists so that a refusal names a way
     /// forward **that would actually work for this reason**. Telling someone in
@@ -259,12 +222,12 @@ impl Reason {
             // They share an arm because clippy is right that the bodies are
             // identical; they are listed separately above because a future
             // editor changing one must not silently change the other.
-            Self::GrantedByInvocation | Self::GrantedByUserLayer | Self::SandboxByProjectDenial => {
+            Self::GrantedByInvocation | Self::GrantedByUserLayer | Self::RefusedByProjectDenial => {
                 None
             }
-            Self::SandboxByDefault => Some(Guidance::new(&[
+            Self::RefusedByDefault => Some(Guidance::new(&[
                 Line::Note(&[
-                    "Or accept an unisolated run instead. `cargo clippy` would then compile",
+                    "To run it, accept an unisolated run. `cargo clippy` will then compile",
                     "this tree here, executing its build scripts and loading its proc macros",
                     "with your filesystem and your credentials. In your own repository that is",
                     "the build you were going to run anyway; in a branch you are reviewing it",
@@ -287,13 +250,9 @@ impl Reason {
                     "start running builds on every teammate's machine (ADR-0020 §6).",
                 ]),
             ])),
-            Self::SandboxByUserLayer => Some(Guidance::new(&[Line::Note(&[
-                "Or override your own `[lint] allow_unsandboxed = false` for this run with",
+            Self::RefusedByUserLayer => Some(Guidance::new(&[Line::Note(&[
+                "Override your own `[lint] allow_unsandboxed = false` for this run with",
                 "`--allow-unsandboxed`, accepting that the tree is then compiled on this host.",
-            ])])),
-            Self::SandboxByInvocation => Some(Guidance::new(&[Line::Note(&[
-                "Or drop `--sandboxed` and pass `--allow-unsandboxed`, accepting that the tree",
-                "is then compiled on this host.",
             ])])),
         }
     }
@@ -314,13 +273,6 @@ pub struct Decision {
 }
 
 impl Decision {
-    /// Which backend this run uses. Never *whether it is available* — see
-    /// [`Backend`].
-    #[must_use]
-    pub fn backend(self) -> Backend {
-        self.reason.backend()
-    }
-
     /// Whether this run may execute the linter on this host.
     #[must_use]
     pub fn granted(self) -> bool {
@@ -362,12 +314,11 @@ impl Decision {
 #[must_use]
 pub fn decide(config: ConfigGrant, requested: Requested) -> Decision {
     let reason = match (config.project_denied(), requested, config.as_effective()) {
-        (true, _, _) => Reason::SandboxByProjectDenial,
-        (false, Requested::Sandbox, _) => Reason::SandboxByInvocation,
+        (true, _, _) => Reason::RefusedByProjectDenial,
         (false, Requested::Host, _) => Reason::GrantedByInvocation,
         (false, Requested::Unset, Some(true)) => Reason::GrantedByUserLayer,
-        (false, Requested::Unset, Some(false)) => Reason::SandboxByUserLayer,
-        (false, Requested::Unset, None) => Reason::SandboxByDefault,
+        (false, Requested::Unset, Some(false)) => Reason::RefusedByUserLayer,
+        (false, Requested::Unset, None) => Reason::RefusedByDefault,
     };
     debug_assert_eq!(
         reason.granted(),
@@ -384,24 +335,21 @@ pub fn decide(config: ConfigGrant, requested: Requested) -> Decision {
 
 #[cfg(test)]
 mod tests {
-    use super::{Backend, ConfigGrant, Decision, Reason, Requested, decide};
+    use super::{ConfigGrant, Decision, Reason, Requested, decide};
 
     fn at(project: Option<bool>, user: Option<bool>, requested: Requested) -> Decision {
         decide(ConfigGrant::from_layers(project, user), requested)
     }
 
-    /// The default, and the reason this module exists: saying nothing asks for
-    /// the sandbox.
+    /// The default, and the reason this module exists: saying nothing refuses.
     ///
-    /// It used to assert that saying nothing *refused*, which was true only
-    /// while conditions 1-2 were unbuilt. The layers never said "refuse" — they
-    /// said "sandbox", and refusing was what the sandbox amounted to when there
-    /// was not one. Now there is, and the same table means what it always said.
+    /// It asserted "saying nothing selects the sandbox" while a microVM backend
+    /// existed; with that removed (ADR-0030) the same table means refusal again,
+    /// which is what it meant before the sandbox was built.
     #[test]
-    fn saying_nothing_selects_the_sandbox() {
+    fn saying_nothing_refuses() {
         let decision = at(None, None, Requested::Unset);
-        assert_eq!(decision.reason, Reason::SandboxByDefault);
-        assert_eq!(decision.backend(), Backend::Sandbox);
+        assert_eq!(decision.reason, Reason::RefusedByDefault);
         assert!(!decision.granted());
     }
 
@@ -411,18 +359,16 @@ mod tests {
     /// a row somebody will change.
     #[test]
     fn every_layer_combination_matches_the_adr_table() {
-        for requested in [Requested::Unset, Requested::Host, Requested::Sandbox] {
+        for requested in [Requested::Unset, Requested::Host] {
             for user in [None, Some(true), Some(false)] {
                 // The project layer may deny host execution, and its denial is
-                // absolute. What it denies is the *host*, never the run: the
-                // sandbox is what everyone in that repository gets.
+                // absolute.
                 let denied = at(Some(false), user, requested);
                 assert_eq!(
                     denied.reason,
-                    Reason::SandboxByProjectDenial,
+                    Reason::RefusedByProjectDenial,
                     "project denial must outrank user={user:?} requested={requested:?}"
                 );
-                assert_eq!(denied.backend(), Backend::Sandbox);
                 assert!(!denied.granted());
 
                 // The project layer may never grant: with `project = Some(true)`
@@ -469,34 +415,18 @@ mod tests {
         );
         assert_eq!(
             at(Some(false), Some(false), Requested::Host).reason,
-            Reason::SandboxByProjectDenial
+            Reason::RefusedByProjectDenial
         );
-    }
-
-    /// Asking for the sandbox denies the host, and it outranks a standing grant:
-    /// `--sandboxed` is how someone with the key set opts *one* run back out.
-    #[test]
-    fn asking_for_the_sandbox_denies_the_host_whatever_the_config_says() {
-        for user in [None, Some(true), Some(false)] {
-            let decision = at(None, user, Requested::Sandbox);
-            assert_eq!(
-                decision.reason,
-                Reason::SandboxByInvocation,
-                "user={user:?}"
-            );
-            assert_eq!(decision.backend(), Backend::Sandbox);
-            assert!(!decision.granted());
-        }
     }
 
     /// An ignored project grant is reported whichever way the decision went, and
     /// never confused with the decision itself.
     #[test]
     fn an_ignored_project_grant_is_reported_beside_the_outcome_not_folded_into_it() {
-        let sandboxed = at(Some(true), None, Requested::Unset);
-        assert!(!sandboxed.granted());
-        assert!(sandboxed.project_grant_ignored);
-        assert!(sandboxed.ignored_project_grant_note().is_some());
+        let refused = at(Some(true), None, Requested::Unset);
+        assert!(!refused.granted());
+        assert!(refused.project_grant_ignored);
+        assert!(refused.ignored_project_grant_note().is_some());
 
         // Also reported when the run went to the host for an unrelated reason:
         // the committed line still did nothing, and the team still needs telling.
@@ -544,15 +474,13 @@ mod tests {
         for reason in [
             Reason::GrantedByInvocation,
             Reason::GrantedByUserLayer,
-            Reason::SandboxByDefault,
-            Reason::SandboxByInvocation,
-            Reason::SandboxByUserLayer,
-            Reason::SandboxByProjectDenial,
+            Reason::RefusedByDefault,
+            Reason::RefusedByUserLayer,
+            Reason::RefusedByProjectDenial,
         ] {
             let explanation = reason.explanation();
             assert!(!explanation.trim().is_empty(), "{reason:?} says nothing");
             let names_the_layer = explanation.contains("--allow-unsandboxed")
-                || explanation.contains("--sandboxed")
                 || explanation.contains("config")
                 || explanation.contains("roteiro.toml")
                 || explanation.contains("default");
@@ -560,35 +488,25 @@ mod tests {
                 names_the_layer,
                 "{reason:?} does not say who decided: {explanation}"
             );
-            // The two backends must be told apart at a glance, since this is the
-            // sentence a person reads to know what just happened to their tree.
-            match reason.backend() {
-                Backend::Host => assert!(
-                    explanation.contains("on this host"),
-                    "{reason:?}: {explanation}"
-                ),
-                Backend::Sandbox => assert!(
-                    explanation.contains("sandboxed"),
-                    "{reason:?}: {explanation}"
-                ),
-            }
+            // A grant and a refusal must be told apart at a glance, since this
+            // is the sentence a person reads to know what happened to their tree.
+            assert_eq!(
+                explanation.contains("on this host"),
+                reason.granted(),
+                "{reason:?}: {explanation}"
+            );
         }
     }
 
     /// A refusal names a way forward **that would work for this person**, and
     /// the one person it must never offer `--allow-unsandboxed` to is the one in
     /// a repository that denies it (#426).
-    ///
-    /// The property that used to be `remedy()`. It moved because what a refusal
-    /// has to say changed: while the sandbox was unbuilt, *every* selection of
-    /// it was a refusal and needed a remedy. Now a sandbox selection is an
-    /// ordinary run, and the escape is consulted only when the boundary cannot
-    /// be had.
+
     #[test]
     fn the_host_escape_is_offered_only_to_someone_who_could_take_it() {
         // Nothing overrides a project denial, so there is no escape to name.
         assert!(
-            Reason::SandboxByProjectDenial.host_escape().is_none(),
+            Reason::RefusedByProjectDenial.host_escape().is_none(),
             "a project denial cannot be escaped, so offering a flag wastes the reader's time"
         );
         // Already on the host: there is nothing to escape to.
@@ -598,7 +516,7 @@ mod tests {
         }
         // And every reason that *can* be escaped says how, in a way that fits
         // what that person actually did.
-        let default = Reason::SandboxByDefault
+        let default = Reason::RefusedByDefault
             .host_escape()
             .expect("escape")
             .to_string();
@@ -628,7 +546,7 @@ mod tests {
             "and that the committed file is not the place to put it: {default}"
         );
 
-        let user = Reason::SandboxByUserLayer
+        let user = Reason::RefusedByUserLayer
             .host_escape()
             .expect("escape")
             .to_string();
@@ -637,13 +555,6 @@ mod tests {
             user.contains("your own"),
             "your own denial is yours to override: {user}"
         );
-
-        let sandboxed = Reason::SandboxByInvocation
-            .host_escape()
-            .expect("escape")
-            .to_string();
-        assert!(sandboxed.contains("--sandboxed"), "{sandboxed}");
-        assert!(sandboxed.contains("--allow-unsandboxed"), "{sandboxed}");
     }
 
     /// The default escape is copy-pasteable, so its shape is pinned: an editor
@@ -652,7 +563,7 @@ mod tests {
     /// where a copy would lose it.
     #[test]
     fn the_default_escape_keeps_each_form_on_its_own_line() {
-        let escape = Reason::SandboxByDefault
+        let escape = Reason::RefusedByDefault
             .host_escape()
             .expect("escape")
             .to_string();
@@ -667,23 +578,5 @@ mod tests {
             ),
             "{escape}"
         );
-    }
-
-    /// `granted()` and `backend()` are two spellings of one fact, and a type
-    /// where they could disagree is a type where a caller checks the wrong one.
-    #[test]
-    fn granted_and_backend_can_never_disagree() {
-        for requested in [Requested::Unset, Requested::Host, Requested::Sandbox] {
-            for user in [None, Some(true), Some(false)] {
-                for project in [None, Some(true), Some(false)] {
-                    let decision = at(project, user, requested);
-                    assert_eq!(
-                        decision.granted(),
-                        decision.backend() == Backend::Host,
-                        "project={project:?} user={user:?} requested={requested:?}"
-                    );
-                }
-            }
-        }
     }
 }

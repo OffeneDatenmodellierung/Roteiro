@@ -72,8 +72,8 @@ C++/cmake toolchain. It includes the whole of <em>preparing</em> to go offline �
 <code>roteiro model pull</code> and <code>roteiro security prefetch</code> — so that needs
 no rebuild. Nothing is ever fetched without an explicit <code>[y/N]</code> consent, and
 <code>security run</code> refuses without <code>--allow-unsandboxed</code> every time.
-Everything heavier — running local models, PDF/image ingestion, the model server, the
-sandboxed analyzer backend — stays opt-in behind a feature flag.</div>
+Everything heavier — running local models, PDF/image ingestion, the model server —
+stays opt-in behind a feature flag.</div>
 
 <div class="note" id="remote-tier"><strong>Models run where you point them — on this
 machine by default.</strong> The default model setup is a local OpenAI-compatible server
@@ -174,7 +174,7 @@ Both are build-outputs — regenerate either locally at any commit with
 
 <p><code>cargo install roteiro --locked</code> gets the lean default build — pure Rust,
 no C++ toolchain, and no network call of its own. The feature tiers add inference,
-serving, MCP, PDF/OCR/vision and the sandboxed analyzer backend. <a href="build.html">Install &amp; build →</a></p>
+serving, MCP and PDF/OCR/vision. <a href="build.html">Install &amp; build →</a></p>
 
 <h2 id="adopt">Use it in your project</h2>
 

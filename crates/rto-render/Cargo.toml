@@ -18,7 +18,7 @@ rto-graph = { workspace = true }
 # over. Nothing here executes anything — the module is ungated in `rto-exec`
 # precisely because a read owes its reader the same answer whichever analyzer
 # backend was compiled in, and every `Command::new` in that crate is behind
-# `exec-subprocess`/`exec-boxlite`, neither of which this enables.
+# `exec-subprocess`, which this does not enable.
 rto-exec = { workspace = true, optional = true }
 # The authored-layer parse and drift rule behind the MCP `check` tool. It is
 # `mcp`-only: a default `rto-render` build renders documents and needs none of it.

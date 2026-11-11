@@ -190,15 +190,13 @@ jobs:
       # The default set, which is `execution,models,exec-subprocess` — the same
       # command as `ci.yml`'s `default-features` job.
       #
-      # Not `--all-features`, and the reason is false alarms rather than cost.
-      # `--all-features` turns on `exec-boxlite`, which needs `protoc` from apt
-      # and a provisioned sandbox runtime before it will build at all. `ci.yml`
-      # carries both steps and its own comment calls an apt failure "often a
-      # transient mirror/network issue; re-run the job". That is survivable for
-      # a job a human is watching. For an unattended weekly job whose entire
-      # value is that people believe its issue, a mirror hiccup filing "clippy
-      # fails on the newest stable" is the failure mode that kills it. So the
-      # canary depends on crates.io and nothing else.
+      # Not `--all-features`, and the reason was false alarms rather than cost:
+      # `--all-features` used to turn on `exec-boxlite`, which needed `protoc`
+      # from apt and a downloaded sandbox runtime, and a mirror hiccup filing
+      # "clippy fails on the newest stable" from an unattended weekly job is the
+      # failure mode that kills it. ADR-0030 removed that feature; widening the
+      # canary is now possible but is a separate decision (it would also build
+      # vendored llama.cpp). So the canary depends on crates.io and nothing else.
       #
       # This set is enough to answer the question, and that is checked against
       # the real incident rather than assumed: of the three lints that broke
@@ -207,7 +205,7 @@ jobs:
       # and all three of `ci.yml`'s clippy jobs went red. This command would
       # have gone red too, on the day, with nobody's PR involved.
       #
-      # What it does not see: `mcp`, `serve`, `explorer`, `exec-boxlite`, and
+      # What it does not see: `mcp`, `serve`, `explorer`, and
       # the model/media tiers. The third lint of that incident was in
       # `rto-render/src/mcp.rs` and this command would have missed that *site*
       # while still failing on the other two. That is the accepted trade: this
