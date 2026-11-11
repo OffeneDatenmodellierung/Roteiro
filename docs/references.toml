@@ -13,7 +13,10 @@
 # - A publication date is never a commit timestamp, and never the day somebody
 #   read the work. A retrieval date belongs only inside
 #   `stability = { unarchived-and-changing = { retrieved = { ... } } }`.
-# - Values fetched by a tool are proposals, not entries; a human moves them here.
+# - Values fetched by `roteiro refs fetch <id> --allow-download` land below the
+#   proposals marker at the end of this file as `[[proposal]]`s. They are not
+#   entries and reach no reference list; check them, move what is right into the
+#   entry by hand, and delete the proposal.
 #
 # A document citing one of these by linking its URL gets an `authored`
 # `references` edge to the work, so `roteiro refs <node-key>` answers "what does

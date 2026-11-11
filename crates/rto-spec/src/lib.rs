@@ -47,7 +47,10 @@ pub use layer::{
     AuthoredDocs, AuthoredLayer, BlobReader, authored_blobs, authored_docs, authored_docs_from,
     authored_layer, authored_layer_from,
 };
-pub use reference::{Citation, REGISTER_PATH, citations, locator_url, parse_register, work_facts};
+pub use reference::{
+    Citation, Found, PROPOSALS_MARKER, Proposal, REGISTER_PATH, citations, locator_url,
+    parse_proposals, parse_register, work_facts, write_proposals,
+};
 pub use site::{
     MARKER_FIELD as SITE_PAGE_FIELD, ParseError as SiteParseError, SitePage, is_site_page,
     parse_site_page, site_nav,

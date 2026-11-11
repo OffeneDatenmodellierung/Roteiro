@@ -139,7 +139,7 @@ yaml-rust2 = { version = "0.13.0", default-features = false }
 #     a missing one is a named error, not a fetch.
 #   * A run records `isolation=none` in its evidence either way.
 # `serve` is the one thing that stays off, for the reasons above.
-default = ["execution", "models", "exec-subprocess", "provider"]
+default = ["execution", "models", "exec-subprocess", "provider", "refs-fetch"]
 # The `AnalyzerRunner` seam, `roteiro security ingest|list`, and — since the
 # provisioning/execution split — `security prefetch|status` (ADR-0012, ADR-0014).
 # It also carries `roteiro lint`'s command surface, because that reads types from
@@ -275,6 +275,12 @@ inference = ["rto-graph/inference"]
 # `--yes`), and no other command opens a socket, so the default build remains
 # offline-by-default in behaviour as well as in name.
 models = ["rto-graph/models", "dep:ureq"]
+# `roteiro refs fetch` (ADR-0029 §7): reads a reference-register work's URL and
+# writes what the page states into the register as a proposal for review. Shaped
+# like `security prefetch` — an explicit subcommand that opens a socket only with
+# `--allow-download`, every time — and never reached from a scan or a render.
+# Takes the `ureq` already in the default build, so it adds no package there.
+refs-fetch = ["dep:ureq"]
 # Pluggable local embedding/generative models (`roteiro infer --model`, `spec
 # draft`) via the shared **llama.cpp** engine — GGUF embedding + generative
 # models, no candle (ADR-0003 v1.1). Pulls `rto-llama` (a C/C++ toolchain).

@@ -11,7 +11,7 @@ architectural-significance: MEDIUM  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Knowledge Graph
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "0.2"
+version: "0.3"
 last-modified: 2026-11-11
 confluence-url:
 ---
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | For Review |
 | **Architectural Significance** | MEDIUM |
 | **Domain** | Knowledge Graph |
-| **Document version** | 0.2 |
+| **Document version** | 0.3 |
 
 ## Reference
 
@@ -179,6 +179,38 @@ pure function of the graph.
 `meta.okf.source_entries` — only when at least one entry carries one, so a
 resource-only bundle imports exactly as before.
 
+### 7. Enrichment is an explicit, consented command that writes proposals
+
+`roteiro refs fetch <id> | --all --allow-download` reads a work's URL and writes
+what the page states into the register file as a `[[proposal]]`, below a marker
+line the tool owns, for a person to review and move into the entry by hand. See
+[[crates/roteiro/src/refs_fetch.rs#run]] and
+[[crates/rto-spec/src/reference.rs#Proposal]].
+
+- **Shaped like `security prefetch`.** An explicit subcommand behind its own
+  feature (`refs-fetch`, on by default, taking the `ureq` the default build
+  already has), and no socket without `--allow-download`, given every time. It
+  lives in the `roteiro` binary: `rto-graph` still cannot reach the network.
+- **Never during a scan or render, and never a graph fact.** A proposal is not
+  an entry. `parse_register` validates proposals (an id the register lacks, an
+  impossible retrieval day) and returns none of them, so nothing fetched reaches
+  a `work` node, a reference list or the bundle until a person moves it. That is
+  also why this needs no amendment to the remote-output rule ADR-0019 §5 set
+  ("remote output is not a graph fact"): it still is not one.
+- **The read date is an access date.** `retrieved` is an `AccessDate`, the one
+  clock read in the feature, recorded as exactly what it is.
+- **What the page does not state is recorded as not stated.** Each value is
+  `Found::Stated` or `Found::NotStated`, which is a fact about the page read,
+  not `Unknown` (nobody looked) or `AbsentFromWork` (the work has none). Moving
+  it into the entry forces a person to decide which of those it is. A
+  publication date is taken only from explicit metadata
+  (`citation_publication_date`, `article:published_time`, `DC.date.issued`, …),
+  at the precision stated, and never from a `Last-Modified` header, a commit or
+  a copyright line.
+- **The register's human half is untouched.** Everything above the marker is
+  returned byte-for-byte, comments included. Only the proposals section below
+  it is regenerated.
+
 ## Options considered + consequences
 
 **A derived `url:` node per external link, joined to the work at query time.**
@@ -207,9 +239,9 @@ spelled in two crates is the drift this repository keeps closing.
 ## Status
 
 **For Review.** Step 1 (v0.1): register, graph, `refs`, and the `references`
-field. Step 2 (v0.2): projection into the OKF bundle's `sources[]`. Step 3: an
-explicit, consent-gated enrichment command that proposes values for a human to
-commit.
+field. Step 2 (v0.2): projection into the OKF bundle's `sources[]`. Step 3
+(v0.3): `refs fetch`, an explicit, consent-gated enrichment command that
+proposes values for a human to commit.
 
 ## Version history
 
@@ -217,3 +249,4 @@ commit.
 |---|---|---|
 | 0.1 | 2026-11-11 | Initial. Register, `work` nodes, authored citation edges, `roteiro refs`, and `references` on `explain`/`context`. |
 | 0.2 | 2026-11-11 | §6: works projected into OKF `sources[]` with `id`/`title`/`author` and a `[^id]` footnote; import keeps a peer's attribution keys. |
+| 0.3 | 2026-11-11 | §7: `roteiro refs fetch --allow-download` writes fetched values as `[[proposal]]`s below a tool-owned marker, with an access date and explicit `not-stated`; never a graph fact. |
