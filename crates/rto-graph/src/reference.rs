@@ -1216,6 +1216,9 @@ impl WorkKind {
 /// in; sorting a slice with it directly gives id order, which is nobody's
 /// bibliography.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+// Unknown fields refused: a register entry is typed by hand, and a key this
+// record does not have would otherwise be dropped without a word (ADR-0029).
+#[serde(deny_unknown_fields)]
 pub struct Reference {
     /// A stable identifier for this work within a reference register. It never
     /// appears in rendered output; it is what a citation points at, what a

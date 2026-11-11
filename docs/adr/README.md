@@ -34,6 +34,7 @@
 | [0026](0026-research-knowledge-layer.md) | A research knowledge layer — raw sources in, an authored wiki out | For Review |
 | [0027](0027-external-model-provider.md) | External model provider — models run in a local server the user already has, not inside Roteiro | For Review |
 | [0028](0028-one-engine-local-or-hosted.md) | One engine, local or hosted — the provider may be off this machine, and the remote tier is removed | Accepted |
+| [0029](0029-external-work-references.md) | External works are cited from an authored reference register, rendered APA 7, and refused when incomplete | For Review |
 
 > **ADR 0018** is the third of the analyzer trio: 0012 decides how findings are
 > stored, 0014 how analyzers are executed and provisioned, and 0018 *which*
