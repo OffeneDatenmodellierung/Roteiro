@@ -511,10 +511,9 @@ fn spec_draft_under_a_provider_needs_a_generative_model() {
 }
 
 /// Under `[provider]`, `roteiro config` reports the surfaces that moved to it
-/// (Ask and `spec draft`) as using the provider id `serve` and `spec draft`
-/// accept, rather than calling a working pin unresolved because the registry
-/// does not list it — and leaves the surfaces that have not moved on the
-/// registry (ADR-0027).
+/// (Ask, `spec draft` and `review --llm`) as using the provider id they accept,
+/// rather than calling a working pin unresolved because the registry does not
+/// list it (ADR-0027).
 #[test]
 #[cfg(feature = "provider")]
 fn config_reports_the_provider_id_for_the_surfaces_that_use_it() {
@@ -528,32 +527,23 @@ fn config_reports_the_provider_id_for_the_surfaces_that_use_it() {
     let out = roteiro(&dir, &["config"]);
     assert!(out.status.success(), "{out:?}");
     let text = stdout(&out);
-    for task in ["chat", "draft"] {
+    for task in ["chat", "draft", "review"] {
         let line = resolution_line(&text, task);
         assert!(
             line.contains("qwen3:8b") && line.contains("provider") && !line.contains("UNRESOLVED"),
             "{task}: {line}"
         );
     }
-    // `review --llm` has not moved, so the registry still cannot honour the pin.
-    assert!(
-        resolution_line(&text, "review").contains("UNRESOLVED"),
-        "{text}"
-    );
 
     let json = roteiro(&dir, &["config", "--json"]);
     assert!(json.status.success(), "{json:?}");
     let cfg: serde_json::Value = serde_json::from_slice(&json.stdout).expect("json");
     let entries = cfg["model_resolution"].as_array().expect("array");
-    for task in ["chat", "draft"] {
+    for task in ["chat", "draft", "review"] {
         let e = entry(entries, task);
         assert_eq!(e["model"], "qwen3:8b", "{e}");
         assert_eq!(e["source"], "provider", "{e}");
     }
-    assert!(
-        entry(entries, "review").get("error").is_some(),
-        "{entries:?}"
-    );
 
     std::fs::remove_dir_all(&dir).ok();
 }

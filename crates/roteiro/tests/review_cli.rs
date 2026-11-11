@@ -1180,3 +1180,132 @@ fn a_base_with_no_upstream_reports_its_commit_and_warns_about_nothing() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// A loopback stand-in for an OpenAI-compatible provider that answers the
+/// whole-change verdict prompt with `verdict` and every per-file prompt with
+/// `finding`, streamed as one chunk. Keeps serving until the test ends, and sends
+/// each request body down the channel.
+#[cfg(feature = "provider")]
+fn stub_reviewer(
+    finding: &'static str,
+    verdict: &'static str,
+) -> (String, std::sync::mpsc::Receiver<String>) {
+    use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let base = format!("http://{}/v1", listener.local_addr().expect("addr"));
+    let (sent, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("header");
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = v.trim().parse().expect("length");
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).expect("body");
+            let body = String::from_utf8_lossy(&body).into_owned();
+            // The verdict prompt is the only one that asks for a `VERDICT` line.
+            let reply = if body.contains("VERDICT |") {
+                verdict
+            } else {
+                finding
+            };
+            sent.send(body).ok();
+            let chunk = serde_json::json!({"choices": [{"delta": {"content": reply}}]});
+            let events = format!("data: {chunk}\n\ndata: [DONE]\n\n");
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\
+                 connection: close\r\n\r\n{events}",
+                events.len()
+            )
+            .ok();
+        }
+    });
+    (base, received)
+}
+
+/// A repository with one committed file and an uncommitted edit to it, and a
+/// project config pointing `[provider]` at `base`.
+#[cfg(feature = "provider")]
+fn provider_review_fixture(name: &str, base: &str) -> PathBuf {
+    let dir = fresh_dir(name);
+    git(&dir, &["init", "-q"]);
+    write(
+        &dir,
+        "src/lib.rs",
+        "/// Returns two.\npub fn two() -> u32 { 2 }\n",
+    );
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+    write(
+        &dir,
+        "src/lib.rs",
+        "/// Returns two.\npub fn two() -> u32 { 3 }\n",
+    );
+    write(
+        &dir,
+        "roteiro.toml",
+        &format!("[provider]\nbase_url = \"{base}\"\n\n[models]\ngenerative = \"qwen3:8b\"\n"),
+    );
+    dir
+}
+
+/// `review --llm` runs on the configured provider in a stock build — no
+/// llama.cpp — and produces both halves of its output: per-file findings and the
+/// whole-change verdict (ADR-0027).
+#[test]
+#[cfg(feature = "provider")]
+fn review_llm_runs_on_the_configured_provider() {
+    let (base, requests) = stub_reviewer(
+        "FINDING | line=2 | class=contract-drift | compile=no | the doc says two but it returns 3",
+        "VERDICT | stance=concerns | the doc comment no longer matches the value returned",
+    );
+    let dir = provider_review_fixture("llm-provider", &base);
+
+    let out = roteiro(&dir, &["review", "--llm"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "runs: {stdout}\n{stderr}");
+    assert!(
+        stdout.contains("src/lib.rs:2  [contract-drift]  the doc says two but it returns 3"),
+        "the provider's finding is reported: {stdout}"
+    );
+    assert!(
+        stdout.contains("verdict on the whole change [concerns]")
+            && stdout.contains("the doc comment no longer matches the value returned"),
+        "and so is its verdict: {stdout}"
+    );
+    assert!(
+        stderr.contains("with qwen3:8b — served by the provider at"),
+        "names the model and where it ran: {stderr}"
+    );
+    let first = requests.try_recv().expect("the provider was called");
+    assert!(first.contains("\"model\":\"qwen3:8b\""), "{first}");
+
+    // `--typed-class` cannot be answered by a provider: it falls back to the
+    // reply's own class and says so, rather than changing results silently.
+    let out = roteiro(&dir, &["review", "--llm", "--typed-class"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "runs: {stdout}\n{stderr}");
+    assert!(
+        stderr.contains("`--typed-class`") && stderr.contains("`reply-text`"),
+        "the fallback is announced: {stderr}"
+    );
+    assert!(
+        stdout.contains("[contract-drift]") && !stdout.contains("typed class:"),
+        "and the class is the reply's, with no typed-read numbers: {stdout}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}

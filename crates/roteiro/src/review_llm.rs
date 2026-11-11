@@ -44,8 +44,8 @@ use rto_graph::reviewer::FileUnderReview;
 
 /// The half of this module that needs a generation backend. Everything outside
 /// it — the diff reconstruction and the parent-module lookup — is useful and
-/// tested in a build with no model, which is the build CI runs.
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+/// tested in a build with no generation backend at all (`--no-default-features`).
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
 use {
     rto_graph::compile_claim::{CheckRun, suppression},
     rto_graph::review_score::{CandidateFinding, CandidateRun},
@@ -73,7 +73,7 @@ use std::collections::BTreeSet;
 /// [`rto_graph::reviewer::Parsed::reasoning_truncated`] is how that is now caught
 /// rather than believed, and a truncated file is reported as unreviewed rather
 /// than counted as clean.
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
 const REVIEW_MAX_TOKENS: u32 = 4_096;
 
 /// The context window this reviewer asks llama.cpp for.
@@ -93,7 +93,7 @@ const REVIEW_MAX_TOKENS: u32 = 4_096;
 /// comes from — so the true count of a prompt this module believes is 30k can be
 /// materially higher. The slack absorbs that; `the_context_window_holds_the_whole_budget`
 /// holds the arithmetic.
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+#[cfg(feature = "inference-local-models")]
 const REVIEW_N_CTX: u32 = 49_152;
 
 /// The estimated-token budget for one file's prompt.
@@ -102,13 +102,13 @@ const REVIEW_N_CTX: u32 = 49_152;
 /// hide the estimate's imprecision: the slack belongs in [`REVIEW_N_CTX`], where
 /// it is visible, not in a quietly smaller budget that would truncate files the
 /// measurement says fit.
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
 const REVIEW_PROMPT_BUDGET: usize = SINGLE_CALL_BUDGET_TOKENS;
 
 /// The window must hold the prompt *and* what is generated into it, with room for
 /// `len / 4` to have understated the prompt. A build that broke this relationship
 /// would fail per file at run time, on whichever file happened to be largest.
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+#[cfg(feature = "inference-local-models")]
 const _: () = assert!(
     REVIEW_N_CTX as usize >= (REVIEW_PROMPT_BUDGET * 13 / 10) + REVIEW_MAX_TOKENS as usize,
     "REVIEW_N_CTX must hold a 30%-underestimated prompt plus the generation"
@@ -179,7 +179,7 @@ impl ReviewArm {
 /// things that read it are the per-file review and the classification pass, both
 /// of which need a generation backend. In a build without one there is no
 /// mechanism to choose between.
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum ClassSource {
@@ -193,7 +193,7 @@ pub enum ClassSource {
     TypedRead,
 }
 
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
 impl ClassSource {
     /// The tag written into [`rto_graph::review_score::RunArm::class_source`].
     ///
@@ -211,7 +211,7 @@ impl ClassSource {
 }
 
 /// One file's review, before scoring.
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
 pub struct FileOutcome {
     /// Findings the reviewer stands behind.
     pub findings: Vec<CandidateFinding>,
@@ -257,16 +257,14 @@ pub struct FileOutcome {
 ///
 /// # Errors
 /// If the engine fails to generate.
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
 pub fn verdict_on(
-    engine: &rto_llama::llama::LlamaEngine,
+    engine: &dyn rto_llama::Engine,
     model: &str,
     reviewed_sha: &str,
     files: &[FileUnderReview],
     findings: &[String],
 ) -> anyhow::Result<Option<rto_graph::review_score::CandidateVerdict>> {
-    use rto_llama::Engine as _;
-
     let lines: Vec<&str> = findings.iter().map(String::as_str).collect();
     let prompt = rto_graph::reviewer::build_verdict_prompt(files, &lines, REVIEW_PROMPT_BUDGET);
     let completion = engine
@@ -292,9 +290,9 @@ pub fn verdict_on(
 
 /// # Errors
 /// If the engine fails to generate.
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
-pub fn review_file(
-    engine: &rto_llama::llama::LlamaEngine,
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+pub(crate) fn review_file(
+    backend: &Backend,
     model: &str,
     file: &FileUnderReview,
     context: &GraphContext,
@@ -302,10 +300,9 @@ pub fn review_file(
     sources: &dyn Fn(&str) -> Option<String>,
     class_source: ClassSource,
 ) -> anyhow::Result<FileOutcome> {
-    use rto_llama::Engine as _;
-
     let prompt = build_prompt(file, context, REVIEW_PROMPT_BUDGET);
-    let completion = engine
+    let completion = backend
+        .engine()
         .chat(&rto_llama::ChatRequest {
             tools: None,
             model: model.to_owned(),
@@ -391,9 +388,9 @@ pub fn review_file(
         // both: a withheld finding is still recorded in the run document, and a
         // score over it would otherwise compare a typed class against a parsed
         // one depending on whether CI happened to refute it.
-        classify_findings(engine, model, &mut findings)?;
+        backend.classify(model, &mut findings)?;
         for (finding, _) in &mut withheld {
-            classify_findings(engine, model, std::slice::from_mut(finding))?;
+            backend.classify(model, std::slice::from_mut(finding))?;
         }
     }
 
@@ -482,7 +479,7 @@ pub fn review_file(
 /// If the engine fails on a question. One failure aborts the file rather than
 /// leaving a mixture: a `FileOutcome` whose findings came from two different
 /// class mechanisms is not a measurement of either.
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+#[cfg(feature = "inference-local-models")]
 pub fn classify_findings(
     engine: &rto_llama::llama::LlamaEngine,
     model: &str,
@@ -536,7 +533,7 @@ pub fn classify_findings(
 ///
 /// # Errors
 /// If the graph at `sha` cannot be assembled.
-#[cfg(any(feature = "serve", feature = "inference-local-models", test))]
+#[cfg(any(feature = "provider", feature = "inference-local-models", test))]
 fn graph_at(
     repo: &rto_graph::Repo,
     cache: &rto_graph::ObjectCache,
@@ -559,7 +556,7 @@ fn graph_at(
 /// baseline is the absence of a store rather than a store that happened to answer
 /// nothing. The two are indistinguishable in the prompt and very distinguishable
 /// in what they mean about a run.
-#[cfg(any(feature = "serve", feature = "inference-local-models", test))]
+#[cfg(any(feature = "provider", feature = "inference-local-models", test))]
 fn context_for(
     graph: Option<&rto_graph::Store>,
     file: &FileUnderReview,
@@ -585,7 +582,7 @@ fn context_for(
 ///
 /// # Errors
 /// If the repository or the graph cannot be assembled.
-#[cfg(any(feature = "serve", feature = "inference-local-models", test))]
+#[cfg(any(feature = "provider", feature = "inference-local-models", test))]
 fn worktree_graph(
     repo: &Path,
     ingest: rto_graph::IngestConfig,
@@ -660,7 +657,7 @@ fn worktree_graph(
 ///
 /// # Errors
 /// If the store cannot be queried.
-#[cfg(any(feature = "serve", feature = "inference-local-models", test))]
+#[cfg(any(feature = "provider", feature = "inference-local-models", test))]
 pub fn graph_context_for(
     store: &rto_graph::Store,
     file: &FileUnderReview,
@@ -946,7 +943,7 @@ pub fn files_at(
     }))
 }
 
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
 /// A file's contents at a commit.
 fn blob_at(repo: &Path, sha: &str, path: &str) -> Option<String> {
     git(repo, &["show", &format!("{sha}:{path}")])
@@ -966,7 +963,7 @@ fn main_ref(repo: &Path) -> anyhow::Result<String> {
         })
 }
 
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
 /// What a replay produced, beyond the run document itself.
 #[derive(Debug, Default)]
 pub struct ReplayReport {
@@ -1032,7 +1029,11 @@ pub struct ReplayReport {
 ///
 /// # Errors
 /// If the repository, the model or the output file cannot be used.
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each is one independent input to the replay; a struct holding them would be built at one call site and read at one"
+)]
 pub fn run_replay(
     repo: &Path,
     out: &str,
@@ -1041,15 +1042,16 @@ pub fn run_replay(
     arm: ReviewArm,
     class_source: ClassSource,
     ingest: rto_graph::IngestConfig,
+    cfg: &crate::config::Config,
 ) -> anyhow::Result<()> {
     let corpus = rto_graph::review_corpus::builtin()?;
     let main = main_ref(repo)?;
     let checks = checks_with_notice(checks_path)?;
 
-    let choice = rto_graph::resolve_model(rto_graph::ModelTask::Review)?;
-    let model = choice.require_installed()?;
-    eprintln!("reviewing with {model} — {}", choice.why());
-    let engine = start_engine(model)?;
+    let (backend, model, why) = start_backend(cfg)?;
+    let model = model.as_str();
+    eprintln!("reviewing with {model} — {why}");
+    let class_source = backend.class_source(class_source);
 
     // Anchored (sha, path) pairs, so the report can say how much of what it
     // reviewed the corpus can judge at all.
@@ -1117,7 +1119,7 @@ pub fn run_replay(
             // refusals are themselves a result: they say which files this budget
             // cannot actually review.
             let outcome = match review_file(
-                &engine,
+                &backend,
                 model,
                 file,
                 &context,
@@ -1143,7 +1145,7 @@ pub fn run_replay(
         }
 
         record_verdict(
-            &engine,
+            backend.engine(),
             model,
             sha,
             &set.files,
@@ -1168,7 +1170,7 @@ pub fn run_replay(
 ///
 /// # Errors
 /// If `checks_path` names a file that cannot be read or parsed.
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
 fn checks_with_notice(checks_path: Option<&str>) -> anyhow::Result<Vec<CheckRun>> {
     let checks = match checks_path {
         Some(p) => read_checks(p)?,
@@ -1195,7 +1197,7 @@ fn checks_with_notice(checks_path: Option<&str>) -> anyhow::Result<Vec<CheckRun>
 /// `rto-graph` constructed `None` by hand and so never touched the path that was
 /// wrong. `the_default_arm_records_no_class_source` is the guard; the `rto-graph`
 /// tests document the wire shape.
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
 fn run_arm(
     arm: ReviewArm,
     model: &str,
@@ -1220,7 +1222,7 @@ fn run_arm(
 ///
 /// # Errors
 /// If the engine cannot be started.
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+#[cfg(feature = "inference-local-models")]
 fn start_engine(model: &str) -> anyhow::Result<rto_llama::llama::LlamaEngine> {
     rto_llama::llama::LlamaEngine::new(
         vec![rto_llama::llama::Served {
@@ -1233,6 +1235,139 @@ fn start_engine(model: &str) -> anyhow::Result<rto_llama::llama::LlamaEngine> {
     .map_err(|e| anyhow::anyhow!("starting llama.cpp: {e}"))
 }
 
+/// The engine a review runs on (ADR-0027): the external provider when
+/// `[provider] base_url` is set, else the in-process llama.cpp engine in a build
+/// that has one.
+///
+/// An enum rather than a bare `&dyn Engine` because the two are not
+/// interchangeable for one job: `--typed-class` reads the label-token
+/// distribution through [`rto_llama::llama::LlamaEngine::ask_choice`], which an
+/// HTTP provider cannot answer. Everything else only chats, through
+/// [`Backend::engine`].
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+pub(crate) enum Backend {
+    /// llama.cpp in this process, on a registry model.
+    #[cfg(feature = "inference-local-models")]
+    Local(rto_llama::llama::LlamaEngine),
+    /// An OpenAI-compatible server on this machine.
+    #[cfg(feature = "provider")]
+    Provider(crate::provider::ProviderEngine),
+}
+
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+impl Backend {
+    /// The chat seam every per-file review and verdict goes through.
+    #[must_use]
+    pub(crate) fn engine(&self) -> &dyn rto_llama::Engine {
+        match self {
+            #[cfg(feature = "inference-local-models")]
+            Self::Local(engine) => engine,
+            #[cfg(feature = "provider")]
+            Self::Provider(engine) => engine,
+        }
+    }
+
+    /// The class source this backend can actually serve for `requested`, saying
+    /// on stderr when it is not the one asked for.
+    ///
+    /// A provider cannot answer a typed read, so `--typed-class` falls back to
+    /// [`ClassSource::ReplyText`] there — announced rather than silent, because a
+    /// run recorded under the wrong class source is a run measuring something
+    /// else. The returned value is what the run document records, so the
+    /// document says what happened, not what was asked.
+    #[must_use]
+    pub(crate) fn class_source(&self, requested: ClassSource) -> ClassSource {
+        match self {
+            #[cfg(feature = "inference-local-models")]
+            Self::Local(_) => requested,
+            #[cfg(feature = "provider")]
+            Self::Provider(_) => {
+                if requested == ClassSource::TypedRead {
+                    eprintln!(
+                        "note: `--typed-class` reads the model's label-token distribution, \
+                         which only the in-process engine exposes; under `[provider]` each \
+                         finding's class comes from the reply's `class=` field instead \
+                         (`reply-text`), and the run records that."
+                    );
+                }
+                ClassSource::ReplyText
+            }
+        }
+    }
+
+    /// Overwrite each finding's class with a typed read — see
+    /// [`classify_findings`].
+    ///
+    /// # Errors
+    /// If the engine fails on a question, or this backend has no typed read
+    /// (which [`Backend::class_source`] prevents a caller from asking for).
+    fn classify(&self, model: &str, findings: &mut [CandidateFinding]) -> anyhow::Result<()> {
+        match self {
+            #[cfg(feature = "inference-local-models")]
+            Self::Local(engine) => classify_findings(engine, model, findings),
+            #[cfg(feature = "provider")]
+            Self::Provider(_) => {
+                let _ = (model, findings);
+                anyhow::bail!("a provider cannot answer a typed class question")
+            }
+        }
+    }
+}
+
+/// Choose and start the engine a review runs on, the way `spec draft` chooses:
+/// `[provider] base_url` set → the provider with `[models] generative` as its
+/// model id (no registry resolution — the provider owns its list); otherwise
+/// the in-process engine where this build has one; otherwise a refusal naming
+/// what to configure.
+///
+/// Returns the backend, the model id and why that model was chosen.
+///
+/// # Errors
+/// If the configuration names no usable model, or the engine cannot start.
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+pub(crate) fn start_backend(
+    cfg: &crate::config::Config,
+) -> anyhow::Result<(Backend, String, String)> {
+    #[cfg(feature = "provider")]
+    if let Some(base_url) = cfg.provider.base_url.as_deref() {
+        let Some(model) = cfg.models.get("generative") else {
+            anyhow::bail!(
+                "`[provider] base_url` is set but `[models] generative` is not — set it to a \
+                 model your provider has (for example `qwen3:8b`); see docs/MODEL_SETUP.md"
+            );
+        };
+        let engine = crate::provider::ProviderEngine::new(base_url, vec![model.to_owned()])?;
+        return Ok((
+            Backend::Provider(engine),
+            model.to_owned(),
+            format!("served by the provider at {base_url}"),
+        ));
+    }
+    #[cfg(feature = "inference-local-models")]
+    {
+        let _ = cfg;
+        let choice = rto_graph::resolve_model(rto_graph::ModelTask::Review)?;
+        let model = choice.require_installed()?;
+        if cfg!(debug_assertions) {
+            eprintln!(
+                "note: unoptimized build — local generation is very slow; use a \
+                 release build (`cargo build --release`) for usable speed."
+            );
+        }
+        Ok((
+            Backend::Local(start_engine(model)?),
+            model.to_owned(),
+            choice.why(),
+        ))
+    }
+    #[cfg(not(feature = "inference-local-models"))]
+    anyhow::bail!(
+        "no model to review with: set `[provider] base_url` to a local model server such \
+         as Ollama and `[models] generative` to one of its models (see \
+         docs/MODEL_SETUP.md). `roteiro review` without `--llm` needs no model."
+    )
+}
+
 /// Fold one file's outcome into the run document and the replay's counters, and
 /// append its findings to `reported` in the form the whole-change pass is handed.
 ///
@@ -1240,7 +1375,7 @@ fn start_engine(model: &str) -> anyhow::Result<rto_llama::llama::LlamaEngine> {
 /// were withheld from the reader under [`rto_graph::compile_claim`], and a
 /// verdict asked to synthesise a claim nobody was shown would be summarising
 /// evidence the reader cannot check.
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
 fn record_outcome(
     outcome: FileOutcome,
     path: &str,
@@ -1279,7 +1414,7 @@ fn record_outcome(
 /// *beside* the verdict rather than only above it: a judgement formed over an
 /// incomplete pass is worth less than one formed over a complete one, and the
 /// reader needs that where they read the judgement.
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
 fn print_verdict(
     verdict: Option<&rto_graph::review_score::CandidateVerdict>,
     never_reviewed: usize,
@@ -1323,9 +1458,9 @@ fn print_verdict(
 /// **absent**, exactly as a file whose review was refused is recorded and stepped
 /// over. Writing an invented `clean` into the run document would put a claim no
 /// model made in front of the scorer.
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
 fn record_verdict(
-    engine: &rto_llama::llama::LlamaEngine,
+    engine: &dyn rto_llama::Engine,
     model: &str,
     sha: &str,
     files: &[FileUnderReview],
@@ -1351,7 +1486,7 @@ fn record_verdict(
     }
 }
 
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
 /// Print what a replay covered — **unadjudicated volume first**.
 ///
 /// The order is the argument. Recall is what a score reports, but 22 adjudicated
@@ -1440,7 +1575,7 @@ fn print_replay(report: &ReplayReport, out: &str) {
     println!("\nwrote {out} — score it with: roteiro review --score {out}");
 }
 
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
 /// Read a `CheckRun` array.
 fn read_checks(path: &str) -> anyhow::Result<Vec<CheckRun>> {
     let text =
@@ -1470,7 +1605,7 @@ fn read_checks(path: &str) -> anyhow::Result<Vec<CheckRun>> {
 ///
 /// # Errors
 /// If the repository cannot be opened or the spec names no single commit.
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
 fn resolve_llm_base(repo: &Path, base: Option<&str>) -> anyhow::Result<Option<String>> {
     let Some(spec) = base else {
         return Ok(None);
@@ -1504,7 +1639,7 @@ fn resolve_llm_base(repo: &Path, base: Option<&str>) -> anyhow::Result<Option<St
 /// Uncommitted work carries no commit message, so there is nothing to read and
 /// nothing is printed. That is the same silence a human-authored commit
 /// produces, arrived at by the same route: no trailer, no match, no warning.
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
 fn warn_if_reviewing_own_work(repo: &Path, base: Option<&str>, model: &str) {
     let Some(base) = base else {
         return;
@@ -1555,7 +1690,7 @@ fn warn_if_reviewing_own_work(repo: &Path, base: Option<&str>, model: &str) {
 ///
 /// It refuses `opaque` as well as `excluded`: an opaque path's bytes may be
 /// measured, never mined, and handing them to a model is mining by any reading.
-#[cfg(feature = "inference-local-models")]
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
 fn worktree_sources<'a>(
     repo: &'a Path,
     paths: &'a rto_graph::PathPolicy,
@@ -1568,7 +1703,7 @@ fn worktree_sources<'a>(
     }
 }
 
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
 fn changed_files(repo: &Path, base: Option<&str>, paths: &rto_graph::PathPolicy) -> ReviewSet {
     let head = git(repo, &["rev-parse", "HEAD"]).unwrap_or_else(|| "HEAD".to_owned());
     let range: Vec<String> = match base {
@@ -1602,7 +1737,7 @@ fn changed_files(repo: &Path, base: Option<&str>, paths: &rto_graph::PathPolicy)
 /// and is the same distinction `reasoning_truncated` carries for a reply that
 /// stopped early. A change that is *entirely* unreviewable would otherwise print
 /// `0 finding(s)` and look like a clean review.
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
 fn announce_unreviewable(skipped: &[String]) {
     if skipped.is_empty() {
         return;
@@ -1642,7 +1777,7 @@ fn announce_unreviewable(skipped: &[String]) {
 /// cannot check. That is the same rule [`record_outcome`] follows for the replay,
 /// and it is stated in both places because the two paths build `reported`
 /// independently.
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
 fn print_file_findings(
     path: &str,
     outcome: &FileOutcome,
@@ -1686,7 +1821,7 @@ fn print_file_findings(
 ///
 /// # Errors
 /// If the repository, the model or git cannot be used.
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
 pub fn run_llm(
     repo: &Path,
     base: Option<&str>,
@@ -1694,6 +1829,7 @@ pub fn run_llm(
     arm: ReviewArm,
     class_source: ClassSource,
     ingest: rto_graph::IngestConfig,
+    cfg: &crate::config::Config,
 ) -> anyhow::Result<()> {
     let checks = match checks_path {
         Some(p) => read_checks(p)?,
@@ -1715,24 +1851,14 @@ pub fn run_llm(
         return Ok(());
     }
 
-    let choice = rto_graph::resolve_model(rto_graph::ModelTask::Review)?;
-    let model = choice.require_installed()?;
-    eprintln!(
-        "reviewing {} file(s) with {model} — {}",
-        files.len(),
-        choice.why()
-    );
+    let (backend, model, why) = start_backend(cfg)?;
+    let model = model.as_str();
+    eprintln!("reviewing {} file(s) with {model} — {why}", files.len());
+    let class_source = backend.class_source(class_source);
     // Before the review rather than after it: the reader needs to know how to
     // weigh the result while they are reading it, not once they have already
     // formed a view of a clean one.
     warn_if_reviewing_own_work(repo, base, model);
-    if cfg!(debug_assertions) {
-        eprintln!(
-            "note: unoptimized build — local generation is very slow; use a \
-             release build (`cargo build --release`) for usable speed."
-        );
-    }
-    let engine = start_engine(model)?;
 
     // The live surface reviews the working tree, so its graph is the working
     // tree's — `HEAD` plus uncommitted edits, which is what `review` and `check`
@@ -1755,7 +1881,7 @@ pub fn run_llm(
         let sources = worktree_sources(repo, ingest.paths);
         let context = context_for(graph.as_ref(), file, &sources)?;
         let outcome = review_file(
-            &engine,
+            &backend,
             model,
             file,
             &context,
@@ -1806,10 +1932,11 @@ pub fn run_llm(
     // for stepping over a refused file, and worse in this direction, because
     // every per-file finding above has already been earned and printed. The
     // failure is reported on stderr and the verdict is recorded as absent.
-    let verdict = verdict_on(&engine, model, &sha, &files, &reported).unwrap_or_else(|e| {
-        eprintln!("warning: the whole-change verdict could not be generated: {e}");
-        None
-    });
+    let verdict =
+        verdict_on(backend.engine(), model, &sha, &files, &reported).unwrap_or_else(|e| {
+            eprintln!("warning: the whole-change verdict could not be generated: {e}");
+            None
+        });
     print_verdict(verdict.as_ref(), never_reviewed.len());
 
     println!(
@@ -1851,7 +1978,7 @@ mod tests {
     /// no production path for this to guard. Left ungated it compiled at
     /// `--all-features` and at `--features serve`, and broke **every other CI
     /// cell** — neither of those is the default build.
-    #[cfg(any(feature = "serve", feature = "inference-local-models"))]
+    #[cfg(any(feature = "provider", feature = "inference-local-models"))]
     #[test]
     fn the_default_arm_records_no_class_source() {
         let arm = super::run_arm(ReviewArm::DiffOnly, "m", super::ClassSource::ReplyText);
@@ -2763,7 +2890,7 @@ mod tests {
     /// assertion beside the constants catches the arithmetic at compile time; this
     /// records what it is for, and that the slack is for `len / 4` understating a
     /// prompt of code rather than a margin someone liked the look of.
-    #[cfg(any(feature = "serve", feature = "inference-local-models"))]
+    #[cfg(feature = "inference-local-models")]
     #[test]
     fn the_context_window_holds_the_whole_budget() {
         use super::{REVIEW_MAX_TOKENS, REVIEW_N_CTX, REVIEW_PROMPT_BUDGET};
@@ -2936,7 +3063,7 @@ mod tests {
 /// cargo test -p roteiro --features serve --bin roteiro \
 ///     review_llm::typed_class_calibration -- --ignored --nocapture
 /// ```
-#[cfg(all(test, any(feature = "serve", feature = "inference-local-models")))]
+#[cfg(all(test, feature = "inference-local-models"))]
 mod typed_class_calibration {
     // Every cast below turns a count into a rate. The counts are a corpus row
     // count (27) and a class count (14); `f64` represents every integer to 2^53
@@ -3532,7 +3659,7 @@ mod typed_class_calibration {
 /// cargo test -p roteiro --features serve --bin roteiro \
 ///     review_llm::margin_ranking -- --ignored --nocapture      # the whole run
 /// ```
-#[cfg(all(test, any(feature = "serve", feature = "inference-local-models")))]
+#[cfg(all(test, feature = "inference-local-models"))]
 mod margin_ranking {
     #![expect(
         clippy::cast_precision_loss,
@@ -3850,9 +3977,8 @@ mod margin_ranking {
             done.len()
         );
 
-        let Some((engine, model)) = engine_or_skip(out) else {
-            anyhow::bail!("no engine");
-        };
+        let (engine, model) = engine_or_skip(out).ok_or_else(|| anyhow::anyhow!("no engine"))?;
+        let backend = super::Backend::Local(engine);
         let main = super::main_ref(repo)?;
         let shas: Vec<&str> = corpus.reviewed_shas().into_iter().collect();
 
@@ -3886,7 +4012,7 @@ mod margin_ranking {
                 }
                 let started = Instant::now();
                 let outcome = super::review_file(
-                    &engine,
+                    &backend,
                     &model,
                     &file,
                     &rto_graph::reviewer::GraphContext::none(),

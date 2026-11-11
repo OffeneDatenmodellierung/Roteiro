@@ -46,7 +46,7 @@ mod review;
 // reconstruction and the parent-module lookup are pure git and string work, and
 // their tests are the ones that matter in CI — which has no model store, so the
 // backend-gated half of the module never runs there.
-#[cfg(any(feature = "serve", feature = "inference-local-models", test))]
+#[cfg(any(feature = "provider", feature = "inference-local-models", test))]
 mod review_llm;
 // Structured logging / telemetry init (ADR-0011): the single place the tracing
 // subscriber is built — the unchanged human-text stdout layer plus an opt-in
@@ -356,6 +356,10 @@ enum Command {
         /// judgement over the whole change — a model's opinion, which gates
         /// nothing: `review`'s exit status is authored-layer drift and nothing
         /// else. Warns on stderr when the reviewing model also wrote the change.
+        ///
+        /// Runs on the `[provider]` server with `[models] generative` when
+        /// `[provider] base_url` is set (ADR-0027), else on the in-process
+        /// engine where the build has one.
         #[arg(long, conflicts_with_all = ["score", "replay"])]
         llm: bool,
         /// Replay the LLM reviewer over every commit the adjudicated corpus
@@ -2330,6 +2334,7 @@ fn main() -> anyhow::Result<()> {
                 graph_context,
                 typed_class,
                 ingest,
+                &cfg.effective,
             ),
             (None, None, true) => run_llm_review(
                 base.as_deref(),
@@ -2337,6 +2342,7 @@ fn main() -> anyhow::Result<()> {
                 graph_context,
                 typed_class,
                 ingest,
+                &cfg.effective,
             ),
             (None, None, false) => {
                 // `--typed-class` is a property of the model reviewer, and
@@ -3067,7 +3073,7 @@ fn print_models_section(loaded: &config::Loaded) {
 /// or `task`'s surface still uses the in-process engine, else the provider id it
 /// uses and why — or why it has none.
 ///
-/// Only Ask and `spec draft` have moved to the provider; they read
+/// Ask, `spec draft` and `review --llm` have moved to the provider; they read
 /// `[models] generative` as a provider id the registry does not list, so the
 /// registry resolution would report a working pin as unresolved.
 #[cfg(feature = "provider")]
@@ -3078,7 +3084,7 @@ fn provider_resolution(
     let base_url = cfg.provider.base_url.as_deref()?;
     if !matches!(
         task,
-        rto_graph::ModelTask::Chat | rto_graph::ModelTask::Draft
+        rto_graph::ModelTask::Chat | rto_graph::ModelTask::Draft | rto_graph::ModelTask::Review
     ) {
         return None;
     }
@@ -4110,7 +4116,7 @@ fn apply_authored_layer(
 /// be a silent wrong answer of the same family as scoring against a PR head: the
 /// numbers would come out clean and would describe a repository that did not
 /// exist when the code was written.
-#[cfg(any(feature = "serve", feature = "inference-local-models", test))]
+#[cfg(any(feature = "provider", feature = "inference-local-models", test))]
 fn build_graph_at_rev(
     repo: &rto_graph::Repo,
     store: &mut rto_graph::Store,
@@ -4236,14 +4242,14 @@ fn run_check(
     Ok(())
 }
 
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
 /// The repository root a git-backed review works from.
 fn review_repo_root() -> std::path::PathBuf {
     std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
 }
 
 /// The arm a `--graph-context` flag selects.
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
 fn review_arm(graph_context: bool) -> review_llm::ReviewArm {
     if graph_context {
         review_llm::ReviewArm::Graph
@@ -4259,7 +4265,7 @@ fn review_arm(graph_context: bool) -> review_llm::ReviewArm {
 /// each at its own call site — including its feature gate, because `review_llm`
 /// is itself behind one and a build with no backend has no `ClassSource` to
 /// return.
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
 fn review_class_source(typed_class: bool) -> review_llm::ClassSource {
     if typed_class {
         review_llm::ClassSource::TypedRead
@@ -4268,14 +4274,16 @@ fn review_class_source(typed_class: bool) -> review_llm::ClassSource {
     }
 }
 
-/// `roteiro review --llm` — review the change with the local generative model.
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+/// `roteiro review --llm` — review the change with a model: the configured
+/// provider, else the in-process engine where this build has one.
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
 fn run_llm_review(
     base: Option<&str>,
     checks: Option<&str>,
     graph_context: bool,
     typed_class: bool,
     ingest: rto_graph::IngestConfig,
+    cfg: &config::Config,
 ) -> anyhow::Result<()> {
     review_llm::run_llm(
         &review_repo_root(),
@@ -4284,11 +4292,12 @@ fn run_llm_review(
         review_arm(graph_context),
         review_class_source(typed_class),
         ingest,
+        cfg,
     )
 }
 
 /// `roteiro review --replay` — measure the reviewer against the corpus.
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
 fn run_replay(
     out: &str,
     checks: Option<&str>,
@@ -4296,6 +4305,7 @@ fn run_replay(
     graph_context: bool,
     typed_class: bool,
     ingest: rto_graph::IngestConfig,
+    cfg: &config::Config,
 ) -> anyhow::Result<()> {
     review_llm::run_replay(
         &review_repo_root(),
@@ -4305,6 +4315,7 @@ fn run_replay(
         review_arm(graph_context),
         review_class_source(typed_class),
         ingest,
+        cfg,
     )
 }
 
@@ -4314,23 +4325,25 @@ fn run_replay(
 /// `--help` whatever the build, so a stock install that answered
 /// `unrecognized argument` would send someone to check their spelling instead of
 /// their features. This is the shape `models` was moved into `default` for.
-#[cfg(not(any(feature = "serve", feature = "inference-local-models")))]
+#[cfg(not(any(feature = "provider", feature = "inference-local-models")))]
 fn run_llm_review(
     _base: Option<&str>,
     _checks: Option<&str>,
     _graph_context: bool,
     _typed_class: bool,
     _ingest: rto_graph::IngestConfig,
+    _cfg: &config::Config,
 ) -> anyhow::Result<()> {
     anyhow::bail!(
-        "`review --llm` needs a local generation backend, which this build does not \
-         have. Rebuild with `--features serve` (or `inference-local-models`). \
+        "`review --llm` needs a model backend, which this build does not have. Rebuild \
+         with the default `provider` feature and set `[provider] base_url` (or build \
+         with `inference-local-models`). \
          `roteiro review` without `--llm` needs no model and still works."
     )
 }
 
 /// See [`run_llm_review`]'s backend-less twin.
-#[cfg(not(any(feature = "serve", feature = "inference-local-models")))]
+#[cfg(not(any(feature = "provider", feature = "inference-local-models")))]
 fn run_replay(
     _out: &str,
     _checks: Option<&str>,
@@ -4338,10 +4351,12 @@ fn run_replay(
     _graph_context: bool,
     _typed_class: bool,
     _ingest: rto_graph::IngestConfig,
+    _cfg: &config::Config,
 ) -> anyhow::Result<()> {
     anyhow::bail!(
-        "`review --replay` needs a local generation backend, which this build does \
-         not have. Rebuild with `--features serve` (or `inference-local-models`). \
+        "`review --replay` needs a model backend, which this build does not have. \
+         Rebuild with the default `provider` feature and set `[provider] base_url` \
+         (or build with `inference-local-models`). \
          `roteiro review --score <run.json>` scores an existing run with no model."
     )
 }
