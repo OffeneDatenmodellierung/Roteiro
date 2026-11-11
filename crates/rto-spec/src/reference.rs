@@ -20,7 +20,10 @@
 
 use std::collections::BTreeMap;
 
-use rto_graph::{FactSet, Locator, Node, NodeKind, Provenance, Reference};
+use rto_graph::{
+    AccessDate, FactSet, Locator, Node, NodeKind, Provenance, PublicationDate, Reference,
+};
+use serde::{Deserialize, Serialize};
 
 use crate::check::{Violation, ViolationKind};
 
@@ -63,9 +66,13 @@ pub fn parse_register(path: &str, text: &str) -> (Vec<Reference>, Vec<Violation>
             Vec::new()
         }
     };
+    // Proposals are validated here so a hand-edited one cannot rot unnoticed,
+    // and never returned: they are not entries (ADR-0029 §7).
+    let proposals = table.remove("proposal");
     for key in table.keys() {
         violations.push(malformed(format!(
-            "unknown top-level key `{key}` (the register holds `[[reference]]` entries)"
+            "unknown top-level key `{key}` (the register holds `[[reference]]` entries \
+             and `[[proposal]]`s)"
         )));
     }
 
@@ -98,7 +105,128 @@ pub fn parse_register(path: &str, text: &str) -> (Vec<Reference>, Vec<Violation>
         }
         records.push(record);
     }
+    if let Some(value) = proposals {
+        let mut only = toml::Table::new();
+        only.insert("proposal".to_owned(), value);
+        match parse_proposals(&only.to_string()) {
+            Ok(proposals) => {
+                for p in proposals {
+                    if !seen.contains_key(&p.id) {
+                        violations.push(malformed(format!(
+                            "proposal for `{}` names no register entry",
+                            p.id
+                        )));
+                    }
+                    if !p.retrieved.names_a_day_that_exists() {
+                        violations.push(malformed(format!(
+                            "proposal for `{}` was retrieved on a day that does not exist",
+                            p.id
+                        )));
+                    }
+                }
+            }
+            Err(e) => violations.push(malformed(e)),
+        }
+    }
     (records, violations)
+}
+
+/// Whether a fetched page stated a value.
+///
+/// Its own two-state type rather than an `Option` or an
+/// [`rto_graph::Attested`]: `NotStated` is a fact about the **page that was
+/// read**, which is neither "nobody looked" (`Unknown`) nor "the work has none"
+/// (`AbsentFromWork`). Moving it into an entry is a human's call, and the
+/// type makes them choose which of those it becomes.
+///
+/// Deliberately not `#[non_exhaustive]`: a page either stated a value or did
+/// not, and a third answer would be a different question.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Found<T> {
+    /// The page stated this value.
+    Stated(T),
+    /// The page was read and stated none.
+    NotStated,
+}
+
+/// Values `roteiro refs fetch` read from a work's locator (ADR-0029 §7) — a
+/// **proposal** awaiting review, never an entry.
+///
+/// Kept in the register file under `[[proposal]]`, below a marker the tool owns,
+/// and never applied to the graph: a scraped title is not authored fact
+/// (issue #801, constraint 2), so it stays out of every rendered list until a
+/// human moves it into the entry above.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Proposal {
+    /// The register entry this proposes values for.
+    pub id: String,
+    /// The URL that was read.
+    pub url: String,
+    /// When it was read — an access date, and only ever that.
+    pub retrieved: AccessDate,
+    /// The title the page states.
+    pub title: Found<String>,
+    /// The publication date the page's metadata states, at its precision.
+    pub published: Found<PublicationDate>,
+    /// The version the page's metadata states.
+    pub version: Found<String>,
+}
+
+/// The line above which the register belongs to people and below which
+/// `roteiro refs fetch` rewrites its proposals.
+pub const PROPOSALS_MARKER: &str =
+    "# ---- proposals: written by `roteiro refs fetch`; everything below is regenerated ----";
+
+/// The `[[proposal]]` array of a register, as TOML holds it.
+#[derive(Serialize, Deserialize)]
+struct ProposalTable {
+    #[serde(default)]
+    proposal: Vec<Proposal>,
+}
+
+/// The `[[proposal]]` tables in a register's text.
+///
+/// # Errors
+/// A message naming the problem when the text or a proposal does not parse.
+pub fn parse_proposals(text: &str) -> Result<Vec<Proposal>, String> {
+    let mut table = text.parse::<toml::Table>().map_err(|e| e.to_string())?;
+    let mut only = toml::Table::new();
+    if let Some(value) = table.remove("proposal") {
+        only.insert("proposal".to_owned(), value);
+    }
+    toml::Value::Table(only)
+        .try_into::<ProposalTable>()
+        .map(|t| t.proposal)
+        .map_err(|e| format!("`[[proposal]]`: {}", e.message()))
+}
+
+/// `text` with its proposals section replaced by `proposals` — or removed when
+/// there are none.
+///
+/// Everything above [`PROPOSALS_MARKER`] is returned byte-for-byte: the
+/// register's entries and comments are a person's, and a tool that re-serialised
+/// them would discard the comments recording why each value is what it is.
+///
+/// # Errors
+/// The serialiser's message if a proposal cannot be written as TOML.
+pub fn write_proposals(text: &str, proposals: &[Proposal]) -> Result<String, String> {
+    let head = text
+        .find(PROPOSALS_MARKER)
+        .map_or(text, |at| &text[..at])
+        .trim_end();
+    if proposals.is_empty() {
+        return Ok(format!("{head}\n"));
+    }
+    let body = toml::to_string(&ProposalTable {
+        proposal: proposals.to_vec(),
+    })
+    .map_err(|e| e.to_string())?;
+    Ok(format!(
+        "{head}\n\n{PROPOSALS_MARKER}\n# Fetched, not attested. Check each value against the work, \
+         move what is right into\n# its entry above, and delete the proposal.\n\n{body}"
+    ))
 }
 
 /// The URL a work is found at, if it has one — the string a document's link is
@@ -252,6 +380,48 @@ stability = "fixed-or-archived"
             violations[0].message.contains("cannot parse"),
             "{violations:?}"
         );
+    }
+
+    fn proposal(id: &str) -> super::Proposal {
+        super::Proposal {
+            id: id.to_owned(),
+            url: "https://example.org/SPEC.md".to_owned(),
+            retrieved: rto_graph::AccessDate {
+                year: rto_graph::Year::new(2026).expect("year"),
+                month: rto_graph::Month::November,
+                day: rto_graph::Day::new(11).expect("day"),
+            },
+            title: super::Found::Stated("Open Knowledge Format".to_owned()),
+            published: super::Found::NotStated,
+            version: super::Found::NotStated,
+        }
+    }
+
+    /// The human half of the register survives byte-for-byte; the proposals
+    /// round-trip, replace themselves rather than accumulate, and stay valid.
+    #[test]
+    fn proposals_are_written_below_the_marker_and_never_touch_the_entries() {
+        let head = format!("# a comment a person wrote\n{SPEC}");
+        let once = super::write_proposals(&head, &[proposal("okf-spec")]).expect("write");
+        assert!(once.starts_with(head.trim_end()), "{once}");
+        assert_eq!(
+            super::parse_proposals(&once).expect("parse"),
+            vec![proposal("okf-spec")]
+        );
+        let (records, violations) = parse_register("r.toml", &once);
+        assert!(violations.is_empty(), "{violations:?}");
+        assert_eq!(records.len(), 1, "a proposal is not an entry");
+
+        let twice = super::write_proposals(&once, &[proposal("okf-spec")]).expect("write");
+        assert_eq!(once, twice, "rewriting is idempotent");
+        assert_eq!(
+            super::write_proposals(&once, &[]).expect("write"),
+            format!("{}\n", head.trim_end())
+        );
+
+        let orphan = super::write_proposals(&head, &[proposal("nobody")]).expect("write");
+        let (_, violations) = parse_register("r.toml", &orphan);
+        assert!(violations[0].message.contains("`nobody`"), "{violations:?}");
     }
 
     #[test]

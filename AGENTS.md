@@ -168,8 +168,9 @@ CI (`.github/workflows/ci.yml`) enforces these; run them locally before pushing.
   `roteiro model pull` and `roteiro security prefetch` are the prerequisites for
   *preparing* to work offline and must exist in a stock install. So "offline by
   default" is a claim about **behaviour**, not about the absence of an HTTP
-  client: the socket is compiled in, and only `pull` and
-  `prefetch --allow-download`, each after an explicit consent, may open it.
+  client: the socket is compiled in, and only `pull`,
+  `prefetch --allow-download` and `refs fetch --allow-download` (ADR-0029),
+  each after an explicit consent, may open it.
   Likewise `exec-subprocess` compiles in the *capability* to run an analyzer as a
   child process; `--allow-unsandboxed` is what permits an actual run, it is
   required every time, and since the build-time gate is no longer in the default

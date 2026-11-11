@@ -40,6 +40,10 @@ mod diff;
 // `roteiro refs` — the APA 7 reference list of the authored reference register
 // (ADR-0029). In its own file because this one is too large to parse reliably.
 mod refs;
+// `roteiro refs fetch` — the one path by which register metadata is read from
+// the network, behind its own feature and `--allow-download` (ADR-0029 §7).
+#[cfg(feature = "refs-fetch")]
+mod refs_fetch;
 mod review;
 // The LLM reviewer's driver and the corpus replay that measures it (Stage 35b).
 // Present under `test` as well as under a generation backend: the diff
@@ -571,6 +575,7 @@ enum Command {
     /// (ADR-0029). With no key, every work in `docs/references.toml`; with a
     /// key, the works that node rests on. A record too incomplete to cite is
     /// listed as refused, with the fields that stopped it — never guessed.
+    #[command(args_conflicts_with_subcommands = true)]
     Refs {
         /// Node key whose cited works to list. Omit for the whole register.
         key: Option<String>,
@@ -579,6 +584,8 @@ enum Command {
         json: bool,
         #[command(flatten)]
         source: SourceArgs,
+        #[command(subcommand)]
+        action: Option<RefsAction>,
     },
     /// Fetch a node's cached context bundle (its provenance-labelled
     /// neighbourhood), or refresh all cached contexts that have gone stale.
@@ -1525,6 +1532,30 @@ enum OkfAction {
     },
 }
 
+/// `roteiro refs` actions (ADR-0029).
+#[derive(Subcommand)]
+enum RefsAction {
+    /// Read a register work's URL and write what the page states — title,
+    /// publication date, version — into `docs/references.toml` as a
+    /// **proposal** for a human to review. Never runs during a scan or render.
+    ///
+    /// The date the page was read is recorded as an access date, never as a
+    /// publication date; a page that states no date is recorded as saying none.
+    /// Nothing is fetched without `--allow-download`, which is required every
+    /// time.
+    #[cfg(feature = "refs-fetch")]
+    Fetch {
+        /// The register id to fetch. Omit with `--all`.
+        id: Option<String>,
+        /// Fetch every register entry that has a locator.
+        #[arg(long, conflicts_with = "id")]
+        all: bool,
+        /// Permit the network request. Required every time.
+        #[arg(long)]
+        allow_download: bool,
+    },
+}
+
 /// ADR-0023's authoring verbs. `fmt` is step 1; the rest follow.
 #[derive(Subcommand)]
 enum DocsAction {
@@ -2390,7 +2421,20 @@ fn main() -> anyhow::Result<()> {
             json,
             source,
         } => run_context(ingest, key, refresh, json, source),
-        Command::Refs { key, json, source } => refs::run(ingest, key.as_deref(), json, source),
+        Command::Refs {
+            key,
+            json,
+            source,
+            action,
+        } => match action {
+            None => refs::run(ingest, key.as_deref(), json, source),
+            #[cfg(feature = "refs-fetch")]
+            Some(RefsAction::Fetch {
+                id,
+                all,
+                allow_download,
+            }) => refs_fetch::run(id.as_deref(), all, allow_download),
+        },
         Command::Debt { kind, json, source } => run_debt(ingest, &kind, json, debt_ignore, source),
         Command::DebtDensity {
             kind,
