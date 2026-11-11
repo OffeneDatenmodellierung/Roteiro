@@ -255,6 +255,12 @@ pub struct FileOutcome {
 /// the corpus, from one a model actually formed — which is the same silent zero
 /// [`FileOutcome::reasoning_truncated`] exists to prevent, one level up.
 ///
+/// # A verdict that is formed is then checked
+///
+/// The reply comes back as a [`CheckedVerdict`]: the verdict, the ids it cites
+/// resolved against what this prompt listed, and `rto-faithful`'s verdict on
+/// whether it traces to them — see [`check_verdict`].
+///
 /// # Errors
 /// If the engine fails to generate.
 #[cfg(any(feature = "provider", feature = "inference-local-models"))]
@@ -264,7 +270,7 @@ pub fn verdict_on(
     reviewed_sha: &str,
     files: &[FileUnderReview],
     findings: &[String],
-) -> anyhow::Result<Option<rto_graph::review_score::CandidateVerdict>> {
+) -> anyhow::Result<Option<CheckedVerdict>> {
     let lines: Vec<&str> = findings.iter().map(String::as_str).collect();
     let prompt = rto_graph::reviewer::build_verdict_prompt(files, &lines, REVIEW_PROMPT_BUDGET);
     let completion = engine
@@ -285,7 +291,118 @@ pub fn verdict_on(
     else {
         return Ok(None);
     };
-    Ok(rto_graph::reviewer::parse_verdict(reviewed_sha, reply))
+    Ok(rto_graph::reviewer::parse_verdict(reviewed_sha, reply)
+        .map(|parsed| check_verdict(parsed, files, findings)))
+}
+
+/// A whole-change verdict, checked against the findings and files its prompt
+/// listed.
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+pub struct CheckedVerdict {
+    /// What the model said.
+    pub verdict: rto_graph::review_score::CandidateVerdict,
+    /// Each id it cited, in the order written, with the finding line or file
+    /// path it resolves to — `None` for an id that names nothing shown.
+    pub cites: Vec<(String, Option<String>)>,
+    /// `rto-faithful`'s verdict on the summary. Unfaithful means the verdict is
+    /// **withheld**: printed as UNFAITHFUL, never as the verdict, and kept out of
+    /// a replay's run document.
+    pub faithfulness: rto_faithful::Verdict,
+}
+
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+impl CheckedVerdict {
+    /// Whether the verdict may be shown as one.
+    #[must_use]
+    pub fn is_faithful(&self) -> bool {
+        self.faithfulness.is_faithful()
+    }
+}
+
+/// The finding key a verdict citation names: `review-llm:F<n>` for a per-file
+/// finding, `review-file:P<n>` for a changed file.
+///
+/// Keyed by the **id**, not by the path or the finding's prose. An id is what
+/// the model wrote and what the prompt numbered, so membership is exact; keying
+/// a file by its path would let a dangling `P99` resolve against a real file
+/// that happens to be called `P99`. An id `FindingKey` rejects — too long, a
+/// control character — becomes a key no listed entry can have, so it is reported
+/// as dangling rather than panicking or vanishing.
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+fn cite_key(id: &str) -> rto_graph::FindingKey {
+    let analyzer = if id.starts_with(rto_graph::reviewer::FILE_CITE) {
+        "review-file"
+    } else {
+        "review-llm"
+    };
+    rto_graph::FindingKey::new(analyzer, &[id]).unwrap_or_else(|_| {
+        rto_graph::FindingKey::new("review-llm", &["unreadable-citation"])
+            .expect("a literal, valid key")
+    })
+}
+
+/// Check a parsed verdict with `rto-faithful` against exactly what its prompt
+/// listed: the first [`rto_graph::reviewer::verdict_citable`] findings as
+/// `F1..` and files as `P1..`.
+///
+/// The summary is one [`rto_faithful::Segment::Claim`] citing every id in
+/// `cites=`. So a verdict that cites nothing is an `uncited-claim` and one
+/// citing an id nobody was shown is a `dangling-citation` — by set membership,
+/// the crate's only rule.
+///
+/// # `stance=clean` is held to the same rule
+///
+/// An uncited `clean` is withheld too. Its summary still asserts something about
+/// the change (*"a self-contained rename with its call sites moved together"*),
+/// and `rto-faithful` exempts only the connectives in
+/// [`rto_faithful::STRUCTURAL_EXEMPTIONS`] — a frozen list that deliberately
+/// excludes any sentence asserting emptiness. Exempting "nothing to push back
+/// on" here would be widening that list by the back door. It costs a clean
+/// verdict nothing it cannot pay: a verdict is only asked for over at least one
+/// reviewable file, so there is always a `P1` to cite, and the prompt says so.
+#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+#[must_use]
+pub fn check_verdict(
+    parsed: rto_graph::reviewer::ParsedVerdict,
+    files: &[FileUnderReview],
+    findings: &[String],
+) -> CheckedVerdict {
+    use rto_graph::reviewer::{FILE_CITE, FINDING_CITE, verdict_citable};
+
+    let (n_findings, n_files) = verdict_citable(findings.len(), files.len());
+    let mut shown: Vec<(String, String)> = Vec::with_capacity(n_findings + n_files);
+    shown.extend(
+        findings[..n_findings]
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (format!("{FINDING_CITE}{}", i + 1), f.clone())),
+    );
+    shown.extend(
+        files[..n_files]
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (format!("{FILE_CITE}{}", i + 1), f.path.clone())),
+    );
+    let known: Vec<rto_graph::FindingKey> = shown.iter().map(|(id, _)| cite_key(id)).collect();
+
+    let rendering = rto_faithful::Rendering::new(vec![rto_faithful::Segment::Claim {
+        text: parsed.verdict.summary.clone(),
+        citations: parsed.cites.iter().map(|id| cite_key(id)).collect(),
+    }]);
+    let faithfulness = rto_faithful::check(&known, &rendering);
+    let cites = parsed
+        .cites
+        .into_iter()
+        .map(|id| {
+            let text = shown.iter().find(|(s, _)| *s == id).map(|(_, t)| t.clone());
+            (id, text)
+        })
+        .collect();
+    CheckedVerdict {
+        verdict: parsed.verdict,
+        cites,
+        faithfulness,
+    }
 }
 
 /// # Errors
@@ -1017,6 +1134,11 @@ pub struct ReplayReport {
     /// reviewer, and a run that rendered them identically would report a clean
     /// summary rate it did not measure.
     pub verdicts_absent: usize,
+    /// Verdicts the model formed that `rto-faithful` rejected — uncited, or
+    /// citing an id nobody was shown. Withheld from the reader and from the run
+    /// document, and counted here so a prompt that stops the model citing shows
+    /// up as a number rather than as a quietly shrinking `verdicts`.
+    pub verdicts_unfaithful: usize,
     /// Files the engine refused (over its context window, or a decode failure).
     /// Named rather than counted: which files a budget cannot review is the
     /// actionable half, and a run that swallowed them would report coverage it
@@ -1414,11 +1536,15 @@ fn record_outcome(
 /// *beside* the verdict rather than only above it: a judgement formed over an
 /// incomplete pass is worth less than one formed over a complete one, and the
 /// reader needs that where they read the judgement.
+///
+/// **An unfaithful verdict is withheld.** It is printed as UNFAITHFUL with the
+/// defects `rto-faithful` found, and its summary is **not** printed: a sentence
+/// that traces to nothing the reader was shown is exactly what the check exists
+/// to keep from being read as the verdict. A faithful one is printed with each
+/// citation resolved to the finding or file it names, so the reader can check
+/// it without counting down a list.
 #[cfg(any(feature = "provider", feature = "inference-local-models"))]
-fn print_verdict(
-    verdict: Option<&rto_graph::review_score::CandidateVerdict>,
-    never_reviewed: usize,
-) {
+fn print_verdict(verdict: Option<&CheckedVerdict>, never_reviewed: usize) {
     let Some(verdict) = verdict else {
         // Deliberately does **not** name a cause. `None` arrives from a reply that
         // carried no verdict, from one that stopped inside a reasoning block, and
@@ -1431,12 +1557,41 @@ fn print_verdict(
         );
         return;
     };
+    if !verdict.is_faithful() {
+        println!(
+            "\nwhole-change verdict WITHHELD — UNFAITHFUL: it does not trace to the \
+             findings (F…) and changed files (P…) it was shown, so it is not shown as \
+             the verdict."
+        );
+        for defect in &verdict.faithfulness.defects {
+            let detail = match defect {
+                rto_faithful::Defect::DanglingCitation { citation, .. } => {
+                    format!(
+                        ": {} names nothing that was shown",
+                        citation.parts().join(":")
+                    )
+                }
+                rto_faithful::Defect::UncitedClaim { .. } => {
+                    ": it cites no finding or changed file".to_owned()
+                }
+                _ => String::new(),
+            };
+            println!("  {}{detail}", defect.label());
+        }
+        return;
+    }
+    let verdict_text = &verdict.verdict;
     println!(
         "\nverdict on the whole change [{}] — ONE MODEL'S OPINION, not a gate: it \
          changes no exit status and is not a finding.",
-        verdict.stance.as_str()
+        verdict_text.stance.as_str()
     );
-    println!("  {}", verdict.summary);
+    println!("  {}", verdict_text.summary);
+    for (id, text) in &verdict.cites {
+        // Faithful means every id resolved, so `None` cannot reach here; the
+        // fallback keeps a future defect kind from printing a blank line.
+        println!("    {id}  {}", text.as_deref().unwrap_or("(unresolved)"));
+    }
     if never_reviewed > 0 {
         println!(
             "  Read it against the {never_reviewed} file(s) above that were never \
@@ -1458,6 +1613,11 @@ fn print_verdict(
 /// **absent**, exactly as a file whose review was refused is recorded and stepped
 /// over. Writing an invented `clean` into the run document would put a claim no
 /// model made in front of the scorer.
+///
+/// An **unfaithful** verdict is counted as such and kept out of the run document,
+/// for the reason a reader is not shown it: the document records the verdicts a
+/// reader would have read. So the document's schema is unchanged and every run
+/// written before this loads as it did.
 #[cfg(any(feature = "provider", feature = "inference-local-models"))]
 fn record_verdict(
     engine: &dyn rto_llama::Engine,
@@ -1472,7 +1632,8 @@ fn record_verdict(
         return;
     }
     match verdict_on(engine, model, sha, files, reported) {
-        Ok(Some(verdict)) => {
+        Ok(Some(checked)) if !checked.is_faithful() => report.verdicts_unfaithful += 1,
+        Ok(Some(CheckedVerdict { verdict, .. })) => {
             report.verdicts += 1;
             report.verdicts_clean +=
                 usize::from(verdict.stance == rto_graph::review_score::VerdictStance::Clean);
@@ -1542,8 +1703,10 @@ fn print_replay(report: &ReplayReport, out: &str) {
     // opposite facts, and only the first is silence.
     println!(
         "  {} whole-change verdict(s), {} of them `clean`; {} commit(s) produced \
-         none in the required form and are recorded as ABSENT, never as clean",
-        report.verdicts, report.verdicts_clean, report.verdicts_absent
+         none in the required form and are recorded as ABSENT, never as clean; {} \
+         verdict(s) were WITHHELD as UNFAITHFUL (uncited, or citing what was not \
+         shown) and are in neither count",
+        report.verdicts, report.verdicts_clean, report.verdicts_absent, report.verdicts_unfaithful
     );
     println!(
         "  {} compile claim(s) withheld by the filter",
@@ -3012,6 +3175,68 @@ mod tests {
             Some("#[cfg(feature = \"exec-boxlite\")]\npub mod boxlite;"),
             "`boxlite/mod.rs` is declared in `src`, not in `src/boxlite`"
         );
+    }
+
+    /// The check behind the verdict, in the three cases the CLI test drives end
+    /// to end: a verdict citing what it was shown is faithful and its ids
+    /// resolve; an uncited one and one citing `F99` are not.
+    #[cfg(any(feature = "provider", feature = "inference-local-models"))]
+    #[test]
+    fn a_verdict_is_faithful_only_when_it_cites_what_it_was_shown() {
+        use rto_graph::reviewer::parse_verdict;
+
+        let files = [rto_graph::reviewer::FileUnderReview {
+            reviewed_sha: "a".repeat(40),
+            path: "src/lib.rs".to_owned(),
+            diff: "@@ -1 +1 @@\n-a\n+b\n".to_owned(),
+        }];
+        let findings = ["src/lib.rs:2 [contract-drift] the doc says two".to_owned()];
+        let check = |reply: &str| {
+            super::check_verdict(
+                parse_verdict("sha", reply).expect("a verdict line"),
+                &files,
+                &findings,
+            )
+        };
+
+        let faithful = check("VERDICT | stance=concerns | cites=F1,P1 | the doc drifted");
+        assert!(faithful.is_faithful(), "{:?}", faithful.faithfulness);
+        assert_eq!(
+            faithful.cites,
+            [
+                ("F1".to_owned(), Some(findings[0].clone())),
+                ("P1".to_owned(), Some("src/lib.rs".to_owned())),
+            ]
+        );
+
+        let uncited = check("VERDICT | stance=concerns | the doc drifted");
+        assert_eq!(
+            uncited
+                .faithfulness
+                .defects
+                .iter()
+                .map(rto_faithful::Defect::label)
+                .collect::<Vec<_>>(),
+            ["uncited-claim"]
+        );
+
+        let clean = check("VERDICT | stance=clean | nothing to push back on");
+        assert!(
+            !clean.is_faithful(),
+            "an uncited `clean` asserts something too, and is held to the same rule"
+        );
+
+        let dangling = check("VERDICT | stance=concerns | cites=F99,P1 | the doc drifted");
+        assert_eq!(
+            dangling
+                .faithfulness
+                .defects
+                .iter()
+                .map(rto_faithful::Defect::label)
+                .collect::<Vec<_>>(),
+            ["dangling-citation"]
+        );
+        assert_eq!(dangling.cites[0], ("F99".to_owned(), None));
     }
 }
 

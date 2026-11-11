@@ -408,6 +408,38 @@ const NO_FINDINGS: &str = "NO FINDINGS";
 /// JSON document loses the whole reply.
 const VERDICT_PREFIX: &str = "VERDICT";
 
+/// The id prefix of a per-file finding in the verdict prompt: `F1`, `F2`, ….
+pub const FINDING_CITE: char = 'F';
+
+/// The id prefix of a changed file in the verdict prompt: `P1`, `P2`, ….
+pub const FILE_CITE: char = 'P';
+
+/// A parsed `VERDICT` line: the verdict a reader is shown, and the ids it says
+/// it rests on.
+///
+/// The citations are kept apart from [`CandidateVerdict`] on purpose. An id is
+/// meaningful only against the one prompt it was numbered in, so it means
+/// nothing in a run document read later — and `CandidateVerdict` is that
+/// document's schema (`deny_unknown_fields`), which this leaves unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedVerdict {
+    /// The verdict itself.
+    pub verdict: CandidateVerdict,
+    /// The ids in `cites=`, upper-cased, in the order written; empty when the
+    /// line had no `cites=` field.
+    pub cites: Vec<String>,
+}
+
+/// How many findings and files the verdict prompt lists — and so can be cited —
+/// out of `findings` and `files`: everything up to [`VERDICT_LIST_CAP`].
+///
+/// Returned as `(findings, files)`, so ids `F1..=F<findings>` and
+/// `P1..=P<files>` are exactly the ones [`build_verdict_prompt`] wrote.
+#[must_use]
+pub fn verdict_citable(findings: usize, files: usize) -> (usize, usize) {
+    (findings.min(VERDICT_LIST_CAP), files.min(VERDICT_LIST_CAP))
+}
+
 /// Build the **whole-change** prompt: judge the change as a unit, given the
 /// per-file pass's own findings beside the diffs (issue #649, part 2).
 ///
@@ -436,6 +468,16 @@ const VERDICT_PREFIX: &str = "VERDICT";
 /// will block a merge has a reason to hedge; one told it is advice does not. The
 /// same words appear where the verdict is printed, so a reader and the model are
 /// told the same thing.
+///
+/// # Every listed entry carries an id the verdict must cite
+///
+/// Findings are numbered `F1..` and changed files `P1..`, in the order listed,
+/// and the reply names the ones its sentence rests on in `cites=`. That is what
+/// lets the caller check the verdict with `rto-faithful` — a claim citing nothing
+/// is a fabrication, a citation naming nothing shown is a dangling reference.
+/// Only **listed** entries get an id: an entry past [`VERDICT_LIST_CAP`] is not
+/// shown, so it is not citable, and [`verdict_citable`] says how many of each
+/// are.
 #[must_use]
 pub fn build_verdict_prompt(files: &[FileUnderReview], findings: &[&str], budget: usize) -> Prompt {
     let mut head = String::from(
@@ -450,25 +492,35 @@ pub fn build_verdict_prompt(files: &[FileUnderReview], findings: &[&str], budget
          behind;\n\
          - several small findings that are really one thing worth saying once.\n\n\
          Output format. ONE line, nothing else on it:\n\
-         \x20   VERDICT | stance=<clean|concerns> | <one or two sentences>\n\n\
+         \x20   VERDICT | stance=<clean|concerns> | cites=<ids> | <one or two sentences>\n\n\
          For example:\n\
-         \x20   VERDICT | stance=concerns | the new `retry` path is added in three \
-         callers and left out of the fourth, so one code path keeps the old \
-         behaviour the doc no longer describes\n\
-         \x20   VERDICT | stance=clean | a self-contained rename with its call \
-         sites and its doc comment moved together\n\n\
+         \x20   VERDICT | stance=concerns | cites=F2,P1,P3 | the new `retry` path is \
+         added in three callers and left out of the fourth, so one code path keeps \
+         the old behaviour the doc no longer describes\n\
+         \x20   VERDICT | stance=clean | cites=P1,P2 | a self-contained rename with \
+         its call sites and its doc comment moved together\n\n\
          Rules:\n\
          - `stance=clean` means you have nothing you would push back on. Use it \
          when that is true; a routine change is a normal outcome.\n\
          - `stance=concerns` means you have something to say. Say the ONE most \
          important thing, not a list — the per-file findings below are already the \
          list.\n\
+         - `cites=` names what your sentence rests on: the ids of the findings \
+         (F1, F2, …) and changed files (P1, P2, …) listed below, comma-separated. \
+         Every verdict cites at least one — `clean` included, which cites the \
+         files it judged. A verdict that cites nothing, or cites an id that is not \
+         listed, is withheld from the reader.\n\
          - Judge only what is shown. Do not infer what code you have not been \
          shown does.\n",
     );
 
     let _ = writeln!(head, "\nFiles in this change ({}):", files.len());
-    list_capped(&mut head, files.iter().map(|f| f.path.as_str()), "file");
+    list_capped(
+        &mut head,
+        files.iter().map(|f| f.path.as_str()),
+        FILE_CITE,
+        "file",
+    );
     if findings.is_empty() {
         head.push_str(
             "\nThe per-file pass reported no findings. That is not by itself a \
@@ -480,7 +532,7 @@ pub fn build_verdict_prompt(files: &[FileUnderReview], findings: &[&str], budget
             "\nWhat the per-file pass already reported ({}):",
             findings.len()
         );
-        list_capped(&mut head, findings.iter().copied(), "finding");
+        list_capped(&mut head, findings.iter().copied(), FINDING_CITE, "finding");
     }
 
     let mut body = String::from("\nThe change:\n");
@@ -517,8 +569,19 @@ pub fn build_verdict_prompt(files: &[FileUnderReview], findings: &[&str], budget
 /// [`CandidateVerdict`] carrying an empty sha would not survive
 /// [`crate::review_score::score`], and a value that cannot round-trip through the
 /// scorer is a trap for whoever constructs the next one.
+///
+/// # `cites=` is read, and its absence is not a parse failure
+///
+/// The ids in `cites=` (see [`build_verdict_prompt`]) come back on
+/// [`ParsedVerdict::cites`], upper-cased, in the order written. A line with no
+/// `cites=` field — a model that ignored the instruction, or a reply written
+/// before the field existed — parses exactly as it always did, with no citations.
+/// That is an **uncited** verdict, and deciding what an uncited verdict is worth
+/// is the caller's job (it is withheld as unfaithful), not this parser's: a
+/// parser that dropped the line would make "cited nothing" and "said nothing"
+/// the same fact.
 #[must_use]
-pub fn parse_verdict(reviewed_sha: &str, reply: &str) -> Option<CandidateVerdict> {
+pub fn parse_verdict(reviewed_sha: &str, reply: &str) -> Option<ParsedVerdict> {
     for raw in reply.lines() {
         let line = raw.trim().trim_start_matches(['-', '*', '>', '#', ' ']);
         let line = line.trim_start_matches('`').trim_end();
@@ -530,6 +593,7 @@ pub fn parse_verdict(reviewed_sha: &str, reply: &str) -> Option<CandidateVerdict
             continue;
         }
         let mut stance = None;
+        let mut cites = Vec::new();
         let mut summary = String::new();
         for field in line.split('|').skip(1) {
             let field = field.trim().trim_end_matches('`').trim();
@@ -538,12 +602,19 @@ pub fn parse_verdict(reviewed_sha: &str, reply: &str) -> Option<CandidateVerdict
                 .split_once('=')
                 .map(|(k, v)| (k.trim(), v.trim()))
             {
-                // Only `stance=` is structural; everything else is the prose a
-                // human reads, kept verbatim for the reason `parse_one` keeps a
+                // Only `stance=` and `cites=` are structural; everything else is
+                // the prose a human reads, kept verbatim for the reason `parse_one` keeps a
                 // description verbatim — a parser that rewrites the text it
                 // reports is editing the evidence.
                 Some((key, value)) if key.eq_ignore_ascii_case("stance") => {
                     stance = VerdictStance::from_token(&value.to_ascii_lowercase());
+                }
+                Some((key, value)) if key.eq_ignore_ascii_case("cites") => {
+                    cites = value
+                        .split([',', ';', ' '])
+                        .map(|id| id.trim().to_ascii_uppercase())
+                        .filter(|id| !id.is_empty() && id != "NONE" && id != "-")
+                        .collect();
                 }
                 _ => {
                     if !summary.is_empty() {
@@ -557,10 +628,13 @@ pub fn parse_verdict(reviewed_sha: &str, reply: &str) -> Option<CandidateVerdict
         // at. Guessing `clean` would manufacture the one answer that costs
         // something to be wrong about.
         let stance = stance?;
-        return Some(CandidateVerdict {
-            reviewed_sha: reviewed_sha.to_owned(),
-            stance,
-            summary: summary.trim().to_owned(),
+        return Some(ParsedVerdict {
+            verdict: CandidateVerdict {
+                reviewed_sha: reviewed_sha.to_owned(),
+                stance,
+                summary: summary.trim().to_owned(),
+            },
+            cites,
         });
     }
     None
@@ -802,22 +876,23 @@ fn parse_hunk_new_start(header: &str) -> Option<u32> {
 /// the change itself, and eventually exceed the engine's context window, so the
 /// verdict would fail on exactly the changes most worth summarising. A hundred
 /// entries is ~1.2k estimated tokens against a 30k budget.
-const VERDICT_LIST_CAP: usize = 100;
+pub const VERDICT_LIST_CAP: usize = 100;
 
-/// Write at most [`VERDICT_LIST_CAP`] of `items`, then say how many were left
-/// out.
+/// Write at most [`VERDICT_LIST_CAP`] of `items`, each numbered `<id>1`, `<id>2`,
+/// …, then say how many were left out — unnumbered, because they are not shown and
+/// so cannot be cited.
 ///
 /// The elision is **stated**, never silent. A model shown 100 of 900 paths and
 /// told nothing would judge a change it believes it has seen the whole of, and
 /// its "clean" would be about a change that does not exist — the same failure
 /// mode as a truncated diff whose marker is missing.
-fn list_capped<'a>(out: &mut String, items: impl Iterator<Item = &'a str>, noun: &str) {
+fn list_capped<'a>(out: &mut String, items: impl Iterator<Item = &'a str>, id: char, noun: &str) {
     let mut shown = 0usize;
     let mut elided = 0usize;
     for item in items {
         if shown < VERDICT_LIST_CAP {
-            let _ = writeln!(out, "  {item}");
             shown += 1;
+            let _ = writeln!(out, "  {id}{shown} {item}");
         } else {
             elided += 1;
         }
@@ -1200,6 +1275,7 @@ mod tests {
         CLASS_QUESTION, FileUnderReview, GraphContext, NO_FINDINGS, Prompt,
         SINGLE_CALL_BUDGET_TOKENS, annotate_diff, build_prompt, build_verdict_prompt, claim_site,
         class_gloss, class_options, estimate_tokens, parse_findings, parse_verdict,
+        verdict_citable,
     };
     use crate::compile_claim::{CheckRun, Conclusion, Features, TargetOs, Targets, suppression};
     use crate::review_corpus::{CLASSES, DefectClass};
@@ -1909,10 +1985,11 @@ FINDING | **line**=42 | class=**contract-drift** | **compile**=YES | the **remot
              out of the fourth\n",
         )
         .expect("a verdict");
-        assert_eq!(parsed.reviewed_sha, SHA);
-        assert_eq!(parsed.stance, VerdictStance::Concerns);
+        assert_eq!(parsed.verdict.reviewed_sha, SHA);
+        assert_eq!(parsed.verdict.stance, VerdictStance::Concerns);
+        assert!(parsed.cites.is_empty(), "no `cites=` is an uncited verdict");
         assert_eq!(
-            parsed.summary,
+            parsed.verdict.summary,
             "`retry` is added in three callers and left out of the fourth"
         );
     }
@@ -1924,9 +2001,9 @@ FINDING | **line**=42 | class=**contract-drift** | **compile**=YES | the **remot
             "- **VERDICT | stance=**clean** | a *self-contained* rename**\n",
         )
         .expect("a verdict");
-        assert_eq!(parsed.stance, VerdictStance::Clean);
+        assert_eq!(parsed.verdict.stance, VerdictStance::Clean);
         assert_eq!(
-            parsed.summary, "a *self-contained* rename",
+            parsed.verdict.summary, "a *self-contained* rename",
             "emphasis the model put in prose is evidence, not decoration"
         );
     }
@@ -1957,10 +2034,61 @@ FINDING | **line**=42 | class=**contract-drift** | **compile**=YES | the **remot
         )
         .expect("a verdict");
         assert_eq!(
-            parsed.stance,
+            parsed.verdict.stance,
             VerdictStance::Concerns,
             "a model that contradicts itself gets the answer it committed to first, \
              not a third one this parser invented"
+        );
+    }
+
+    /// `cites=` is structural: read into ids, kept out of the prose, and
+    /// tolerant of the spacing and case a model actually emits.
+    #[test]
+    fn cites_are_read_apart_from_the_prose() {
+        let parsed = parse_verdict(
+            SHA,
+            "VERDICT | stance=concerns | cites=f2, P1 ;P3 | the retry path misses one caller\n",
+        )
+        .expect("a verdict");
+        assert_eq!(parsed.cites, ["F2", "P1", "P3"]);
+        assert_eq!(parsed.verdict.summary, "the retry path misses one caller");
+
+        let none =
+            parse_verdict(SHA, "VERDICT | stance=clean | cites=none | fine\n").expect("a verdict");
+        assert!(
+            none.cites.is_empty(),
+            "`none` is the absence of a citation, not an id"
+        );
+    }
+
+    /// Every listed entry is numbered so a verdict can cite it, and the ids
+    /// match what [`verdict_citable`] says the caller may resolve.
+    #[test]
+    fn the_verdict_prompt_numbers_what_it_lists() {
+        let files = vec![file("@@ -1,1 +1,1 @@\n-a\n+b\n")];
+        let findings = ["src/lib.rs:12 [contract-drift] the doc says X"];
+        let prompt = build_verdict_prompt(&files, &findings, SINGLE_CALL_BUDGET_TOKENS);
+        assert!(
+            prompt
+                .text
+                .contains("  F1 src/lib.rs:12 [contract-drift] the doc says X\n"),
+            "{}",
+            prompt.text
+        );
+        assert!(
+            prompt.text.contains("  P1 crates/rto-graph/src/lib.rs\n"),
+            "{}",
+            prompt.text
+        );
+        assert!(
+            prompt.text.contains("cites=<ids>"),
+            "the contract asks for it"
+        );
+        assert_eq!(verdict_citable(1, 1), (1, 1));
+        assert_eq!(
+            verdict_citable(300, 900),
+            (100, 100),
+            "only listed is citable"
         );
     }
 
@@ -2031,11 +2159,11 @@ FINDING | **line**=42 | class=**contract-drift** | **compile**=YES | the **remot
             "the true total is always stated: {head}"
         );
         assert!(
-            head.contains("  src/generated/file_0099.rs\n"),
+            head.contains("  P100 src/generated/file_0099.rs\n"),
             "the first 100 are listed"
         );
         assert!(
-            !head.contains("  src/generated/file_0100.rs\n"),
+            !head.contains("src/generated/file_0100.rs\n"),
             "and the rest are not: {head}"
         );
         assert!(

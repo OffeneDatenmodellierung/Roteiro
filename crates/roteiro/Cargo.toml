@@ -19,6 +19,10 @@ clap = { workspace = true }
 # because ingest is the zero-install path (ADR-0014) and pulls no third-party
 # dependency the workspace does not already have.
 rto-exec = { workspace = true, optional = true }
+# Rendering faithfulness for `review --llm`'s whole-change verdict: a verdict
+# that cites no shown finding or file, or one that was not shown, is withheld.
+# A workspace crate over `rto-graph` and `serde`, both already here.
+rto-faithful = { workspace = true }
 rto-graph = { workspace = true }
 rto-llama = { workspace = true, optional = true }
 rto-render = { workspace = true }
