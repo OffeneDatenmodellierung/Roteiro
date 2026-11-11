@@ -820,9 +820,6 @@ fn inline_version_refs(line: &str) -> impl Iterator<Item = DocVersion> + '_ {
         .filter_map(|(i, _)| DocVersion::parse_prefix(&line[i + MARK.len()..]))
 }
 
-/// Split leading `---`-delimited frontmatter from the body. Returns
-/// `("", text)` when there is no frontmatter. Shared with `crate::site`,
-/// whose publication marker is a frontmatter field read the same way.
 /// Like [`split_frontmatter`], but the frontmatter is returned **verbatim** —
 /// including any blank line before the closing fence.
 ///
@@ -848,19 +845,10 @@ pub(crate) fn split_frontmatter_verbatim(text: &str) -> (&str, &str) {
     }
 }
 
-pub(crate) fn split_frontmatter(text: &str) -> (&str, &str) {
-    let Some(rest) = text.strip_prefix("---\n") else {
-        return ("", text);
-    };
-    match rest.find("\n---\n") {
-        Some(end) => (&rest[..end], &rest[end + 5..]),
-        // A closing fence with no trailing newline (end of file).
-        None => match rest.strip_suffix("\n---") {
-            Some(fm) => (fm, ""),
-            None => ("", text),
-        },
-    }
-}
+/// Split leading `---`-delimited frontmatter from the body. Shared with
+/// `crate::site`, whose publication marker is a frontmatter field read the same
+/// way, and with `rto_render`, which drops the block before rendering.
+pub(crate) use rto_graph::split_frontmatter;
 
 /// Clean a raw frontmatter value: trim, drop a trailing ` #…` inline comment
 /// (YAML-style) from unquoted values, then strip surrounding quotes. Quoted
@@ -1205,6 +1193,27 @@ mod tests {
         );
         assert_eq!(doc.links[1].from, "adr:0007#decision");
         assert_eq!(doc.links[1].target_key, "file:docs/adr/0001-x.md");
+    }
+
+    /// A symbol link into a non-Rust file must build the key extraction writes,
+    /// or it can never resolve: the reader once built `sym:py:…` while the
+    /// extractor wrote `sym:python:…`.
+    #[test]
+    fn a_non_rust_symbol_link_targets_the_key_extraction_writes() {
+        use rto_graph::Extractor as _;
+        let registry = rto_graph::Registry::new(rto_graph::IngestConfig::default());
+        for (path, src) in [
+            ("pkg/mod.py", "class Foo:\n    pass\n"),
+            ("web/App.TS", "function Foo() {}\n"),
+        ] {
+            let facts = registry.extract(path, "b1", src.as_bytes());
+            let key = super::resolve_target(&format!("{path}#Foo")).expect("key");
+            assert!(
+                facts.nodes.iter().any(|n| n.key == key),
+                "{key} not among extracted keys {:?}",
+                facts.nodes.iter().map(|n| &n.key).collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]

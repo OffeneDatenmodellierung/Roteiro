@@ -37,6 +37,28 @@ pub fn slugify(s: &str) -> String {
     out.trim_matches('-').to_owned()
 }
 
+/// Split a leading `---`-fenced YAML frontmatter block from the body, returning
+/// `(frontmatter, body)`; `("", text)` when the text opens with no block.
+///
+/// Lives here for the same reason as [`slugify`]: `rto_spec` reads the block and
+/// `rto_render` drops it, and a renderer that disagreed about where it ends would
+/// publish metadata as prose. A closing fence at end of file (no trailing
+/// newline) still closes the block.
+#[must_use]
+pub fn split_frontmatter(text: &str) -> (&str, &str) {
+    let Some(rest) = text.strip_prefix("---\n") else {
+        return ("", text);
+    };
+    match rest.find("\n---\n") {
+        Some(end) => (&rest[..end], &rest[end + 5..]),
+        // A closing fence with no trailing newline (end of file).
+        None => match rest.strip_suffix("\n---") {
+            Some(fm) => (fm, ""),
+            None => ("", text),
+        },
+    }
+}
+
 /// The Markdown dialect this project reads and renders with — the one answer to
 /// "what does this source mean", for every surface that asks.
 ///

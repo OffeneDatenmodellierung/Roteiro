@@ -560,6 +560,20 @@ pub(crate) fn extension(path: &str) -> Option<String> {
         .map(|(_, ext)| ext.to_ascii_lowercase())
 }
 
+/// The language label extraction writes into `sym:<lang>:` keys for `path`, or
+/// `None` when no symbol extractor handles its extension.
+///
+/// Readers that *build* symbol keys (an ADR's `[[x.py#Foo]]`, a lat.md ref) call
+/// this rather than keeping their own extension table: a second table drifted to
+/// `sym:py:…` while extraction wrote `sym:python:…`, so no Python link resolved.
+#[must_use]
+pub fn language_for_path(path: &str) -> Option<&'static str> {
+    match extension(path)?.as_str() {
+        "rs" => Some("rust"),
+        ext => tag_lang_for(ext).map(|def| def.lang),
+    }
+}
+
 /// The natural key of the `file` node for `path`.
 fn file_key(path: &str) -> String {
     format!("file:{path}")

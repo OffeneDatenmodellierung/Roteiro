@@ -126,7 +126,7 @@ pub use context::{
 };
 pub use extract::{
     Extractor, FileNodeExtractor, IngestConfig, MediaEngineGuard, Registry, RustExtractor,
-    cap_content, is_prose, release_media_engines,
+    cap_content, is_prose, language_for_path, release_media_engines,
 };
 pub use findings::{
     AdvisoryDb, AnalysisRun, CommandPolicy, EnvironmentPolicy, FINDING_KEY_PREFIX, Finding,
@@ -206,7 +206,7 @@ pub use sync::{
 pub use text::{
     Heading, LinkKind, LinkScope, MarkdownLink, code_spans, first_h1, heading_id, heading_id_from,
     heading_text, headings, is_code_fence, link_scope, markdown_dialect, markdown_links, slugify,
-    strip_code_spans, wiki_link_targets,
+    split_frontmatter, strip_code_spans, wiki_link_targets,
 };
 pub use workspace::{
     Follow, OKF_BUNDLE_DIR, OkfBundle, OnOpen, ReloadPlan, ResolvedWorkspace, RootScan,

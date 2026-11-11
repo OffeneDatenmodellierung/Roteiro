@@ -1106,7 +1106,11 @@ async fn matrix(State(st): State<AppState>, params: RawPathParams) -> ApiResult 
                 Some(hub_node) => matches.push(overview::MatchInput {
                     // The hub key's source file, so the client (the explorer's "hide
                     // tooling config" toggle) and CLI can classify the row.
-                    file: cfgkey_file(&hub_node.key),
+                    // An unknown file is "" — app config, so an opt-in tooling
+                    // filter never hides it. Mirrors the explorer's JS `cfgkeyFile`.
+                    file: crate::cfgkey_file(&hub_node.key)
+                        .unwrap_or_default()
+                        .to_owned(),
                     hub_key: hub_node.name,
                     spoke_key,
                     spoke_value,
@@ -1316,18 +1320,6 @@ fn config_by_node_key(store: &Store) -> Result<BTreeMap<String, (String, String)
         // extraction), so rebuild it from the file + dotted key.
         .map(|c| (format!("cfgkey:{}#{}", c.file, c.key), (c.key, c.value)))
         .collect())
-}
-
-/// The `<file>` component of a `cfgkey:<file>#<dotted>` config-key node key — the
-/// file its config setting was read from. Neither the path nor the dotted key
-/// contains `#`, so the first `#` splits them. Returns an empty string for a key
-/// that isn't a `cfgkey:` id (the caller treats "unknown file" as app config, so an
-/// opt-in tooling filter never hides it). Mirrors the explorer's JS `cfgkeyFile`.
-fn cfgkey_file(key: &str) -> String {
-    key.strip_prefix("cfgkey:")
-        .map(|rest| rest.split_once('#').map_or(rest, |(file, _)| file))
-        .unwrap_or_default()
-        .to_owned()
 }
 
 /// Follow an external-ref to its hub node for the cross-repo views, mapping a

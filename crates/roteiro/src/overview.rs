@@ -681,8 +681,9 @@ table.drift td:first-child{white-space:nowrap;color:var(--muted)}\
 td.conflict{outline:2px solid var(--drift);outline-offset:-2px;font-weight:600}";
 
 /// Escape text for HTML body or attribute content (both quote styles), so the
-/// helper stays safe if reused inside single-quoted attributes.
-fn esc(s: &str) -> String {
+/// helper stays safe if reused inside single-quoted attributes. Shared with the
+/// OKF viewer.
+pub(crate) fn esc(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
