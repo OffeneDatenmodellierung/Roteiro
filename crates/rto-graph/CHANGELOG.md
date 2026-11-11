@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v6.2.0...rto-graph-v7.0.0) - 2026-11-11
+
+### Added
+
+- *(refs)* an authored reference register, work nodes, and `roteiro refs`
+- *(provider)* [**breaking**] one engine for local and hosted models; remove the remote tier
+
 ## [6.2.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v6.1.0...rto-graph-v6.2.0) - 2026-11-01
 
 ### Added

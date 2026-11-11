@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v6.2.0...rto-spec-v7.0.0) - 2026-11-11
+
+### Added
+
+- *(refs)* an authored reference register, work nodes, and `roteiro refs`
+
 ## [5.15.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-spec-v5.14.3...rto-spec-v5.15.0) - 2026-09-15
 
 ### Added
