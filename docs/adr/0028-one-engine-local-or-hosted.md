@@ -11,7 +11,7 @@ architectural-significance: VERY HIGH  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Inference
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.0"
+version: "1.1"
 last-modified: 2026-11-11
 confluence-url:
 ---
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | Accepted |
 | **Architectural Significance** | VERY HIGH |
 | **Domain** | Inference |
-| **Document version** | 1.0 |
+| **Document version** | 1.1 |
 
 ## Reference
 
@@ -89,8 +89,12 @@ sent to it, on stderr, on every run.
 
 - Plaintext `http://` to another machine. The request carries repository content
   and the credential (`ROTEIRO_PROVIDER_API_KEY`, sent as a Bearer token).
-- Redirects, and environment proxies, as before: either could move the call,
-  credential included, away from the host that was checked and announced.
+- Redirects, as before: one could move the call, credential included, away
+  from the host that was checked and announced.
+- Environment proxies for **this machine**. A hosted endpoint does use
+  `HTTPS_PROXY`/`ALL_PROXY` (and honours `NO_PROXY`), because a corporate
+  network may allow no other route out and a TLS call tunnels through the proxy
+  without exposing the request (v1.1).
 - The credential as a config key. `roteiro.toml` is committed.
 
 ### 4. No egress ledger
@@ -130,3 +134,4 @@ audit log, and a local one sends nothing anywhere.
 | Version | Date | Change |
 |---|---|---|
 | 1.0 | 2026-11-11 | Initial. Accepted with the implementation. |
+| 1.1 | 2026-11-11 | A hosted provider honours `HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY` (owner decision): corporate networks often allow no other route. A loopback provider still ignores proxies. |

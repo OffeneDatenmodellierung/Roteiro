@@ -98,7 +98,9 @@ export ROTEIRO_PROVIDER_API_KEY=sk-ant-...
 Everything the local path builds is sent: the full conversation, graph tool
 results, symbol names, paths and captured prose. Roteiro prints the host on
 stderr on every run, keeps no log of what it sent, and refuses plaintext
-`http://` to another machine. Environment proxies (`HTTPS_PROXY`) are not used.
+`http://` to another machine. A hosted endpoint is reached through
+`HTTPS_PROXY`/`ALL_PROXY` when set (`NO_PROXY` is honoured); a local provider
+never is.
 
 A committed `roteiro.toml` can set this for a whole team, so check a
 repository's `[provider]` table before running Roteiro in it. Anthropic serves no

@@ -66,7 +66,7 @@ impl ProviderEngine {
     pub fn new(base_url: &str, models: Vec<String>) -> anyhow::Result<Self> {
         let (base, host) =
             checked_base(base_url).map_err(|e| anyhow::anyhow!("`[provider] base_url`: {e}"))?;
-        if let Some(host) = host {
+        if let Some(host) = &host {
             eprintln!(
                 "note: model provider is {host} — prompts, including repository content, are \
                  sent off this machine (`[provider] base_url`, ADR-0028)"
@@ -76,9 +76,11 @@ impl ProviderEngine {
             // A redirect could move the call, credential included, somewhere
             // other than the host that was checked and announced.
             .max_redirects(0)
-            // An `HTTP(S)_PROXY`/`ALL_PROXY` in the environment would otherwise
-            // carry the call, credential included, to wherever the proxy is.
-            .proxy(None)
+            // Hosted only: a corporate network may require `HTTPS_PROXY`, and a
+            // TLS call tunnels through it (`NO_PROXY` is honoured). Never for
+            // this machine, where a proxy would carry the call, credential
+            // included, somewhere that is not the server named.
+            .proxy(host.and_then(|_| ureq::Proxy::try_from_env()))
             .timeout_connect(Some(CONNECT_TIMEOUT))
             .timeout_global(Some(CALL_TIMEOUT))
             .http_status_as_error(false)
@@ -581,12 +583,13 @@ mod tests {
         read("data: [DONE]\n\n").expect("[DONE] ends it");
     }
 
-    /// The checked host governs the real connection: a proxy in the
-    /// environment must not carry the call (and its credential) elsewhere.
+    /// A proxy in the environment never carries a call to this machine (and its
+    /// credential) elsewhere, but a hosted endpoint does use it — a corporate
+    /// network may allow no other route out.
     /// Re-runs itself in a child, because setting a process's environment from a
     /// test is `unsafe` and this crate forbids that.
     #[test]
-    fn a_proxy_in_the_environment_does_not_carry_the_call() {
+    fn a_proxy_carries_hosted_calls_and_never_local_ones() {
         const CHILD: &str = "ROTEIRO_PROVIDER_PROXY_TEST_CHILD";
         if std::env::var_os(CHILD).is_some() {
             let (base, _server) = stub(200, "data: [DONE]\n\n");
@@ -594,10 +597,16 @@ mod tests {
             engine
                 .chat(&request("m"))
                 .expect("the stub was reached directly, not through the proxy");
+            let hosted = ProviderEngine::new("https://api.example.com/v1", Vec::new())
+                .expect("a hosted https endpoint");
+            assert!(
+                hosted.agent.config().proxy().is_some(),
+                "a hosted endpoint takes the environment's proxy"
+            );
             return;
         }
         let name = format!(
-            "{}::a_proxy_in_the_environment_does_not_carry_the_call",
+            "{}::a_proxy_carries_hosted_calls_and_never_local_ones",
             module_path!()
                 .split_once("::")
                 .map_or(module_path!(), |(_, rest)| rest)
