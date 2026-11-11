@@ -16,8 +16,7 @@
 //! `roteiro` depends on `rto-serve` rather than the reverse, so `rto-serve`
 //! could not call it without a dependency cycle (#582). The honest fix for "a
 //! rule two crates need" is to move it to the crate both can see rather than to
-//! copy it, which is what #523/#529 did for `markdown_dialect` and Stage 34
-//! part 2b did for `ProducerTrust`.
+//! copy it, which is what #523/#529 did for `markdown_dialect`.
 //!
 //! `rto-llama` is that crate: `rto-serve` depends on it unconditionally, and so
 //! does every `roteiro` build that can reach a generation. It is also where
@@ -37,11 +36,10 @@
 //! is the documented worst case of the model this project is configured to use.
 //!
 //! So [`answer`] refuses it, and the refusal is the shape the codebase has
-//! already settled on twice. `rto-serve`'s `tools::finish` refuses an unfinished
+//! already settled on. `rto-serve`'s `tools::finish` refuses an unfinished
 //! `<tool_call>` rather than stripping it, because *"stripping would be the
 //! silent downgrade `docs/REVIEW_CHECKLIST.md` §Refusals forbids: an incomplete
-//! thing presented as the whole one, with the evidence removed"*. `rto-remote`'s
-//! `response::parse` refuses a truncated remote generation for the same reason —
+//! thing presented as the whole one, with the evidence removed"* —
 //! *"Roteiro will not hand you a truncated answer as though it were a whole
 //! one"*. An unterminated reasoning block is the same fact arriving through a
 //! third marker, and it gets the same answer.
@@ -62,8 +60,7 @@
 //!
 //! A generation that closed its block and was then cut off mid-answer is a
 //! partial answer, not a missing one, and this hands it over. The caller already
-//! has [`FinishReason`] and can decide — `rto-remote` refuses that case at its
-//! own tier, and `/v1/chat/completions` reports it as `finish_reason: "length"`
+//! has [`FinishReason`] and can decide — `/v1/chat/completions` reports it as `finish_reason: "length"`
 //! exactly as an OpenAI client expects. Widening the refusal to cover it would
 //! be a different decision about a different fact, and is not one this module
 //! makes on a caller's behalf.
@@ -429,8 +426,7 @@ mod tests {
 
     /// A closed block with nothing after it yields an empty answer rather than an
     /// error. That is deliberate: emptiness is a fact the callers already act on
-    /// (`spec draft` skips an empty section, `rto-remote` refuses an empty
-    /// completion at its own tier), and this module's subject is the reasoning
+    /// (`spec draft` skips an empty section), and this module's subject is the reasoning
     /// block, not the length of what follows it.
     #[test]
     fn a_closed_block_with_nothing_after_it_is_an_empty_answer() {

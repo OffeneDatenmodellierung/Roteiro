@@ -51,35 +51,8 @@
 //!
 //! With no `[models]` key set, every task resolves to the constant its call site
 //! used before this module existed — see `resolve_unset_matches_the_previous_hard_coded_models`.
-//!
-//! # The remote tier is a *variant*, not a transport
-//!
-//! [`ModelSource::Remote`] is the one resolution that does not name a registry
-//! model, and it is here because ADR-0019's remote tier reaches the generative
-//! surfaces this resolver already serves ([`ModelTask::Draft`],
-//! [`ModelTask::Chat`] and [`ModelTask::Review`]). What arrives here is a
-//! **decision already taken
-//! elsewhere**: [`RemoteTier`] is the consent gate's answer, computed by
-//! `rto-remote` from the config layers and the invocation, and this module has
-//! no way to compute it, ask for it, or change it. Nothing here opens a socket,
-//! reads a credential or knows an endpoint's URL — the crate still has no
-//! transport, and its `gix` is still pinned without one.
-//!
-//! Two consequences are deliberate and worth stating, because both look like
-//! omissions:
-//!
-//! * **A remote choice carries no model name.** [`ModelChoice::model`] is a
-//!   *registry* name, and a hosted model has no registry entry. The vendor model
-//!   string lives on the endpoint (`[remote] model`), where the trust grade that
-//!   qualifies it lives too. Putting it in this field would let a mutable
-//!   pointer sit in the slot reserved for digest-pinned names.
-//! * **A remote choice reports [`ModelChoice::installed`] as `None`.** Not
-//!   `false`: there are no weights to install, so "is it installed?" has no
-//!   answer rather than a negative one, and `Some(false)` would send a reader to
-//!   `roteiro model pull` for a model no registry lists.
 
 use crate::models::{self, ModelKind, Platform};
-use crate::trust::ProducerTrust;
 
 /// A job a model is chosen for.
 ///
@@ -214,57 +187,6 @@ impl ModelTask {
         }
     }
 
-    /// Whether the remote model tier (ADR-0019) can serve this task at all.
-    ///
-    /// [`ModelTask::Draft`], [`ModelTask::Chat`] and [`ModelTask::Review`] — the
-    /// generative surfaces, which share `[models] generative`. The other four are
-    /// refused **structurally rather than by policy**, and for two separate
-    /// reasons:
-    ///
-    /// * [`ModelTask::Embed`] needs vectors, not text, and the remote tier
-    ///   speaks one chat-completion shape.
-    /// * [`ModelTask::Transcribe`], [`ModelTask::Describe`] and
-    ///   [`ModelTask::Ocr`] run **inside extraction**, per blob, below the
-    ///   command that read the config. There is no invocation there to grant
-    ///   anything, so a remote call on those paths could only be consented to by
-    ///   a config value — which is the user layer again, and ADR-0019 §3 is
-    ///   explicit that the user layer alone never suffices. A gate that cannot
-    ///   be operated is not a stricter gate; leaving these four local is.
-    ///
-    /// Their outputs are also *stored* (media records, OCR text in `meta`),
-    /// where ADR-0019 §5's producer identity would have to become
-    /// vendor-asserted — a far larger change than a resolution, and not one this
-    /// stage makes.
-    ///
-    /// [`ModelTask::Review`] qualifies on exactly the test the other four fail:
-    /// it runs **at command level**, where an invocation exists for a person to
-    /// grant. `roteiro review --llm --allow-remote` is a deliberate per-run act
-    /// by someone who typed it, which is what ADR-0019 §3 requires and what a
-    /// per-blob extraction path structurally cannot offer. Its output is also not
-    /// *stored*: a finding is printed, never written to `nodes`/`edges` as a
-    /// `derived` fact, so ADR-0019 §5's producer identity has nothing here to
-    /// become vendor-asserted about.
-    ///
-    /// **The task qualifies; the surface does not ship yet, and the reason is
-    /// worth recording where the next person will look.** Reviewing remotely
-    /// means sending the diff hunks of the file under review, and ADR-0019 §4's
-    /// payload allow-list carries node identities and captured prose — its system
-    /// message says, in as many words, *"You are not given source code"*. A
-    /// remote reviewer therefore needs a **new allow-listed field**, which is an
-    /// amendment to ADR-0019 rather than a flag on this command, and taking the
-    /// "no new path" constraint seriously is precisely what forbids the shortcut.
-    ///
-    /// So `roteiro review --llm` is local-only today and rejects
-    /// `--allow-remote`, enforced by
-    /// `review_llm_has_no_allow_remote_flag_until_the_allow_list_carries_source`.
-    /// This predicate stays `true` because it answers whether the *tier* may
-    /// serve the task under ADR-0019 §3 — it may — not whether a payload for it
-    /// has been designed.
-    #[must_use]
-    pub fn goes_remote(self) -> bool {
-        matches!(self, Self::Draft | Self::Chat | Self::Review)
-    }
-
     /// Registry name of the model this task uses when nothing pins one, or `None`
     /// when the built-in fallback is not a registry model.
     ///
@@ -386,85 +308,17 @@ pub enum ModelSource {
     Pinned,
     /// Nothing named it, so the task's built-in default applies.
     Default,
-    /// The remote model tier serves this task, because the consent gate opened
-    /// for this run (ADR-0019).
-    ///
-    /// **The variant carries the trust grade rather than a model name, and that
-    /// is the point of it existing.** A hosted model has no registry entry and no
-    /// digest: a vendor model string is a *mutable pointer*, so the weights
-    /// behind it can change while the name does not, and Roteiro cannot detect
-    /// it. `trust` is always [`ProducerTrust::VendorAsserted`] today, and it is a
-    /// field rather than an implication so that a resolution says **on its face**
-    /// that its identity is a claim — the same honesty ADR-0019 §5 requires of a
-    /// stored record. A future endpoint that could prove which weights answered
-    /// would set [`ProducerTrust::PinnedDigest`] here and change nothing else.
-    Remote {
-        /// How far the endpoint's model string can be trusted to identify
-        /// particular weights.
-        trust: ProducerTrust,
-    },
 }
 
 impl ModelSource {
-    /// Stable token (`pinned` | `default` | `remote`) for `--json` output.
-    ///
-    /// `remote` does not encode the trust grade, which is reported on its own —
-    /// a consumer that reads `source == "remote"` and wants to know how much the
-    /// model string means asks [`ModelSource::trust`] rather than parsing a
-    /// compound token.
+    /// Stable token (`pinned` | `default`) for `--json` output.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Pinned => "pinned",
             Self::Default => "default",
-            Self::Remote { .. } => "remote",
         }
     }
-
-    /// The trust grade of a remote resolution, or `None` for a local one.
-    ///
-    /// A local model's identity is a digest computed on this machine, so it has
-    /// no grade to report here; [`crate::Producer`] carries it where it matters.
-    #[must_use]
-    pub fn trust(self) -> Option<ProducerTrust> {
-        match self {
-            Self::Pinned | Self::Default => None,
-            Self::Remote { trust } => Some(trust),
-        }
-    }
-
-    /// Whether this resolution sends anything off the machine.
-    #[must_use]
-    pub fn is_remote(self) -> bool {
-        matches!(self, Self::Remote { .. })
-    }
-}
-
-/// Whether the remote model tier is available to a resolution — **the consent
-/// gate's answer, arriving as an input.**
-///
-/// This crate cannot compute it and must not try. Deciding it means reading the
-/// project file, the user file and the invocation under ADR-0019 §3's inverted
-/// precedence, and that logic has exactly one implementation, in `rto-remote`.
-/// What crosses into this module is the result: a boolean the user opened, plus
-/// the trust grade the endpoint carries.
-///
-/// Deliberately **not** an `Option<ProducerTrust>`, so a call site cannot pass
-/// `None` meaning "I did not check". [`RemoteTier::Unavailable`] is a stated
-/// answer, and it is the [`Default`], so every existing caller keeps the
-/// local-only behaviour it had by construction rather than by remembering to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum RemoteTier {
-    /// The tier is off, not built, not consented, or not configured. The
-    /// resolver behaves exactly as it did before ADR-0019.
-    #[default]
-    Unavailable,
-    /// The gate is open for this invocation, and the endpoint's model string
-    /// carries this trust grade.
-    Granted {
-        /// How far that model string can be trusted to identify weights.
-        trust: ProducerTrust,
-    },
 }
 
 /// A resolved task: the model, the rule that chose it, and whether it is on disk.
@@ -473,21 +327,16 @@ pub struct ModelChoice {
     /// The task this answers.
     pub task: ModelTask,
     /// Registry name of the chosen model, or `None` for [`ModelTask::Embed`]'s
-    /// compiled-in hashing embedder (see [`ModelTask::default_model`]) and for
-    /// every [`ModelSource::Remote`] resolution — a hosted model has no registry
-    /// entry, and its vendor model string lives on the endpoint rather than here.
+    /// compiled-in hashing embedder (see [`ModelTask::default_model`]).
     pub model: Option<&'static str>,
-    /// Whether a `[models]` key chose it, the default did, or the remote tier
-    /// did.
+    /// Whether a `[models]` key chose it or the default did.
     pub source: ModelSource,
     /// Whether every file of the host variant is present in the model store.
     ///
     /// `Some(true)` when there is nothing to install — [`ModelChoice::model`] is
     /// `None` for the compiled-in hashing embedder, which is in the binary. `None`
-    /// is the *third* answer, and it means the question does not apply: a
-    /// [`ModelSource::Remote`] choice has no weights on any disk, so reporting
-    /// `Some(false)` would be a false negative pointing at `roteiro model pull`
-    /// for a model no registry lists.
+    /// means the question does not apply; no resolution produces it since the
+    /// remote tier was removed (ADR-0028).
     pub installed: Option<bool>,
 }
 
@@ -495,13 +344,6 @@ impl ModelChoice {
     /// The chosen model's name, or the label of the built-in fallback.
     #[must_use]
     pub fn label(&self) -> &'static str {
-        if self.source.is_remote() {
-            // Not the vendor model string: this returns a `&'static str`, and
-            // more to the point the endpoint owns that string together with the
-            // trust grade that qualifies it. A label that quoted it here would
-            // read like a registry name.
-            return "the remote model tier (`[remote] model`)";
-        }
         self.model.unwrap_or("hashing embedder (offline default)")
     }
 
@@ -516,16 +358,6 @@ impl ModelChoice {
                 format!("built-in default, no model needed (`[models] {key}` unset)")
             }
             ModelSource::Default => format!("built-in default (`[models] {key}` unset)"),
-            // Says both halves, because either alone misleads: *this run* was
-            // granted (so the reader knows it is not a standing setting), and the
-            // identity is asserted rather than measured (so they know what the
-            // model string is worth). `[models] <key>` is named as not applying,
-            // since a pin that resolved and then did not run is exactly the
-            // "configuration appearing honoured" this module refuses elsewhere.
-            ModelSource::Remote { trust } => format!(
-                "the remote model tier, granted for this run (ADR-0019) — `[remote] model`, \
-                 not `[models] {key}`; identity is {trust}, a claim rather than a measurement"
-            ),
         }
     }
 
@@ -539,15 +371,8 @@ impl ModelChoice {
     /// # Errors
     /// [`ModelChoiceError::NotInstalled`] or [`ModelChoiceError::PinNotInstalled`]
     /// when the model's files are not in the store,
-    /// [`ModelChoiceError::NoModel`] for a task whose default is not a model, and
-    /// [`ModelChoiceError::RemoteHasNoWeights`] for a remote resolution.
+    /// and [`ModelChoiceError::NoModel`] for a task whose default is not a model.
     pub fn require_installed(&self) -> Result<&'static str, ModelChoiceError> {
-        // Checked before `model`, so a remote choice is reported as remote rather
-        // than as a task with no model — the two are both `model: None` and mean
-        // entirely different things to whoever reads the error.
-        if self.source.is_remote() {
-            return Err(ModelChoiceError::RemoteHasNoWeights { task: self.task });
-        }
         let Some(name) = self.model else {
             return Err(ModelChoiceError::NoModel { task: self.task });
         };
@@ -559,11 +384,10 @@ impl ModelChoice {
                 key: self.task.config_key(),
                 name: name.to_owned(),
             },
-            // `Remote` is unreachable — it returned above — and `Default` is the
-            // only case left. Matched rather than caught by a wildcard so that a
-            // later variant has to decide what it means here instead of
-            // inheriting "not installed" by accident.
-            ModelSource::Default | ModelSource::Remote { .. } => ModelChoiceError::NotInstalled {
+            // Matched rather than caught by a wildcard so that a later variant
+            // has to decide what it means here instead of inheriting "not
+            // installed" by accident.
+            ModelSource::Default => ModelChoiceError::NotInstalled {
                 name: name.to_owned(),
             },
         })
@@ -632,22 +456,6 @@ pub enum ModelChoiceError {
         /// The task asked about.
         task: ModelTask,
     },
-    /// A caller demanded local weights for a task the remote tier resolved.
-    ///
-    /// Not a fallback point. A surface reaching this has a remote resolution in
-    /// hand and asked for a file path anyway, which means it has a local branch
-    /// it forgot to guard — and quietly answering with the local default there is
-    /// exactly the unannounced downgrade ADR-0019 exists to prevent.
-    #[error(
-        "`{task}` resolved to the remote model tier for this run, which has no weights on \
-         this machine to install or load — a hosted model has no registry entry and no \
-         digest. Send the request through the remote tier, or re-run without \
-         `--allow-remote` to use the local model deliberately"
-    )]
-    RemoteHasNoWeights {
-        /// The task asked about.
-        task: ModelTask,
-    },
 }
 
 /// Resolve `task` against `pins` — the pure core, with no process state.
@@ -690,55 +498,6 @@ pub fn resolve_with(task: ModelTask, pins: &ModelPins) -> Result<ModelChoice, Mo
         model: Some(spec.name),
         source: ModelSource::Pinned,
         installed: Some(is_installed_now(spec.name)),
-    })
-}
-
-/// Resolve `task` against `pins`, letting the remote tier take the two surfaces
-/// it serves when the consent gate opened for this run (ADR-0019).
-///
-/// # The order, and why it is this order
-///
-/// The pin is resolved **first, and its errors still fail**, even when the tier
-/// is granted and the local answer will be discarded. That is deliberate: an
-/// unknown name or a wrong modality in `[models] generative` is a broken
-/// configuration whether or not this particular run reads it, and a
-/// `--allow-remote` that made a config error stop being reported would be a flag
-/// that hides bugs as a side effect. Fixing the pin is cheap; discovering it
-/// three weeks later when the flag comes off is not.
-///
-/// Then the tier wins, for [`ModelTask::goes_remote`] tasks only. It wins over a
-/// pin because the two are not the same kind of statement: `[models] generative`
-/// is a standing project default, and the invocation grant is a deliberate,
-/// per-run act by a person who typed it. The specific overrides the standing —
-/// and it does so **out loud**: [`ModelChoice::why`] names `[models] <key>` as
-/// not applying, so a displaced pin is reported rather than silently skipped.
-///
-/// The four non-generative tasks are untouched by any [`RemoteTier`], so a
-/// granted run still transcribes, describes, embeds and OCRs locally. See
-/// [`ModelTask::goes_remote`] for why that is structural rather than a policy
-/// this function could relax.
-///
-/// # Errors
-/// As [`resolve_with`] — this adds none of its own.
-pub fn resolve_with_remote(
-    task: ModelTask,
-    pins: &ModelPins,
-    remote: RemoteTier,
-) -> Result<ModelChoice, ModelChoiceError> {
-    let local = resolve_with(task, pins)?;
-    let RemoteTier::Granted { trust } = remote else {
-        return Ok(local);
-    };
-    if !task.goes_remote() {
-        return Ok(local);
-    }
-    Ok(ModelChoice {
-        task,
-        // No registry name and no weights: both are `None` because a hosted
-        // model has neither, not because they were not looked up.
-        model: None,
-        source: ModelSource::Remote { trust },
-        installed: None,
     })
 }
 
@@ -806,18 +565,9 @@ pub fn resolve_all_with(
 mod tests {
     use super::{
         DEFAULT_GENERATIVE, DEFAULT_OCR, ModelChoiceError, ModelPins, ModelSource, ModelTask,
-        RemoteTier, TASKS, pin_accepts, resolve_all_with, resolve_with, resolve_with_remote,
+        TASKS, pin_accepts, resolve_all_with, resolve_with,
     };
     use crate::models::{ModelKind, ModelRole, REGISTRY, ResourceTier};
-    use crate::trust::ProducerTrust;
-
-    /// The gate's answer as it actually arrives: open, with a model string
-    /// nothing on this machine can verify.
-    fn granted() -> RemoteTier {
-        RemoteTier::Granted {
-            trust: ProducerTrust::VendorAsserted,
-        }
-    }
 
     fn pins(key: &str, value: &str) -> ModelPins {
         let mut p = ModelPins::default();
@@ -1026,56 +776,6 @@ mod tests {
         );
     }
 
-    /// **A granted tier changes exactly the generative surfaces.** `spec draft`,
-    /// Ask and `review --llm` all run at command level, where an invocation
-    /// exists to grant; the other four are refused structurally rather than by a
-    /// policy check, because there is no invocation inside extraction to grant
-    /// anything with — see [`ModelTask::goes_remote`].
-    ///
-    /// The negative half is the half worth having: a run that granted egress must
-    /// not thereby start sending audio, images or OCR blobs it was never asked
-    /// about. Written against [`ModelTask::goes_remote`] rather than a literal
-    /// list so that a task added to the table has to state which side it is on.
-    #[test]
-    fn a_granted_tier_takes_the_generative_surfaces_and_no_others() {
-        let unset = ModelPins::default();
-        for task in TASKS {
-            let choice = resolve_with_remote(task, &unset, granted()).expect("resolves");
-            if task.goes_remote() {
-                assert_eq!(
-                    choice.source,
-                    ModelSource::Remote {
-                        trust: ProducerTrust::VendorAsserted
-                    },
-                    "{task} is one of ADR-0019's two surfaces"
-                );
-                assert!(choice.model.is_none(), "{task}: no registry name exists");
-                assert!(
-                    choice.installed.is_none(),
-                    "{task}: `installed` has no answer, not a negative one"
-                );
-            } else {
-                assert_eq!(
-                    choice,
-                    resolve_with(task, &unset).expect("resolves"),
-                    "{task} is untouched by a granted tier"
-                );
-                assert!(choice.installed.is_some(), "{task}: locally answerable");
-            }
-        }
-        assert!(
-            ModelTask::Draft.goes_remote()
-                && ModelTask::Chat.goes_remote()
-                && ModelTask::Review.goes_remote()
-        );
-        assert!(
-            !ModelTask::Embed.goes_remote()
-                && !ModelTask::Transcribe.goes_remote()
-                && !ModelTask::Describe.goes_remote()
-                && !ModelTask::Ocr.goes_remote()
-        );
-    }
-
     /// **`Review` is an amendment to this table, not a seventh bespoke rule.**
     /// Stage 35b's reviewer resolves its model here or not at all, so the whole
     /// of what it adds is asserted in one place: a task on the existing
@@ -1147,138 +847,6 @@ mod tests {
             TASKS.len(),
             "`roteiro config` reports every task"
         );
-    }
-
-    /// **A remote resolution says on its face that its identity is a claim.**
-    /// ADR-0019 §5: a vendor model string is a mutable pointer, so the weights
-    /// behind it can change while the name does not. The variant carries the
-    /// trust grade precisely so that nothing downstream has to remember to add
-    /// the caveat.
-    #[test]
-    fn a_remote_resolution_declares_its_identity_a_claim() {
-        let choice = resolve_with_remote(ModelTask::Chat, &ModelPins::default(), granted())
-            .expect("resolves");
-        assert_eq!(choice.source.as_str(), "remote");
-        assert!(choice.source.is_remote());
-        assert_eq!(choice.source.trust(), Some(ProducerTrust::VendorAsserted));
-
-        let why = choice.why();
-        assert!(why.contains("vendor_asserted"), "{why}");
-        assert!(why.contains("claim rather than a measurement"), "{why}");
-        assert!(why.contains("granted for this run"), "{why}");
-        // The label points at the endpoint's key rather than quoting a model
-        // name, so nothing reads a mutable pointer as a registry entry.
-        assert_eq!(choice.label(), "the remote model tier (`[remote] model`)");
-
-        // A local resolution has no grade to report, and must not acquire one:
-        // `pinned`/`default` identities are digests measured on this machine.
-        let local = resolve_with(ModelTask::Chat, &ModelPins::default()).expect("resolves");
-        assert_eq!(local.source.trust(), None);
-        assert!(!local.source.is_remote());
-    }
-
-    /// **A displaced pin is reported, never silently skipped.** `--allow-remote`
-    /// is a deliberate per-run act and outranks a standing `[models] generative`,
-    /// but a configuration that appears honoured while something else ran is the
-    /// exact failure this module exists to prevent — so `why()` names the key it
-    /// did not use.
-    #[test]
-    fn a_granted_tier_displaces_a_pin_and_says_which_key_it_displaced() {
-        let pinned = pins("generative", "qwen3-8b");
-        let local = resolve_with(ModelTask::Draft, &pinned).expect("a valid pin");
-        assert_eq!(local.model, Some("qwen3-8b"));
-        assert_eq!(local.source, ModelSource::Pinned);
-
-        let remote = resolve_with_remote(ModelTask::Draft, &pinned, granted()).expect("resolves");
-        assert!(remote.source.is_remote(), "the invocation outranks the pin");
-        let why = remote.why();
-        assert!(
-            why.contains("not `[models] generative`"),
-            "the displaced key is named: {why}"
-        );
-    }
-
-    /// **A broken pin still fails under a granted tier.** The local answer is
-    /// about to be discarded, and the error is raised anyway: an unknown name or
-    /// a wrong modality is a broken configuration whether or not this run reads
-    /// it, and a flag that made config errors stop being reported would hide bugs
-    /// as a side effect of granting egress.
-    #[test]
-    fn a_broken_pin_still_fails_under_a_granted_tier() {
-        let err = resolve_with_remote(
-            ModelTask::Draft,
-            &pins("generative", "bge-small-en-v1.5-gguf"),
-            granted(),
-        )
-        .expect_err("an encoder cannot generate, tier or no tier");
-        assert!(
-            matches!(
-                err,
-                ModelChoiceError::WrongKind {
-                    key: "generative",
-                    ..
-                }
-            ),
-            "{err:?}"
-        );
-        let err = resolve_with_remote(
-            ModelTask::Chat,
-            &pins("generative", "no-such-model"),
-            granted(),
-        )
-        .expect_err("an unknown name is still unknown");
-        assert!(matches!(err, ModelChoiceError::Unknown { .. }), "{err:?}");
-    }
-
-    /// **The default is off, structurally.** [`RemoteTier`]'s `Default` is
-    /// `Unavailable`, and an unavailable tier resolves every task to exactly what
-    /// `resolve_with` returns — so a caller that forgets the tier gets the local
-    /// answer rather than an accidental grant.
-    #[test]
-    fn an_unavailable_tier_resolves_exactly_as_the_local_resolver_does() {
-        assert_eq!(RemoteTier::default(), RemoteTier::Unavailable);
-        for pins in [
-            ModelPins::default(),
-            pins("generative", "qwen3-8b"),
-            pins("audio", "voxtral-mini-3b"),
-        ] {
-            for task in TASKS {
-                assert_eq!(
-                    resolve_with_remote(task, &pins, RemoteTier::default()).ok(),
-                    resolve_with(task, &pins).ok(),
-                    "{task}: an unavailable tier changes nothing"
-                );
-            }
-        }
-    }
-
-    /// **`require_installed` on a remote choice refuses instead of falling back.**
-    /// A surface holding a remote resolution that asks for a file path has a
-    /// local branch it forgot to guard, and answering it with the local default
-    /// would be the unannounced downgrade ADR-0019 most needs to prevent. The
-    /// error says so and offers the deliberate alternative.
-    #[test]
-    fn require_installed_on_a_remote_choice_refuses_rather_than_falling_back() {
-        let choice = resolve_with_remote(ModelTask::Draft, &ModelPins::default(), granted())
-            .expect("resolves");
-        let err = choice
-            .require_installed()
-            .expect_err("there are no weights to require");
-        assert!(
-            matches!(
-                err,
-                ModelChoiceError::RemoteHasNoWeights {
-                    task: ModelTask::Draft
-                }
-            ),
-            "{err:?}"
-        );
-        let text = err.to_string();
-        assert!(text.contains("no registry entry and no digest"), "{text}");
-        assert!(text.contains("--allow-remote"), "actionable: {text}");
-        // …and it is *not* reported as the modelless-task case, which is also
-        // `model: None` and means something entirely different to a reader.
-        assert!(!matches!(err, ModelChoiceError::NoModel { .. }));
     }
 
     /// Every task's key is one of the five `[models]` keys, and every key is

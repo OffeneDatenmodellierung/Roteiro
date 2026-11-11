@@ -2,8 +2,8 @@
 //! (ADR-0007 v1.4).
 //!
 //! The ADR's rule is stated for a switch — *"a project may deny but never
-//! grant"* — because the first key it governed was one. But `[remote] enabled`
-//! and `[serve] max_client_tool_bytes` are the same rule at different widths: a
+//! grant"* — because the first key it governed (`[remote] enabled`, removed by
+//! ADR-0028) was one. But a switch and `[serve] max_client_tool_bytes` are the same rule at different widths: a
 //! project file may move the value toward **more** restriction and never toward
 //! less. Under `Ord` that is one comparison, since `false < true` and a smaller
 //! bound is a tighter one.
@@ -87,8 +87,7 @@ impl<T: Ord + Copy> Grant<T> {
     /// not what the file literally said — so a project naming a bound *above*
     /// the user's own raise is ignored, while one naming a bound between the
     /// built-in and that raise applies. A caller wanting "the file said X" should
-    /// test the file, not this; `ConfigGrant` keeps such a predicate of its own
-    /// for `[remote] enabled`, where "denied" means the literal `false`.
+    /// test the file, not this.
     #[must_use]
     pub fn project_widening_ignored(self) -> bool {
         matches!(self.project, Some(p) if p > self.baseline())
@@ -106,8 +105,8 @@ impl<T: Ord + Copy> Grant<T> {
 mod tests {
     use super::Grant;
 
-    /// `[remote] enabled`'s four cases, which `ConfigGrant` decided before this
-    /// type existed. Its built-in is `false`: unset is not a grant.
+    /// A switch's four cases (originally `[remote] enabled`'s, before ADR-0028
+    /// removed that key). Its built-in is `false`: unset is not a grant.
     #[test]
     fn a_switch_denies_from_the_project_and_grants_only_from_the_user() {
         let g = |project, user| Grant::from_layers(project, user, false);

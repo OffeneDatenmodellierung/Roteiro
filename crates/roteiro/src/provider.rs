@@ -2,17 +2,18 @@
 //! ([[docs/adr/0027-external-model-provider.md]]).
 //!
 //! [`ProviderEngine`] implements [`rto_llama::Engine`] over HTTP against any
-//! OpenAI-compatible server: Ollama, `llama-server`, LM Studio. Everything that
-//! already talks to a model through that trait — the `/v1` tool loop, the Ask
-//! panel — runs against it unchanged.
+//! OpenAI-compatible server: Ollama, `llama-server`, LM Studio, or a hosted
+//! endpoint such as Anthropic's or OpenAI's. Everything that already talks to a
+//! model through that trait — the `/v1` tool loop, the Ask panel, `spec draft` —
+//! runs against it unchanged, with the full context it builds locally.
 //!
-//! # Loopback only
+//! # Off this machine is allowed, and announced
 //!
-//! A provider on another machine is egress, and ADR-0019 decides what egress
-//! requires. Until that gate is wired here, [`ProviderEngine::new`] refuses any
-//! base URL whose host is not this machine, so `[provider] base_url` in a
-//! committed `roteiro.toml` cannot send repository content anywhere
-//! (ADR-0027 §1).
+//! ADR-0028 lets `base_url` name another machine from any config layer. What
+//! remains: plaintext `http://` is refused off this machine, because the request
+//! carries repository content and the credential; and [`ProviderEngine::new`]
+//! prints the host on stderr whenever it is not this machine, so a committed
+//! `roteiro.toml` cannot send content anywhere without every run saying so.
 //!
 //! # Tools stay in the prompt
 //!
@@ -32,12 +33,12 @@ use rto_llama::{ChatRequest, CompletionStats, Engine, EngineError, FinishReason,
 
 /// The environment variable holding the provider's credential, if it needs one.
 ///
-/// Not a config key, for the reason `[remote]`'s credential is not one:
-/// `roteiro.toml` is committed. A local Ollama or `llama-server` wants none.
+/// Not a config key, because `roteiro.toml` is committed. A local Ollama or
+/// `llama-server` wants none; a hosted endpoint is sent it as a Bearer token.
 pub const API_KEY_ENV: &str = "ROTEIRO_PROVIDER_API_KEY";
 
-/// How long a connection may take to open. Short, because the server is on this
-/// machine: a slow connect means it is not running.
+/// How long a connection may take to open. Short: a local server that is slow to
+/// accept is not running, and a hosted one that is has a problem a retry won't fix.
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// How long one call may take end to end. Generous, because a provider may load
@@ -45,7 +46,7 @@ const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// `max_tokens` anyway.
 const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
-/// An [`Engine`] backed by an OpenAI-compatible server on this machine.
+/// An [`Engine`] backed by an OpenAI-compatible server.
 pub struct ProviderEngine {
     base: String,
     models: Vec<String>,
@@ -57,18 +58,29 @@ impl ProviderEngine {
     /// provider model ids `GET /v1/models` lists — taken from config rather than
     /// asked of the server, so building one opens no socket.
     ///
+    /// Prints the host on stderr when it is not this machine (ADR-0028).
+    ///
     /// # Errors
-    /// If `base_url` is not an absolute `http(s)` URL naming this machine.
+    /// If `base_url` is not an absolute `http(s)` URL, or is plaintext `http://`
+    /// to another machine.
     pub fn new(base_url: &str, models: Vec<String>) -> anyhow::Result<Self> {
-        let base =
-            loopback_base(base_url).map_err(|e| anyhow::anyhow!("`[provider] base_url`: {e}"))?;
+        let (base, host) =
+            checked_base(base_url).map_err(|e| anyhow::anyhow!("`[provider] base_url`: {e}"))?;
+        if let Some(host) = &host {
+            eprintln!(
+                "note: model provider is {host} — prompts, including repository content, are \
+                 sent off this machine (`[provider] base_url`, ADR-0028)"
+            );
+        }
         let agent = ureq::config::Config::builder()
-            // A redirect could move the call off this machine after the
-            // loopback check passed.
+            // A redirect could move the call, credential included, somewhere
+            // other than the host that was checked and announced.
             .max_redirects(0)
-            // An `HTTP(S)_PROXY`/`ALL_PROXY` in the environment would otherwise
-            // carry the call, credential included, to wherever the proxy is.
-            .proxy(None)
+            // Hosted only: a corporate network may require `HTTPS_PROXY`, and a
+            // TLS call tunnels through it (`NO_PROXY` is honoured). Never for
+            // this machine, where a proxy would carry the call, credential
+            // included, somewhere that is not the server named.
+            .proxy(host.and_then(|_| ureq::Proxy::try_from_env()))
             .timeout_connect(Some(CONNECT_TIMEOUT))
             .timeout_global(Some(CALL_TIMEOUT))
             .http_status_as_error(false)
@@ -168,14 +180,17 @@ fn api_key() -> Option<String> {
         .filter(|key| !key.is_empty())
 }
 
-/// `url` without a trailing `/`, if it is an absolute `http(s)` URL whose host is
-/// this machine.
-fn loopback_base(url: &str) -> Result<String, String> {
+/// `url` without a trailing `/`, and its host when that is not this machine.
+///
+/// Refuses anything but an absolute `http(s)` URL, and plaintext `http://` to
+/// another machine: the request carries repository content and the credential.
+fn checked_base(url: &str) -> Result<(String, Option<String>), String> {
     let trimmed = url.trim().trim_end_matches('/');
     let uri: ureq::http::Uri = trimmed
         .parse()
         .map_err(|e| format!("`{url}` is not a URL: {e}"))?;
-    if !matches!(uri.scheme_str(), Some("http" | "https")) {
+    let scheme = uri.scheme_str();
+    if !matches!(scheme, Some("http" | "https")) {
         return Err(format!("`{url}` must start with http:// or https://"));
     }
     let host = uri.host().unwrap_or_default();
@@ -184,14 +199,16 @@ fn loopback_base(url: &str) -> Result<String, String> {
         || ip_host
             .parse::<std::net::IpAddr>()
             .is_ok_and(|ip| ip.is_loopback());
-    if !loopback {
+    if loopback {
+        return Ok((trimmed.to_owned(), None));
+    }
+    if scheme == Some("http") {
         return Err(format!(
-            "`{url}` is not on this machine. A provider elsewhere is egress, which \
-             ADR-0027 §1 refuses until it is routed through the remote tier's consent \
-             gate; use a loopback address such as http://127.0.0.1:11434/v1"
+            "`{url}` is plaintext to another machine; use https:// (or a loopback address \
+             such as http://127.0.0.1:11434/v1)"
         ));
     }
-    Ok(trimmed.to_owned())
+    Ok((trimmed.to_owned(), Some(host.to_owned())))
 }
 
 /// The `/v1/chat/completions` body for `req`, streaming.
@@ -449,7 +466,8 @@ mod tests {
              data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2}}\n\n\
              data: [DONE]\n\n",
         );
-        let engine = ProviderEngine::new(&base, vec!["qwen3:8b".to_owned()]).expect("loopback");
+        let engine =
+            ProviderEngine::new(&base, vec!["qwen3:8b".to_owned()]).expect("a loopback stub");
         let completion = engine.chat(&request("qwen3:8b")).expect("completes");
         assert_eq!(completion.content, "Hello");
         assert_eq!(completion.prompt_tokens, 3);
@@ -467,7 +485,7 @@ mod tests {
     #[test]
     fn an_unknown_model_is_named_rather_than_reported_as_a_failure() {
         let (base, _server) = stub(404, "{\"error\":\"model not found\"}");
-        let engine = ProviderEngine::new(&base, Vec::new()).expect("loopback");
+        let engine = ProviderEngine::new(&base, Vec::new()).expect("a loopback stub");
         let err = engine.chat(&request("nope")).expect_err("404");
         assert!(
             matches!(err, EngineError::UnknownModel(ref m) if m == "nope"),
@@ -479,7 +497,7 @@ mod tests {
     fn a_refused_request_is_a_client_error_not_a_failure() {
         for status in [400, 422] {
             let (base, _server) = stub(status, "{\"error\":\"model does not support images\"}");
-            let engine = ProviderEngine::new(&base, Vec::new()).expect("loopback");
+            let engine = ProviderEngine::new(&base, Vec::new()).expect("a loopback stub");
             let err = engine.chat(&request("qwen3:8b")).expect_err("refused");
             assert!(
                 matches!(err, EngineError::InvalidRequest(ref m) if m.contains("does not support images")),
@@ -494,7 +512,7 @@ mod tests {
             200,
             "{\"data\":[{\"index\":1,\"embedding\":[2.0]},{\"index\":0,\"embedding\":[1.0]}]}",
         );
-        let engine = ProviderEngine::new(&base, Vec::new()).expect("loopback");
+        let engine = ProviderEngine::new(&base, Vec::new()).expect("a loopback stub");
         let vectors = engine
             .embed("bge-m3", &["a".to_owned(), "b".to_owned()])
             .expect("embeds");
@@ -565,23 +583,31 @@ mod tests {
         read("data: [DONE]\n\n").expect("[DONE] ends it");
     }
 
-    /// The loopback check governs the real connection: a proxy in the
-    /// environment must not carry the call (and its credential) elsewhere.
+    /// A proxy in the environment never carries a call to this machine (and its
+    /// credential) elsewhere, but a hosted endpoint does use it — a corporate
+    /// network may allow no other route out. Also pins the off-machine notice:
+    /// printed for the hosted engine, never for the loopback one.
     /// Re-runs itself in a child, because setting a process's environment from a
     /// test is `unsafe` and this crate forbids that.
     #[test]
-    fn a_proxy_in_the_environment_does_not_carry_the_call() {
+    fn a_proxy_carries_hosted_calls_and_never_local_ones() {
         const CHILD: &str = "ROTEIRO_PROVIDER_PROXY_TEST_CHILD";
         if std::env::var_os(CHILD).is_some() {
             let (base, _server) = stub(200, "data: [DONE]\n\n");
-            let engine = ProviderEngine::new(&base, Vec::new()).expect("loopback");
+            let engine = ProviderEngine::new(&base, Vec::new()).expect("a loopback stub");
             engine
                 .chat(&request("m"))
                 .expect("the stub was reached directly, not through the proxy");
+            let hosted = ProviderEngine::new("https://api.example.com/v1", Vec::new())
+                .expect("a hosted https endpoint");
+            assert!(
+                hosted.agent.config().proxy().is_some(),
+                "a hosted endpoint takes the environment's proxy"
+            );
             return;
         }
         let name = format!(
-            "{}::a_proxy_in_the_environment_does_not_carry_the_call",
+            "{}::a_proxy_carries_hosted_calls_and_never_local_ones",
             module_path!()
                 .split_once("::")
                 .map_or(module_path!(), |(_, rest)| rest)
@@ -606,31 +632,46 @@ mod tests {
         }
         let out = child.output().expect("run the child");
         let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(
-            out.status.success(),
-            "{stdout}{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{stdout}{stderr}");
         // Zero passed would be a filter that matched nothing, not a pass.
         assert!(stdout.contains("1 passed"), "{stdout}");
+        // The child built one loopback engine and one hosted one: exactly one
+        // notice, naming the hosted host (ADR-0028 §2).
+        assert_eq!(
+            stderr.matches("note: model provider is").count(),
+            1,
+            "only the hosted engine announces itself: {stderr}"
+        );
+        assert!(
+            stderr.contains("note: model provider is api.example.com"),
+            "{stderr}"
+        );
     }
 
     #[test]
-    fn only_this_machine_is_accepted() {
-        for ok in [
+    fn hosted_https_is_accepted_and_named_but_plaintext_off_machine_is_not() {
+        for local in [
             "http://127.0.0.1:11434/v1",
             "http://localhost:8080/v1/",
             "http://[::1]:8080/v1",
         ] {
-            assert!(loopback_base(ok).is_ok(), "{ok}");
+            assert_eq!(checked_base(local).map(|(_, h)| h), Ok(None), "{local}");
         }
+        assert_eq!(
+            checked_base("https://api.anthropic.com/v1/"),
+            Ok((
+                "https://api.anthropic.com/v1".to_owned(),
+                Some("api.anthropic.com".to_owned())
+            ))
+        );
         for refused in [
             "http://192.168.1.5:11434/v1",
-            "https://api.example.com/v1",
+            "http://api.example.com/v1",
             "ftp://127.0.0.1/v1",
             "127.0.0.1:11434",
         ] {
-            assert!(loopback_base(refused).is_err(), "{refused}");
+            assert!(checked_base(refused).is_err(), "{refused}");
         }
     }
 }

@@ -10,9 +10,8 @@ Defaults are sensible, so a config file is optional. When you want to pin
 choices, Roteiro merges two layers: a per-user `~/.roteiro/config.toml` and a
 per-project `roteiro.toml` at the repository root (project wins). `roteiro
 config` prints the effective, merged values and labels which layer set each one.
-**One key inverts that**: `[remote] enabled`, which opens Roteiro's only egress
-path, may be switched *off* by the committed project file but never *on* — see
-below.
+**One key inverts that**: `[lint] allow_unsandboxed`, which lets builds run on
+your host, may be switched *off* by the committed project file but never *on*.
 
 <pre><code><span class="c"># roteiro.toml — every key is optional; shown with its default</span>
 
@@ -23,14 +22,10 @@ vision     = "smolvlm-500m-gguf"        <span class="c"># image description for 
 audio      = "voxtral-mini-3b"          <span class="c"># speech transcription for `media build`</span>
 ocr        = "ocrs-text"                <span class="c"># literal image text for `sync`</span>
 
-[remote]                                <span class="c"># the optional remote model tier — OFF by default, and the one key</span>
-enabled  = false                        <span class="c"># whose precedence inverts: roteiro.toml may set this false for</span>
-                                        <span class="c"># everyone, and may NEVER set it true. Only your own</span>
-                                        <span class="c"># ~/.roteiro/config.toml can grant it — and a run still needs</span>
-                                        <span class="c"># --allow-remote. Both are required; neither alone is enough.</span>
-endpoint = "https://…/v1/chat/completions"  <span class="c"># ordinary key: either layer may choose the destination</span>
-model    = "vendor/model-name"          <span class="c"># a vendor model string is a mutable pointer, so anything recorded</span>
-                                        <span class="c"># from this tier is `vendor_asserted`, never digest-pinned</span>
+[provider]                              <span class="c"># the OpenAI-compatible model server (ADR-0027/0028); unset by default</span>
+# base_url = "http://127.0.0.1:11434/v1"  <span class="c"># e.g. local Ollama, or a hosted https:// endpoint (announced on every run);</span>
+                                        <span class="c"># once set, [models] values are the provider's ids, not the registry names above.</span>
+                                        <span class="c"># Credential: ROTEIRO_PROVIDER_API_KEY in the environment, never here</span>
 
 [ingest]                                <span class="c"># which blob content `sync` embeds</span>
 prose  = true                           <span class="c"># Markdown / plain text bodies</span>

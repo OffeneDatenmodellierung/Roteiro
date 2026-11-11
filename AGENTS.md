@@ -188,7 +188,7 @@ CI (`.github/workflows/ci.yml`) enforces these; run them locally before pushing.
 - Commit messages and PR descriptions explain the **why**, not just the what.
 - **`!` is a release instruction, not a severity marker.** A `!` after the type
   (`fix(schema)!:`) or a `BREAKING CHANGE:` footer tells release-plz to bump the
-  **major version of all nine crates** — they share one
+  **major version of all eight crates** — they share one
   `[workspace.package] version`, so one `!` in one crate relabels the whole
   workspace, and crates with nothing breaking in them get the new major anyway.
   Use it only when something a consumer of a **published** crate depends on has
@@ -208,7 +208,7 @@ CI (`.github/workflows/ci.yml`) enforces these; run them locally before pushing.
   an under-marked commit is a changelog omission, an over-marked one is a version
   the project cannot walk back.
 
-- **The `rto-*` crates are published, and are implementation details.** All eight
+- **The `rto-*` crates are published, and are implementation details.** All seven
   of them publish to crates.io because they have to: `crates/roteiro/Cargo.toml`
   depends on them by version, and crates.io rejects a package with path-only
   dependencies — so `cargo install roteiro` does not work unless they all ship.

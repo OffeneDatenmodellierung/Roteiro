@@ -1,14 +1,17 @@
-# Model setup — pointing Roteiro at a local model server
+# Model setup — pointing Roteiro at a model server
 
 Roteiro does not need a model. Graph building, `search`, `query`, `check`,
 `review` and the explorer all run without one, and `infer` falls back to a
 built-in hashing embedding.
 
 The features that do use a language model send it to an **OpenAI-compatible
-server already running on this machine** — [Ollama](https://ollama.com),
-`llama-server` from [llama.cpp](https://github.com/ggml-org/llama.cpp), or LM
-Studio. Roteiro does not download or run those models itself
-([ADR-0027](adr/0027-external-model-provider.md)).
+server** — by default one already running on this machine:
+[Ollama](https://ollama.com), `llama-server` from
+[llama.cpp](https://github.com/ggml-org/llama.cpp), or LM Studio. It can also be
+a hosted endpoint (see [Hosted models](#hosted-models)). Roteiro does not
+download or run those models itself
+([ADR-0027](adr/0027-external-model-provider.md),
+[ADR-0028](adr/0028-one-engine-local-or-hosted.md)).
 
 > **Migration status.** `roteiro serve` (the `/v1` endpoint and the explorer's
 > Ask panel) and `roteiro spec draft` use the provider today. `review --llm`,
@@ -53,12 +56,11 @@ not Roteiro registry names.
 
 Two rules worth knowing:
 
-- **The provider must be on this machine.** A `base_url` whose host is not
-  `localhost`, `127.0.0.1` or `::1` is refused: sending repository content to
-  another machine is egress, which the remote tier
-  ([ADR-0019](adr/0019-remote-model-tier.md)) governs separately.
+- **A provider off this machine is announced on every run**, and must be
+  `https://`. See [Hosted models](#hosted-models).
 - **A credential is an environment variable**, `ROTEIRO_PROVIDER_API_KEY`, never
-  a config key. Ollama and `llama-server` need none by default.
+  a config key. Ollama and `llama-server` need none by default; a hosted
+  endpoint is sent it as `Authorization: Bearer …`.
 
 ## 3. Check it
 
@@ -75,6 +77,34 @@ curl -s http://127.0.0.1:8017/v1/models
 The model list is taken from `[models]`; Roteiro does not ask the provider at
 startup. A model the provider does not have is reported on the first request,
 by name.
+
+## Hosted models
+
+For teams whose enterprise subscription covers sending code to a hosted model,
+point `base_url` at the vendor's OpenAI-compatible endpoint. For Claude:
+
+```toml
+[provider]
+base_url = "https://api.anthropic.com/v1"
+
+[models]
+generative = "claude-sonnet-5-5"   # or claude-opus-5-5, claude-haiku-5-5
+```
+
+```sh
+export ROTEIRO_PROVIDER_API_KEY=sk-ant-...
+```
+
+Everything the local path builds is sent: the full conversation, graph tool
+results, symbol names, paths and captured prose. Roteiro prints the host on
+stderr on every run, keeps no log of what it sent, and refuses plaintext
+`http://` to another machine. A hosted endpoint is reached through
+`HTTPS_PROXY`/`ALL_PROXY` when set (`NO_PROXY` is honoured); a local provider
+never is.
+
+A committed `roteiro.toml` can set this for a whole team, so check a
+repository's `[provider]` table before running Roteiro in it. Anthropic serves no
+embeddings, so leave `embedding` unset.
 
 ## Which models each feature needs
 

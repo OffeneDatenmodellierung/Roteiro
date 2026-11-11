@@ -116,8 +116,8 @@ image = "registry.example/you/rust-clippy@sha256:1234…"
 image = "registry.example/team/rust-clippy@sha256:5678…"
 ```
 
-Ordinary precedence: **project over user, `--image` over both.** That is
-`[remote] endpoint`'s rule, not `[lint] allow_unsandboxed`'s — a project may
+Ordinary precedence: **project over user, `--image` over both.** That is not
+`[lint] allow_unsandboxed`'s rule — a project may
 choose *where* its team's boundary comes from without being able to decide
 *whether* there is one. The permission inverts; a locator does not.
 
@@ -298,7 +298,7 @@ osv-scanner = "registry.example/team/osv-scanner@sha256:9abc…"
 ```
 
 **Ordinary precedence, per analyzer: project over user.** That is `[lint] image`'s
-rule and `[remote] endpoint`'s — a project may choose *where* its team's boundary
+rule — a project may choose *where* its team's boundary
 comes from without being able to decide *whether* there is one. The permission
 keys invert; a locator does not.
 
