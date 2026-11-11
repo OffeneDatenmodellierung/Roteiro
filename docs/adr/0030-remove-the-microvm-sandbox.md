@@ -163,7 +163,10 @@ analyzer at all) are unchanged.
 - **Analyzers that only ran sandboxed now run only on the host, with consent.**
   `semgrep` had a pinned image and was the one analyzer a stock sandboxed run
   could use; `roteiro lint clippy` needed a user-supplied image. Both now need a
-  host install and a grant, or a report from elsewhere through `ingest`.
+  host install and a grant. `semgrep` can instead be run elsewhere and its report
+  brought in through `ingest`; Clippy cannot, because lint output is deliberately
+  not a storable findings layer (ADR-0020 v1.1), so a granted host run is its only
+  path.
 - **Unblocks the dependency policy.** With `boxlite` gone, the three `zstd`
   ignores and the six unmaintained-crate ignores have nothing to excuse, and
   `rusqlite` is free to move past ^0.39. Taking the SQLite fix (RUSTSEC-2026-0459)
