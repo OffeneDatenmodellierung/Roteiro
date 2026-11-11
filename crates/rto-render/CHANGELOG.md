@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v6.2.0...rto-render-v7.0.0) - 2026-11-11
+
+### Added
+
+- *(refs)* an authored reference register, work nodes, and `roteiro refs`
+
+### Other
+
+- Merge pull request #946 from OffeneDatenmodellierung/refactor/dedupe-text-helpers
+- share text helpers duplicated across four crates
+
 ## [6.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v6.0.2...rto-render-v6.1.0) - 2026-09-29
 
 ### Fixed
