@@ -383,34 +383,6 @@ pub(crate) fn execute(
     })
 }
 
-/// The last few lines of an analyzer's standard error, for a failure message.
-///
-/// Bounded, because a failing analyzer can be extremely talkative and a wall of
-/// output in an error message hides the error.
-pub(crate) fn stderr_tail(stderr: &[u8]) -> String {
-    const MAX_LINES: usize = 8;
-    const MAX_BYTES: usize = 4_000;
-    let text = String::from_utf8_lossy(stderr);
-    let trimmed = text.trim_end();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-    let tail: Vec<&str> = trimmed
-        .lines()
-        .rev()
-        .take(MAX_LINES)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    let mut joined = tail.join("\n  ");
-    if joined.len() > MAX_BYTES {
-        joined.truncate(MAX_BYTES);
-        joined.push('…');
-    }
-    format!("\n  its stderr ended:\n  {joined}")
-}
-
 // `ChildEnv` and `scrub_environment` used to live here, and moving them out is
 // the point rather than a tidy-up. They were this backend's, while the guest
 // backend built its environment from nothing in `boxlite.rs` — two mechanisms
@@ -418,7 +390,7 @@ pub(crate) fn stderr_tail(stderr: &[u8]) -> String {
 // a passthrough under a promise that it was configured. They are now one type
 // with two consumers in `crate::child_env`, which is also where the reason a
 // guest cannot have an `inherit` half is written down.
-pub(crate) use crate::child_env::{ChildEnv, scrub_environment};
+pub(crate) use crate::child_env::{ChildEnv, scrub_environment, stderr_tail};
 
 /// Ask the analyzer for its version, best effort.
 ///
