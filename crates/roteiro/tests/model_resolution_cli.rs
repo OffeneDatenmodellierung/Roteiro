@@ -419,6 +419,14 @@ fn spec_draft_refuses_a_generative_pin_of_the_wrong_kind() {
 /// streamed sentence, and sends each request body it receives down the channel.
 #[cfg(feature = "provider")]
 fn stub_provider() -> (String, std::sync::mpsc::Receiver<String>) {
+    stub_provider_with(|_| "Drafted by the provider.")
+}
+
+/// [`stub_provider`], answering each request body with `reply(body)`.
+#[cfg(feature = "provider")]
+fn stub_provider_with(
+    reply: fn(&str) -> &'static str,
+) -> (String, std::sync::mpsc::Receiver<String>) {
     use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -441,9 +449,12 @@ fn stub_provider() -> (String, std::sync::mpsc::Receiver<String>) {
             }
             let mut body = vec![0; length];
             reader.read_exact(&mut body).expect("body");
-            sent.send(String::from_utf8_lossy(&body).into_owned()).ok();
-            let events = "data: {\"choices\":[{\"delta\":{\"content\":\"Drafted by the provider.\"}}]}\n\n\
-                          data: [DONE]\n\n";
+            let body = String::from_utf8_lossy(&body).into_owned();
+            let content = serde_json::to_string(reply(&body)).expect("encode");
+            sent.send(body).ok();
+            let events = format!(
+                "data: {{\"choices\":[{{\"delta\":{{\"content\":{content}}}}}]}}\n\ndata: [DONE]\n\n"
+            );
             write!(
                 stream,
                 "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\
@@ -520,6 +531,109 @@ fn spec_draft_reports_what_the_draft_never_mentions() {
         "stdout stays the document"
     );
 
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A repo whose only symbol is `fixture_parser`, configured for `base`.
+#[cfg(feature = "provider")]
+fn parser_repo(label: &str, base: &str) -> PathBuf {
+    let dir = fresh_repo(label);
+    std::fs::create_dir_all(dir.join("src")).expect("mkdir");
+    std::fs::write(dir.join("src/lib.rs"), "pub fn fixture_parser() {}\n").expect("write");
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "code"]);
+    std::fs::write(
+        dir.join("roteiro.toml"),
+        format!("[provider]\nbase_url = \"{base}\"\n\n[models]\ngenerative = \"qwen3:8b\"\n"),
+    )
+    .expect("write project");
+    dir
+}
+
+/// The first draft every section gets: poor style, mentions the symbol.
+const POOR_DRAFT: &str = "We utilize `fixture_parser` in order to parse.";
+
+/// `--repair` keeps a rewrite that scores better and drops nothing
+/// (ADR-0031 §3).
+#[test]
+#[cfg(feature = "provider")]
+fn spec_draft_repair_keeps_a_better_rewrite() {
+    let (base, _requests) = stub_provider_with(|body| {
+        if body.contains("Your previous draft was") {
+            "`fixture_parser` parses the input."
+        } else {
+            POOR_DRAFT
+        }
+    });
+    let dir = parser_repo("spec-draft-repair-keep", &base);
+    let out = roteiro(&dir, &["spec", "draft", "fixture_parser", "--repair", "1"]);
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "drafts: {err}");
+    let doc = stdout(&out);
+    assert!(doc.contains("`fixture_parser` parses the input."), "{doc}");
+    assert!(
+        !doc.contains(POOR_DRAFT),
+        "the rewrite replaced the draft: {doc}"
+    );
+    assert!(err.contains("style 0 → 100 after 1 pass(es)"), "{err}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// `--repair` discards a rewrite that scores better by dropping a symbol the
+/// draft mentioned — the loophole a style score alone leaves open.
+#[test]
+#[cfg(feature = "provider")]
+fn spec_draft_repair_refuses_a_rewrite_that_drops_content() {
+    let (base, _requests) = stub_provider_with(|body| {
+        if body.contains("Your previous draft was") {
+            "It parses the input."
+        } else {
+            POOR_DRAFT
+        }
+    });
+    let dir = parser_repo("spec-draft-repair-refuse", &base);
+    let out = roteiro(&dir, &["spec", "draft", "fixture_parser", "--repair", "1"]);
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "drafts: {err}");
+    let doc = stdout(&out);
+    assert!(
+        doc.contains(POOR_DRAFT),
+        "the original draft survives: {doc}"
+    );
+    assert!(!doc.contains("It parses the input."), "{doc}");
+    assert!(err.contains("style 0 → 0 after 1 pass(es)"), "{err}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Without `--repair`, no repair request is ever sent.
+#[test]
+#[cfg(feature = "provider")]
+fn spec_draft_without_repair_sends_no_repair_request() {
+    let (base, requests) = stub_provider_with(|_| POOR_DRAFT);
+    let dir = parser_repo("spec-draft-no-repair", &base);
+    let out = roteiro(&dir, &["spec", "draft", "fixture_parser"]);
+    assert!(out.status.success(), "{out:?}");
+    let sent: Vec<String> = requests.try_iter().collect();
+    assert!(!sent.is_empty(), "the provider was called");
+    assert!(
+        sent.iter().all(|b| !b.contains("Your previous draft was")),
+        "{sent:?}"
+    );
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("repair `"));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// `--repair` is bounded: four passes are refused at the parser.
+#[test]
+#[cfg(feature = "provider")]
+fn spec_draft_repair_is_at_most_three_passes() {
+    let dir = fresh_repo("spec-draft-repair-bound");
+    let out = roteiro(&dir, &["spec", "draft", "x", "--repair", "4"]);
+    assert!(!out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("--repair"),
+        "{out:?}"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 

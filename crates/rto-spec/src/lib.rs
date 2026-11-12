@@ -57,6 +57,6 @@ pub use site::{
 };
 pub use spec::{
     DraftCoverage, SPEC_SCHEMA, SpecContext, SymbolContext, apply_drafts, context, draft_coverage,
-    draft_prompt, draft_targets, scaffold_adr, scaffold_blueprint,
+    draft_prompt, draft_targets, repair_accepts, repair_prompt, scaffold_adr, scaffold_blueprint,
 };
 pub use tool_check::{CheckedAgainst, Gate, TOOL_CHECK_SCHEMA, ToolCheck, tool_check};
