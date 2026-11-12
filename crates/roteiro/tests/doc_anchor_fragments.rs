@@ -45,7 +45,7 @@
 //! in bold, inline code, intra-doc links, colons, quotes and em-dashes — was
 //! slugified by this file and looked up in the generated HTML: **79 exact
 //! matches, no disagreements**. The 13 that were not compared are behind
-//! `serve` / `exec-boxlite`. If a heading ever needs something stranger than
+//! `serve` / the since-removed `exec-boxlite`. If a heading ever needs something stranger than
 //! the forms above, check the generated id by hand and extend `slugify` in the
 //! same change.
 //!

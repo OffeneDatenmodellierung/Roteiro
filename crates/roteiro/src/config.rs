@@ -192,10 +192,12 @@ pub struct Config {
     /// `[lint]` — whether `roteiro lint` may run a linter on this host
     /// (ADR-0020 §6). **The inverted key**; see [`LintConfig`].
     pub lint: LintConfig,
-    /// `[security]` — the images `roteiro security run` sandboxes analyzers in
-    /// (ADR-0014). Ordinary precedence: these are locators, not permissions —
-    /// see [`SecurityConfig`] for the ADR-0007 v1.4 classification.
-    pub security: SecurityConfig,
+    /// `[security]` — **removed** (ADR-0030): it held `[security.images]`, the
+    /// OCI images the removed microVM backend ran analyzers in. Still parsed,
+    /// never serialized, so a config that carries the old table loads and
+    /// [`read_config`] warns that it is inert.
+    #[serde(skip_serializing)]
+    pub security: Option<toml::Value>,
     /// Filesystem locations (the model store).
     pub paths: PathsConfig,
     /// `[telemetry]` — opt-in structured file logging (ADR-0011). Unset ⇒ stdout
@@ -514,7 +516,7 @@ impl ModelsConfig {
 ///
 /// # `allow_unsandboxed` inverts the layering
 ///
-/// `roteiro lint` runs the linter sandboxed by default. `cargo clippy` has
+/// `roteiro lint` refuses to run unless host execution is granted. `cargo clippy` has
 /// `cargo check` semantics, so running it on the host executes the tree's build
 /// scripts and loads its proc macros with the invoking user's filesystem and
 /// credentials — and that the *toolchain* is yours does not make the *code*
@@ -524,10 +526,10 @@ impl ModelsConfig {
 ///
 /// | Layer | May deny | May grant |
 /// |---|---|---|
-/// | Built-in default | sandboxed by default | — |
+/// | Built-in default | refused | — |
 /// | Project `roteiro.toml` | **yes** | **no** |
 /// | User `~/.roteiro/config.toml` | yes | **yes** |
-/// | Invocation (`--allow-unsandboxed` / `--sandboxed`) | yes | **yes** |
+/// | Invocation (`--allow-unsandboxed`) | — | **yes** |
 ///
 /// A merged line that starts running builds on every teammate's machine is
 /// consent granted by someone else and noticed by nobody.
@@ -547,30 +549,11 @@ pub struct LintConfig {
     /// setting that governs both.
     #[serde(alias = "allow-unsandboxed")]
     pub allow_unsandboxed: Option<bool>,
-    /// The digest-pinned OCI image the sandboxed linter runs in.
-    ///
-    /// **Roteiro ships no default, and that is a decision rather than an
-    /// omission.** A builder's image has to carry the linter — for `clippy`, a
-    /// Rust toolchain *with the `clippy` component* — and no first-party image
-    /// does: `rust-lang/docker-rust` builds every stable and nightly variant
-    /// with `rustup-init --profile minimal`, which installs `rustc`, `cargo` and
-    /// `rust-std` and stops. Picking a third party's image on the user's behalf
-    /// would make somebody else's container the boundary in which somebody
-    /// else's build scripts execute, chosen by Roteiro and noticed by nobody;
-    /// building one would make Roteiro the publisher of it. Neither is a job
-    /// this project takes on, so the image is **supplied**, and an image without
-    /// the linter in it is a named refusal that says how to build one.
-    ///
-    /// # Ordinary precedence, unlike the key above it
-    ///
-    /// Project over user, and `--image` over both: a project may choose *where* its team's boundary
-    /// comes from without being able to decide *whether* there is one. The
-    /// inversion belongs to `allow_unsandboxed`, which is a permission; this is
-    /// a locator.
-    ///
-    /// A tag is refused. An image is where somebody else's build scripts
-    /// execute, and a tag is a mutable pointer to it.
-    pub image: Option<String>,
+    /// `[lint] image` — **removed** (ADR-0030): the image the removed microVM
+    /// backend linted inside. Still parsed, never serialized, so a config that
+    /// carries it loads and [`read_config`] warns that it is inert.
+    #[serde(skip_serializing)]
+    pub image: Option<toml::Value>,
 }
 
 impl LintConfig {
@@ -589,10 +572,8 @@ impl LintConfig {
                 self.allow_unsandboxed,
                 over.allow_unsandboxed,
             ),
-            // Ordinary key, ordinary precedence: a
-            // project may choose *where* its team's boundary comes from without
-            // being able to decide *whether* there is one.
-            image: over.image.clone().or(self.image.clone()),
+            // Inert since ADR-0030; each layer is warned about in `read_config`.
+            image: None,
         }
     }
 }
@@ -617,188 +598,6 @@ fn lint_allow_unsandboxed_effective(user: Option<bool>, project: Option<bool>) -
 #[cfg(not(feature = "exec-subprocess"))]
 fn lint_allow_unsandboxed_effective(_user: Option<bool>, _project: Option<bool>) -> Option<bool> {
     None
-}
-
-/// `[security]` — how `roteiro security run` sandboxes an analyzer.
-///
-/// # Why this table is a map where `[lint]`'s is a scalar
-///
-/// A builder has one image, so `[lint] image` is one key. The analyzer path has
-/// **N**: one per analyzer, each a different tool with a different published
-/// container, and `roteiro security run <analyzer>` picks between them by name.
-/// So the shape follows the surface rather than the precedent — a scalar here
-/// could only mean "the image every analyzer runs in", which is not a thing that
-/// exists.
-///
-/// It **composes with** the built-in table rather than replacing it. With this
-/// table absent, `security run` behaves exactly as it did: `semgrep` runs in the
-/// image Roteiro pinned, and an analyzer with no pin refuses. See
-/// `rto_exec::boxlite::resolve_image` for what an entry does when there is
-/// already a pin — it wins, and that decision is argued where it is implemented.
-///
-/// # Ordinary precedence: these are values, not capabilities
-///
-/// Classified against [[docs/adr/0007-configuration-file.md]] v1.4's five tests
-/// rather than assumed, because getting the layering direction wrong here is how
-/// a committed `roteiro.toml` starts choosing the boundary somebody else's
-/// analyzer runs in:
-///
-/// 1. **Sends repository content off the machine?** No. A run never opens a
-///    socket — the guest has no network interface — and the pull is
-///    `roteiro security prefetch --allow-download`, an invocation rather than
-///    this key.
-/// 2. **Executes code the repository supplies?** No, twice over. The analyzers
-///    reachable here *parse* the tree rather than building it (ADR-0014's own
-///    reading of the security argument), and the image is registry content named
-///    by a locator, not something the repository carries.
-/// 3. **Writes outside the repository and Roteiro's caches?** No. Provisioning
-///    writes into `~/.roteiro/security/boxlite-home`, which is written regardless;
-///    this changes *what* is in it, never *whether* — test 3 as v1.4 sharpened it,
-///    the same reading that made `[paths] model_store` a value.
-/// 4. **Spends materially more of the machine?** The pull is large, and it is
-///    not this key that spends it: `prefetch --allow-download` does, having
-///    printed the reference first, and a run refuses rather than fetching.
-/// 5. **Removes a guard?** It is the opposite, and this is the decisive one. The
-///    key's *direction* is to put an analyzer that had no sandboxed path at all
-///    **inside** one. Unset, `cargo-audit` and `osv-scanner` are host-only or
-///    refused; set, they run in a microVM. A key whose default grants nothing and
-///    whose effect is to add a boundary is not a permission.
-///
-/// So: **value**, ordinary precedence — project over user, exactly `[lint] image`. A project may choose *where* its team's boundary
-/// comes from without deciding *whether* there is one; and for a locator the
-/// inversion is not merely unnecessary but inexpressible, since there is no
-/// "deny" for a locator, only a different one.
-///
-/// The residual is real and is answered by disclosure rather than by precedence:
-/// a committed file *does* choose the container somebody else's analyzer runs in,
-/// so `prefetch` names the reference before opening a socket, `security status`
-/// says which images are built-in and which are declared, and the run records the
-/// digest that actually ran.
-#[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
-#[serde(default)]
-pub struct SecurityConfig {
-    /// Digest-pinned OCI images for `roteiro security run`, keyed by analyzer.
-    ///
-    /// ```toml
-    /// [security.images]
-    /// osv-scanner = "registry.example/you/osv-scanner@sha256:…"
-    /// ```
-    ///
-    /// **A tag is refused.** An image is where somebody else's code executes,
-    /// and a tag is a mutable pointer to it — the same rule, the same message
-    /// and the same function as `[lint] image`, because the difference between a
-    /// pinned entry and a declared one is *who chose*, never *how strong the pin
-    /// is*.
-    ///
-    /// Nothing is validated in this module, which is deliberate and is
-    /// `ModelsConfig::resolve`'s rule (named, not linked — it is behind
-    /// `models` and this key is not): a value that is wrong is refused where
-    /// it is *consumed*, so `roteiro config` can **report** a bad entry rather
-    /// than being the one command a bad entry stops. Every path that resolves an
-    /// image goes through `rto_exec::boxlite::resolve_image`, so there is one
-    /// refusal and it fires before a guest boots — including at `prefetch` and
-    /// `status`, so a typo in a committed file does not lie dormant until
-    /// somebody runs that analyzer. [`Self::problems`] is the reporting half.
-    ///
-    /// **Public registries only, for now, and that is a conflict rather than an
-    /// unimplemented nicety.** A private registry needs credentials at pull
-    /// time, and they would have to come from the ambient environment — inside a
-    /// feature whose whole `EnvironmentPolicy::Scrubbed` posture exists to keep
-    /// ambient credentials *out*, and whose guest never receives an environment
-    /// at all. Resolving that needs a credential story, not a code path, so
-    /// until there is one an image must be pullable without authentication.
-    pub images: std::collections::BTreeMap<String, String>,
-}
-
-impl SecurityConfig {
-    /// The declared images as the resolver takes them: `(analyzer, reference)`.
-    ///
-    /// A `Vec` rather than the map, because `rto-exec` owns what a reference
-    /// *means* and owns none of the layering that produced it — the same seam
-    /// `[lint] image` crosses as a plain `&str`.
-    ///
-    /// Gated on the backend that resolves images, because in a build without one
-    /// its only caller is compiled out — and an item whose callers are all cfg'd
-    /// away is precisely the `-D warnings` rejection ADR-0014 v1.7 records the
-    /// `no-default-features` job existing to catch. [`Self::image_for`] is gated
-    /// for the same reason but on `execution`, not on this feature: its callers
-    /// are the `security`/`sandbox` commands, which need an analyzer surface
-    /// rather than a sandbox backend. [`Self::problems`] is ungated, because
-    /// *reporting* a key is not a property of which backends were compiled in,
-    /// and it has a `not(execution)` arm that says so.
-    #[cfg(feature = "exec-boxlite")]
-    #[must_use]
-    pub fn declared(&self) -> Vec<(String, String)> {
-        self.images
-            .iter()
-            .map(|(analyzer, reference)| (analyzer.clone(), reference.clone()))
-            .collect()
-    }
-
-    /// The declared reference for one analyzer, if this configuration names one.
-    ///
-    /// Gated on `execution` on the same terms as [`Self::declared`] above: every
-    /// caller is a `security`/`sandbox` command, and all of them are behind this
-    /// feature, so an ungated item here is dead code in a build without it. #667
-    /// is what found that — until then no CI job compiled a configuration with
-    /// `execution` off, so `-D dead_code` had nothing to reject it in.
-    #[cfg(feature = "execution")]
-    #[must_use]
-    pub fn image_for(&self, analyzer: &str) -> Option<&str> {
-        self.images.get(analyzer).map(String::as_str)
-    }
-
-    /// Everything wrong with this table, as sentences, for `roteiro config` to
-    /// **print** rather than refuse over.
-    ///
-    /// The report-don't-refuse half of ADR-0007 v1.3: `roteiro config` is the
-    /// command an operator reaches for precisely because a key is not doing what
-    /// they expected, so it must not be the one command that key stops. The
-    /// refusal itself lives at every consuming site, in one function.
-    ///
-    /// Checks the pin through `rto_exec::image_pinned_digest`, which is the same
-    /// function the refusal uses — a second implementation written for reporting
-    /// is how one of the two ends up laxer than the other.
-    #[cfg(feature = "execution")]
-    #[must_use]
-    pub fn problems(&self) -> Vec<String> {
-        self.images
-            .iter()
-            .filter_map(|(analyzer, reference)| {
-                if rto_exec::adapter_for(analyzer).is_none() {
-                    return Some(format!(
-                        "`{analyzer}` is not an analyzer this build can read the output of \
-                         (it can read: {}) — an image can only serve an analyzer Roteiro already \
-                         has an adapter for, because the parser is Rust and cannot be supplied \
-                         alongside the image",
-                        rto_exec::known_analyzers().join(", ")
-                    ));
-                }
-                rto_exec::image_pinned_digest(&format!("`[security.images] {analyzer}`"), reference)
-                    .err()
-                    .map(|e| e.to_string())
-            })
-            .collect()
-    }
-
-    /// Without `execution` there is no analyzer surface for a key to name, so
-    /// there is nothing this build can say is wrong with one.
-    ///
-    /// Empty rather than absent, and never a parse failure: ADR-0007's
-    /// forward-compatibility rule is that a config shared with a fuller build is
-    /// not rejected by a leaner one, and `roteiro config` says the build has no
-    /// analyzer surface where it prints the section.
-    #[cfg(not(feature = "execution"))]
-    #[must_use]
-    #[expect(
-        clippy::unused_self,
-        reason = "the `execution` arm above reads `self.images`; an associated \
-                  function here would give the two arms different call sites and \
-                  push the cfg out to every caller"
-    )]
-    pub fn problems(&self) -> Vec<String> {
-        Vec::new()
-    }
 }
 
 /// Which of [`PathsConfig`]'s two glob lists a caller means.
@@ -1566,7 +1365,7 @@ pub struct McpConfig {
 /// does not ask for that tool, it declines every tool not named. A layer's
 /// effect is therefore always a **denial**, and the ordinary "nearer layer wins"
 /// would let a nearer layer *un-deny* — a committed `roteiro.toml` restoring
-/// `sandbox_clear` after the machine's owner removed it in
+/// `security_status` after the machine's owner removed it in
 /// `~/.roteiro/config.toml`. That is the failure ADR-0007 v1.4's inversion
 /// exists to prevent, reached from the other direction.
 ///
@@ -1874,22 +1673,8 @@ impl Config {
             // The table in this merge whose grant key does **not** follow the
             // project-over-user rule every line above uses (ADR-0020 §6).
             lint: self.lint.overlaid_with(&over.lint),
-            // **Per key, project over user** — `[pins]`'s rule, not
-            // `[debt] ignore`'s. Each entry is an independent locator for one
-            // analyzer, so a project naming an image for `osv-scanner` must not
-            // discard a user's entry for `cargo-audit`: the two answer different
-            // questions and neither is a narrowing of the other. It is not the
-            // merging *exclusion* list either, which is additive because its
-            // intent is a union; here the project's entry for the same analyzer
-            // replaces the user's outright, because two images for one analyzer
-            // is not a union, it is a choice.
-            security: SecurityConfig {
-                images: {
-                    let mut merged = self.security.images.clone();
-                    merged.extend(over.security.images.clone());
-                    merged
-                },
-            },
+            // Inert since ADR-0030; each layer is warned about in `read_config`.
+            security: None,
             paths: PathsConfig {
                 model_store: over
                     .paths
@@ -2414,7 +2199,29 @@ fn read_config(path: Option<&Path>) -> anyhow::Result<Config> {
             path.display()
         );
     }
+    for key in inert_sandbox_keys(&config) {
+        eprintln!(
+            "warning: {} sets {key}, which no longer does anything: the microVM sandbox was \
+             removed (ADR-0030). Analyzers and linters run only on this host, with consent — \
+             `--allow-unsandboxed`, or `[lint] allow_unsandboxed = true` in your own config for \
+             `roteiro lint`. Delete the key to silence this.",
+            path.display()
+        );
+    }
     Ok(config)
+}
+
+/// The sandbox-era keys a parsed file still sets, which [`read_config`] warns
+/// are inert (ADR-0030).
+fn inert_sandbox_keys(config: &Config) -> Vec<&'static str> {
+    let mut keys = Vec::new();
+    if config.security.is_some() {
+        keys.push("`[security]`");
+    }
+    if config.lint.image.is_some() {
+        keys.push("`[lint] image`");
+    }
+    keys
 }
 
 /// Roteiro's home directory: `$ROTEIRO_HOME` when set, else `~/.roteiro`. The one
@@ -2554,8 +2361,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        Config, LintConfig, NamedWorkspace, WorkspaceConfig, expand_tilde_with,
-        find_project_config, load_from,
+        Config, NamedWorkspace, WorkspaceConfig, expand_tilde_with, find_project_config, load_from,
     };
 
     /// **The two sides of a `[models]` key must agree about whether it is set.**
@@ -2720,7 +2526,7 @@ mod tests {
     /// may not widen it (issue #584).
     ///
     /// The failing case is the third block. Under this file's ordinary "nearer
-    /// layer wins" the project file would restore `sandbox_clear` after the user
+    /// layer wins" the project file would restore `security_status` after the user
     /// removed it — consent granted by pull request, which is exactly what
     /// ADR-0007 v1.4's inversion exists to stop, reached from the other direction.
     #[test]
@@ -2757,7 +2563,7 @@ mod tests {
         // everything — which is the reading that would be dangerous.
         std::fs::write(
             &project,
-            "[mcp]\ntools = [\"search\", \"explain\", \"sandbox_clear\"]\n",
+            "[mcp]\ntools = [\"search\", \"explain\", \"security_status\"]\n",
         )
         .expect("write");
         let loaded = load_from(Some(user.clone()), Some(project.clone())).expect("load");
@@ -4091,6 +3897,7 @@ mod tests {
     #[cfg(feature = "exec-subprocess")]
     #[test]
     fn the_lint_merge_delegates_the_inversion_rather_than_repeating_it() {
+        use super::LintConfig;
         for project in [None, Some(true), Some(false)] {
             for user in [None, Some(true), Some(false)] {
                 let merged = LintConfig {
@@ -4133,183 +3940,30 @@ mod tests {
         );
     }
 
-    /// `[lint] image` follows the **ordinary** precedence, and this is the test
-    /// that stops it being "fixed" to match its neighbour.
-    ///
-    /// The two keys sit in one table under two rules, which is unusual enough to
-    /// be worth pinning: `allow_unsandboxed` is a *permission* and inverts, so a
-    /// committed file may deny and never grant; `image` is a *locator* and does
-    /// not, so a project may choose where its team's boundary comes from.
+    /// A config still carrying the removed sandbox keys loads, and names them so
+    /// `read_config` can warn they are inert (ADR-0030) — the `[remote]` rule.
     #[test]
-    fn the_lint_image_takes_ordinary_precedence_unlike_the_key_beside_it() {
-        let image = |user: Option<&str>, project: Option<&str>| {
-            LintConfig {
-                image: user.map(str::to_owned),
-                ..LintConfig::default()
-            }
-            .overlaid_with(&LintConfig {
-                image: project.map(str::to_owned),
-                ..LintConfig::default()
-            })
-            .image
-        };
-        assert_eq!(
-            image(Some("user@sha256:a"), Some("project@sha256:b")),
-            Some("project@sha256:b".to_owned()),
-            "a project may choose where its team's boundary comes from"
-        );
-        assert_eq!(
-            image(Some("user@sha256:a"), None),
-            Some("user@sha256:a".to_owned())
-        );
-        assert_eq!(
-            image(None, Some("project@sha256:b")),
-            Some("project@sha256:b".to_owned())
-        );
-        assert_eq!(image(None, None), None);
-
-        // And the contrast, in one assertion, because the point is the
-        // *difference*: the same project layer that supplies an image cannot
-        // supply a grant.
-        let both = LintConfig {
-            allow_unsandboxed: None,
-            image: None,
-        }
-        .overlaid_with(&LintConfig {
-            allow_unsandboxed: Some(true),
-            image: Some("project@sha256:b".to_owned()),
-        });
-        assert_eq!(both.image, Some("project@sha256:b".to_owned()));
-        assert_eq!(
-            both.allow_unsandboxed, None,
-            "the locator carries from the project layer; the permission does not"
-        );
-    }
-
-    /// `[security.images]` is a **map**, and it layers per entry — `[pins]`'s
-    /// rule, not `[lint] image`'s scalar one and not `[debt] ignore`'s merge.
-    ///
-    /// The property that matters is the third assertion: a project naming an
-    /// image for one analyzer must not silently un-declare a user's image for a
-    /// *different* one. They answer different questions, and neither is a
-    /// narrowing of the other — so a table-level replace would leave someone's
-    /// `cargo-audit` sandbox quietly gone the day a teammate committed an
-    /// `osv-scanner` entry.
-    #[test]
-    fn security_images_layer_per_analyzer_rather_than_per_table() {
-        let dir = std::env::temp_dir().join(format!("roteiro-cfg-sec-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        let user = dir.join("config.toml");
-        let project = dir.join("roteiro.toml");
-
-        let hex = "a".repeat(64);
-        std::fs::write(
-            &user,
-            format!(
-                "[security.images]\nsemgrep = \"mine/semgrep@sha256:{hex}\"\n\
-                 cargo-audit = \"mine/audit@sha256:{hex}\"\n"
-            ),
-        )
-        .expect("write");
-        std::fs::write(
-            &project,
-            format!("[security.images]\nsemgrep = \"ours/semgrep@sha256:{hex}\"\n"),
-        )
-        .expect("write");
-
-        let loaded = load_from(Some(user), Some(project)).expect("load");
-        let images = &loaded.effective.security.images;
-        assert_eq!(
-            images.get("semgrep").map(String::as_str),
-            Some(format!("ours/semgrep@sha256:{hex}").as_str()),
-            "project over user, per analyzer"
-        );
-        assert_eq!(
-            images.get("cargo-audit").map(String::as_str),
-            Some(format!("mine/audit@sha256:{hex}").as_str()),
-            "a project entry for one analyzer must not discard a user entry for another"
-        );
-        assert_eq!(images.len(), 2);
-        // `image_for` is gated on `execution` (see its own note); the layering
-        // above is not, so the rest of this test runs in every feature set.
-        #[cfg(feature = "execution")]
-        {
-            assert_eq!(
-                loaded.effective.security.image_for("cargo-audit"),
-                Some(format!("mine/audit@sha256:{hex}").as_str())
-            );
-            assert_eq!(loaded.effective.security.image_for("osv-scanner"), None);
-        }
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// With no `[security]` table at all, nothing changes — which is the
-    /// forward-compatibility rule and also the whole promise of the feature: the
-    /// built-in pins are what `security run` uses, exactly as before.
-    #[test]
-    fn no_security_table_declares_nothing_and_reports_nothing() {
-        let empty = Config::default();
-        assert!(empty.security.images.is_empty());
-        #[cfg(feature = "execution")]
-        assert!(empty.security.image_for("semgrep").is_none());
-        assert!(
-            empty.security.problems().is_empty(),
-            "an absent table has nothing wrong with it"
-        );
-    }
-
-    /// A bad entry is **reported, never a parse failure** — ADR-0007 v1.3's rule
-    /// that `roteiro config` is the command an operator runs *because* a key is
-    /// misbehaving, so it must not be the one command that key stops.
-    ///
-    /// The refusal itself lives at every consuming site (`security run`,
-    /// `prefetch`, `status`), which is what stops this being a softening: the tag
-    /// never reaches a guest, it just does not take `roteiro config` down on the
-    /// way.
-    #[cfg(feature = "execution")]
-    #[test]
-    fn a_bad_security_image_is_reported_rather_than_refused_at_load() {
-        let dir = std::env::temp_dir().join(format!("roteiro-cfg-secbad-{}", std::process::id()));
+    fn removed_sandbox_keys_load_and_are_named_as_inert() {
+        let dir =
+            std::env::temp_dir().join(format!("roteiro-cfg-inert-sbx-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("mkdir");
         let project = dir.join("roteiro.toml");
         std::fs::write(
             &project,
-            "[security.images]\nsemgrep = \"registry.example/you/semgrep:1.173.0\"\n\
-             my-favourite-linter = \"registry.example/you/lint@sha256:\"\n",
+            "[lint]\nimage = \"x@sha256:00\"\nallow_unsandboxed = false\n\
+             [security.images]\nsemgrep = \"y@sha256:00\"\n",
         )
         .expect("write");
-
-        let loaded = load_from(None, Some(project)).expect("a bad value must still load");
-        let problems = loaded.effective.security.problems();
-        assert_eq!(problems.len(), 2, "{problems:?}");
-
-        // Matched on the *key* rather than on the analyzer name, because the
-        // adapterless message lists every readable analyzer — `semgrep` among
-        // them — so "contains semgrep" finds the wrong sentence. A test that
-        // reads a refusal has to select it the way a reader would.
-        let tag = problems
-            .iter()
-            .find(|p| p.contains("`[security.images] semgrep`"))
-            .expect("the tag is reported");
-        assert!(tag.contains("`[security.images] semgrep`"), "{tag}");
-        assert!(tag.contains("tag rather than a digest"), "{tag}");
-        assert!(
-            tag.contains("registry.example/you/semgrep:1.173.0"),
-            "{tag}"
+        let loaded = load_from(None, Some(project)).expect("an old config must still load");
+        assert_eq!(
+            super::inert_sandbox_keys(&loaded.project),
+            vec!["`[security]`", "`[lint] image`"]
         );
-
-        let adapter = problems
-            .iter()
-            .find(|p| p.starts_with("`my-favourite-linter`"))
-            .expect("the adapterless analyzer is reported");
-        assert!(adapter.contains("adapter"), "{adapter}");
-        assert!(
-            !adapter.contains("tag rather than a digest"),
-            "the adapter is the reason, and it is reported instead of the pin rather than \
-             after it — fixing the digest would not have helped: {adapter}"
-        );
-
+        // The live key beside the removed one still takes effect.
+        assert_eq!(loaded.project.lint.allow_unsandboxed, Some(false));
+        // And nothing inert survives the merge to be echoed back.
+        assert!(super::inert_sandbox_keys(&loaded.effective).is_empty());
+        assert!(super::inert_sandbox_keys(&Config::default()).is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 

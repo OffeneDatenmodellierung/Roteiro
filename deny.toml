@@ -56,8 +56,7 @@
 #   on what the licence obliges, not on how many people receive it. Recorded here
 #   because the *blast radius* of the entry changed even though the entry did not,
 #   and a future reader comparing this file against ADR-0017 should not have to
-#   reconstruct that. The `pathrs` entry below still says "a default build never
-#   sees it" — that remains true; `exec-boxlite` did not change.
+#   reconstruct that.
 # * **It licenses data, not code.** The crate is a single generated `src/lib.rs`
 #   that is a table of CA certificates derived from the Common CA Database; the
 #   crate's own README states the data "is used via the CCADB Data Usage Terms"
@@ -83,71 +82,15 @@
 # needing a bundled root store. Now that `models` is a default feature, the first
 # two of those would affect every release rather than an opt-in build.
 #
-# ## `pathrs` — the second MPL-2.0 crate, re-examined as this file requires
+# ## Removed with the sandbox (ADR-0030)
 #
-# The MPL-2.0 entry above says: *"If a second MPL-2.0 crate ever appears in the
-# tree, re-run that reasoning for it — this entry blessed a considered case, not
-# the licence in general."* `pathrs` v0.2.5 is that second crate, arriving with
-# `boxlite` under `exec-boxlite` (Stage 24). The reasoning, re-run:
-#
-# * It is dual-licensed **`MPL-2.0 OR LGPL-3.0-or-later`**, so the MPL side is a
-#   choice Roteiro makes, not a constraint it inherits. `cargo deny` resolves to
-#   MPL-2.0 because that is the allowed half; the LGPL-3.0 half is never taken.
-# * The MPL-2.0 analysis above transfers unchanged: file-level (weak) copyleft,
-#   the obligation attaches to the MPL-licensed files themselves, and using the
-#   crate unmodified — which is the case — reduces it to keeping the notice. It
-#   does not reach Roteiro's own source, and `MIT OR Apache-2.0` is untouched.
-# * Blast radius is smaller than `symphonia`'s: `pathrs` is a Linux-only
-#   dependency (`cfg(target_os = "linux")`) of `boxlite`, itself behind the
-#   opt-in `exec-boxlite` feature. A default build, and every non-Linux build,
-#   never sees it.
-#
-# Accepted on the same terms. A *third* MPL-2.0 crate means running this again.
-#
-# ## GPL-2.0 and LGPL-2.0 binaries under `exec-boxlite` — NOT a licence entry
-#
-# This is recorded here because this is where licence decisions live, but note
-# carefully: **nothing was added to the allow-list for it, and nothing could
-# have been.** `cargo deny` governs crates, and what follows is not in a crate.
-#
-# `exec-boxlite` depends on `boxlite`, whose build script embeds a prebuilt
-# runtime archive into the compiled library with `include_bytes!`. That archive
-# contains complete third-party programs:
-#
-#   * `mke2fs`, `debugfs` (e2fsprogs) — **GPL-2.0**
-#   * `libkrunfw` (a packaged Linux kernel) — **GPL-2.0**
-#   * `bwrap` (bubblewrap, Linux only) — **LGPL-2.0-or-later**
-#   * `boxlite-shim`, `boxlite-guest` — Apache-2.0
-#
-# `cargo deny --all-features check` reported `licenses ok` across the whole
-# resolved graph while this was true, and was not wrong to: the crates really are
-# Apache-2.0: the GPL code enters as bytes fetched by a build script. **A
-# crate-metadata gate cannot see this class of thing at all**, which is the
-# general lesson, not a boxlite-specific one.
-#
-# The owner has accepted it. What that acceptance means:
-#
-# * **It does not make Roteiro's source GPL.** These are complete, independent
-#   programs run as separate processes with their own address spaces. That is
-#   aggregation, not derivation; `MIT OR Apache-2.0` is unaffected, for Roteiro
-#   and for anything built with it.
-# * **It does create distribution duties**, because the bytes travel inside any
-#   binary built with the feature: GPL-2.0 §3 (complete corresponding source must
-#   be available to recipients) and LGPL relinking. They are discharged by
-#   `crates/rto-exec/NOTICE-boxlite-runtime.md`, which names each binary, its
-#   licence, and its upstream source — and which is `include_str!`d into the
-#   crate and printed by `roteiro security prefetch` before installation, so it
-#   travels with the artifact rather than living only in this repository.
-# * **A default build embeds none of it.** `exec-boxlite` is off by default, and
-#   the ingest and subprocess backends add no third-party binaries.
-#
-# The gate that *can* see this is
-# `crates/rto-exec/tests/build_script_fetch_audit.rs`: it reads the build script
-# of every package in the `--all-features` graph and fails on anything that looks
-# like it fetches without a recorded pin. Read its module docs for what it does
-# not cover before trusting it. Revisit this entry if the archive's contents
-# change, if `boxlite` starts building its native layer from source, or if the
-# feature ever becomes default.
+# Two records used to sit here for the opt-in `exec-boxlite` feature: `pathrs`
+# (a second MPL-2.0 crate, Linux-only, under `boxlite`) and the GPL-2.0 /
+# LGPL-2.0 executables `boxlite`'s build script embedded (e2fsprogs,
+# `libkrunfw`, bubblewrap). ADR-0030 removed the feature and the dependency, so
+# neither is in the tree. The general lesson stands: a crate-metadata gate
+# cannot see code a build script fetches as bytes — a new build script that
+# downloads anything needs its own record here.
 allow = [
     "MIT",
     "Apache-2.0",
@@ -193,95 +136,17 @@ ignore = [
     # or replaces the dependency.
     "RUSTSEC-2026-0192",
 
-    # ── The four below all arrive with `boxlite` under the opt-in
-    # `exec-boxlite` feature (Stage 24, ADR-0014). Every one is
-    # **unmaintained-only — none is a vulnerability**, and `cargo deny` reports
-    # no vulnerability advisory anywhere in that subtree. They are listed
-    # separately rather than as one entry because they enter by different paths
-    # and will go away at different times.
-    #
-    # THE FEATURE-SCOPING CAVEAT APPLIES TO ALL FOUR, and it is not a formality:
-    # `cargo deny` cannot scope an ignore to a feature, so these are global. If
-    # any of these crates later enters through a *non*-`exec-boxlite` path, it
-    # would be silenced there too, and nothing would say so. That is the price of
-    # the mechanism, not an oversight — the check that would notice is a human
-    # reading this list when the dependency graph changes.
-    #
-    # ADR-0014 makes tracking `boxlite`'s advisories a standing duty precisely
-    # because "the failure mode of a security boundary is not that it breaks
-    # loudly but that it silently stops being a boundary". These entries are that
-    # duty written down, not a way of discharging it.
-
-    # `term_size` unmaintained (no known vulnerability); use `terminal_size`.
-    # Enters as a **direct dependency of `boxlite` 0.9.7**, which uses it to size
-    # terminal output. Revisit when `boxlite` moves to `terminal_size` — worth
-    # checking on every `boxlite` bump, since it is the shallowest of these and
-    # the easiest for upstream to drop.
-    "RUSTSEC-2020-0163",
-
-    # `bincode` unmaintained (no known vulnerability). Enters twice, both via
-    # `boxlite` 0.9.7: once through `qcow2-rs` 0.1.6 (its disk-image format) and
-    # once as `boxlite`'s own Linux build-dependency. No safe upgrade is
-    # published. Revisit if `bincode` finds a maintainer, if `qcow2-rs` replaces
-    # it, or if a *vulnerability* advisory is ever filed against it — at which
-    # point this entry must go rather than be widened.
-    "RUSTSEC-2025-0141",
-
-    # `adler` unmaintained; use `adler2`. Enters through `miniz_oxide` 0.7.4 →
-    # `qcow2-rs` 0.1.6 → `boxlite`. Note the tree already contains a *newer*
-    # `miniz_oxide` (0.8.x) on the `adler2` path for everything else, so this is
-    # `qcow2-rs` holding an old pin rather than the project using a stale
-    # compressor. Revisit when `qcow2-rs` bumps `miniz_oxide`; the ignore should
-    # then be removable without anything else changing.
-    "RUSTSEC-2025-0056",
-
-    # `pin-utils` unmaintained (no known vulnerability; `core::pin::pin!` replaces
-    # it). Enters through `nix` 0.26.4 → `qcow2-rs` 0.1.6 → `boxlite`, the same
-    # stale `qcow2-rs` pin as `adler` above; the rest of the tree is on `nix` 0.30.
-    # Revisit when `qcow2-rs` bumps `nix`, or if a *vulnerability* advisory is
-    # filed against `pin-utils` — then this entry must go rather than be widened.
-    "RUSTSEC-2026-0441",
-
-    # `atty` unmaintained. Enters through `env_logger` 0.9.3 → `qcow2-rs` 0.1.6 →
-    # `boxlite`. `atty`'s separate *vulnerability* advisory (RUSTSEC-2021-0145,
-    # unaligned read on Windows) is NOT what is being silenced here — cargo-deny
-    # does not report it against this tree, and this ignore names only the
-    # unmaintained ID, so a vulnerability advisory would still fail the gate.
-    # Revisit when `qcow2-rs` bumps `env_logger` past 0.10, which dropped `atty`.
-    "RUSTSEC-2024-0375",
-
-    # `jwt` unmaintained (no known vulnerability). Enters through `oci-client`
-    # 0.15 → `boxlite`, which uses it for registry bearer tokens. `boxlite`
-    # 0.11.0 still requires `oci-client` ^0.15, so no bump removes it yet.
-    # Revisit when `oci-client` drops `jwt` or `boxlite` moves past 0.15.
-    "RUSTSEC-2016-0007",
-
-    # ── The three below are **vulnerabilities**, unlike every boxlite entry
-    # above, and are ignored as a recorded decision (2026-10-30), not to make
-    # CI green. All enter through `zstd` 0.13 → `boxlite` (opt-in
-    # `exec-boxlite`), which requires `zstd` ^0.13 in every release up to
-    # 0.11.0; the fixes are only in `zstd` 0.14.3 / `zstd-safe` 8.2. `boxlite`
-    # uses zstd to unpack sandbox image layers, and those images are pinned by
-    # digest, so the decoder only ever sees bytes we verified. The default
-    # build does not compile `boxlite` at all. Mirrored in `.cargo/audit.toml`.
-    # Revisit on every `boxlite` bump and remove as soon as it reaches zstd 0.14.
-    "RUSTSEC-2026-0391", # abandoned stream leaks into the next on a reused context
-    "RUSTSEC-2026-0398", # Seekable::decompress sets Vec length past capacity
-    "RUSTSEC-2026-0403", # uninitialised memory on failed legacy-frame streaming
-
     # ── A **vulnerability**, ignored as a recorded decision (2026-11-11), not to
     # make CI green. `libsqlite3-sys` < 0.39 bundles SQLite < 3.54, which can
     # return stale page-cache memory when it opens a database together with a
     # crafted `-wal` file of a different page size (CVE-2026-119375; local, needs
-    # the victim to open the files). Unlike the zstd entries this is in the
-    # **default** build too: `rto-graph`'s store uses `rusqlite`. The fix is
-    # `rusqlite` 0.41, but `libsqlite3-sys` is `links = "sqlite3"`, so the one
-    # lockfile holds one copy, and `boxlite` requires `rusqlite` ^0.39 in every
-    # release up to 0.12.0. Exposure: Roteiro's own stores are files it writes;
-    # the path that opens a database another tool wrote is
+    # the victim to open the files). It is in the **default** build:
+    # `rto-graph`'s store uses `rusqlite`. The fix is `rusqlite` 0.41, which
+    # `boxlite` (requiring `rusqlite` ^0.39) blocked until ADR-0030 removed it;
+    # the bump is its own change. Exposure: Roteiro's own stores are files it
+    # writes; the path that opens a database another tool wrote is
     # `roteiro import --from codegraph <db>` (read-only). Do not run that on a
     # database (and `-wal`) from a party you do not trust until this is removed.
-    # Mirrored in `.cargo/audit.toml`. Revisit on every `boxlite` bump and remove
-    # as soon as it allows `rusqlite` 0.41.
+    # Mirrored in `.cargo/audit.toml`. Remove with the `rusqlite` 0.41 bump.
     "RUSTSEC-2026-0459",
 ]

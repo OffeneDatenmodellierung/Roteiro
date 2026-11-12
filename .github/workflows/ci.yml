@@ -319,16 +319,8 @@ jobs:
       # downloaded, nothing changed, and six hours available to hang doing it.
       #
       # If a future dependency genuinely needs a package the image lacks, add a
-      # step for THAT package and bound it the way the protoc step below is —
-      # do not restore this one on the assumption the toolchain is missing.
-      # protoc + the pinned sandbox runtime for `exec-boxlite`; the why is in
-      # the action. The step-level bound lives here because composite steps
-      # cannot carry one: 8 minutes for the apt fetch as before, plus 2 for the
-      # 26 MB runtime download.
-      - name: Provision the exec-boxlite build (protoc, sandbox runtime)
-        if: env.RELEASE_PR != 'true'
-        timeout-minutes: 10
-        uses: ./.github/actions/provision-sandbox
+      # step for THAT package with a step-level `timeout-minutes` — do not
+      # restore this one on the assumption the toolchain is missing.
       # The whole of a release PR's verification in this job. See the
       # `RELEASE_PR` comment at the top of this file for what it catches, what
       # it deliberately does not, and why the job runs at all rather than being
@@ -457,10 +449,7 @@ jobs:
   #
   # `cargo build`/`cargo install` at the default set never paid this either way;
   # the cost was confined to `--all-targets`, i.e. to CI.
-  #
-  # protoc and the sandbox runtime are NOT needed and deliberately absent:
-  # `exec-boxlite` is off in `rto-exec`'s default set, so nothing here trips
-  # `rto-exec/build.rs`'s BOXLITE_RUNTIME_URL requirement.
+
   # Pinned, not `ubuntu-latest`; see the `checks` job for why.
   default-features:
     runs-on: ubuntu-24.04
@@ -605,10 +594,7 @@ jobs:
   # on a cold target dir at `--no-default-features --features execution`:
   # 35.5s → 14.1s wall, 235s → 63s of CPU. Nothing left in this graph needs more
   # than the `cc` the runner already ships (tree-sitter, libsqlite3-sys, ring).
-  #
-  # protoc and the sandbox runtime are NOT needed and are deliberately absent:
-  # `--no-default-features` leaves `exec-boxlite` off in every workspace member,
-  # so nothing trips `rto-exec/build.rs`'s BOXLITE_RUNTIME_URL requirement.
+
   # Pinned, not `ubuntu-latest`; see the `checks` job for why.
   no-default-features:
     runs-on: ubuntu-24.04
@@ -728,7 +714,7 @@ jobs:
   # is the surface that is tested. That builds vendored llama.cpp (`serve`),
   # which needs cmake and a bindgen-loadable libclang — both already on the
   # runner image, so this job installs neither; see the `checks` job for the
-  # evidence. `protoc` it does install, because that one really is absent.
+  # evidence.
   # rust-cache carries the compiled artefacts between runs. If this ever proves too slow to keep, narrow it to default features and
   # SAY SO in the summary — a partial measurement reported as partial is honest,
   # a gate that times out is not.
@@ -822,13 +808,6 @@ jobs:
       # ships all three and bindgen loads libclang without `libclang-dev`. The
       # evidence, and the six-hour hang that made it worth establishing, are in
       # the `checks` job above. Do not add one back here either.
-      # protoc + the pinned sandbox runtime for `exec-boxlite`; the why is in
-      # the action. The step-level bound lives here because composite steps
-      # cannot carry one: 8 minutes for the apt fetch as before, plus 2 for the
-      # 26 MB runtime download.
-      - name: Provision the exec-boxlite build (protoc, sandbox runtime)
-        timeout-minutes: 10
-        uses: ./.github/actions/provision-sandbox
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
@@ -903,14 +882,6 @@ jobs:
       # ships all three and bindgen loads libclang without `libclang-dev`. The
       # evidence, and the six-hour hang that made it worth establishing, are in
       # the `checks` job above. Do not add one back here either.
-      # protoc + the pinned sandbox runtime for `exec-boxlite`; the why is in
-      # the action. The step-level bound lives here because composite steps
-      # cannot carry one: 8 minutes for the apt fetch as before, plus 2 for the
-      # 26 MB runtime download.
-      - name: Provision the exec-boxlite build (protoc, sandbox runtime)
-        if: env.RELEASE_PR != 'true'
-        timeout-minutes: 10
-        uses: ./.github/actions/provision-sandbox
       # The whole of a release PR's verification in this job — see the
       # `RELEASE_PR` comment at the top of this file. Running it on the 1.96
       # toolchain rather than stable earns this job something the other two

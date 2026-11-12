@@ -19,13 +19,13 @@
 | [0011](0011-structured-file-logging-otel-groundwork.md) | Structured file logging — OpenTelemetry-shaped JSON, rotated, groundwork for OTLP | Accepted |
 | [0012](0012-analyzer-findings-artifact-model.md) | Analyzer findings — a separate artifact model, never a provenance class | Accepted |
 | [0013](0013-agent-memory-artifact-store.md) | Agent memory — a two-tier artifact store, decaying by evidence not by clock | Accepted |
-| [0014](0014-sandboxed-analyzer-execution.md) | Sandboxed analyzer execution — an owned seam, ingest by default, boxlite opt-in | Accepted |
+| [0014](0014-sandboxed-analyzer-execution.md) | Sandboxed analyzer execution — an owned seam, ingest by default, boxlite opt-in | Accepted (boxlite backend superseded by 0030) |
 | [0015](0015-generated-media-content-artifact-store.md) | Generated media content — its own artifact store, rebuildable on demand | Accepted |
 | [0016](0016-audio-metadata-extraction.md) | Audio metadata as derived facts — symphonia for format reads, MPL-2.0 allowed | Accepted |
 | [0017](0017-dependency-security-policy.md) | Dependency security — current by default, monitored, held for a minimum release age of at least 48 hours | Accepted |
 | [0018](0018-analyzer-coverage-matrix.md) | Analyzer coverage — which analyzers deliver which languages, and on which axis | Accepted |
 | [0019](0019-remote-model-tier.md) | Remote model tier — an explicitly consented egress path, and the promises it changes | Superseded by 0028 |
-| [0020](0020-build-capable-sandboxed-execution.md) | Build-capable sandboxed execution — running the repository's own build, and the non-goal it narrows | Draft |
+| [0020](0020-build-capable-sandboxed-execution.md) | Build-capable sandboxed execution — running the repository's own build, and the non-goal it narrows | Draft (§6 sandbox default superseded by 0030) |
 | [0021](0021-open-knowledge-format-bundle.md) | The graph's shareable form is an OKF bundle — replacing the Obsidian vault | Accepted |
 | [0022](0022-dynamic-okf-viewer.md) | A dynamic OKF viewer — the bundle is the source, and it is somebody else's | Accepted |
 | [0023](0023-authoring-commands.md) | Authoring commands act on the sources, and only where a rule is decidable | Accepted |
@@ -35,9 +35,11 @@
 | [0027](0027-external-model-provider.md) | External model provider — models run in a local server the user already has, not inside Roteiro | For Review |
 | [0028](0028-one-engine-local-or-hosted.md) | One engine, local or hosted — the provider may be off this machine, and the remote tier is removed | Accepted |
 | [0029](0029-external-work-references.md) | External works are cited from an authored reference register, rendered APA 7, and refused when incomplete | For Review |
+| [0030](0030-remove-the-microvm-sandbox.md) | Remove the microVM sandbox — analyzers and linters run on the host, behind the consent gate, or not at all | Accepted |
 
 > **ADR 0018** is the third of the analyzer trio: 0012 decides how findings are
-> stored, 0014 how analyzers are executed and provisioned, and 0018 *which*
+> stored, 0014 how analyzers are executed and provisioned (its microVM backend
+> removed by 0030), and 0018 *which*
 > analyzers are shipped and what each one actually covers — with the evidence,
 > since 0012 and 0014 name `cargo-audit` and `semgrep` only as examples.
 

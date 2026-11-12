@@ -85,13 +85,15 @@ tool declines every tool not named, so the layers <strong>intersect</strong>: <c
 a project <code>roteiro.toml</code> and your <code>~/.roteiro/config.toml</code> each may narrow the
 surface and none may widen it — a committed project file cannot restore a tool you removed. An
 unknown name, or a restriction leaving nothing to serve, refuses to start rather than quietly
-advertising everything. See <a href="https://github.com/OffeneDatenmodellierung/Roteiro/blob/main/docs/adr/0007-configuration-file.md">ADR-0007</a> v1.5.</div>
+advertising everything. The one exception is the names of tools that were removed with the
+sandbox (<code>sandbox_status</code>, <code>sandbox_clear</code> and the <code>sandbox</code>
+class): a list still naming them loads, they restrict nothing, and Roteiro reports them. See <a href="https://github.com/OffeneDatenmodellierung/Roteiro/blob/main/docs/adr/0007-configuration-file.md">ADR-0007</a> v1.5.</div>
 
 <div class="note"><strong>Name a class, not ten tools.</strong> <code>query</code>,
-<code>quality</code>, <code>security</code> and <code>sandbox</code> are accepted wherever a tool
+<code>quality</code> and <code>security</code> are accepted wherever a tool
 name is, and a hand-written list of names is exactly what goes stale when a tool is added. Every
 advertised tool costs tokens on every turn whether the session could reach it or not, and
-<code>security</code> + <code>sandbox</code> are roughly two fifths of it. The default is still
+<code>security</code> is a large share of it. The default is still
 every class. Whatever you leave out, <code>list_tool_classes</code> stays advertised and says so
 — see <a href="modes.html#mcp">MCP mode</a>.</div>
 

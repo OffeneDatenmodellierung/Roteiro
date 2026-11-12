@@ -995,33 +995,16 @@ enum Command {
     /// line of its own, and as `build_succeeded` in `--json` — so a partial
     /// result is never quietly a small one.
     ///
-    /// **The linter runs sandboxed by default** (ADR-0020 §6). `cargo clippy`
-    /// has `cargo check` semantics, so running it here would compile this tree
-    /// on this machine, executing its build scripts and loading its proc macros
-    /// with your filesystem and your credentials. In your own repository that is
-    /// the build you were going to run anyway; in a branch you are reviewing it
-    /// is somebody else's code, and that the toolchain is yours does not make
-    /// the code yours.
+    /// **The linter runs only on this host, and only with your consent**
+    /// (ADR-0020 §6, ADR-0030). `cargo clippy` has `cargo check` semantics, so
+    /// running it here compiles this tree on this machine, executing its build
+    /// scripts and loading its proc macros with your filesystem and your
+    /// credentials. In your own repository that is the build you were going to
+    /// run anyway; in a branch you are reviewing it is somebody else's code, and
+    /// that the toolchain is yours does not make the code yours. So with nothing
+    /// granted, it refuses and says how to grant.
     ///
-    /// **You have to supply the image**, in `[lint] image` or `--image`, pinned
-    /// by digest. Roteiro ships no default and will not choose one: no
-    /// first-party Rust image carries the `clippy` component — rust-lang builds
-    /// every stable and nightly variant `--profile minimal` — and picking a
-    /// third party's would make somebody else's container the boundary your
-    /// build scripts run in, chosen here and noticed by nobody. See
-    /// `docs/SANDBOXED_LINTING.md`, which shows the Dockerfile.
-    ///
-    /// **The count can differ from a local `cargo clippy`, legitimately.** Which
-    /// lints fire is decided by the image's rustc, which is not this machine's,
-    /// and a lint name is a symbol in a compiler. Nothing is stored, so that is
-    /// a surprise rather than a corruption — the report names the toolchain it
-    /// used, beside the image digest it came from.
-    ///
-    /// The guest has no network interface, so it builds from a read-only mount
-    /// of this machine's cargo cache. If a dependency is not already there, the
-    /// run refuses and tells you to `cargo fetch` on the host first.
-    ///
-    /// To allow host execution instead, **either** is enough — you do not need
+    /// To allow host execution, **either** is enough — you do not need
     /// both:
     ///
     /// - for one run: `--allow-unsandboxed`;
@@ -1034,30 +1017,15 @@ enum Command {
     /// so a merged line granting it would be consent given by someone else and
     /// noticed by nobody. `roteiro config` shows which layer decided.
     ///
-    /// Nothing ever falls back. If the sandbox is asked for and unavailable the
-    /// command says so and stops; it does not quietly run on the host instead.
     #[cfg(feature = "execution")]
     Lint {
         /// Which linter to run (`clippy`).
         analyzer: String,
-        /// Run the linter in the sandbox — already the default, so this pins the
-        /// intent against a change of defaults, and against a user-config grant
-        /// you would rather not apply to this run. If the sandbox cannot be had
-        /// it refuses by name rather than running here.
-        #[arg(long, conflicts_with = "allow_unsandboxed")]
-        sandboxed: bool,
         /// Accept that this run has no isolation boundary, and compile this tree
         /// on this host. Grants host execution for this run alone; the standing
         /// form is `[lint] allow_unsandboxed` in your own config.
         #[arg(long)]
         allow_unsandboxed: bool,
-        /// The digest-pinned OCI image to lint inside, overriding `[lint]
-        /// image` for this run. Roteiro ships no default and will not pick one:
-        /// no first-party Rust image carries `clippy`, and choosing a third
-        /// party's would make somebody else's container the boundary your build
-        /// scripts run in. A tag is refused — see `docs/SANDBOXED_LINTING.md`.
-        #[arg(long, value_name = "REFERENCE")]
-        image: Option<String>,
         /// Resolve the build with **every** feature enabled (`--all-features`).
         /// This changes what is compiled and therefore what is linted, so the
         /// report names the feature set it used.
@@ -1080,25 +1048,6 @@ enum Command {
     Security {
         #[command(subcommand)]
         action: SecurityAction,
-    },
-    /// The **sandbox image store**: what it is holding, and dropping it (#433).
-    ///
-    /// Separate from `security` because its subject is different. `security`'s
-    /// verbs are about *analyzers* — their findings, their pinned assets, their
-    /// readiness — and this one is about the machine-global cache of OCI images
-    /// and the ext4 disks derived from them, which after ADR-0014 v1.6's builder
-    /// work is no longer one image per analyzer.
-    ///
-    /// Both verbs are safe by the same property, which is also their limit:
-    /// everything in this store is re-obtainable from a pinned digest, so
-    /// clearing costs time and never information — and `clear` may therefore
-    /// never reach anything that is not. It cannot see a findings layer, a memory
-    /// record or `graph.db`, and it refuses rather than guesses when it meets
-    /// something under the store root it does not recognise.
-    #[cfg(feature = "execution")]
-    Sandbox {
-        #[command(subcommand)]
-        action: SandboxAction,
     },
     /// Start the network HTTP server: the OpenAI-compatible `/v1` model endpoint
     /// (+ graph tools + Ask) when built `--features serve` with a model installed,
@@ -1179,10 +1128,10 @@ enum Command {
         /// Restrict what this server advertises **and dispatches** — over `/mcp`
         /// and to the served model alike — to these tools (comma-separated,
         /// repeatable). Accepts a tool name, a CLASS (`query`, `quality`,
-        /// `security`, `sandbox`), or the alias `read-only` for everything except
-        /// the one tool that changes something. A class is the cheap lever: the
+        /// `security`), or the alias `read-only` for every read-only tool (all of
+        /// them, today). A class is the cheap lever: the
         /// unused half of the surface is tokens spent on every turn, and
-        /// `--tools query,quality` drops the `security`/`sandbox` prose without
+        /// `--tools query,quality` drops the `security` prose without
         /// making them undiscoverable — `list_tool_classes` is always advertised
         /// and says what was left out. Intersected with `[mcp] tools` from config
         /// — every layer may narrow the surface and none may widen it. An unknown
@@ -1236,8 +1185,8 @@ enum Command {
         sync_on_access: bool,
         /// Restrict what this server advertises **and dispatches** to these tools
         /// (comma-separated, repeatable). Accepts a tool name, a CLASS (`query`,
-        /// `quality`, `security`, `sandbox`), or the alias `read-only` for
-        /// everything except the one tool that changes something. A class is the
+        /// `quality`, `security`), or the alias `read-only` for every read-only
+        /// tool (all of them, today). A class is the
         /// cheap lever: the unused half of the surface is tokens spent on every
         /// turn, and `list_tool_classes` is always advertised so a class left out
         /// stays discoverable. Intersected with `[mcp] tools` from config — every
@@ -1982,30 +1931,19 @@ enum SecurityAction {
     },
     /// Run an analyzer against this worktree and file its findings.
     ///
-    /// **The sandbox is the default.** With no flag, the analyzer is executed
-    /// inside a digest-pinned OCI image in a microVM (`exec-boxlite`), and the
-    /// run's evidence records `isolation=microvm`. That backend is not in the
-    /// default feature set, so on a stock build this is a named refusal that
-    /// says which feature to rebuild with — never a silent absence, and never a
-    /// silent downgrade to the host.
+    /// **It runs on this host, and only with `--allow-unsandboxed`.** The
+    /// analyzer is a child process here with no boundary (`exec-subprocess`, on
+    /// by default), and the flag is consent to execute a third-party binary on
+    /// this machine with nothing between them. It is required on every run and
+    /// implied by nothing; without it the command refuses and says so. (A
+    /// microVM backend once made a sandboxed run the default; ADR-0030 removed
+    /// it.)
     ///
-    /// `--allow-unsandboxed` selects the other backend: a child process on this
-    /// host, with no boundary (`exec-subprocess`, on by default). It is required
-    /// for that path and means exactly what it has always meant — consent to
-    /// execute a third-party binary here with nothing between it and this
-    /// machine. It is not implied by anything, and the sandbox existing does not
-    /// weaken it.
-    ///
-    /// Whichever backend runs, assets are never fetched: a cold cache fails and
+    /// Assets are never fetched: a cold cache fails and
     /// names the `prefetch` command, having executed nothing.
     Run {
         /// The analyzer to run (`roteiro security status` lists them).
         analyzer: String,
-        /// Execute inside the sandbox. This is already the default; saying it
-        /// explicitly pins the intent so a script cannot be re-aimed at the
-        /// host by a change of defaults.
-        #[arg(long, conflicts_with = "allow_unsandboxed")]
-        sandboxed: bool,
         /// Accept that this run has no isolation boundary, and execute the
         /// analyzer as a child process on this host. Required for that path.
         #[arg(long)]
@@ -2018,23 +1956,13 @@ enum SecurityAction {
     /// digest — the one command that writes to the asset cache.
     ///
     /// Gated on `execution`, which is on by default: provisioning downloads,
-    /// digests and pins, and executes no analyzer. It is deliberately reachable
-    /// from a build with *no* execution backend, because that is what
-    /// bootstraps one — `exec-boxlite` requires the verified runtime archive at
-    /// compile time.
+    /// digests and pins, and executes no analyzer, so it is reachable from a
+    /// build with no execution backend — one that only ingests.
     #[cfg(feature = "execution")]
     Prefetch {
         /// Only this analyzer's assets. Default: all of them.
         #[arg(long, value_name = "NAME")]
         analyzer: Option<String>,
-        /// Pull this digest-pinned linter image instead of `[lint] image`.
-        ///
-        /// The counterpart of `roteiro lint --image`, and it exists so the pair
-        /// is symmetric: an image you can lint with is an image you can
-        /// provision, without having to write it into a config file first to
-        /// try it.
-        #[arg(long, value_name = "REFERENCE")]
-        image: Option<String>,
         /// Allow downloading the assets that are fetched by URL — today that is
         /// `osv-scanner`'s per-ecosystem OSV databases, roughly **260 MB**.
         ///
@@ -2062,66 +1990,6 @@ enum SecurityAction {
         #[arg(long, value_name = "NAME")]
         analyzer: Option<String>,
         /// Emit the status as JSON.
-        #[arg(long)]
-        json: bool,
-    },
-}
-
-/// The two verbs of the sandbox image store (#433, ADR-0014 v1.6).
-///
-/// `status` and `clear`, and deliberately no third: there is no config key that
-/// drops this cache. A setting that evicts is a *standing instruction to throw
-/// work away* which fires when nobody is looking, where ADR-0013 already holds
-/// eviction to be a maintenance act rather than a preference.
-#[cfg(feature = "execution")]
-#[derive(Subcommand)]
-enum SandboxAction {
-    /// Report what the sandbox image store is holding: one row per image, with
-    /// its sizes, and the store's total.
-    ///
-    /// Offered alongside `clear` rather than as a convenience. A destructive verb
-    /// with no way to see what it will destroy is invoked blind, which is
-    /// ADR-0014 v1.6's third rule. Each row's reference is what `clear --image`
-    /// takes, so what to type next is on the screen.
-    Status {
-        /// Emit the status as JSON.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Drop cached images, and report what that freed.
-    ///
-    /// **What it may touch is bounded by why it is safe.** Everything in this
-    /// store is re-obtainable from a pinned digest, so clearing costs time and
-    /// never information — and the verb may therefore never reach anything that
-    /// is not. It refuses, naming what it found, rather than clearing anything it
-    /// cannot classify.
-    ///
-    /// Shared blobs are handled as a set difference over the whole index, not as
-    /// a walk of the named image: a layer some other cached image still uses
-    /// stays, and every surviving image is re-resolved blob by blob afterwards
-    /// and reported.
-    Clear {
-        /// Drop this image, by the reference `roteiro sandbox status` lists it
-        /// under.
-        #[arg(long, value_name = "REFERENCE")]
-        image: Option<String>,
-        /// Drop the pinned image this analyzer runs in — the same request as
-        /// `--image`, spelled the way the analyzer table spells it.
-        #[arg(long, value_name = "NAME")]
-        analyzer: Option<String>,
-        /// Drop **every** cached image, and the bytes under the store root that
-        /// no image claims.
-        ///
-        /// A separate argument from `--image` and `--analyzer` on purpose: "clear
-        /// this one" and "clear everything" are different requests, and a caller
-        /// asking for one must not be able to receive the other by supplying
-        /// nothing (ADR-0014 v1.6).
-        #[arg(long)]
-        everything: bool,
-        /// Report what would be removed, and remove nothing.
-        #[arg(long)]
-        dry_run: bool,
-        /// Emit the report as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -2213,7 +2081,7 @@ fn is_long_lived_server(cmd: &Command) -> bool {
         #[cfg(feature = "models")]
         Command::Model { .. } => false,
         #[cfg(feature = "execution")]
-        Command::Lint { .. } | Command::Security { .. } | Command::Sandbox { .. } => false,
+        Command::Lint { .. } | Command::Security { .. } => false,
     }
 }
 
@@ -2577,27 +2445,18 @@ fn main() -> anyhow::Result<()> {
         #[cfg(feature = "execution")]
         Command::Lint {
             analyzer,
-            sandboxed,
             allow_unsandboxed,
-            image,
             all_features,
             features,
             json,
         } => run_lint(
             &analyzer,
             &lint_features(all_features, features.as_deref())?,
-            lint_host_decision(&cfg, sandboxed, allow_unsandboxed),
+            lint_host_decision(&cfg, allow_unsandboxed),
             json,
-            image.as_deref().or(cfg.effective.lint.image.as_deref()),
         ),
         #[cfg(feature = "execution")]
-        Command::Security { action } => run_security(
-            action,
-            cfg.effective.lint.image.as_deref(),
-            &cfg.effective.security,
-        ),
-        #[cfg(feature = "execution")]
-        Command::Sandbox { action } => run_sandbox(action),
+        Command::Security { action } => run_security(action),
         #[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
         Command::Serve {
             models,
@@ -2990,12 +2849,11 @@ fn print_mcp_section(loaded: &config::Loaded) {
 /// merged one, and each is labelled with what that layer is allowed to do.
 ///
 /// It also names the **default** in the header, because for this key the default
-/// is the whole story: unset means sandboxed, and sandboxed means the run needs
-/// an image nobody can supply but the reader. A section that printed two `None`s
+/// is the whole story: unset means refused. A section that printed two `None`s
 /// without saying so would be accurate and useless.
 #[cfg(feature = "execution")]
 fn print_lint_section(loaded: &config::Loaded) {
-    println!("\n[lint]  (ADR-0020 §6 — sandboxed by default; the host is opt-in)");
+    println!("\n[lint]  (ADR-0020 §6 — refused by default; the host is opt-in)");
     println!(
         "  allow_unsandboxed = {:?}  (project: {:?} — may deny, never grant; user: {:?} — may \
          grant)",
@@ -3010,22 +2868,8 @@ fn print_lint_section(loaded: &config::Loaded) {
         );
     }
     println!("  either this key or `--allow-unsandboxed` is enough");
-    // Ordinary precedence, unlike the key above it, so the layers are printed
-    // as ordinary keys rather than the way
-    // `allow_unsandboxed` does — the two rules sitting in one table is exactly
-    // the sort of thing a reader has to be able to see rather than infer.
-    println!(
-        "  image             = {:?}  (project: {:?}; user: {:?} — ordinary precedence, project \
-         over user, `--image` over both)",
-        loaded.effective.lint.image, loaded.project.lint.image, loaded.user.lint.image,
-    );
-    if loaded.effective.lint.image.is_none() {
-        println!(
-            "  no image is set, so a sandboxed lint refuses. Roteiro ships no default: no \
-             first-party Rust image carries `clippy` (rust-lang/docker-rust builds every variant \
-             `--profile minimal`), and choosing a third party's would make somebody else's \
-             container the boundary your build scripts run in. See docs/SANDBOXED_LINTING.md."
-        );
+    if loaded.project.lint.image.is_some() || loaded.user.lint.image.is_some() {
+        println!("  image             — removed with the sandbox (ADR-0030); ignored");
     }
 }
 
@@ -3041,49 +2885,21 @@ fn print_lint_section(_loaded: &config::Loaded) {
     );
 }
 
-/// Print `[security]` — the images analyzers are sandboxed in, per layer.
-///
-/// Its own function beside [`print_lint_section`], and the header names the
-/// precedence *because* it sits next to a table that does not follow it. `[lint]`
-/// holds one key that inverts and one that does not; this table holds only
-/// locators, so a reader coming from the section above has to be told that the
-/// ordinary rule is back, rather than left to infer which of the two neighbours
-/// they are looking at.
-///
-/// It **reports** a bad entry rather than refusing over one. That is ADR-0007
-/// v1.3's rule and it is not a softening: the refusal fires at every consuming
-/// site, and this is the command an operator runs precisely because a key is not
-/// doing what they expected — the one command it must not stop.
+/// Print `[security]` only to say it is inert: its one key, `[security.images]`,
+/// went with the microVM sandbox (ADR-0030). Silent when neither layer sets it.
 fn print_security_section(loaded: &config::Loaded) {
-    println!("\n[security]  (ADR-0014 — locators, so ordinary precedence: project over user)");
-    let effective = &loaded.effective.security.images;
-    if effective.is_empty() {
+    let layers: Vec<&str> = [
+        ("project", loaded.project.security.is_some()),
+        ("user", loaded.user.security.is_some()),
+    ]
+    .into_iter()
+    .filter_map(|(name, set)| set.then_some(name))
+    .collect();
+    if !layers.is_empty() {
         println!(
-            "  images = {{}}  — nothing declared, so `security run` uses only the images this \
-             build pins. An analyzer with no pin has no sandboxed path; declare one under \
-             `[security.images]` to give it one. See docs/SANDBOXED_LINTING.md."
+            "\n[security]  removed with the sandbox (ADR-0030); set in {} and ignored",
+            layers.join(" and ")
         );
-    } else {
-        for (analyzer, reference) in effective {
-            // Per entry rather than per table, for the reason `[debt] ignore`
-            // reports per pattern: the effective map can hold entries from both
-            // layers at once, so one label for the table would be a lie.
-            let layer = match (
-                loaded.project.security.images.get(analyzer),
-                loaded.user.security.images.get(analyzer),
-            ) {
-                (Some(_), Some(_)) => "project (over user)",
-                (Some(_), None) => "project",
-                (None, Some(_)) => "user",
-                (None, None) => "unknown",
-            };
-            println!("  images.{analyzer} = {reference:?}  ({layer})");
-        }
-    }
-    for problem in loaded.effective.security.problems() {
-        // Named as read-and-refused rather than printed bare, so nobody reads
-        // this section as a list of settings that are in force.
-        println!("  ** this entry is refused wherever it is used: {problem}");
     }
 }
 
@@ -12554,23 +12370,8 @@ fn run_load(file: &str, force: bool) -> anyhow::Result<()> {
 }
 
 /// Dispatch a `roteiro security` action.
-///
-/// `lint_image` is the `[lint] image` the config layers settled on. It reaches
-/// `prefetch` because a builder's image is **supplied rather than pinned by
-/// Roteiro** (ADR-0020 conditions 1-2): there is no entry in `SANDBOX_IMAGES` to
-/// iterate for it, so the only place that knows what to pull is the config.
-///
-/// `security` is `[security.images]`, and it reaches three actions rather than
-/// one. `run` needs the image it is about to boot; `prefetch` needs it for the
-/// same reason `lint_image` does, since a declared image is not in any table to
-/// iterate; and `status` needs it because a reader who cannot tell a built-in
-/// image from a declared one has lost the thing the pin was for (issue #434).
 #[cfg(feature = "execution")]
-fn run_security(
-    action: SecurityAction,
-    lint_image: Option<&str>,
-    security: &config::SecurityConfig,
-) -> anyhow::Result<()> {
+fn run_security(action: SecurityAction) -> anyhow::Result<()> {
     match action {
         SecurityAction::Ingest {
             file,
@@ -12580,317 +12381,17 @@ fn run_security(
         SecurityAction::List { analyzer, json } => run_security_list(analyzer.as_deref(), json),
         SecurityAction::Run {
             analyzer,
-            sandboxed,
             allow_unsandboxed,
             json,
-        } => run_security_run(
-            &analyzer,
-            select_backend(sandboxed, allow_unsandboxed),
-            json,
-            security.image_for(&analyzer),
-        ),
+        } => run_security_run(&analyzer, allow_unsandboxed, json),
         #[cfg(feature = "execution")]
         SecurityAction::Prefetch {
             analyzer,
-            image,
             allow_download,
             json,
-        } => run_security_prefetch(
-            analyzer.as_deref(),
-            allow_download,
-            json,
-            image.as_deref().or(lint_image),
-            security,
-        ),
+        } => run_security_prefetch(analyzer.as_deref(), allow_download, json),
         #[cfg(feature = "execution")]
-        SecurityAction::Status { analyzer, json } => {
-            run_security_status(analyzer.as_deref(), json, security)
-        }
-    }
-}
-
-/// Dispatch the sandbox store's two verbs.
-#[cfg(feature = "execution")]
-fn run_sandbox(action: SandboxAction) -> anyhow::Result<()> {
-    match action {
-        SandboxAction::Status { json } => run_sandbox_status(json),
-        SandboxAction::Clear {
-            image,
-            analyzer,
-            everything,
-            dry_run,
-            json,
-        } => run_sandbox_clear(image, analyzer.as_deref(), everything, dry_run, json),
-    }
-}
-
-/// The reference the pinned image table holds for `analyzer`.
-///
-/// Gated, because the table is: `SANDBOX_IMAGES` is compiled only under
-/// `exec-boxlite`. The *store* is not gated and neither is clearing it — a
-/// machine that filled this cache with one build must be able to empty it with
-/// another — so the absence of the table is a **named refusal that says what to
-/// type instead**, rather than an argument that silently is not there.
-#[cfg(all(feature = "execution", feature = "exec-boxlite"))]
-fn sandbox_image_for(analyzer: &str) -> anyhow::Result<String> {
-    rto_exec::boxlite::image_for(analyzer).map_or_else(
-        || {
-            anyhow::bail!(
-                "no pinned sandbox image for analyzer `{analyzer}`.\n  \
-                 `roteiro sandbox status` lists what the store is holding, \
-                 and `--image` takes any of those references."
-            )
-        },
-        |image| Ok(image.reference.to_owned()),
-    )
-}
-
-/// The same, in a build with no pinned image table to consult.
-#[cfg(all(feature = "execution", not(feature = "exec-boxlite")))]
-fn sandbox_image_for(analyzer: &str) -> anyhow::Result<String> {
-    anyhow::bail!(
-        "this build cannot map analyzer `{analyzer}` to an image: the pinned image table is \
-         compiled only with `--features exec-boxlite`.\n  \
-         The store itself is readable and clearable without it — run \
-         `roteiro sandbox status` and pass one of the references it lists to `--image`."
-    )
-}
-
-/// Turn the three selectors into the one scope, or refuse naming all three.
-///
-/// The refusal is the point rather than a formality. ADR-0014 v1.6 requires that
-/// "clear this image" and "clear everything" be **different arguments**, so
-/// supplying neither must not fall through to either — least of all to the
-/// destructive one.
-#[cfg(feature = "execution")]
-fn sandbox_scope(
-    image: Option<String>,
-    analyzer: Option<&str>,
-    everything: bool,
-) -> anyhow::Result<rto_exec::Scope> {
-    let asked =
-        usize::from(image.is_some()) + usize::from(analyzer.is_some()) + usize::from(everything);
-    if asked > 1 {
-        anyhow::bail!(
-            "`--image`, `--analyzer` and `--everything` are different requests; pass exactly one."
-        );
-    }
-    if everything {
-        return Ok(rto_exec::Scope::Everything);
-    }
-    if let Some(reference) = image {
-        return Ok(rto_exec::Scope::Image(reference));
-    }
-    if let Some(analyzer) = analyzer {
-        return Ok(rto_exec::Scope::Image(sandbox_image_for(analyzer)?));
-    }
-    anyhow::bail!(
-        "`roteiro sandbox clear` needs to be told what to drop.\n  \
-         `--image REFERENCE` or `--analyzer NAME` drops one; `--everything` drops all of them.\n  \
-         Run `roteiro sandbox status` first — it lists each reference and what it is costing."
-    )
-}
-
-/// Report what the sandbox image store is holding.
-#[cfg(feature = "execution")]
-fn run_sandbox_status(json: bool) -> anyhow::Result<()> {
-    let report = rto_exec::sandbox_status(&rto_exec::asset_root())?;
-    if json {
-        return emit_json(&report);
-    }
-
-    // The scope is printed, not implied. There is one of these per asset root and
-    // every repository on the machine shares it, so a figure read next to a
-    // project name would otherwise be attributed to that project.
-    println!("sandbox image store: {}  (machine-wide)", report.store);
-    if !report.present {
-        println!("\nnothing is cached — the store does not exist yet");
-        return Ok(());
-    }
-    if report.images.is_empty() {
-        println!("\nno images cached");
-    } else {
-        println!("\nimages");
-    }
-    for image in &report.images {
-        println!("  {}", image.reference);
-        println!(
-            "      {}  ({} reclaimable on its own)",
-            human_bytes(image.bytes.total),
-            human_bytes(image.bytes.exclusive)
-        );
-        println!(
-            "      layers {} · extracted {} · disk image {} · base {}",
-            human_bytes(image.bytes.layers),
-            human_bytes(image.bytes.extracted),
-            human_bytes(image.bytes.disk_image),
-            human_bytes(image.bytes.base_disk)
-        );
-        // The object tally is the pulled content — manifest, config, one per
-        // distinct layer. Not the derived trees and disks, which are built on
-        // first run: an image that has only ever been pulled is complete without
-        // them, and counting them would report every fresh pull as damaged.
-        println!(
-            "      {} layer(s), {}/{} object(s) present, cached {}{}",
-            image.layers,
-            image.objects.present,
-            image.objects.expected,
-            image.cached_at,
-            if image.pull_complete {
-                ""
-            } else {
-                "  ** the index calls this pull incomplete — re-run `roteiro security prefetch` **"
-            }
-        );
-    }
-
-    sandbox_status_tail(&report);
-    Ok(())
-}
-
-/// The parts of a status screen that are about the store rather than an image.
-///
-/// Lifted out so [`run_sandbox_status`] is one loop over images: these four
-/// sections each answer a different question — what is not attributable, what
-/// will never be cleared, what is holding the store open, and what to type next.
-#[cfg(feature = "execution")]
-fn sandbox_status_tail(report: &rto_exec::SandboxStatus) {
-    if !report.unattributed.is_empty() {
-        println!("\nunattributed — no cached image claims these bytes");
-        for entry in &report.unattributed {
-            println!("  {}  {}", human_bytes(entry.bytes), entry.path);
-        }
-        println!("  `--everything` removes them; a per-image clear never does.");
-    }
-    if !report.preserved.is_empty() {
-        println!("\nnever cleared — no pinned digest re-obtains these");
-        for entry in &report.preserved {
-            println!("  {}\n      {}", entry.path, entry.reason);
-        }
-    }
-    if report.live_boxes > 0 {
-        println!(
-            "\n{} box(es) are registered in this store; `clear` will refuse until they are gone",
-            report.live_boxes
-        );
-    }
-
-    println!("\ntotal {}", human_bytes(report.total_bytes));
-    // Offered only when there is something to reclaim. A cleared store is a few
-    // kilobytes of empty index, and telling somebody they could reclaim that is
-    // how a useful line becomes one people stop reading.
-    if !report.images.is_empty() || !report.unattributed.is_empty() {
-        println!("  `roteiro sandbox clear --everything` reclaims it; every byte is re-obtainable");
-        println!("  by `roteiro security prefetch`, so it costs a re-pull and never information.");
-    }
-    // The boundary, said out loud. This verb owns the image store and not the
-    // rest of the asset cache, and a reader who has just been told a total wants
-    // to know whether it was the whole of what is on disk.
-    println!("  The pinned assets beside it — the sandbox runtime, analyzer rules — are");
-    println!("  reported by `roteiro security status` and are not in this total.");
-}
-
-/// Drop cached images and report what that freed.
-#[cfg(feature = "execution")]
-fn run_sandbox_clear(
-    image: Option<String>,
-    analyzer: Option<&str>,
-    everything: bool,
-    dry_run: bool,
-    json: bool,
-) -> anyhow::Result<()> {
-    let scope = sandbox_scope(image, analyzer, everything)?;
-    let root = rto_exec::asset_root();
-    let report = if dry_run {
-        rto_exec::sandbox_plan(&root, &scope)?.0
-    } else {
-        rto_exec::sandbox_clear(&root, &scope)?
-    };
-    if json {
-        return emit_json(&report);
-    }
-
-    println!("sandbox image store: {}  (machine-wide)", report.store);
-    let verb = if report.applied {
-        "cleared"
-    } else {
-        "would clear"
-    };
-    println!("{verb}: {}", report.requested);
-
-    if report.removed.is_empty() && report.removed_unattributed.is_empty() {
-        println!("\nnothing to remove");
-        return Ok(());
-    }
-    println!("\nimages");
-    for removed in &report.removed {
-        println!(
-            "  {}\n      {}, {} object(s)",
-            removed.reference,
-            human_bytes(removed.freed_bytes),
-            removed.objects_removed
-        );
-    }
-    for entry in &report.removed_unattributed {
-        println!(
-            "  unattributed: {}\n      {}",
-            entry.path,
-            human_bytes(entry.bytes)
-        );
-    }
-
-    sandbox_clear_tail(&report);
-    Ok(())
-}
-
-/// The freed-bytes accounting and the survivors' verification.
-///
-/// Both are obligations rather than niceties. ADR-0014 v1.6 requires the verb to
-/// **report what it freed**, so an 8.5 GB re-pull appears in the transcript rather
-/// than turning up later as a mystery. And a `clear` that cannot demonstrate the
-/// surviving images are still complete is one nobody trusts twice (#433) — so the
-/// survivors are re-resolved against the filesystem after the deletion, and the
-/// tally is printed whether or not it is reassuring.
-#[cfg(feature = "execution")]
-fn sandbox_clear_tail(report: &rto_exec::ClearReport) {
-    println!("\nfreed {}", human_bytes(report.freed_bytes));
-    if report.applied {
-        println!(
-            "  store {} → {} (measured {})",
-            human_bytes(report.store_bytes_before),
-            human_bytes(report.store_bytes_after),
-            human_bytes(report.measured_freed_bytes())
-        );
-    }
-
-    if !report.preserved.is_empty() {
-        println!("\nleft alone — no pinned digest re-obtains these");
-        for entry in &report.preserved {
-            println!("  {}\n      {}", entry.path, entry.reason);
-        }
-    }
-
-    if !report.applied {
-        println!("\nnothing was removed — drop `--dry-run` to apply this");
-        return;
-    }
-    if report.retained.is_empty() {
-        println!("\nno images remain");
-        return;
-    }
-    println!("\nsurviving images, re-checked against the filesystem");
-    for image in &report.retained {
-        println!(
-            "  {}\n      {}/{} object(s) present{}",
-            image.reference,
-            image.objects.present,
-            image.objects.expected,
-            if image.complete {
-                ""
-            } else {
-                "  ** INCOMPLETE — this image can no longer run; re-run `roteiro security prefetch` **"
-            }
-        );
+        SecurityAction::Status { analyzer, json } => run_security_status(analyzer.as_deref(), json),
     }
 }
 
@@ -13364,12 +12865,8 @@ fn print_cross_reference(cross_reference: &[SecurityCrossReference]) {
 /// The `--json` shape of `roteiro security run`.
 ///
 /// Gated on having a backend rather than on `execution`, because the only thing
-/// that constructs it is [`execute_and_file`] — see there for why the two arms
-/// of the `any` are named separately instead of collapsed to `exec-subprocess`.
-#[cfg(all(
-    feature = "execution",
-    any(feature = "exec-boxlite", feature = "exec-subprocess")
-))]
+/// that constructs it is [`execute_and_file`].
+#[cfg(all(feature = "execution", feature = "exec-subprocess"))]
 #[derive(serde::Serialize)]
 struct SecurityRunReport {
     layer: String,
@@ -13377,12 +12874,6 @@ struct SecurityRunReport {
     analyzer_version: String,
     runner: rto_graph::RunnerKind,
     isolation: rto_graph::Isolation,
-    /// The pinned image the analyzer ran inside, absent for a host run. Carried
-    /// beside `runner` and `isolation` because those three together are the
-    /// answer to "where did this finding come from", and a consumer that had
-    /// only the first two could not tell one sandboxed run from another.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    image_digest: Option<String>,
     /// The exact argv that was executed, so a run is reproducible by hand.
     command: Vec<String>,
     findings: usize,
@@ -13398,169 +12889,43 @@ struct SecurityRunReport {
     advisory_db: Option<rto_graph::AdvisoryDb>,
 }
 
-/// Which backend `roteiro security run` was asked for.
-///
-/// Named rather than a `bool` because the two are not opposites of one
-/// permission: they are different machines to run on, with different evidence,
-/// and the choice is made once — here — instead of being re-derived from flags
-/// at each place that cares.
-#[cfg(feature = "execution")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RunBackend {
-    /// A pinned OCI image in a microVM.
-    Sandboxed,
-    /// A child process on this host, with no boundary.
-    Subprocess,
-}
-
-/// Resolve the two flags into the backend that will run.
-///
-/// **The sandbox is what you get for saying nothing.** `--allow-unsandboxed` is
-/// the only thing that selects the host, and it selects it outright: there is no
-/// input to this function that means "try the sandbox and settle for the host",
-/// because that is the silent downgrade ADR-0019 §6 exists to prevent. If the
-/// sandbox cannot run, the caller refuses and says why; it does not quietly
-/// produce findings stamped with an isolation boundary that was not there.
-///
-/// Split out as a pure function so the rule is testable in a build with no
-/// backend compiled in at all — the build where getting it wrong is least
-/// likely to be noticed.
-#[cfg(feature = "execution")]
-fn select_backend(sandboxed: bool, allow_unsandboxed: bool) -> RunBackend {
-    // clap's `conflicts_with` rejects both together before we are called; this
-    // says so where the assumption is relied upon, rather than leaving the
-    // precedence of an impossible combination to be inferred from the `if`.
-    debug_assert!(
-        !(sandboxed && allow_unsandboxed),
-        "`--sandboxed` and `--allow-unsandboxed` are mutually exclusive at the parser"
-    );
-    if allow_unsandboxed {
-        RunBackend::Subprocess
-    } else {
-        RunBackend::Sandboxed
-    }
-}
-
 /// Run an analyzer against this worktree and file its findings.
 ///
-/// Dispatches to the backend [`select_backend`] chose. Each arm either runs on
-/// the backend that was asked for or fails naming what is missing; **no arm
-/// substitutes the other backend**, so the `runner` and `isolation` recorded on
-/// the stored layer are always the ones the user asked for.
+/// The host is the only backend (ADR-0030), and `--allow-unsandboxed` is its
+/// consent: without it [`rto_exec::SubprocessRunner::new`] refuses before
+/// anything is executed, naming the flag.
 #[cfg(feature = "execution")]
-fn run_security_run(
-    analyzer: &str,
-    backend: RunBackend,
-    json: bool,
-    declared_image: Option<&str>,
-) -> anyhow::Result<()> {
-    match backend {
-        RunBackend::Sandboxed => run_security_run_sandboxed(analyzer, json, declared_image),
-        // A host run has no image, so `[security.images]` is not consulted and
-        // not silently ignored either: there is nothing for it to name. The
-        // recorded `isolation=none` is the whole of what that run is.
-        RunBackend::Subprocess => run_security_run_on_this_host(analyzer, json),
-    }
-}
-
-/// Execute the analyzer inside a digest-pinned OCI image in a microVM.
-///
-/// Everything refusable is refused before a guest boots: the hypervisor probe
-/// and the pinned asset cache inside [`rto_exec::BoxliteRunner::new`], then the
-/// image pull below. Each of those already carries the command that fixes it, so
-/// this adds no wording of its own — a second, paraphrased copy of a message
-/// that lives in `rto-exec` is a copy that goes stale.
-#[cfg(all(feature = "execution", feature = "exec-boxlite"))]
-fn run_security_run_sandboxed(
-    analyzer: &str,
-    json: bool,
-    declared_image: Option<&str>,
-) -> anyhow::Result<()> {
-    use rto_exec::BoxliteRunner;
-
-    let root = rto_exec::asset_root();
-    let runner = BoxliteRunner::new(analyzer, &root, declared_image)?;
-    let reference = runner.image().reference.clone();
-
-    // Preflight the local image store. The backend checks this too, but only
-    // after it has opened a runtime and started building a box — so without
-    // this, the commonest first-run failure on a provisioned host arrives after
-    // a visible pause, looking like something broke rather than something was
-    // never fetched. `roteiro` never pulls during a run, so the answer cannot be
-    // to fetch it here — and that is as true of an image the operator declared
-    // as of one Roteiro pinned.
-    if !rto_exec::boxlite::image_is_provisioned(analyzer, &root, declared_image)? {
-        return Err(rto_exec::boxlite::SandboxError::ImageNotProvisioned {
-            analyzer: analyzer.to_owned(),
-            reference,
-        }
-        .into());
-    }
-
-    let invocation = runner.invocation();
-    execute_and_file(&runner, analyzer, invocation, Some(&reference), json)
-}
-
-/// The same command in a build without `exec-boxlite`, which is every stock
-/// build: a refusal that names the feature, the bootstrap, and the alternative.
-///
-/// Deliberately a runtime error rather than a `cfg` on the clap variant. Gating
-/// the variant is how `roteiro model rm` shipped invisible to every crates.io
-/// user — `unrecognized subcommand` for a command the documentation describes.
-/// The flag parses everywhere; only the capability is conditional, and it says
-/// so in a sentence.
-///
-/// It does **not** offer to run the analyzer on the host instead. Naming
-/// `--allow-unsandboxed` as *an* option is honest — it is a different, weaker
-/// thing the user may choose — but it is stated as a downgrade with its
-/// consequence attached, not as a fallback this command would take on its own.
-#[cfg(all(feature = "execution", not(feature = "exec-boxlite")))]
-fn run_security_run_sandboxed(
-    analyzer: &str,
-    _json: bool,
-    _declared_image: Option<&str>,
-) -> anyhow::Result<()> {
-    anyhow::bail!(
-        "sandbox-unavailable: `roteiro security run {analyzer}` runs sandboxed by default, and \
-         this build has no sandbox backend — `exec-boxlite` was not compiled in. It is not in the \
-         default feature set, so a released binary and a plain `cargo build` both land here.\n  \
-         To get one, in this order:\n    \
-         1. roteiro security prefetch --analyzer sandbox --allow-download\n    \
-         2. export BOXLITE_RUNTIME_URL=\"file://$HOME/.roteiro/security/boxlite-runtime/boxlite-runtime.tar.gz\"\n    \
-         3. cargo install roteiro --features exec-boxlite     (or `cargo build --features exec-boxlite`)\n    \
-         4. roteiro security prefetch --analyzer {analyzer} --allow-download   (pulls the pinned image; needs the binary from step 3)\n  \
-         Step 4 needs a binary that already has the feature, which is why it comes last.\n  \
-         Without rebuilding, the alternatives are to run the analyzer elsewhere and \
-         `roteiro security ingest` its report, or to accept an unisolated run with \
-         `--allow-unsandboxed` — that executes a third-party binary on this host with nothing \
-         between it and your machine, and its findings are recorded isolation=none. Roteiro will \
-         not make that substitution for you."
-    );
+fn run_security_run(analyzer: &str, allow_unsandboxed: bool, json: bool) -> anyhow::Result<()> {
+    run_security_run_on_this_host(analyzer, allow_unsandboxed, json)
 }
 
 /// Execute the analyzer as a child process on this host, with no isolation.
 ///
-/// Reached only via `--allow-unsandboxed`. The flag is the consent, and it is a
-/// separate, explicit act from asking for the run, because what is being
-/// consented to — executing a third-party binary here with no boundary — is not
-/// what "analyze my code" implies. That has not changed now that a sandbox
-/// exists; if anything the flag says more, since there is now something better
-/// to have chosen instead.
+/// `allow_unsandboxed` is the consent, and it is a separate, explicit act from
+/// asking for the run, because what is being consented to — executing a
+/// third-party binary here with no boundary — is not what "analyze my code"
+/// implies. It is handed to the runner rather than checked here, so the refusal
+/// cannot be skipped by a caller that forgot.
 #[cfg(all(feature = "execution", feature = "exec-subprocess"))]
-fn run_security_run_on_this_host(analyzer: &str, json: bool) -> anyhow::Result<()> {
+fn run_security_run_on_this_host(
+    analyzer: &str,
+    allow_unsandboxed: bool,
+    json: bool,
+) -> anyhow::Result<()> {
     use rto_exec::SubprocessRunner;
 
-    // `true` is the consent the caller already collected: this function is
-    // reachable only from `RunBackend::Subprocess`, which only `--allow-unsandboxed`
-    // selects.
-    let runner = SubprocessRunner::new(analyzer, &rto_exec::asset_root(), true)?;
+    let runner = SubprocessRunner::new(analyzer, &rto_exec::asset_root(), allow_unsandboxed)?;
     let invocation = runner.invocation();
-    execute_and_file(&runner, analyzer, invocation, None, json)
+    execute_and_file(&runner, analyzer, invocation, json)
 }
 
 /// The same, in a `--no-default-features` build that dropped `exec-subprocess`.
 #[cfg(all(feature = "execution", not(feature = "exec-subprocess")))]
-fn run_security_run_on_this_host(analyzer: &str, _json: bool) -> anyhow::Result<()> {
+fn run_security_run_on_this_host(
+    analyzer: &str,
+    _allow_unsandboxed: bool,
+    _json: bool,
+) -> anyhow::Result<()> {
     anyhow::bail!(
         "`roteiro security run {analyzer} --allow-unsandboxed` needs the `exec-subprocess` \
          feature, which this build does not have; rebuild with `--features exec-subprocess` (it \
@@ -13572,38 +12937,18 @@ fn run_security_run_on_this_host(analyzer: &str, _json: bool) -> anyhow::Result<
 
 /// Run the request on `runner`, replace the analyzer's layer, and report.
 ///
-/// The half of `security run` that is the same whichever backend produced the
-/// result — and it is shared rather than duplicated for a reason beyond tidiness:
-/// **every user-visible claim about isolation below is read back out of
-/// `response.run`**, the record that was just written to the store. Nothing here
-/// is told which backend ran, so nothing here can say something the stored
-/// evidence does not.
+/// **Every user-visible claim about isolation below is read back out of
+/// `response.run`**, the record that was just written to the store, so nothing
+/// here can say something the stored evidence does not.
 ///
-/// `image_reference` is the exception, and only for the line printed *before* the
-/// run, where there is no record yet to read.
-///
-/// Gated on **having a backend**, not on `execution`. Its two callers are
-/// `run_security_run_sandboxed` (`exec-boxlite`) and
-/// `run_security_run_on_this_host` (`exec-subprocess`), and an `execution`-only
-/// build compiles neither — both are replaced there by refusal arms that bail
-/// before anything runs. So in that build this function, `SecurityRunReport` and
-/// `isolation_note` were genuinely dead and `-D warnings` said so (issue #445).
-///
-/// The `any` is written out rather than collapsed to `exec-subprocess`, which
-/// today implies it: the union of the two call sites is what makes the gate
-/// correct, and `crates/roteiro/Cargo.toml` records that `exec-boxlite`'s
-/// implication of `exec-subprocess` is CLI plumbing "worth untangling" later. If
-/// that happens, an `exec-boxlite`-only build still needs this and the `any`
-/// still says so.
-#[cfg(all(
-    feature = "execution",
-    any(feature = "exec-boxlite", feature = "exec-subprocess")
-))]
+/// Gated on **having a backend**, not on `execution`: an `execution`-only build
+/// replaces its caller with a refusal arm, and this would be dead code there
+/// (issue #445).
+#[cfg(all(feature = "execution", feature = "exec-subprocess"))]
 fn execute_and_file(
     runner: &dyn rto_exec::AnalyzerRunner,
     analyzer: &str,
     invocation: rto_exec::Invocation,
-    image_reference: Option<&str>,
     json: bool,
 ) -> anyhow::Result<()> {
     use rto_exec::{AnalysisRequest, Consent, Worktree};
@@ -13630,16 +12975,10 @@ fn execute_and_file(
         // a third-party binary should never leave the user guessing which one,
         // with which arguments, or where.
         let argv = format!("{} {}", invocation.program, invocation.args.join(" "));
-        match image_reference {
-            Some(reference) => eprintln!(
-                "running (isolation {}, in {reference}): {argv}",
-                runner.isolation().as_str()
-            ),
-            None => eprintln!(
-                "running (isolation {}, on this host): {argv}",
-                runner.isolation().as_str()
-            ),
-        }
+        eprintln!(
+            "running (isolation {}, on this host): {argv}",
+            runner.isolation().as_str()
+        );
     }
 
     let response = runner.run(&request)?;
@@ -13655,7 +12994,6 @@ fn execute_and_file(
             analyzer_version: response.run.analyzer_version,
             runner: response.run.runner,
             isolation: response.run.isolation,
-            image_digest: response.run.image_digest,
             command,
             findings: applied.findings,
             removed: applied.removed,
@@ -13705,19 +13043,17 @@ fn execute_and_file(
 ///
 /// Gated with [`execute_and_file`], its only caller — a build with no backend
 /// files no run, so there is no stored record for this to read out.
-#[cfg(all(
-    feature = "execution",
-    any(feature = "exec-boxlite", feature = "exec-subprocess")
-))]
+#[cfg(all(feature = "execution", feature = "exec-subprocess"))]
 fn isolation_note(run: &rto_graph::AnalysisRun) -> String {
     match run.isolation {
         rto_graph::Isolation::None => "isolation none — the analyzer ran on this host. Its egress \
                                        was configured off and its inputs were pinned, but nothing \
                                        enforced that."
             .to_owned(),
+        // Not reachable from this command since ADR-0030 removed the microVM
+        // backend; kept because the variant still describes stored runs.
         rto_graph::Isolation::MicroVm => format!(
-            "isolation microvm — the analyzer ran inside a microVM, in image {}, with the \
-             worktree mounted read-only and no network device.",
+            "isolation microvm — the analyzer ran inside a microVM, in image {}.",
             run.image_digest.as_deref().unwrap_or("(undeclared)")
         ),
         // Not reachable from this command: `security run` executes something, so
@@ -13780,10 +13116,8 @@ const LINT_CAVEATS: &[&str] = &[
     "a removed lint reads as fixed — the compiler dropped the check, nobody fixed anything",
     "an edit to `[workspace.lints]`, or an added `#[allow]`, makes whole cohorts appear or vanish \
      — a configuration change reading as a code change",
-    "a sandboxed run reports what the *image's* rustc said, and it is not this machine's — a lint \
-     name is a symbol in a compiler, so a different compiler legitimately fires a different set. \
-     `roteiro lint clippy` and `cargo clippy` in the same tree on the same day can disagree with \
-     no defect on either side",
+    "a toolchain bump moves the count — a lint name is a symbol in a compiler, so a different \
+     rustc legitimately fires a different set, with no defect on either side",
 ];
 
 /// Resolve every layer into the decision `roteiro lint` runs under (ADR-0020 §6).
@@ -13791,30 +13125,16 @@ const LINT_CAVEATS: &[&str] = &[
 /// A thin adapter, not a second implementation: the layering rule lives in
 /// `rto_exec::lint`, so the answer this produces and the answer
 /// `roteiro config`'s `[lint]` section echoes come from the same code. What it
-/// adds is the translation from two clap booleans to the three-state
-/// [`rto_exec::LintRequested`] — a pair of bools has a fourth state the flags
-/// cannot express, and turning it into an enum here is what keeps the impossible
-/// combination out of the gate.
+/// adds is the translation from the clap flag to [`rto_exec::LintRequested`].
 ///
-/// Split out as a pure function so all four rows of the ADR's table are testable
+/// Split out as a pure function so every row of the ADR's table is testable
 /// without running a linter, in a build that has no linter to run.
 #[cfg(feature = "execution")]
-fn lint_host_decision(
-    cfg: &config::Loaded,
-    sandboxed: bool,
-    allow_unsandboxed: bool,
-) -> rto_exec::LintDecision {
-    // clap's `conflicts_with` rejects both together before we are called; this
-    // says so where the assumption is relied upon rather than leaving the
-    // precedence of an impossible combination to be inferred from the match.
-    debug_assert!(
-        !(sandboxed && allow_unsandboxed),
-        "`--sandboxed` and `--allow-unsandboxed` are mutually exclusive at the parser"
-    );
-    let requested = match (allow_unsandboxed, sandboxed) {
-        (true, _) => rto_exec::LintRequested::Host,
-        (_, true) => rto_exec::LintRequested::Sandbox,
-        _ => rto_exec::LintRequested::Unset,
+fn lint_host_decision(cfg: &config::Loaded, allow_unsandboxed: bool) -> rto_exec::LintDecision {
+    let requested = if allow_unsandboxed {
+        rto_exec::LintRequested::Host
+    } else {
+        rto_exec::LintRequested::Unset
     };
     rto_exec::decide_lint_host(
         rto_exec::LintConfigGrant::from_layers(
@@ -13886,13 +13206,6 @@ struct LintReport {
     command: Vec<String>,
     /// The workspace root that was linted.
     worktree: String,
-    /// The digest-pinned image the run happened inside, absent for a host run.
-    ///
-    /// What `isolation` is made of. A consumer that wants to know what executed
-    /// this tree's build scripts can look the digest up; without it `"micro_vm"`
-    /// is a claim with nothing behind it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    image: Option<String>,
     /// The `CARGO_TARGET_DIR` roteiro set for the run, outside the worktree.
     ///
     /// Present so `command` is genuinely reproducible by hand — the argv needs
@@ -13969,7 +13282,6 @@ fn run_lint(
     features: &rto_exec::FeatureSet,
     decision: rto_exec::LintDecision,
     json: bool,
-    image: Option<&str>,
 ) -> anyhow::Result<()> {
     let dir = std::env::current_dir()?;
     // A committed grant that was discarded is reported before anything else,
@@ -13994,20 +13306,11 @@ fn run_lint(
     // another analyzer's name would be a small lie printed in the one place a
     // user is relying on being told the truth. The refusal itself comes from the
     // run below, which owns that wording.
-    if let (false, Some(invocation)) = (
+    if let (false, true, Some(invocation)) = (
         json,
-        // The backend's own argv, not the host's: the two differ by `--offline`,
-        // and a disclosure line that is one token away from what ran is worse
-        // than none, because it is trusted.
-        rto_exec::lint_invocation(analyzer, features, decision.backend()),
+        decision.granted(),
+        rto_exec::lint_invocation(analyzer, features),
     ) {
-        // Future tense, and the tense is the point. This used to say "running",
-        // which was true while the only thing that could refuse after it was the
-        // grant — and the grant was checked first, so nothing was ever announced
-        // that did not then run. A sandboxed run has refusals of its own *after*
-        // this line (no image, not provisioned, no hypervisor, a cache too cold),
-        // so "running" would announce a build that never happened. Disclosure
-        // still comes before anything executes, which is its whole job.
         eprintln!(
             "{analyzer} will run {}: {} {}",
             decision.reason.explanation(),
@@ -14015,7 +13318,7 @@ fn run_lint(
             invocation.args.join(" ")
         );
     }
-    let outcome = rto_exec::run_lint(analyzer, &dir, features, decision, image)?;
+    let outcome = rto_exec::run_lint(analyzer, &dir, features, decision)?;
 
     let findings: Vec<LintFinding> = outcome
         .report
@@ -14047,7 +13350,6 @@ fn run_lint(
             isolation: outcome.isolation,
             command: outcome.command.clone(),
             worktree: outcome.worktree.display().to_string(),
-            image: outcome.image.clone(),
             scratch: outcome.scratch.display().to_string(),
             started_at: outcome.report.started_at.clone(),
             ended_at: outcome.report.ended_at.clone(),
@@ -14091,33 +13393,11 @@ fn print_lint_report(
         "  build dir {} — set by roteiro, outside the worktree; the tree is not written to",
         outcome.scratch.display()
     );
-    match &outcome.image {
-        Some(image) => {
-            println!(
-                "  isolation {} — the linter compiled this tree inside a microVM with no network \
-                 interface; its build scripts and proc macros ran there, not here",
-                outcome.isolation.as_str()
-            );
-            println!("  image     {image}");
-            // Named where a user meets it rather than only in the docs. The
-            // guest's rustc decides which lints fire, and it is not this
-            // machine's — so a count from here and a count from `cargo clippy`
-            // may legitimately differ. Nothing is stored, so this is a surprise
-            // rather than a corruption (ADR-0020 v1.1), but a surprise is still
-            // something a person should be told before they go looking for the
-            // bug that is not there.
-            println!(
-                "  the toolchain above is the image's, not this machine's — which lints fire is \
-                 decided by that rustc, so this count and a local `cargo clippy` can differ \
-                 legitimately"
-            );
-        }
-        None => println!(
-            "  isolation {} — the linter compiled this tree on this host, so its build scripts \
-             and proc macros ran here too",
-            outcome.isolation.as_str()
-        ),
-    }
+    println!(
+        "  isolation {} — the linter compiled this tree on this host, so its build scripts and \
+         proc macros ran here too",
+        outcome.isolation.as_str()
+    );
     for finding in findings {
         let at = match (&finding.path, finding.line) {
             (Some(path), Some(line)) => format!("{path}:{line}"),
@@ -14184,7 +13464,6 @@ fn run_lint(
     _features: &rto_exec::FeatureSet,
     _decision: rto_exec::LintDecision,
     _json: bool,
-    _image: Option<&str>,
 ) -> anyhow::Result<()> {
     anyhow::bail!(
         "`roteiro lint {analyzer}` needs the `exec-subprocess` feature, which this build does not \
@@ -14323,104 +13602,30 @@ fn verify_transferred(url: &str, declared: u64, written: u64) -> Result<(), Stri
 
 /// Which assets `prefetch` provisions for a given `--analyzer`, or all of them.
 ///
-/// Lifted out of [`run_security_prefetch`] so it can be tested. The fallback
-/// below is the whole reason `--analyzer sandbox` works, and the comment
-/// describing it in `rto-exec`'s asset table once outlived it by long enough to
-/// put a wrong recipe in `AGENTS.md` (#362). A rule worth documenting twice is a
-/// rule worth asserting once.
+/// Lifted out of [`run_security_prefetch`] so it can be tested.
 #[cfg(feature = "execution")]
 fn assets_to_prefetch(analyzer: Option<&str>) -> anyhow::Result<Vec<&'static rto_exec::AssetSpec>> {
     let Some(name) = analyzer else {
         return Ok(rto_exec::ASSETS.iter().collect());
     };
 
-    let mut specs = rto_exec::assets_for(name);
-    if specs.is_empty() {
-        // Some assets belong to no single analyzer — the sandbox runtime is
-        // shared by every analyzer that runs in one — so fall back to selecting
-        // by the spec's own owner. That is what makes `--analyzer sandbox`
-        // provision the runtime without also fetching a quarter-gigabyte of
-        // advisory databases.
-        specs = rto_exec::ASSETS
-            .iter()
-            .filter(|s| s.analyzer == name)
-            .collect();
-    }
+    let specs = rto_exec::assets_for(name);
     if specs.is_empty() && rto_exec::LINT_ANALYZERS.contains(&name) {
         // A linter has **no pinned assets at all**, and an empty list is the
-        // right answer rather than an error. Its rule set is the toolchain, and
-        // the toolchain arrives in an image the user supplies (ADR-0020
-        // conditions 1-2) — so there is nothing here to digest, and the one
-        // thing `prefetch --analyzer clippy` does have to do is pull that image,
-        // which happens further down against `[lint] image` rather than against
-        // this table. Bailing here made the natural command for provisioning a
-        // linter fail with "no assets", which is true and useless.
+        // right answer rather than an error: its rule set is the toolchain on
+        // this host, so there is nothing here to digest. Bailing made the
+        // natural command for provisioning a linter fail with "no assets",
+        // which is true and useless.
         return Ok(Vec::new());
     }
     if specs.is_empty() {
         anyhow::bail!(
-            "no assets for `{name}` in this build (analyzers: {}; linters: {}; shared: {})",
+            "no assets for `{name}` in this build (analyzers: {}; linters: {})",
             rto_exec::known_analyzers().join(", "),
             rto_exec::LINT_ANALYZERS.join(", "),
-            rto_exec::SANDBOX
         );
     }
     Ok(specs)
-}
-
-/// Pull every sandbox image this configuration would run, reporting failures.
-///
-/// Lifted out of [`run_security_prefetch`] because it grew a second source and
-/// with it a fallible resolution step — but the split earns its place beyond the
-/// line count: this is the **only** function in the CLI that can pull an image,
-/// so what it discloses before opening a socket is worth reading on its own.
-///
-/// Returns what went wrong rather than short-circuiting, for the reason the asset
-/// loop above does the same: one unobtainable image must not hide the others, and
-/// a `prefetch` that stopped at the first failure would have to be run once per
-/// problem to find out how many there were.
-#[cfg(all(feature = "execution", feature = "exec-boxlite"))]
-fn pull_sandbox_images(
-    root: &std::path::Path,
-    analyzer: Option<&str>,
-    json: bool,
-    security: &config::SecurityConfig,
-) -> Vec<String> {
-    // The **inventory**, not the table: since issue #434 the set of images an
-    // analyzer run can use is the built-in pins composed with
-    // `[security.images]`, and iterating the table alone would leave a declared
-    // image obtainable by no command at all. Resolution refuses a tag, an
-    // analyzer with no adapter, or an entry naming nothing — here rather than at
-    // a run, which is the point of validating the whole map instead of only the
-    // entries somebody happens to provision.
-    let inventory = match rto_exec::boxlite::image_inventory(&security.declared()) {
-        Ok(inventory) => inventory,
-        Err(e) => return vec![format!("{e}")],
-    };
-
-    let mut failures = Vec::new();
-    for image in inventory {
-        if analyzer.is_some_and(|name| name != image.analyzer) {
-            continue;
-        }
-        if !json {
-            // Named before a socket is opened, and labelled with who chose it. A
-            // declared reference can come from a committed `roteiro.toml`, so it
-            // is the one image a teammate may have picked for you; printing
-            // whose choice it was is what turns that into a thing you saw.
-            eprintln!(
-                "pulling sandbox image for {} [{}] ({})",
-                image.analyzer,
-                image.source.as_str(),
-                image.reference
-            );
-        }
-        let declared = security.image_for(&image.analyzer);
-        if let Err(e) = rto_exec::boxlite::provision_image(&image.analyzer, root, declared) {
-            failures.push(format!("{e}"));
-        }
-    }
-    failures
 }
 
 /// Install and verify every pinned asset, recording each digest.
@@ -14436,8 +13641,6 @@ fn run_security_prefetch(
     analyzer: Option<&str>,
     allow_download: bool,
     json: bool,
-    lint_image: Option<&str>,
-    security: &config::SecurityConfig,
 ) -> anyhow::Result<()> {
     let root = rto_exec::asset_root();
     let specs = assets_to_prefetch(analyzer)?;
@@ -14465,16 +13668,6 @@ fn run_security_prefetch(
                     eprintln!("    {}", file.url);
                 }
             }
-            if let rto_exec::AssetSource::PinnedArchive { archives } = spec.source {
-                // This one embeds third-party executables into any binary built
-                // against it, some of them GPL-2.0 and LGPL-2.0. The full record
-                // is printed before installation rather than linked, because a
-                // licence obligation nobody read is how it gets breached.
-                for archive in archives {
-                    eprintln!("    {} → sha256 {}", archive.target, archive.sha256);
-                }
-                eprintln!("\n{}\n", rto_exec::SANDBOX_RUNTIME_NOTICE);
-            }
         }
         // The fetcher is passed only when the operator asked for downloads. A
         // downloadable asset that is already present still provisions without
@@ -14487,38 +13680,6 @@ fn run_security_prefetch(
             Err(e) => failures.push(format!("{e}")),
         }
     }
-
-    // The pinned analyzer images live in boxlite's own store rather than the
-    // asset cache, so they are provisioned alongside it rather than by it. Same
-    // rule as everything else here: only with `--allow-download`, and a run
-    // never does it.
-    #[cfg(feature = "exec-boxlite")]
-    if allow_download {
-        failures.extend(pull_sandbox_images(&root, analyzer, json, security));
-    }
-
-    // The sandboxed linter's image, which is **supplied rather than pinned**
-    // (ADR-0020 conditions 1-2). It is pulled here rather than by a run for the
-    // rule that governs every other input: provisioning fetches, running reads.
-    //
-    // Named before a socket is opened, like every download above, and for a
-    // sharper reason than the others: this reference can come from a committed
-    // `roteiro.toml`, so it is the one asset a teammate may have chosen for you.
-    // Printing it is what turns that into a thing you saw.
-    #[cfg(feature = "exec-boxlite")]
-    if allow_download
-        && let Some(reference) = lint_image
-        && analyzer.is_none_or(|name| rto_exec::LINT_ANALYZERS.contains(&name))
-    {
-        if !json {
-            eprintln!("pulling the sandboxed linter's image, from `[lint] image`: {reference}");
-        }
-        if let Err(e) = rto_exec::boxlite::pull_reference("`[lint] image`", reference, &root) {
-            failures.push(format!("{e}"));
-        }
-    }
-    #[cfg(not(feature = "exec-boxlite"))]
-    let _ = (lint_image, security);
 
     if json {
         emit_json(&SecurityPrefetchReport {
@@ -14572,71 +13733,8 @@ fn run_security_prefetch(
 struct SecurityStatusReport {
     root: String,
     analyzers: Vec<rto_exec::AnalyzerCoverage>,
-    /// The sandbox images this configuration would run, each labelled with who
-    /// chose it and whether it is in the local store.
-    ///
-    /// Added alongside `analyzers` rather than inside it, and that is not
-    /// squeamishness about a breaking change. `AnalyzerCoverage` is shared with
-    /// both model-facing tool surfaces and answers *"could this host run it"*
-    /// from the asset cache and `PATH`; which container it would run in is a
-    /// different question with a different remedy, and issue #464 is what it
-    /// costs to answer two questions in one field.
-    ///
-    /// Absent in a build with no sandbox backend, where there is no such thing
-    /// as an image to report.
-    #[cfg(feature = "exec-boxlite")]
-    images: Vec<SandboxImageStatus>,
     assets: Vec<rto_exec::AssetStatus>,
     layers: Vec<rto_exec::LayerStaleness>,
-}
-
-/// One sandbox image as `security status` reports it.
-///
-/// `source` is the field issue #434 turns on. A user who cannot tell a built-in
-/// pin from an image named in a committed `roteiro.toml` has lost exactly what
-/// the pin was for — Roteiro checked that a built-in image is published,
-/// digest-addressable and of a knowable version, and it checked none of that
-/// about a reference it was handed.
-#[cfg(all(feature = "execution", feature = "exec-boxlite"))]
-#[derive(serde::Serialize)]
-struct SandboxImageStatus {
-    #[serde(flatten)]
-    image: rto_exec::boxlite::ResolvedImage,
-    /// Whether it is already in the local store. `false` means a run refuses —
-    /// nothing pulls implicitly.
-    provisioned: bool,
-}
-
-/// Resolve every sandbox image and ask the local store about each one.
-///
-/// Its own function so the `--json` and human arms report from one computation:
-/// a status blob and a status listing disagreeing about which images are present
-/// is the shape of defect `tool_security` exists to prevent.
-///
-/// # Errors
-/// The first [`rto_exec::boxlite::resolve_image`] refusal — a tag, an analyzer
-/// with no adapter, an entry naming nothing. A status that skipped a broken key
-/// and printed the rest would be the quiet answer this command exists to
-/// replace.
-#[cfg(all(feature = "execution", feature = "exec-boxlite"))]
-fn sandbox_image_status(
-    root: &std::path::Path,
-    analyzer: Option<&str>,
-    security: &config::SecurityConfig,
-) -> anyhow::Result<Vec<SandboxImageStatus>> {
-    rto_exec::boxlite::image_inventory(&security.declared())?
-        .into_iter()
-        .filter(|image| analyzer.is_none_or(|name| name == image.analyzer))
-        .map(|image| {
-            let declared = security.image_for(&image.analyzer);
-            // "Could not tell" is not "absent" — `image_is_provisioned` errors
-            // rather than answering `false` on a store it cannot read, and that
-            // distinction is preserved here rather than flattened into a column.
-            let provisioned =
-                rto_exec::boxlite::image_is_provisioned(&image.analyzer, root, declared)?;
-            Ok(SandboxImageStatus { image, provisioned })
-        })
-        .collect()
 }
 
 /// One analyzer's readiness as a display column.
@@ -14666,19 +13764,11 @@ fn analyzer_state_line(coverage: &rto_exec::AnalyzerCoverage) -> String {
 // functions that only ever run together.
 #[allow(clippy::too_many_lines)]
 #[cfg(feature = "execution")]
-fn run_security_status(
-    analyzer: Option<&str>,
-    json: bool,
-    security: &config::SecurityConfig,
-) -> anyhow::Result<()> {
+fn run_security_status(analyzer: Option<&str>, json: bool) -> anyhow::Result<()> {
     let root = rto_exec::asset_root();
     let assets = rto_exec::status(&root, analyzer);
 
     let analyzers = rto_exec::coverage_matrix(&root, analyzer);
-    #[cfg(feature = "exec-boxlite")]
-    let images = sandbox_image_status(&root, analyzer, security)?;
-    #[cfg(not(feature = "exec-boxlite"))]
-    let _ = security;
 
     // Staleness comes from the *runs*, because the advisory database's
     // publication date is something the analyzer reported, not something
@@ -14694,8 +13784,6 @@ fn run_security_status(
         emit_json(&SecurityStatusReport {
             root: root.display().to_string(),
             analyzers,
-            #[cfg(feature = "exec-boxlite")]
-            images,
             assets,
             layers,
         })?;
@@ -14732,9 +13820,6 @@ fn run_security_status(
             println!("               run `roteiro security prefetch` to provision its assets");
         }
     }
-
-    #[cfg(feature = "exec-boxlite")]
-    print_sandbox_images(&images);
 
     println!("\nassets");
     for asset in &assets {
@@ -14787,64 +13872,6 @@ fn run_security_status(
         }
     }
     Ok(())
-}
-
-/// Print the sandbox images, saying of each one **who chose it**.
-///
-/// Its own section rather than a column on the analyzer rows, because it answers
-/// a different question with a different remedy: an analyzer row says whether
-/// this host could run the tool, and this says which container it would run it
-/// in and whether that container is here yet.
-///
-/// The `source` column is the whole reason issue #434 asked for this. Roteiro
-/// vouches for a built-in pin — published, digest-addressable, of a knowable
-/// version — and vouches for none of that about a reference it was handed, so a
-/// reader who cannot tell them apart has lost the thing the pin was for. The
-/// version line says so out loud rather than leaving a blank column to be read
-/// as an omission.
-#[cfg(all(feature = "execution", feature = "exec-boxlite"))]
-fn print_sandbox_images(images: &[SandboxImageStatus]) {
-    println!("\nsandbox images  (ADR-0014 — a run never pulls; `prefetch` obtains)");
-    if images.is_empty() {
-        println!(
-            "  none — this build pins no image and `[security.images]` declares none, so \
-             `security run` has no sandboxed path. See docs/SANDBOXED_LINTING.md."
-        );
-        return;
-    }
-    for row in images {
-        println!(
-            "  {:<12} {:<41}  {}",
-            row.image.analyzer,
-            row.image.source.as_str(),
-            if row.provisioned {
-                "in the local store"
-            } else {
-                "NOT PROVISIONED — a run refuses"
-            }
-        );
-        println!("               {}", row.image.reference);
-        match &row.image.analyzer_version {
-            Some(version) => println!(
-                "               analyzer version {version}, which Roteiro checked this image \
-                 carries"
-            ),
-            // Stated rather than left blank. A missing column reads as an
-            // omission; this is a consequence of choosing your own image and the
-            // reader should meet it here rather than in a findings record.
-            None => println!(
-                "               analyzer version is not asserted for an image Roteiro did not \
-                 choose — the run records what the analyzer says about itself"
-            ),
-        }
-        if !row.provisioned {
-            println!(
-                "               obtain it: roteiro security prefetch --analyzer {} \
-                 --allow-download",
-                row.image.analyzer
-            );
-        }
-    }
 }
 
 /// Serve the read-only graph explorer JSON API over HTTP, **llama-free**
@@ -18695,16 +17722,12 @@ fn qualified_or(key: &str, project: Option<&str>) -> (Option<String>, String) {
 ///
 /// `security ingest` and `security run` both reach
 /// [`rto_graph::Store::replace_findings_layer`] — `run_security_ingest`
-/// directly, and `security run` through `execute_and_file`, which **both** of
-/// its backends share since ADR-0019 (PR #407). So sandboxing does not make
-/// `run` read-only: it writes whichever backend `select_backend` picks. Neither
-/// may ever appear here.
+/// directly, and `security run` through `execute_and_file`. Neither may ever
+/// appear here.
 ///
-/// `security run` additionally *executes an analyzer*. It now defaults to a
-/// microVM, which makes it safer for the person who typed it and changes nothing
-/// about this: a model asking for a tool is not a human consenting to execution,
-/// and `--allow-unsandboxed` is a gate that exists to be typed by a person
-/// (ADR-0019 §6 refuses even a silent downgrade from sandbox to host).
+/// `security run` additionally *executes an analyzer*: a model asking for a
+/// tool is not a human consenting to execution, and `--allow-unsandboxed` is a
+/// gate that exists to be typed by a person.
 /// `security prefetch` opens the network under an explicit consent and writes the
 /// asset cache. All three are permanent refusals, not gaps.
 ///
@@ -18756,15 +17779,8 @@ fn qualified_or(key: &str, project: Option<&str>) -> (Option<String>, String) {
 #[cfg(feature = "serve")]
 struct GraphToolRegistry {
     workspace: std::sync::Arc<rto_graph::Workspace>,
-    /// The pinned-asset cache this registry reports on and, for `sandbox_clear`,
-    /// deletes from — **held rather than resolved at the call**.
-    ///
-    /// The same field, for the same reason, as `rto_render::mcp`'s `GraphServer`:
-    /// `rto_exec::asset_root()` resolves from the process environment, and
-    /// `unsafe_code = "forbid"` means a test cannot redirect it — so a test that
-    /// reaches the one mutating tool reaches the developer's own cache. That is
-    /// not hypothetical; fault-injecting the refusal, to prove the test catches
-    /// its absence, cleared 8.7 GB on the machine this was written on.
+    /// The pinned-asset cache `security_status` reports on, resolved once at
+    /// construction — the same field as `rto_render::mcp`'s `GraphServer`.
     #[cfg(feature = "execution")]
     asset_root: std::path::PathBuf,
     /// Which of [`Self::carried`] the operator's `--tools` selection kept (#664).
@@ -18849,16 +17865,6 @@ impl GraphToolRegistry {
         }
     }
 
-    /// Point this registry's asset-cache reads and removals at `root`.
-    ///
-    /// Test-only, and it is what lets a test exercise the one tool here that
-    /// deletes without deleting the developer's cache.
-    #[cfg(all(test, feature = "execution"))]
-    fn with_asset_root(mut self, root: std::path::PathBuf) -> Self {
-        self.asset_root = root;
-        self
-    }
-
     /// Resolve `project` (if hosting several) and run `query` against its store,
     /// serialising the result to JSON. Flattens the workspace/store/serialise
     /// error layers into the registry's `String` error.
@@ -18928,130 +17934,6 @@ impl GraphToolRegistry {
                 rto_exec::security_status(&root, analyzer.as_deref(), &project_name, &layers, &now)
             })
         })
-    }
-
-    /// The `sandbox_status` call: the machine-global image store, no project.
-    ///
-    /// Not routed through [`Self::run`], and that is the point rather than an
-    /// omission: there is no project in this question. One sandbox store exists
-    /// per asset root and every hosted project shares it, so resolving a project
-    /// here would attach a selector to an answer it cannot change.
-    ///
-    /// # Errors
-    /// The store errors [`rto_exec::StoreError`] carries, or a serialisation
-    /// failure.
-    #[cfg(feature = "execution")]
-    fn sandbox_status(&self) -> Result<String, String> {
-        let report = rto_exec::sandbox_status(&self.asset_root).map_err(|e| e.to_string())?;
-        serde_json::to_string(&report).map_err(|e| e.to_string())
-    }
-
-    /// The `sandbox_clear` call — the one tool on either surface that mutates.
-    ///
-    /// # Errors
-    /// A scope that names neither selector or both, the store errors
-    /// [`rto_exec::StoreError`] carries, or a serialisation failure.
-    #[cfg(feature = "execution")]
-    fn sandbox_clear(&self, args: &serde_json::Value) -> Result<String, String> {
-        let image = args
-            .get("image")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned);
-        let everything = args
-            .get("everything")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        // Neither argument defaults to the other, and the absence of both is not a
-        // request. ADR-0014 v1.6: "clear this image" and "clear everything" are
-        // different requests, so silence must not resolve to the destructive one.
-        // The MCP surface refuses the same two shapes in the same two ways —
-        // `sandbox_clear_refuses_a_scope_it_was_not_given` on each.
-        let scope = match (image, everything) {
-            (Some(_), true) => {
-                return Err(
-                    "`image` and `everything` are different requests; pass exactly one.".to_owned(),
-                );
-            }
-            (None, true) => rto_exec::Scope::Everything,
-            (Some(reference), false) => rto_exec::Scope::Image(reference),
-            (None, false) => {
-                return Err(
-                    "nothing was named to drop. Pass `image` with a reference from \
-                            `sandbox_status`, or `everything: true`. Supplying neither does \
-                            not mean everything."
-                        .to_owned(),
-                );
-            }
-        };
-        let report = if args
-            .get("dry_run")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false)
-        {
-            rto_exec::sandbox_plan(&self.asset_root, &scope).map(|(report, _doomed)| report)
-        } else {
-            rto_exec::sandbox_clear(&self.asset_root, &scope)
-        }
-        .map_err(|e| e.to_string())?;
-        serde_json::to_string(&report).map_err(|e| e.to_string())
-    }
-}
-
-/// The served-chat `sandbox_status` tool definition — the mirror of the MCP one
-/// in `rto_render::mcp`, which declares its own schema.
-///
-/// **No `project`.** Every other tool here takes one; this store is machine-global
-/// and has no per-repository half for a selector to choose between, so offering
-/// the argument would imply an answer that changes with it.
-#[cfg(all(feature = "serve", feature = "execution"))]
-fn sandbox_status_tool_def() -> rto_serve::ToolDef {
-    use serde_json::json;
-    rto_serve::ToolDef {
-        name: "sandbox_status".to_owned(),
-        description: rto_render::tool_text::SANDBOX_STATUS.to_owned(),
-        parameters: json!({ "type": "object", "properties": {}, "additionalProperties": false }),
-    }
-}
-
-/// The served-chat `sandbox_clear` tool definition — the mirror of the MCP one.
-///
-/// The **only** definition on either surface that describes a tool which changes
-/// something, so its description carries the three things a model has to do with
-/// it: look first, pass exactly one scope, and quote what came back.
-#[cfg(all(feature = "serve", feature = "execution"))]
-fn sandbox_clear_tool_def() -> rto_serve::ToolDef {
-    use serde_json::json;
-    rto_serve::ToolDef {
-        name: "sandbox_clear".to_owned(),
-        description: rto_render::tool_text::SANDBOX_CLEAR.to_owned(),
-        parameters: json!({
-            "type": "object",
-            "properties": {
-                "image": {
-                    "type": "string",
-                    "description": "Drop this image, by the `reference` `sandbox_status` \
-                                    lists it under. Mutually exclusive with `everything`.",
-                },
-                "everything": {
-                    "type": "boolean",
-                    "description": "Drop every cached image, and the bytes under the store \
-                                    root no image claims. Mutually exclusive with `image`; \
-                                    supplying neither is an error.",
-                },
-                // Both halves, matching `rto_render::mcp`'s `SandboxClearArgs`
-                // word for word. #675 removed "`dry_run: true` removes nothing
-                // and `applied` says which happened" from the shared description
-                // because the argument descriptions carry it — and on this
-                // surface only the first half was here, so the cut would have
-                // taken the `applied` half with it. The MCP copy said both.
-                "dry_run": {
-                    "type": "boolean",
-                    "description": "Report what would be removed and remove nothing. The \
-                                    result's `applied` field says which of the two happened.",
-                },
-            },
-            "additionalProperties": false,
-        }),
     }
 }
 
@@ -19536,21 +18418,12 @@ fn served_tool_defs() -> Vec<rto_serve::ToolDef> {
         //
         // The other three are permanent refusals with their reasons in this
         // registry's documentation: `ingest` and `run` write a findings layer
-        // (`run` through `execute_and_file`, which both its backends share, so
-        // ADR-0019's sandboxed default did not change this), and `prefetch` opens
+        // (`run` through `execute_and_file`), and `prefetch` opens
         // the network under an explicit human consent.
         #[cfg(feature = "execution")]
         {
             tools.push(security_list_tool_def(&with_project));
             tools.push(security_status_tool_def(&with_project));
-            // The sandbox store's pair (#433), on the same gate and for the same
-            // reason. `sandbox_clear` is the one tool on either surface that
-            // changes anything; ADR-0014 v1.6 admits it by a rule rather than as
-            // an exception, and `sandbox_status` is offered beside it because a
-            // destructive verb with no way to see what it will destroy is invoked
-            // blind. Neither takes `with_project`: the store is machine-global.
-            tools.push(sandbox_status_tool_def());
-            tools.push(sandbox_clear_tool_def());
         }
         tools.push(rto_serve::ToolDef {
             name: "list_projects".to_owned(),
@@ -19740,12 +18613,6 @@ impl rto_serve::ToolRegistry for GraphToolRegistry {
             "security_list" => self.security_list(project, args),
             #[cfg(feature = "execution")]
             "security_status" => self.security_status(project, args),
-            // Neither takes `project`: one sandbox store per asset root, shared by
-            // every hosted project, so there is nothing for a selector to select.
-            #[cfg(feature = "execution")]
-            "sandbox_status" => self.sandbox_status(),
-            #[cfg(feature = "execution")]
-            "sandbox_clear" => self.sandbox_clear(args),
             other => Err(format!("unknown tool `{other}`")),
         }
     }
@@ -21832,9 +20699,8 @@ mod lint_cli {
         let message = super::run_lint(
             "clippy",
             &lint_features(false, None).expect("the default feature set resolves"),
-            lint_host_decision(&layers(None, None), false, false),
+            lint_host_decision(&layers(None, None), false),
             false,
-            None,
         )
         .expect_err("a build without exec-subprocess must refuse to lint")
         .to_string();
@@ -21848,9 +20714,7 @@ mod lint_cli {
     fn lint_takes_one_analyzer_and_reports_by_default() {
         let Command::Lint {
             analyzer,
-            sandboxed,
             allow_unsandboxed,
-            image,
             all_features,
             features,
             json,
@@ -21862,35 +20726,25 @@ mod lint_cli {
         assert!(!all_features);
         assert_eq!(features, None);
         assert!(!json);
-        // Roteiro supplies no image, and the flag defaults to none rather than
-        // to something: an image nobody chose would be a boundary nobody chose.
-        assert_eq!(image, None);
-        // Saying nothing asks for neither: the *default* is decided by
+        // Saying nothing grants nothing: the *default* is decided by
         // `lint_host_decision`, not smuggled in as a flag default here.
-        assert!(!sandboxed);
         assert!(!allow_unsandboxed);
     }
 
-    /// The two isolation flags are alternatives. Accepting both would leave the
-    /// gate deciding which of two contradictory instructions the user meant.
+    /// The sandbox's flags went with it (ADR-0030) and are refused by the
+    /// parser, so a script still passing them is told rather than ignored.
     #[test]
-    fn the_two_isolation_flags_are_mutually_exclusive() {
-        assert!(
-            Cli::try_parse_from([
-                "roteiro",
-                "lint",
-                "clippy",
-                "--sandboxed",
-                "--allow-unsandboxed",
-            ])
-            .is_err()
-        );
-        for flag in ["--sandboxed", "--allow-unsandboxed"] {
-            assert!(
-                Cli::try_parse_from(["roteiro", "lint", "clippy", flag]).is_ok(),
-                "{flag} alone must parse"
-            );
+    fn the_removed_sandbox_flags_do_not_parse() {
+        for args in [
+            &["roteiro", "lint", "clippy", "--sandboxed"][..],
+            &["roteiro", "lint", "clippy", "--image", "x@sha256:00"][..],
+            &["roteiro", "security", "run", "semgrep", "--sandboxed"][..],
+            &["roteiro", "security", "prefetch", "--image", "x@sha256:00"][..],
+            &["roteiro", "sandbox", "status"][..],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err(), "{args:?} still parses");
         }
+        assert!(Cli::try_parse_from(["roteiro", "lint", "clippy", "--allow-unsandboxed"]).is_ok());
     }
 
     #[test]
@@ -21947,18 +20801,16 @@ mod lint_cli {
         assert!(err.to_string().contains("--all-features"), "{err}");
     }
 
-    /// The default: `roteiro lint` with no config and no flag runs **sandboxed**.
+    /// The default: `roteiro lint` with no config and no flag **refuses**.
     ///
     /// This is the inversion in one assertion. Before ADR-0020 v1.3 this case
-    /// compiled the tree on the host; between v1.3 and conditions 1-2 it
-    /// refused, because the sandbox it selected did not exist. It selects the
-    /// same thing now and there is something there.
+    /// compiled the tree on the host; while the microVM backend existed it
+    /// selected the sandbox; with that removed (ADR-0030) it refuses again.
     #[test]
-    fn with_nothing_configured_and_no_flag_the_sandbox_is_selected() {
-        let decision = lint_host_decision(&layers(None, None), false, false);
+    fn with_nothing_configured_and_no_flag_it_refuses() {
+        let decision = lint_host_decision(&layers(None, None), false);
         assert!(!decision.granted());
-        assert_eq!(decision.backend(), rto_exec::LintBackend::Sandbox);
-        assert_eq!(decision.reason, rto_exec::LintReason::SandboxByDefault);
+        assert_eq!(decision.reason, rto_exec::LintReason::RefusedByDefault);
     }
 
     /// The row that makes the inversion real rather than documented: a
@@ -21967,7 +20819,7 @@ mod lint_cli {
     /// teammate's machine.
     #[test]
     fn a_project_grant_does_not_enable_host_execution() {
-        let decision = lint_host_decision(&layers(Some(true), None), false, false);
+        let decision = lint_host_decision(&layers(Some(true), None), false);
         assert!(
             !decision.granted(),
             "a committed file may never grant host execution"
@@ -21982,17 +20834,16 @@ mod lint_cli {
     /// and the flag too. A locked-down repository stays locked down.
     #[test]
     fn a_project_deny_overrides_a_user_grant_and_the_flag() {
-        for (sandboxed, allow) in [(false, false), (false, true), (true, false)] {
-            let decision = lint_host_decision(&layers(Some(false), Some(true)), sandboxed, allow);
+        for allow in [false, true] {
+            let decision = lint_host_decision(&layers(Some(false), Some(true)), allow);
             assert!(
                 !decision.granted(),
-                "project denial must hold with sandboxed={sandboxed} allow={allow}"
+                "project denial must hold with allow={allow}"
             );
             assert_eq!(
                 decision.reason,
-                rto_exec::LintReason::SandboxByProjectDenial
+                rto_exec::LintReason::RefusedByProjectDenial
             );
-            assert_eq!(decision.backend(), rto_exec::LintBackend::Sandbox);
         }
     }
 
@@ -22001,25 +20852,15 @@ mod lint_cli {
     #[test]
     fn either_the_user_config_or_the_flag_grants_on_its_own() {
         assert_eq!(
-            lint_host_decision(&layers(None, Some(true)), false, false).reason,
+            lint_host_decision(&layers(None, Some(true)), false).reason,
             rto_exec::LintReason::GrantedByUserLayer,
             "the standing preference needs no flag"
         );
         assert_eq!(
-            lint_host_decision(&layers(None, None), false, true).reason,
+            lint_host_decision(&layers(None, None), true).reason,
             rto_exec::LintReason::GrantedByInvocation,
             "the flag needs no standing preference"
         );
-    }
-
-    /// `--sandboxed` is how somebody with a standing grant opts one run back
-    /// out: it selects the boundary, and if the boundary cannot be had it
-    /// refuses rather than falling back.
-    #[test]
-    fn asking_for_the_sandbox_overrides_a_standing_grant() {
-        let decision = lint_host_decision(&layers(None, Some(true)), true, false);
-        assert!(!decision.granted());
-        assert_eq!(decision.reason, rto_exec::LintReason::SandboxByInvocation);
     }
 
     /// With no flag, the gate must say exactly what the config layers say — so
@@ -22035,7 +20876,7 @@ mod lint_cli {
         for project in [None, Some(true), Some(false)] {
             for user in [None, Some(true), Some(false)] {
                 assert_eq!(
-                    lint_host_decision(&layers(project, user), false, false).granted(),
+                    lint_host_decision(&layers(project, user), false).granted(),
                     rto_exec::LintConfigGrant::from_layers(project, user).as_effective()
                         == Some(true),
                     "project={project:?} user={user:?}: the gate and the echoed value disagree"
@@ -22048,18 +20889,14 @@ mod lint_cli {
     /// them. One list feeds both the human report and the JSON one, so a
     /// scripted consumer cannot be told less than a person.
     ///
-    /// Four now rather than three. Conditions 1-2 add one that did not exist
-    /// while every run was a host run: a sandboxed run reports what the
-    /// **image's** rustc said, which is not this machine's, so the number moves
-    /// with the image as well as with the toolchain. It belongs in this list
-    /// rather than only beside the isolation line, because a `--json` consumer
-    /// reads this list and would otherwise be told less than a person is.
+    /// The fourth is the toolchain: a lint name is a symbol in a compiler, so a
+    /// rustc bump moves the count with no code change.
     #[cfg(feature = "exec-subprocess")]
     #[test]
     fn the_caveats_name_every_reading_that_moves_a_count() {
         assert_eq!(LINT_CAVEATS.len(), 4);
         let all = LINT_CAVEATS.join(" ");
-        for reading in ["renamed", "removed", "[workspace.lints]", "image"] {
+        for reading in ["renamed", "removed", "[workspace.lints]", "toolchain"] {
             assert!(all.contains(reading), "no caveat covers {reading}: {all}");
         }
         // Each is a way the number moves **without the code changing**, which is
@@ -22338,7 +21175,6 @@ mod security_cli {
     fn run_requires_the_unsandboxed_flag_to_be_given_explicitly() {
         let SecurityAction::Run {
             analyzer,
-            sandboxed,
             allow_unsandboxed,
             json,
         } = action(["roteiro", "security", "run", "semgrep"])
@@ -22350,7 +21186,6 @@ mod security_cli {
             !allow_unsandboxed,
             "the flag must default to off; the host backend refuses without it"
         );
-        assert!(!sandboxed, "and neither flag is set by default");
         assert!(!json);
 
         let SecurityAction::Run {
@@ -22368,66 +21203,24 @@ mod security_cli {
         assert!(allow_unsandboxed);
     }
 
-    /// Saying nothing asks for the sandbox; only `--allow-unsandboxed` asks for
-    /// the host, and it asks for it outright.
-    ///
-    /// This is the whole behavioural change of this command, and it is asserted
-    /// on the pure selector so it holds in a build with **no backend compiled
-    /// in** — the build where a regression that quietly re-defaulted to the host
-    /// would be least likely to be noticed, because nothing there can run to
-    /// contradict it.
-    ///
-    /// The missing case is the point: there is deliberately no input that maps
-    /// to "sandbox, or the host if that fails". If one is ever added, this test
-    /// still passes and the constraint is gone — so the refusal tests below
-    /// exist to catch it from the other side.
+    /// Without the flag, `security run` refuses before executing anything and
+    /// names the flag (ADR-0030: the host is the only backend, and the flag is
+    /// its consent).
+    #[cfg(feature = "exec-subprocess")]
     #[test]
-    fn the_sandbox_is_what_no_flag_means() {
-        assert_eq!(
-            super::select_backend(false, false),
-            super::RunBackend::Sandboxed,
-            "a bare `security run` must ask for the sandbox, not the host"
-        );
-        assert_eq!(
-            super::select_backend(true, false),
-            super::RunBackend::Sandboxed,
-            "`--sandboxed` must mean the same as saying nothing"
-        );
-        assert_eq!(
-            super::select_backend(false, true),
-            super::RunBackend::Subprocess,
-            "`--allow-unsandboxed` selects the host outright"
-        );
+    fn run_without_the_flag_refuses_and_names_it() {
+        let message = crate::run_security(SecurityAction::Run {
+            analyzer: "semgrep".to_owned(),
+            allow_unsandboxed: false,
+            json: false,
+        })
+        .expect_err("an unflagged run must refuse")
+        .to_string();
+        assert!(message.contains("--allow-unsandboxed"), "{message}");
+        assert!(message.contains("isolation=none"), "{message}");
     }
 
-    /// The two flags cannot be given together, so no invocation is ambiguous
-    /// about which machine it runs on.
-    #[test]
-    fn sandboxed_and_allow_unsandboxed_are_mutually_exclusive() {
-        assert!(
-            Cli::try_parse_from([
-                "roteiro",
-                "security",
-                "run",
-                "semgrep",
-                "--sandboxed",
-                "--allow-unsandboxed",
-            ])
-            .is_err(),
-            "asking for both an isolation boundary and no isolation boundary must be refused \
-             at the parser rather than resolved by precedence"
-        );
-        // Each alone still parses, so the conflict was declared between them
-        // and did not disable one of them.
-        for flag in ["--sandboxed", "--allow-unsandboxed"] {
-            assert!(
-                Cli::try_parse_from(["roteiro", "security", "run", "semgrep", flag]).is_ok(),
-                "`{flag}` alone must parse"
-            );
-        }
-    }
-
-    /// `run` and both of its flags parse in **every** build, whatever backends
+    /// `run` and its flags parse in **every** build, whatever backends
     /// are compiled in.
     ///
     /// Not a redundant parse check: the alternative — `cfg`-ing the clap variant
@@ -22440,7 +21233,6 @@ mod security_cli {
     fn the_run_surface_is_the_same_in_every_build() {
         for argv in [
             &["roteiro", "security", "run", "semgrep"][..],
-            &["roteiro", "security", "run", "semgrep", "--sandboxed"][..],
             &[
                 "roteiro",
                 "security",
@@ -22463,86 +21255,6 @@ mod security_cli {
         assert!(Cli::try_parse_from(["roteiro", "security", "run"]).is_err());
     }
 
-    /// A build with no sandbox refuses the default path by name, and names the
-    /// whole bootstrap rather than only the feature.
-    ///
-    /// The provisioning order matters and is not guessable: the image pull is
-    /// itself behind `exec-boxlite`, so it can only be done by a binary that
-    /// already has the feature — which is why the rebuild sits between the two
-    /// `prefetch` runs. A message that named the feature alone would send a user
-    /// to a build that then fails on a missing image.
-    #[cfg(not(feature = "exec-boxlite"))]
-    #[test]
-    fn a_build_with_no_sandbox_refuses_and_names_the_bootstrap() {
-        let message = crate::run_security(
-            SecurityAction::Run {
-                analyzer: "semgrep".to_owned(),
-                sandboxed: false,
-                allow_unsandboxed: false,
-                json: false,
-            },
-            // `[lint] image` is a linter's, and this is `security run`. `None`
-            // is the honest value rather than a placeholder: a reader-class
-            // analyzer's image is pinned in `SANDBOX_IMAGES` and never supplied.
-            None,
-            // And nothing declared, which is the state this refusal must hold
-            // in: a build with no sandbox backend cannot honour
-            // `[security.images]` either, so the message names the feature
-            // rather than the key.
-            &crate::config::SecurityConfig::default(),
-        )
-        .expect_err("a build with no sandbox must refuse the sandboxed path")
-        .to_string();
-
-        assert!(message.contains("exec-boxlite"), "{message}");
-        assert!(message.contains("prefetch --analyzer sandbox"), "{message}");
-        assert!(message.contains("BOXLITE_RUNTIME_URL"), "{message}");
-        assert!(
-            message.contains("prefetch --analyzer semgrep"),
-            "the image pull is a separate step and must be named: {message}"
-        );
-        assert!(message.contains("security ingest"), "{message}");
-        assert!(
-            message.contains("sandbox-unavailable"),
-            "the refusal must be greppable, like `assets-unavailable-offline`: {message}"
-        );
-
-        // And it must not have run anything instead. `--allow-unsandboxed` is
-        // named as a weaker thing the user may choose, with its consequence
-        // attached — never as something this command would substitute.
-        assert!(
-            message.contains("isolation=none"),
-            "naming the host path without naming what it costs is how a downgrade \
-             gets taken by accident: {message}"
-        );
-        assert!(
-            message.contains("will not make that substitution"),
-            "{message}"
-        );
-    }
-
-    /// `--sandboxed` is refused by the same build for the same reason: the flag
-    /// is not a different code path, it is the default said out loud.
-    #[cfg(not(feature = "exec-boxlite"))]
-    #[test]
-    fn asking_for_the_sandbox_explicitly_refuses_identically() {
-        let refuse = |sandboxed| {
-            crate::run_security(
-                SecurityAction::Run {
-                    analyzer: "semgrep".to_owned(),
-                    sandboxed,
-                    allow_unsandboxed: false,
-                    json: false,
-                },
-                None,
-                &crate::config::SecurityConfig::default(),
-            )
-            .expect_err("no sandbox in this build")
-            .to_string()
-        };
-        assert_eq!(refuse(true), refuse(false));
-    }
-
     /// Provisioning is reachable from **any** `execution` build, including one
     /// with no execution backend compiled in at all.
     ///
@@ -22550,9 +21262,7 @@ mod security_cli {
     /// and it is exactly the shape a future refactor breaks silently: move the
     /// `assets` module back behind a backend feature and a
     /// `--no-default-features --features execution` build stops being able to
-    /// `prefetch` — which is also the build that has to bootstrap
-    /// `exec-boxlite`, whose build script demands the verified runtime archive
-    /// at compile time. The gate below is a `cfg`, so it fails as a compile
+    /// `prefetch`. The gate below is a `cfg`, so it fails as a compile
     /// error in that build rather than as a wrong answer here.
     #[cfg(feature = "execution")]
     #[test]
@@ -22576,9 +21286,7 @@ mod security_cli {
     /// must not be able to do — and it must say so by name rather than as
     /// `unrecognized subcommand`.
     ///
-    /// Reached via `--allow-unsandboxed`, because that is now the only thing
-    /// that asks for the host: without the flag this build is refused by the
-    /// sandbox arm instead, for an entirely different missing feature.
+    /// Reached via `--allow-unsandboxed`, the only thing that asks for the host.
     #[cfg(not(feature = "exec-subprocess"))]
     #[test]
     fn the_host_path_is_absent_but_names_the_feature() {
@@ -22588,26 +21296,14 @@ mod security_cli {
             panic!("expected Run to parse in a build with no host backend");
         };
         assert_eq!(analyzer, "cargo-audit");
-        // `None` is the `[lint] image` the dispatch forwards to `prefetch`; the
-        // host path never reads it. `run_security` grew that second argument
-        // without this call site following, and nothing caught it: the test is
-        // gated on `not(exec-subprocess)`, which is precisely the configuration
-        // no job compiled (issue #445). It grew a **third** for
-        // `[security.images]` and this call site again did not follow — the
-        // `no-default-features` job ADR-0014 v1.7 added is what caught it that
-        // time, which is the job doing exactly what it was added for.
-        let message = crate::run_security(
-            SecurityAction::Run {
-                analyzer: "cargo-audit".to_owned(),
-                sandboxed: false,
-                allow_unsandboxed: true,
-                json: false,
-            },
-            None,
-            // Nothing declared: the host path has no image, so this argument is
-            // not consulted on the way to the refusal below.
-            &crate::config::SecurityConfig::default(),
-        )
+        // Gated on `not(exec-subprocess)`, the configuration only the
+        // `no-default-features` job compiles (issue #445) — which is what caught
+        // this call site lagging `run_security`'s signature, twice.
+        let message = crate::run_security(SecurityAction::Run {
+            analyzer: "cargo-audit".to_owned(),
+            allow_unsandboxed: true,
+            json: false,
+        })
         .expect_err("a build without exec-subprocess must refuse the host path")
         .to_string();
         assert!(message.contains("exec-subprocess"), "{message}");
@@ -22625,7 +21321,7 @@ mod security_cli {
     /// Gated with the function: a build with no execution backend files no run,
     /// so the sentence has no record to be read out of and `isolation_note` is
     /// not compiled there (issue #445).
-    #[cfg(any(feature = "exec-boxlite", feature = "exec-subprocess"))]
+    #[cfg(feature = "exec-subprocess")]
     #[test]
     fn the_isolation_note_is_read_out_of_the_stored_run() {
         let base = rto_graph::AnalysisRun {
@@ -22661,51 +21357,33 @@ mod security_cli {
         assert!(sandboxed.contains("isolation microvm"), "{sandboxed}");
         assert!(
             sandboxed.contains("sha256:abc"),
-            "a sandboxed run must name the image it ran in — the digest is what makes \
-             `isolation=microvm` checkable rather than merely claimed: {sandboxed}"
+            "a stored microVM run (from before ADR-0030) still names its image: {sandboxed}"
         );
         assert_ne!(host, sandboxed);
     }
 
-    /// `--analyzer sandbox` provisions the runtime archive and nothing else.
-    ///
-    /// The bootstrap recipe printed by `rto-exec/build.rs` — and repeated in
-    /// `README.md`, `AGENTS.md` and `docs/OFFLINE_SETUP.md` — rests entirely on
-    /// this. If the selection ever stopped resolving the shared runtime, that
-    /// recipe would provision nothing and every one of those documents would be
-    /// wrong, with no test to say so: the fallback it depends on is reached only
-    /// when `assets_for` comes back empty, which no other case exercises.
-    ///
-    /// Asserted here rather than trusted because the comment that described this
-    /// selection was stale for long enough to ship a wrong recipe (#362).
+    /// A bare `prefetch` takes every asset, and an unknown analyzer is named
+    /// rather than silently empty.
     #[cfg(feature = "execution")]
     #[test]
-    fn the_sandbox_analyzer_prefetches_the_runtime_archive_alone() {
-        let selected: Vec<&str> = super::assets_to_prefetch(Some(rto_exec::SANDBOX))
-            .expect("the shared runtime is always selectable")
-            .iter()
-            .map(|spec| spec.id)
-            .collect();
-        assert_eq!(
-            selected,
-            vec![rto_exec::RUNTIME_ASSET],
-            "`prefetch --analyzer sandbox` must select the runtime archive and nothing else — \
-             it is what someone bootstrapping `exec-boxlite` runs, and the advisory databases \
-             are a quarter-gigabyte they do not need yet"
-        );
-
-        // The other half of the same rule: a bare `prefetch` still takes
-        // everything, so the fallback narrowed nothing it should not have.
+    fn prefetch_selects_every_asset_or_names_an_unknown_analyzer() {
         assert_eq!(
             super::assets_to_prefetch(None).expect("all assets").len(),
             rto_exec::ASSETS.len()
         );
-
-        let unknown = super::assets_to_prefetch(Some("no-such-analyzer"))
-            .expect_err("an unknown analyzer must be named, not silently empty")
-            .to_string();
-        assert!(unknown.contains("no-such-analyzer"), "{unknown}");
-        assert!(unknown.contains(rto_exec::SANDBOX), "{unknown}");
+        // The removed shared-runtime selector is now just an unknown name.
+        for name in ["no-such-analyzer", "sandbox"] {
+            let unknown = super::assets_to_prefetch(Some(name))
+                .expect_err("an unknown analyzer must be named, not silently empty")
+                .to_string();
+            assert!(unknown.contains(name), "{unknown}");
+        }
+        // A linter has no pinned assets, and that is an empty list, not an error.
+        assert!(
+            super::assets_to_prefetch(Some("clippy"))
+                .expect("a linter resolves")
+                .is_empty()
+        );
     }
 
     #[cfg(feature = "execution")]
@@ -22713,7 +21391,6 @@ mod security_cli {
     fn prefetch_and_status_default_to_every_analyzer() {
         let SecurityAction::Prefetch {
             analyzer,
-            image,
             allow_download,
             json,
         } = action(["roteiro", "security", "prefetch"])
@@ -22725,9 +21402,6 @@ mod security_cli {
         // Downloading is asked for, never assumed: a bare `prefetch` must not
         // start a quarter-gigabyte transfer.
         assert!(!allow_download);
-        // And no image is assumed either — `prefetch` pulls what `[lint] image`
-        // names, or what `--image` names, and invents nothing.
-        assert_eq!(image, None);
 
         let SecurityAction::Status { analyzer, json } = action([
             "roteiro",
@@ -23644,9 +22318,8 @@ mod workspace_scoped_tools {
     ///
     /// The `security*` set must be **exactly** the two read-only subcommands.
     /// `ingest` and `run` write a findings layer — `run` through
-    /// `execute_and_file`, which both of its backends share, so ADR-0019's
-    /// sandboxed default did not make it read-only — and `run` additionally
-    /// executes an analyzer, which a tool call is never consent for. `prefetch`
+    /// `execute_and_file` — and `run` additionally executes an analyzer, which a
+    /// tool call is never consent for. `prefetch`
     /// opens the network under an explicit human consent. Issue #435 added `list`
     /// and `status` and deliberately kept this test rather than deleting it: the set
     /// equality catches any unexpected `security*` tool whatever it is called, and
@@ -23711,7 +22384,6 @@ mod workspace_scoped_tools {
             "ROTEIRO NEVER INSTALLS ANALYZERS",
             "are ALWAYS present",
             "ON THIS HOST",
-            "does not inspect the image store",
         ] {
             assert!(
                 tool.description.contains(claim),
@@ -23785,12 +22457,7 @@ mod workspace_scoped_tools {
         // catch under others. This build has `execution` (it is in `default`, and
         // `--all-features` has it too), so they must be on both here.
         #[cfg(feature = "execution")]
-        for name in [
-            "security_list",
-            "security_status",
-            "sandbox_status",
-            "sandbox_clear",
-        ] {
+        for name in ["security_list", "security_status"] {
             assert!(
                 chat.contains(name) && mcp.contains(name),
                 "`{name}` must be on both surfaces: `execution` gates it here and \
@@ -23922,7 +22589,7 @@ mod workspace_scoped_tools {
         let refs: Vec<&rto_serve::ToolDef> = tools.iter().collect();
         let prompt = rto_serve::advertised_system_prompt(&refs);
 
-        for withheld in ["security", "quality", "sandbox"] {
+        for withheld in ["security", "quality"] {
             for tool in rto_render::tool_class::tools_in(withheld).expect("a class") {
                 assert!(
                     !tools.iter().any(|t| t.name == *tool),
@@ -24002,7 +22669,6 @@ mod workspace_scoped_tools {
         // the missing row.
         assert_eq!(class("query")["state"], "loaded", "{doc}");
         assert_eq!(class("security")["state"], "not-loaded-here", "{doc}");
-        assert_eq!(class("sandbox")["state"], "not-loaded-here", "{doc}");
         // `list_kind` is MCP-only, so on THIS surface it is `unavailable` and not
         // `withheld`: telling a user to widen `--tools` would send them to change
         // a flag that cannot produce it.
@@ -24040,11 +22706,7 @@ mod workspace_scoped_tools {
         use rto_serve::ToolRegistry as _;
         use std::collections::BTreeSet;
 
-        for selection in [
-            vec!["query"],
-            vec!["query", "quality"],
-            vec!["security", "sandbox"],
-        ] {
+        for selection in [vec!["query"], vec!["query", "quality"], vec!["security"]] {
             let owned: Vec<String> = selection.iter().map(|n| (*n).to_owned()).collect();
             let restriction = rto_render::mcp::restrict(&owned).expect("resolves");
             let chat: BTreeSet<String> = registry_restricted_to(&selection)
@@ -24078,16 +22740,14 @@ mod workspace_scoped_tools {
     /// let the prose come apart: the `rmcp` macro takes a string literal, so the
     /// description is written twice with no declaration to share, and nothing
     /// noticed when the copies diverged. Measured when this test was added, three
-    /// of the four security/sandbox descriptions differed — `sandbox_status` by
-    /// 363 bytes, `sandbox_clear` by 197, `security_list` by 55 — so a served
+    /// of the four security/sandbox descriptions differed (the sandbox pair was
+    /// removed by ADR-0030; `security_list` differed by 55 bytes) — so a served
     /// model and an MCP client were told materially different things about the
-    /// same tool, including `sandbox_clear`, the one tool on either surface that
-    /// destroys anything.
+    /// same tool.
     ///
     /// A description is not decoration here. It carries the warnings that stop the
-    /// likeliest misuses — that `no-analyzer-on-record` is not a clean repository,
-    /// that `bytes.exclusive` rather than `bytes.total` is what clearing an image
-    /// frees — so one surface silently keeping an older draft of those is a real
+    /// likeliest misuses — that `no-analyzer-on-record` is not a clean repository
+    /// — so one surface silently keeping an older draft of those is a real
     /// divergence, not a formatting difference.
     #[cfg(feature = "mcp")]
     #[test]
@@ -24207,123 +22867,6 @@ mod workspace_scoped_tools {
             )
             .expect_err("unknown analyzer must be an error");
         assert!(err.contains("unknown analyzer `semgrepp`"), "{err}");
-    }
-
-    /// The served-chat half of the sandbox pair: offered together, no `project`,
-    /// and the destructive one refuses a scope it was not given.
-    ///
-    /// The MCP surface has the same three assertions
-    /// (`the_sandbox_pair_is_offered_together_and_takes_no_project`,
-    /// `sandbox_clear_refuses_a_scope_it_was_not_given`). They are separate
-    /// registries with separate schemas, so a guard on one proves nothing about
-    /// the other — which is the lesson of `[debt] ignore` across three surfaces
-    /// (#321) and `limit == 0` across five (#393).
-    #[cfg(feature = "execution")]
-    #[test]
-    fn the_served_sandbox_pair_takes_no_project_and_refuses_an_ungiven_scope() {
-        use rto_serve::ToolRegistry as _;
-
-        // A disposable asset root, for the one tool here that deletes. Every test
-        // that can reach `sandbox_clear` goes through this, including the ones
-        // that only expect a refusal: a refusal is one edit away from not being
-        // one, and finding that out with the ambient root costs the developer's
-        // whole image cache — see `GraphToolRegistry::asset_root`.
-        let root =
-            std::env::temp_dir().join(format!("roteiro-chat-sandbox-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("boxlite-home").join("images").join("layers"))
-            .expect("a store root");
-        std::fs::write(
-            root.join("boxlite-home/images/layers/sha256-spare.tar.gz"),
-            vec![b'x'; 4096],
-        )
-        .expect("a spare blob");
-        let registry = called_registry().with_asset_root(root.clone());
-        let tools = registry.tools();
-        for name in ["sandbox_status", "sandbox_clear"] {
-            let tool = tools
-                .iter()
-                .find(|t| t.name == name)
-                .unwrap_or_else(|| panic!("`{name}` offered"));
-            assert!(
-                tool.parameters["properties"].get("project").is_none(),
-                "`{name}` must not offer a `project` selector: the sandbox store is \
-                 machine-global and the argument would imply an answer that changes with \
-                 it. Schema: {}",
-                tool.parameters
-            );
-        }
-
-        // Neither selector is not a request, and must not resolve to the
-        // destructive one. Both reach the refusal before the store is opened, so
-        // this touches no filesystem.
-        let refusal = registry
-            .call("sandbox_clear", &serde_json::json!({}))
-            .expect_err("silence must not be a scope");
-        assert!(
-            refusal.contains("does not") && refusal.contains("everything"),
-            "the refusal must say that supplying neither is not a request to clear \
-             everything: {refusal}"
-        );
-        assert!(
-            registry
-                .call(
-                    "sandbox_clear",
-                    &serde_json::json!({ "image": "registry/a:1", "everything": true })
-                )
-                .is_err(),
-            "`image` and `everything` are different requests and must not combine"
-        );
-
-        // And when it is given a scope it does act, reports what it freed, and
-        // stays inside the root it was handed. That last one is what fails if the
-        // registry ever goes back to resolving the asset root from the process
-        // environment — the arrangement that let a fault injection clear a real
-        // 8.7 GB cache.
-        let out = registry
-            .call("sandbox_clear", &serde_json::json!({ "everything": true }))
-            .expect("a named scope must be acted on");
-        let document: serde_json::Value = serde_json::from_str(&out).expect("a clear document");
-        assert_eq!(document["scope"], "machine", "{document}");
-        assert_eq!(document["freed_bytes"], 4096, "{document}");
-        assert!(
-            document["store"]
-                .as_str()
-                .expect("a store path")
-                .starts_with(root.to_str().expect("a utf-8 root")),
-            "the tool cleared a store outside the root it was given: {document}"
-        );
-    }
-
-    /// The served-chat `sandbox_clear` description carries what a model has to do
-    /// with the only tool on either surface that changes anything.
-    ///
-    /// The chat half of `the_mutating_tool_states_its_obligations_where_a_model_reads_them`.
-    /// A served model sees only this string.
-    #[cfg(feature = "execution")]
-    #[test]
-    fn the_served_mutating_tool_states_its_obligations() {
-        use rto_serve::ToolRegistry as _;
-
-        let tools = called_registry().tools();
-        let tool = tools
-            .iter()
-            .find(|t| t.name == "sandbox_clear")
-            .expect("`sandbox_clear` offered");
-        for obligation in [
-            "sandbox_status",
-            "freed_bytes",
-            "DIFFERENT REQUESTS",
-            "MACHINE-GLOBAL",
-            "re-obtainable",
-            "retained",
-        ] {
-            assert!(
-                tool.description.contains(obligation),
-                "`sandbox_clear`'s description must carry `{obligation}`: {}",
-                tool.description
-            );
-        }
     }
 
     /// The served-chat `security_status` tool labels its two scopes, and names the
@@ -25586,136 +24129,6 @@ mod audio_stream_tests {
         let mut bare = explanation("audio_stream", "");
         bare.meta = serde_json::json!({});
         assert!(audio_stream_lines(&bare).is_empty());
-    }
-}
-
-// The `roteiro sandbox` surface: the argument shapes, and the one refusal that
-// carries an ADR obligation. The store behaviour these wrap — the set
-// difference, the byte accounting, the post-clear verification — is tested where
-// it lives, in `rto_exec::sandbox_store`.
-#[cfg(all(test, feature = "execution"))]
-mod sandbox_cli {
-    use super::{Cli, Command, SandboxAction, sandbox_scope};
-    use clap::Parser as _;
-
-    fn action<const N: usize>(args: [&str; N]) -> SandboxAction {
-        let Command::Sandbox { action } = Cli::try_parse_from(args).expect("parse").command else {
-            panic!("expected Sandbox");
-        };
-        action
-    }
-
-    /// `status` and `clear`, and `clear` takes three selectors plus a dry run.
-    #[test]
-    fn the_store_has_exactly_two_verbs() {
-        assert!(matches!(
-            action(["roteiro", "sandbox", "status"]),
-            SandboxAction::Status { json: false }
-        ));
-        let SandboxAction::Clear {
-            image,
-            analyzer,
-            everything,
-            dry_run,
-            json,
-        } = action([
-            "roteiro",
-            "sandbox",
-            "clear",
-            "--image",
-            "registry/a@sha256:abc",
-            "--dry-run",
-            "--json",
-        ])
-        else {
-            panic!("expected Clear");
-        };
-        assert_eq!(image.as_deref(), Some("registry/a@sha256:abc"));
-        assert_eq!(analyzer, None);
-        assert!(!everything);
-        assert!(dry_run);
-        assert!(json);
-    }
-
-    /// Being told nothing must not fall through to clearing everything.
-    ///
-    /// ADR-0014 v1.6's second obligation for this verb: "clear this image" and
-    /// "clear everything" are different requests and must be different arguments,
-    /// so a caller who supplied neither has to be sent back rather than served
-    /// the destructive reading of silence. The refusal names the way forward,
-    /// which for a destructive verb is the *non*-destructive one first.
-    #[test]
-    fn clearing_nothing_in_particular_is_a_refusal_and_never_everything() {
-        let refusal = sandbox_scope(None, None, false)
-            .expect_err("no selector must not resolve to a scope")
-            .to_string();
-        for named in ["--image", "--everything", "roteiro sandbox status"] {
-            assert!(
-                refusal.contains(named),
-                "the refusal does not name `{named}`: {refusal}"
-            );
-        }
-    }
-
-    /// Two selectors is also a refusal, in every pairing.
-    #[test]
-    fn two_selectors_are_a_refusal_whichever_two_they_are() {
-        let pairs = [
-            (Some("registry/a:1".to_owned()), None, true),
-            (None, Some("semgrep"), true),
-            (Some("registry/a:1".to_owned()), Some("semgrep"), false),
-        ];
-        for (image, analyzer, everything) in pairs {
-            assert!(
-                sandbox_scope(image.clone(), analyzer, everything).is_err(),
-                "accepted two selectors at once: {image:?} {analyzer:?} {everything}"
-            );
-        }
-    }
-
-    /// One selector each resolves to the scope it names.
-    #[test]
-    fn one_selector_resolves_to_the_scope_it_names() {
-        assert_eq!(
-            sandbox_scope(None, None, true).expect("everything"),
-            rto_exec::Scope::Everything
-        );
-        assert_eq!(
-            sandbox_scope(Some("registry/a:1".to_owned()), None, false).expect("image"),
-            rto_exec::Scope::Image("registry/a:1".to_owned())
-        );
-    }
-
-    /// `--analyzer` is the same request as `--image`, spelled the other way.
-    #[cfg(feature = "exec-boxlite")]
-    #[test]
-    fn an_analyzer_resolves_to_the_reference_the_index_holds_it_under() {
-        let image = rto_exec::boxlite::image_for("semgrep").expect("a pinned semgrep image");
-        assert_eq!(
-            sandbox_scope(None, Some("semgrep"), false).expect("analyzer"),
-            rto_exec::Scope::Image(image.reference.to_owned())
-        );
-        // A reference the table does not carry is a refusal that says what to run
-        // to find one that it does.
-        let refusal = sandbox_scope(None, Some("cargo-audit"), false)
-            .expect_err("no pinned image")
-            .to_string();
-        assert!(refusal.contains("roteiro sandbox status"), "{refusal}");
-    }
-
-    /// Without the pinned image table, `--analyzer` refuses **by name**.
-    ///
-    /// The store is readable and clearable in this build and the mapping is not,
-    /// so the honest answer is a refusal that says how to spell the same request
-    /// — not an argument that silently is not there, and not a clear that guessed.
-    #[cfg(not(feature = "exec-boxlite"))]
-    #[test]
-    fn without_the_pinned_image_table_the_analyzer_selector_says_so() {
-        let refusal = sandbox_scope(None, Some("semgrep"), false)
-            .expect_err("no image table in this build")
-            .to_string();
-        assert!(refusal.contains("exec-boxlite"), "{refusal}");
-        assert!(refusal.contains("--image"), "{refusal}");
     }
 }
 

@@ -106,10 +106,6 @@ pub enum ExecError {
     /// Provisioning an asset failed.
     #[error(transparent)]
     Asset(#[from] crate::assets::AssetError),
-    /// The sandboxed backend could not run the analyzer.
-    #[cfg(feature = "exec-boxlite")]
-    #[error(transparent)]
-    Sandbox(#[from] crate::boxlite::SandboxError),
     /// This build has no adapter for the requested analyzer, so it can neither
     /// run it nor read its native output.
     #[error("no adapter for analyzer {requested:?} in this build (known: {known})")]
@@ -193,7 +189,7 @@ pub fn worktree_id(path: &Path) -> Result<WorktreeId, ExecError> {
 /// What a caller asks a backend to do.
 ///
 /// The same request shape serves every backend, which is the whole point of the
-/// seam: a caller that ingests a CI report today and runs a sandboxed analyzer
+/// seam: a caller that ingests a CI report today and runs an analyzer locally
 /// tomorrow builds the identical value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalysisRequest {
@@ -223,7 +219,7 @@ pub struct AnalysisResponse {
 /// One analyzer backend.
 ///
 /// Implementations differ only in *where* the analyzer ran; the request and the
-/// response are the same, so CI ingestion and a local sandboxed run are the same
+/// response are the same, so CI ingestion and a local run are the same
 /// code path from a caller's point of view. Every implementation must call
 /// [`crate::check_request`] before doing any work, so the consent, network and
 /// worktree-access guarantees hold uniformly rather than per-backend.

@@ -132,9 +132,9 @@ roteiro mcp
 roteiro mcp --http 127.0.0.1:8080
 
 <span class="c"># Restrict what this server exposes — by class, by name, or to everything read-only</span>
-roteiro mcp --tools query,quality        <span class="c"># drops the security + sandbox prose: about two fifths of the surface</span>
+roteiro mcp --tools query,quality        <span class="c"># drops the security prose</span>
 roteiro mcp --tools search,explain,context,path
-roteiro mcp --tools read-only            <span class="c"># drops sandbox_clear, the one mutating tool</span></code></pre>
+roteiro mcp --tools read-only            <span class="c"># every tool is read-only since ADR-0030, so this is the whole surface</span></code></pre>
 
 <div class="note"><strong>The server decides what it exposes.</strong> <code>--tools</code>
 (and <code>[mcp] tools</code> in config) bounds <em>both</em> <code>tools/list</code> and
@@ -144,13 +144,13 @@ restriction leaving nothing to serve, is a startup error rather than a server th
 advertises everything. It bounds the <em>served-chat</em> tools on the same terms, so one server
 never tells its MCP client and its chat client different things about itself.</div>
 
-<div class="note"><strong>Four classes, and a class you did not load stays
+<div class="note"><strong>Three classes, and a class you did not load stays
 discoverable.</strong> <code>query</code> (<code>search</code>, <code>explain</code>,
 <code>context</code>, <code>path</code>, <code>list_kind</code>, <code>list_projects</code>),
 <code>quality</code> (<code>check</code>, <code>debt</code>, <code>debt_density</code>,
-<code>coupling</code>, <code>config_secrets</code>), <code>security</code> and
-<code>sandbox</code>. Every advertised tool costs tokens on every turn whether or not the session
-could ever reach it, and <code>security</code> + <code>sandbox</code> are roughly two fifths of
+<code>coupling</code>, <code>config_secrets</code>) and <code>security</code>.
+Every advertised tool costs tokens on every turn whether or not the session
+could ever reach it, and <code>security</code> is a large share of
 the advertised bytes — a code-navigation session pays that every turn to advertise tools it will
 never call. The default is still every class; narrowing is opt-in.
 <code>list_tool_classes</code> is advertised whatever you withhold, so a model asked about

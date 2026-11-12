@@ -29,9 +29,10 @@
 //!   - raise `checks` to 350 -> named by `a_job_bound_is_small_enough_to_be_one`
 //!   - drop `timeout-minutes` from an apt step -> named by
 //!     `every_apt_step_is_bounded`
-//!   - drop `timeout-minutes` from a `uses: ./.github/actions/provision-sandbox`
-//!     step (the apt fetch lives in the local action) -> named by
-//!     `every_apt_step_is_bounded`
+//!   - drop `timeout-minutes` from a `uses: ./.github/actions/…` step whose
+//!     action reaches apt -> named by `every_apt_step_is_bounded` (confirmed
+//!     against the `provision-sandbox` action, which ADR-0030 removed; the
+//!     follow-into-the-action logic stays for the next local action)
 
 mod common;
 

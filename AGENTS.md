@@ -105,45 +105,9 @@ CI (`.github/workflows/ci.yml`) enforces these; run them locally before pushing.
   `--write` and exits non-zero on drift, so it reads like `cargo fmt --check`.
   `docs_are_canonical.rs` fails in the same run if you forget. **It does not
   reorder frontmatter keys** — that was removed on measurement; see ADR-0023.
-- `cargo test --workspace --all-features` — green. **`--all-features` includes
-  `exec-boxlite`.** That builds without a pre-step now: `boxlite` fetches the
-  runtime archive over TLS and `rto-exec`'s build script verifies **every
-  extracted file** against the per-file digests in `src/runtime_file_pins.rs`
-  before anything links, failing on a mismatch, a missing file or an unpinned
-  extra one. You still need one pass of your own:
-
-  ```sh
-  # The analyzer image. It needs a binary that *has* `exec-boxlite`, so it
-  # cannot be folded into anything earlier.
-  cargo run -p roteiro --features exec-boxlite -- \
-    security prefetch --analyzer semgrep --allow-download   # ~435 MB, pinned by digest
-  ```
-
-  **That pass is easy to miss.** The *image* half of `prefetch` is behind
-  `#[cfg(feature = "exec-boxlite")]`, so a binary without it compiles the image
-  step out entirely. Skip it and `cargo test --workspace --all-features` fails in
-  `backend_parity` with `ImageNotProvisioned`.
-
-  **For a build with no network at all**, provision the archive and name it. Then
-  `boxlite`'s `curl` reads a local file, and the bytes are verified before they
-  are extracted as well as after:
-
-  ```sh
-  # The archive belongs to no analyzer, so `--analyzer sandbox` selects it alone
-  # rather than also fetching ~260 MB of advisory databases you may not want yet.
-  roteiro security prefetch --analyzer sandbox --allow-download   # pinned digest
-  export BOXLITE_RUNTIME_URL="file://$HOME/.roteiro/security/boxlite-runtime/boxlite-runtime.tar.gz"
-  ```
-
-  `prefetch` is gated on `execution`, a default feature, so **any** build can run
-  that — including `--no-default-features --features execution`. Both paths are
-  verified; only this one is offline, and neither should be described as the
-  other (ADR-0014 v1.3).
-
-  **If you bump the `boxlite` pin**, re-derive the per-file digests rather than
-  editing them: `scripts/derive-runtime-file-pins.py` (and `--check` to confirm
-  the checked-in file is current). It covers all three pinned targets, not just
-  your host's.
+- `cargo test --workspace --all-features` — green. It needs no pre-step and no
+  network: the microVM sandbox (`exec-boxlite`), its runtime archive and its
+  analyzer image are gone (ADR-0030).
 - `cargo run -p roteiro -- check` — green. **CI dogfoods the drift gate on this
   repo**, so ADR `[[path#Symbol]]` links and `// @rto:` annotations must resolve.
 - `cargo deny --all-features check` and `cargo audit` — clean. **Every new
@@ -175,7 +139,7 @@ CI (`.github/workflows/ci.yml`) enforces these; run them locally before pushing.
   child process; `--allow-unsandboxed` is what permits an actual run, it is
   required every time, and since the build-time gate is no longer in the default
   path it is the only gate left — do not weaken it. Keep heavy dependencies
-  (llama.cpp, PDF/OCR/vision, the model server, the sandbox runtime) behind
+  (llama.cpp, PDF/OCR/vision, the model server) behind
   **feature flags** so the default build stays small and needs no toolchain class
   it does not already require.
 
