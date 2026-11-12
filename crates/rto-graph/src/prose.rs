@@ -63,6 +63,9 @@ pub struct StyleIssue {
     /// The 1-based sentence it was found in; `0` for a text-wide issue
     /// ([`StyleRule::TermDrift`]).
     pub sentence: usize,
+    /// The 1-based line of the input the sentence starts on; `0` for a
+    /// text-wide issue.
+    pub line: usize,
     /// What to change, in a form a person or a model can act on.
     pub message: String,
 }
@@ -253,15 +256,19 @@ pub fn lint(text: &str) -> StyleReport {
 struct Sentence {
     words: Vec<String>,
     procedural: bool,
+    line: usize,
 }
 
-/// The prose lines of `text`: fences, headings, tables and HTML dropped, list
-/// markers stripped, and each non-prose run masked to the single word `x`.
-fn prose_lines(text: &str) -> Vec<(String, bool)> {
+/// The prose lines of `text` with their 1-based line numbers: fences,
+/// headings, tables and HTML dropped, list markers stripped, and each non-prose
+/// run masked to the single word `x`. A blank or dropped line is an empty entry,
+/// which ends a paragraph.
+fn prose_lines(text: &str) -> Vec<(String, bool, usize)> {
     let mut out = Vec::new();
     let mut fence: Option<&str> = None;
-    for raw in text.lines() {
+    for (i, raw) in text.lines().enumerate() {
         let line = raw.trim();
+        let n = i + 1;
         if let Some(open) = fence {
             if line.starts_with(open) {
                 fence = None;
@@ -270,15 +277,23 @@ fn prose_lines(text: &str) -> Vec<(String, bool)> {
         }
         if line.starts_with("```") || line.starts_with("~~~") {
             fence = Some(&line[..3]);
+            out.push((String::new(), false, n));
             continue;
         }
         if line.starts_with(['#', '|', '<']) {
+            out.push((String::new(), false, n));
             continue;
         }
         let (body, item) = strip_list_marker(line.trim_start_matches('>').trim());
-        if !body.is_empty() {
-            out.push((mask(body), item));
-        }
+        out.push((
+            if body.is_empty() {
+                String::new()
+            } else {
+                mask(body)
+            },
+            item,
+            n,
+        ));
     }
     out
 }
@@ -348,64 +363,50 @@ fn is_code_like(tok: &str) -> bool {
             .any(|p| t.starts_with(p))
 }
 
-/// Split prose lines into sentences. A list item is one sentence per line
-/// break as well as per full stop.
-fn sentences(lines: &[(String, bool)]) -> Vec<Sentence> {
+/// Split prose lines into sentences. A paragraph ends at a blank line, and a
+/// list item is its own paragraph, so an item with no full stop is still one
+/// sentence.
+fn sentences(lines: &[(String, bool, usize)]) -> Vec<Sentence> {
     let mut out = Vec::new();
-    let mut para = String::new();
-    let flush = |para: &mut String, out: &mut Vec<Sentence>| {
-        for s in split_sentences(para) {
-            let words: Vec<String> = s
-                .split_whitespace()
-                .map(|w| {
-                    w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'')
-                        .to_lowercase()
-                })
-                .filter(|w| !w.is_empty())
-                .collect();
-            if words.is_empty() {
-                continue;
-            }
-            let procedural = IMPERATIVE.contains(&words[0].as_str())
-                || (words[0] == "do" && words.get(1).is_some_and(|w| w == "not"));
-            out.push(Sentence { words, procedural });
+    let mut para: Vec<(&str, usize)> = Vec::new();
+    for (text, item, n) in lines {
+        if (*item || text.is_empty()) && !para.is_empty() {
+            split_sentences(&para, &mut out);
+            para.clear();
         }
-        para.clear();
-    };
-    for (line, item) in lines {
-        if *item && !para.is_empty() {
-            flush(&mut para, &mut out);
-        }
-        if !para.is_empty() {
-            para.push(' ');
-        }
-        para.push_str(line);
-        if *item {
-            flush(&mut para, &mut out);
-        }
+        para.extend(text.split_whitespace().map(|w| (w, *n)));
     }
-    flush(&mut para, &mut out);
+    split_sentences(&para, &mut out);
     out
 }
 
-/// Split on `.`, `!`, `?` and `:` followed by whitespace, guarding common
+/// Split one paragraph's words on a closing `.`, `!` or `?`, guarding common
 /// abbreviations.
-fn split_sentences(text: &str) -> Vec<String> {
+fn split_sentences(para: &[(&str, usize)], out: &mut Vec<Sentence>) {
     const ABBREV: &[&str] = &["e.g.", "i.e.", "etc.", "vs.", "cf.", "approx.", "no."];
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let mut words = text.split_whitespace().peekable();
-    while let Some(w) = words.next() {
-        if !cur.is_empty() {
-            cur.push(' ');
+    let mut words = Vec::new();
+    let mut line = 0;
+    for (i, (w, n)) in para.iter().enumerate() {
+        if words.is_empty() {
+            line = *n;
         }
-        cur.push_str(w);
+        let word = w
+            .trim_matches(|c: char| !c.is_alphanumeric() && c != '\'')
+            .to_lowercase();
+        if !word.is_empty() {
+            words.push(word);
+        }
         let ends = w.ends_with(['.', '!', '?']) && !ABBREV.contains(&w.to_lowercase().as_str());
-        if ends || words.peek().is_none() {
-            out.push(std::mem::take(&mut cur));
+        if (ends || i + 1 == para.len()) && !words.is_empty() {
+            let procedural = IMPERATIVE.contains(&words[0].as_str())
+                || (words[0] == "do" && words.get(1).is_some_and(|w| w == "not"));
+            out.push(Sentence {
+                words: std::mem::take(&mut words),
+                procedural,
+                line,
+            });
         }
     }
-    out
 }
 
 fn check_sentence(n: usize, s: &Sentence, issues: &mut Vec<StyleIssue>) {
@@ -418,6 +419,7 @@ fn check_sentence(n: usize, s: &Sentence, issues: &mut Vec<StyleIssue>) {
         issues.push(StyleIssue {
             rule: StyleRule::SentenceLength,
             sentence: n,
+            line: s.line,
             message: format!(
                 "{} words; at most {limit} for {kind} — split it",
                 s.words.len()
@@ -433,6 +435,7 @@ fn check_sentence(n: usize, s: &Sentence, issues: &mut Vec<StyleIssue>) {
         issues.push(StyleIssue {
             rule: StyleRule::MultipleInstructions,
             sentence: n,
+            line: s.line,
             message: format!("a second instruction (`{second}`) — give it its own sentence"),
         });
     }
@@ -442,6 +445,7 @@ fn check_sentence(n: usize, s: &Sentence, issues: &mut Vec<StyleIssue>) {
             issues.push(StyleIssue {
                 rule: StyleRule::UnapprovedWord,
                 sentence: n,
+                line: s.line,
                 message: format!("\"{word}\" — use \"{plain}\""),
             });
         }
@@ -451,6 +455,7 @@ fn check_sentence(n: usize, s: &Sentence, issues: &mut Vec<StyleIssue>) {
             issues.push(StyleIssue {
                 rule: StyleRule::Filler,
                 sentence: n,
+                line: s.line,
                 message: format!("\"{filler}\" says nothing — remove it"),
             });
         }
@@ -459,6 +464,7 @@ fn check_sentence(n: usize, s: &Sentence, issues: &mut Vec<StyleIssue>) {
         issues.push(StyleIssue {
             rule: StyleRule::PassiveVoice,
             sentence: n,
+            line: s.line,
             message: format!("passive (\"… {pp}\") — say who does it"),
         });
     }
@@ -528,6 +534,7 @@ fn drift_issues(sentences: &[Sentence]) -> Vec<StyleIssue> {
                 StyleIssue {
                     rule: StyleRule::TermDrift,
                     sentence: 0,
+                    line: 0,
                     message: format!(
                         "{} name one thing — use \"{keep}\" throughout",
                         used.iter()
@@ -638,6 +645,21 @@ mod tests {
     fn list_items_are_sentences_even_without_a_full_stop() {
         let r = lint("- Open the file\n- Read the first line\n");
         assert_eq!(r.sentences, 2);
+    }
+
+    #[test]
+    fn an_issue_names_the_line_its_sentence_starts_on() {
+        let r = lint("---\n\nThe store is small.\n\nWe utilize\nthe cache.");
+        assert_eq!(r.issues.len(), 1, "{r:?}");
+        assert_eq!((r.issues[0].sentence, r.issues[0].line), (2, 5));
+    }
+
+    #[test]
+    fn a_blank_line_ends_a_sentence_with_no_full_stop() {
+        assert_eq!(
+            lint("A heading-like line\n\nThe store is small.").sentences,
+            2
+        );
     }
 
     #[test]
