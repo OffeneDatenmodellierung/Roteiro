@@ -1268,7 +1268,7 @@ fn provider_review_fixture(name: &str, base: &str) -> PathBuf {
 fn review_llm_runs_on_the_configured_provider() {
     let (base, requests) = stub_reviewer(
         "FINDING | line=2 | class=contract-drift | compile=no | the doc says two but it returns 3",
-        "VERDICT | stance=concerns | the doc comment no longer matches the value returned",
+        "VERDICT | stance=concerns | cites=F1 | the doc comment no longer matches the value returned",
     );
     let dir = provider_review_fixture("llm-provider", &base);
 
@@ -1308,4 +1308,85 @@ fn review_llm_runs_on_the_configured_provider() {
     );
 
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Run `review --llm` against a stub whose verdict is `verdict`, returning
+/// stdout.
+#[cfg(feature = "provider")]
+fn review_llm_with_verdict(name: &str, verdict: &'static str) -> String {
+    let (base, _requests) = stub_reviewer(
+        "FINDING | line=2 | class=contract-drift | compile=no | the doc says two but it returns 3",
+        verdict,
+    );
+    let dir = provider_review_fixture(name, &base);
+    let out = roteiro(&dir, &["review", "--llm"]);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        out.status.success(),
+        "an unfaithful verdict is reported, never fatal: {stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    std::fs::remove_dir_all(&dir).ok();
+    stdout
+}
+
+/// A verdict that cites the finding and file it rests on is shown as the
+/// verdict, with each citation resolved to what it names.
+#[test]
+#[cfg(feature = "provider")]
+fn a_cited_verdict_is_shown_with_its_citations_resolved() {
+    let stdout = review_llm_with_verdict(
+        "llm-faithful",
+        "VERDICT | stance=concerns | cites=F1,P1 | the doc comment no longer matches",
+    );
+    assert!(
+        stdout.contains("verdict on the whole change [concerns]")
+            && stdout.contains("  the doc comment no longer matches\n"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("    F1  src/lib.rs:2 [contract-drift] the doc says two but it returns 3")
+            && stdout.contains("    P1  src/lib.rs"),
+        "each citation is resolved: {stdout}"
+    );
+    assert!(!stdout.contains("UNFAITHFUL"), "{stdout}");
+}
+
+/// An uncited `concerns` verdict is withheld: labelled UNFAITHFUL, and its
+/// summary is not printed as the verdict.
+#[test]
+#[cfg(feature = "provider")]
+fn an_uncited_verdict_is_withheld_as_unfaithful() {
+    let stdout = review_llm_with_verdict(
+        "llm-uncited",
+        "VERDICT | stance=concerns | the doc comment no longer matches",
+    );
+    assert!(
+        stdout.contains("WITHHELD — UNFAITHFUL") && stdout.contains("uncited-claim"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("the doc comment no longer matches")
+            && !stdout.contains("verdict on the whole change ["),
+        "the summary is not shown as the verdict: {stdout}"
+    );
+}
+
+/// A citation naming nothing that was shown is reported by id.
+#[test]
+#[cfg(feature = "provider")]
+fn a_dangling_citation_is_reported() {
+    let stdout = review_llm_with_verdict(
+        "llm-dangling",
+        "VERDICT | stance=concerns | cites=F99 | the doc comment no longer matches",
+    );
+    assert!(
+        stdout.contains("WITHHELD — UNFAITHFUL")
+            && stdout.contains("dangling-citation: F99 names nothing that was shown"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("the doc comment no longer matches"),
+        "{stdout}"
+    );
 }
