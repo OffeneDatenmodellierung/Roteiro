@@ -496,9 +496,13 @@ fn passive(words: &[String]) -> Option<String> {
         if next.ends_with("ly") {
             next = words.get(i + 2)?;
         }
-        let participle =
-            (next.ends_with("ed") && next.len() > 3 && !ED_ADJECTIVES.contains(&next.as_str()))
-                || IRREGULAR_PARTICIPLES.contains(&next.as_str());
+        // `unchanged`, `unset`: an `un-` participle after *be* is a state, not
+        // an action anyone performed.
+        let participle = !next.starts_with("un")
+            && ((next.ends_with("ed")
+                && next.len() > 3
+                && !ED_ADJECTIVES.contains(&next.as_str()))
+                || IRREGULAR_PARTICIPLES.contains(&next.as_str()));
         participle.then(|| next.clone())
     })
 }
@@ -618,6 +622,7 @@ mod tests {
         );
         assert_eq!(r.score, 100);
         assert!(rules("The input is limited to one file.").is_empty());
+        assert!(rules("The document is unchanged.").is_empty());
     }
 
     #[test]
