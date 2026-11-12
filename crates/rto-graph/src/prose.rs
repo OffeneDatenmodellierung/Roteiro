@@ -23,7 +23,12 @@ pub const PROCEDURAL_LIMIT: usize = 20;
 pub const DESCRIPTIVE_LIMIT: usize = 25;
 
 /// Which rule an issue breaks.
+///
+/// `#[non_exhaustive]`: the rule set is expected to grow — webSTE100 lists article
+/// and subject checks as next — and a consumer should not have to change to keep
+/// compiling when it does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[non_exhaustive]
 #[serde(rename_all = "kebab-case")]
 pub enum StyleRule {
     /// Longer than [`PROCEDURAL_LIMIT`] or [`DESCRIPTIVE_LIMIT`] words.
