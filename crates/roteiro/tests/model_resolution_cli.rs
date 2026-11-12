@@ -485,6 +485,39 @@ fn spec_draft_drafts_through_the_configured_provider() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// `spec draft` reports, on stderr, which supplied symbols the draft never
+/// mentions (ADR-0031 §1) — and the document on stdout is unchanged by it.
+#[test]
+#[cfg(feature = "provider")]
+fn spec_draft_reports_what_the_draft_never_mentions() {
+    let (base, _requests) = stub_provider();
+    let dir = fresh_repo("spec-draft-coverage");
+    std::fs::create_dir_all(dir.join("src")).expect("mkdir");
+    std::fs::write(dir.join("src/lib.rs"), "pub fn fixture_parser() {}\n").expect("write");
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "code"]);
+    std::fs::write(
+        dir.join("roteiro.toml"),
+        format!("[provider]\nbase_url = \"{base}\"\n\n[models]\ngenerative = \"qwen3:8b\"\n"),
+    )
+    .expect("write project");
+
+    let out = roteiro(&dir, &["spec", "draft", "fixture_parser"]);
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "drafts: {err}");
+    let line = err
+        .lines()
+        .find(|l| l.starts_with("coverage: "))
+        .unwrap_or_else(|| panic!("a coverage line: {err}"));
+    assert!(line.contains("never mentioned: fixture_parser"), "{line}");
+    assert!(
+        !stdout(&out).contains("coverage:"),
+        "stdout stays the document"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// `[provider]` with no `[models] generative` is refused by key — there is no
 /// provider id a default could safely name.
 #[test]

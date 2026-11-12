@@ -56,7 +56,7 @@ pub use site::{
     parse_site_page, site_nav,
 };
 pub use spec::{
-    SPEC_SCHEMA, SpecContext, SymbolContext, apply_drafts, context, draft_prompt, draft_targets,
-    scaffold_adr, scaffold_blueprint,
+    DraftCoverage, SPEC_SCHEMA, SpecContext, SymbolContext, apply_drafts, context, draft_coverage,
+    draft_prompt, draft_targets, scaffold_adr, scaffold_blueprint,
 };
 pub use tool_check::{CheckedAgainst, Gate, TOOL_CHECK_SCHEMA, ToolCheck, tool_check};

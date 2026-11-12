@@ -419,6 +419,79 @@ pub fn draft_prompt(topic: &str, ctx: &SpecContext, heading: &str, hint: &str) -
     p
 }
 
+/// What a drafted document mentions of the context its prompt supplied, and
+/// what it never does (ADR-0031 §1).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DraftCoverage {
+    /// Supplied items the draft mentions: symbol names and decision keys, in the
+    /// order the prompt listed them.
+    pub mentioned: Vec<String>,
+    /// Supplied items the draft never mentions, in the same order.
+    pub omitted: Vec<String>,
+}
+
+/// Which of `ctx`'s symbols and related decisions `text` mentions.
+///
+/// A **report, never a gate**: a section of a few sentences cannot name every
+/// symbol, and an omission is a prompt for the author rather than a defect.
+/// Decided by text alone — a symbol's name as a whole identifier, or a
+/// decision's key (`adr:0018`, `adr:0018#section`) or number (`ADR-0018`,
+/// `ADR 0018`, case-insensitive).
+#[must_use]
+pub fn draft_coverage(ctx: &SpecContext, text: &str) -> DraftCoverage {
+    let mut seen = BTreeSet::new();
+    let mut out = DraftCoverage::default();
+    let symbols = ctx.symbols.iter().map(|s| (s.node.name.as_str(), false));
+    let adrs = ctx.related_adrs.iter().map(|k| (k.as_str(), true));
+    let lower = text.to_lowercase();
+    for (item, is_adr) in symbols.chain(adrs) {
+        if !seen.insert(item) {
+            continue;
+        }
+        let hit = if is_adr {
+            adr_mentioned(item, text, &lower)
+        } else {
+            has_identifier(text, item)
+        };
+        let bucket = if hit {
+            &mut out.mentioned
+        } else {
+            &mut out.omitted
+        };
+        bucket.push(item.to_owned());
+    }
+    out
+}
+
+/// `key` (`adr:0018`, `adr:0018#section`) appears verbatim, or its number does
+/// as `ADR-0018` / `ADR 0018`.
+fn adr_mentioned(key: &str, text: &str, lower: &str) -> bool {
+    if has_identifier(text, key) {
+        return true;
+    }
+    let Some(num) = key
+        .strip_prefix("adr:")
+        .map(|rest| rest.split('#').next().unwrap_or(rest))
+    else {
+        return false;
+    };
+    [format!("adr-{num}"), format!("adr {num}")]
+        .iter()
+        .any(|form| has_identifier(lower, form))
+}
+
+/// `needle` occurs in `hay` with no identifier character on either side, so
+/// `login` does not match inside `login_user` or `relogin`.
+fn has_identifier(hay: &str, needle: &str) -> bool {
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    !needle.is_empty()
+        && hay.match_indices(needle).any(|(at, _)| {
+            let before = hay[..at].chars().next_back();
+            let after = hay[at + needle.len()..].chars().next();
+            !before.is_some_and(is_ident) && !after.is_some_and(is_ident)
+        })
+}
+
 /// Splice generated prose back into a scaffold: each `_TODO…_` line under a
 /// heading present in `drafts` (as `(heading, prose)`) is replaced by that prose.
 /// Headings without a draft, and all other lines, are left unchanged.
@@ -450,6 +523,60 @@ pub fn apply_drafts(scaffold_md: &str, drafts: &[(String, String)]) -> String {
 mod tests {
     use super::{SPEC_SCHEMA, context};
     use rto_graph::{Edge, EdgeKind, FactSet, Node, NodeKind, Store};
+
+    fn cov_ctx(symbols: &[&str], adrs: &[&str]) -> super::SpecContext {
+        super::SpecContext {
+            schema: SPEC_SCHEMA,
+            topic: "t".to_owned(),
+            symbols: symbols
+                .iter()
+                .map(|n| super::SymbolContext {
+                    node: rto_graph::NodeSummary {
+                        key: format!("sym:rust:a.rs#{n}"),
+                        kind: "fn".to_owned(),
+                        name: (*n).to_owned(),
+                        path: None,
+                        lang: None,
+                    },
+                    container: None,
+                    calls: vec![],
+                    called_by: vec![],
+                    authored_by: vec![],
+                })
+                .collect(),
+            docs: vec![],
+            related_adrs: adrs.iter().map(|a| (*a).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn coverage_splits_what_the_draft_names_from_what_it_drops() {
+        let ctx = cov_ctx(
+            &["login", "validate_token", "login"],
+            &["adr:0007", "adr:0018#summary"],
+        );
+        let cov = super::draft_coverage(
+            &ctx,
+            "`login` calls it, per ADR-0018. relogin and login_user do not count.",
+        );
+        assert_eq!(cov.mentioned, vec!["login", "adr:0018#summary"]);
+        assert_eq!(cov.omitted, vec!["validate_token", "adr:0007"]);
+    }
+
+    #[test]
+    fn a_name_inside_a_longer_identifier_is_not_a_mention() {
+        let ctx = cov_ctx(&["login"], &["adr:0007"]);
+        let cov = super::draft_coverage(&ctx, "relogin, login_user, adr:00071 and ADR-00070");
+        assert!(cov.mentioned.is_empty(), "{cov:?}");
+    }
+
+    #[test]
+    fn a_decision_is_mentioned_by_key_or_number_in_any_case() {
+        for text in ["see adr:0007", "see ADR-0007.", "see adr 0007"] {
+            let cov = super::draft_coverage(&cov_ctx(&[], &["adr:0007"]), text);
+            assert_eq!(cov.mentioned, vec!["adr:0007"], "{text}");
+        }
+    }
 
     fn seeded() -> Store {
         let mut store = Store::open_in_memory().expect("store");

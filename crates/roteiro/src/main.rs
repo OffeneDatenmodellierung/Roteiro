@@ -9082,6 +9082,7 @@ fn spec_draft_local(
         drafts.len(),
         model
     );
+    report_draft_coverage(ctx, &drafts);
     let md = rto_spec::apply_drafts(scaffold, &drafts);
     emit_artifact(&md, &format!("{label} draft"), out)
 }
@@ -9114,6 +9115,7 @@ fn spec_draft_provider(
         "drafted {} section(s) with {model} (via {base_url})",
         drafts.len()
     );
+    report_draft_coverage(ctx, &drafts);
     let md = rto_spec::apply_drafts(scaffold, &drafts);
     emit_artifact(&md, &format!("{label} draft"), out)
 }
@@ -9202,6 +9204,44 @@ fn draft_sections(
         }
     }
     Ok(drafts)
+}
+
+/// Report on stderr which supplied symbols and decisions the draft never
+/// mentions (ADR-0031 §1). A report, not a gate: stdout is unchanged and the
+/// exit status does not move.
+#[cfg(any(
+    feature = "serve",
+    feature = "inference-local-models",
+    feature = "provider"
+))]
+fn report_draft_coverage(ctx: &rto_spec::SpecContext, drafts: &[(String, String)]) {
+    let text: Vec<&str> = drafts.iter().map(|(_, prose)| prose.as_str()).collect();
+    if let Some(line) = draft_coverage_line(&rto_spec::draft_coverage(ctx, &text.join("\n\n"))) {
+        eprintln!("{line}");
+    }
+}
+
+/// The coverage line, or `None` when the prompt supplied nothing to cover.
+#[cfg(any(
+    feature = "serve",
+    feature = "inference-local-models",
+    feature = "provider"
+))]
+fn draft_coverage_line(cov: &rto_spec::DraftCoverage) -> Option<String> {
+    use std::fmt::Write as _;
+
+    let total = cov.mentioned.len() + cov.omitted.len();
+    if total == 0 {
+        return None;
+    }
+    let mut line = format!(
+        "coverage: the draft mentions {} of the {total} symbol(s) and decision(s) it was given",
+        cov.mentioned.len()
+    );
+    if !cov.omitted.is_empty() {
+        let _ = write!(line, " — never mentioned: {}", cov.omitted.join(", "));
+    }
+    Some(line)
 }
 
 /// The error for a section whose generation never got past its reasoning block.
@@ -24041,8 +24081,29 @@ mod workspace_tests {
     )
 ))]
 mod spec_draft_refusal_tests {
-    use super::unanswered_draft;
+    use super::{draft_coverage_line, unanswered_draft};
     use rto_llama::Unterminated;
+
+    /// The coverage line names every omission, and says nothing when the prompt
+    /// supplied nothing to cover (ADR-0031 §1).
+    #[test]
+    fn the_coverage_line_names_what_the_draft_never_mentions() {
+        let cov = rto_spec::DraftCoverage {
+            mentioned: vec!["login".to_owned()],
+            omitted: vec!["validate_token".to_owned(), "adr:0007".to_owned()],
+        };
+        assert_eq!(
+            draft_coverage_line(&cov).as_deref(),
+            Some(
+                "coverage: the draft mentions 1 of the 3 symbol(s) and decision(s) it was \
+                 given — never mentioned: validate_token, adr:0007"
+            )
+        );
+        assert_eq!(
+            draft_coverage_line(&rto_spec::DraftCoverage::default()),
+            None
+        );
+    }
 
     /// **The deliberation must not appear in the message either.** The whole
     /// defect is a model's scratch reasoning being presented as content; a
