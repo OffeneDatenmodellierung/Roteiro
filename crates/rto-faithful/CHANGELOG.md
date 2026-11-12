@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-faithful-v6.2.0...rto-faithful-v7.0.0) - 2026-11-12
+
+### Added
+
+- *(provider)* [**breaking**] one engine for local and hosted models; remove the remote tier
+
 ## [1.26.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-faithful-v1.26.0...rto-faithful-v1.26.1) - 2026-08-19
 
 ### Other
