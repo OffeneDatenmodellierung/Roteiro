@@ -81,6 +81,7 @@ mod query;
 // crate. A rule that lived beside one of them would be a rule the other could
 // not consult, which is exactly the two-scan gap it exists to close.
 pub mod paths;
+pub mod prose;
 pub mod reference;
 // Stage 35 — the adjudicated review corpus, and the two pure decisions made over
 // it. In *this* crate for the same reason `model_choice` is: `gix` is pinned here

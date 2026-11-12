@@ -511,7 +511,9 @@ pub fn build_verdict_prompt(files: &[FileUnderReview], findings: &[&str], budget
          files it judged. A verdict that cites nothing, or cites an id that is not \
          listed, is withheld from the reader.\n\
          - Judge only what is shown. Do not infer what code you have not been \
-         shown does.\n",
+         shown does.\n\
+         - Write plainly: each sentence under 25 words, one name for each \
+         concept.\n",
     );
 
     let _ = writeln!(head, "\nFiles in this change ({}):", files.len());

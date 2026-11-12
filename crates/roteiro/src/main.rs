@@ -9207,8 +9207,8 @@ fn draft_sections(
 }
 
 /// Report on stderr which supplied symbols and decisions the draft never
-/// mentions (ADR-0031 §1). A report, not a gate: stdout is unchanged and the
-/// exit status does not move.
+/// mentions (ADR-0031 §1), and its style score (§2). Reports, not gates: stdout
+/// is unchanged and the exit status does not move.
 #[cfg(any(
     feature = "serve",
     feature = "inference-local-models",
@@ -9216,9 +9216,36 @@ fn draft_sections(
 ))]
 fn report_draft_coverage(ctx: &rto_spec::SpecContext, drafts: &[(String, String)]) {
     let text: Vec<&str> = drafts.iter().map(|(_, prose)| prose.as_str()).collect();
-    if let Some(line) = draft_coverage_line(&rto_spec::draft_coverage(ctx, &text.join("\n\n"))) {
+    let text = text.join("\n\n");
+    if let Some(line) = draft_coverage_line(&rto_spec::draft_coverage(ctx, &text)) {
         eprintln!("{line}");
     }
+    eprintln!("{}", draft_style_line(&rto_graph::prose::lint(&text)));
+}
+
+/// The style line (ADR-0031 §2): the score, and each rule broken with how often.
+/// Style only — it says nothing about whether the draft is true or complete.
+#[cfg(any(
+    feature = "serve",
+    feature = "inference-local-models",
+    feature = "provider"
+))]
+fn draft_style_line(report: &rto_graph::prose::StyleReport) -> String {
+    use std::fmt::Write as _;
+
+    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for issue in &report.issues {
+        *counts.entry(issue.rule.as_str()).or_default() += 1;
+    }
+    let mut line = format!(
+        "style: {}/100 over {} sentence(s) (style only, not correctness)",
+        report.score, report.sentences
+    );
+    if !counts.is_empty() {
+        let parts: Vec<String> = counts.iter().map(|(r, n)| format!("{r} ×{n}")).collect();
+        let _ = write!(line, " — {}", parts.join(", "));
+    }
+    line
 }
 
 /// The coverage line, or `None` when the prompt supplied nothing to cover.
@@ -24081,7 +24108,21 @@ mod workspace_tests {
     )
 ))]
 mod spec_draft_refusal_tests {
-    use super::{draft_coverage_line, unanswered_draft};
+    use super::{draft_coverage_line, draft_style_line, unanswered_draft};
+
+    /// The style line carries the score and each broken rule's count, and says
+    /// it is style only (ADR-0031 §2).
+    #[test]
+    fn the_style_line_counts_each_rule_and_disclaims_correctness() {
+        let line = draft_style_line(&rto_graph::prose::lint(
+            "We utilize the cache. We utilize the store. The row is written by hand.",
+        ));
+        assert_eq!(
+            line,
+            "style: 33/100 over 3 sentence(s) (style only, not correctness) — passive-voice ×1, \
+             unapproved-word ×2"
+        );
+    }
     use rto_llama::Unterminated;
 
     /// The coverage line names every omission, and says nothing when the prompt
