@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-exec-v6.2.0...rto-exec-v7.0.0) - 2026-11-12
+
+### Added
+
+- *(exec)* [**breaking**] remove the boxlite microVM sandbox; analyzers and linters run on the host behind the consent gate
+- *(provider)* [**breaking**] one engine for local and hosted models; remove the remote tier
+
+### Other
+
+- Merge pull request #942 from OffeneDatenmodellierung/refactor/dedupe-exec-helpers
+- *(exec)* one stderr_tail and one collect for both backends
+
 ## [6.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-exec-v6.0.2...rto-exec-v6.1.0) - 2026-09-29
 
 ### Other
