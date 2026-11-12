@@ -1,6 +1,4 @@
 # Mirrors the vulnerability ignores in deny.toml; the reasoning lives there.
-# Remove RUSTSEC-2026-0459 (bundled SQLite) with the `rusqlite` 0.41 bump.
+# There are none at present.
 [advisories]
-ignore = [
-    "RUSTSEC-2026-0459",
-]
+ignore = []
