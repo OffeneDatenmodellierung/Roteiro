@@ -15,14 +15,13 @@
 //! `roteiro`, and this crate's MCP server. The prose was written twice, and
 //! nothing compared the copies — so they drifted. Measured when this module was
 //! introduced: `sandbox_status` differed by 363 bytes, `sandbox_clear` by 197,
-//! `security_list` by 55. A served model and an MCP client were told materially
-//! different things about the same tool, including `sandbox_clear`, the one tool
-//! on either surface that destroys anything.
+//! `security_list` by 55 (the first two were removed with the sandbox,
+//! ADR-0030). A served model and an MCP client were told materially different
+//! things about the same tool.
 //!
 //! A description is not decoration here. It carries the warnings that prevent the
 //! likeliest misuses — that `no-analyzer-on-record` is not a clean repository,
-//! that `bytes.exclusive` and not `bytes.total` is what clearing an image frees —
-//! so one surface quietly holding an older draft is a real divergence.
+//! that a truncated findings page hides only the least severe — so one surface quietly holding an older draft is a real divergence.
 //!
 //! # What #675 removed, and the rule it used
 //!
@@ -35,18 +34,10 @@
 //! What went was the prose that **restates a guarantee something else already
 //! upholds**, on the surface where it is upheld:
 //!
-//! * **The schema states it.** `sandbox_clear`'s `dry_run` semantics and the
-//!   consequence of naming neither scope are in its `everything`/`dry_run`
-//!   argument descriptions, which go out beside this text on both surfaces. Two
-//!   tools also declared the *absence* of an argument (*"No `project` argument"*,
-//!   *"Takes `key` and nothing else"*) beside a rendered signature that already
-//!   showed what they take — and one of those two had gone stale, because
-//!   `context` had since gained `project`.
-//! * **The code refuses it.** `sandbox_clear`'s three store-integrity refusals
-//!   (a registered box, an unrecognised store entry, an index row pointing
-//!   outside the root) are `rto_exec::sandbox_store`'s, each with its own test,
-//!   and each reaches the caller as an **error** rather than as prose read
-//!   beforehand.
+//! * **The schema states it.** Two tools declared the *absence* of an argument
+//!   (*"No `project` argument"*, *"Takes `key` and nothing else"*) beside a
+//!   rendered signature that already showed what they take — and one of those
+//!   two had gone stale, because `context` had since gained `project`.
 //! * **The result body says it.** `no-analyzer-on-record` carries
 //!   `rto_exec`'s `NO_RESULT_REASON`, and `check`'s `not-run` carries
 //!   `not_run_reason` with no `report` at all — read every time, where a
@@ -55,8 +46,7 @@
 //!   is `rto_serve::advertised_system_prompt`'s grounding rule, stated once for
 //!   every tool.
 //!
-//! What stayed is what **nothing but the words upholds**: look before you delete,
-//! quote `freed_bytes`, escalate a `complete: false` retention, `config_secrets`
+//! What stayed is what **nothing but the words upholds**: `config_secrets`
 //! is not a secret scanner, a truncated findings page hides only the least severe.
 //! Those were left even where they are long, because no measurement in this
 //! repository can yet say what a model loses without them — see #675.
@@ -92,7 +82,7 @@
 //!
 //! It should not have to, and this is the closest the framework allows. `rmcp`'s
 //! `#[tool(description = …)]` is parsed by `darling` into a `String`, so it takes
-//! a **string literal** and rejects a path: `description = SANDBOX_STATUS` fails
+//! a **string literal** and rejects a path: `description = SEARCH` fails
 //! to compile with *"Unexpected type `path`"*. Nor can the served side simply read
 //! the MCP surface, because `serve` does not imply `mcp` — a serve-only build has
 //! no MCP module to ask.
@@ -103,69 +93,6 @@
 //! mechanically-checked copy — rather than two copies and a hope.
 //!
 //! Ungated on purpose: a `serve` build without `mcp` needs these too.
-
-/// `sandbox_status` — what the machine-global sandbox image store holds.
-///
-/// Trimmed by #675 to the sentences nothing else carries. What went: the absence
-/// of `project` and of `limit` (the rendered signature is `sandbox_status()`, so
-/// the prose was restating an empty argument list — and unlike the other tools'
-/// `limit` clauses this one states no bound, so #393's contract does not reach
-/// it), `objects`' definition, and the `reference`↔`image` correspondence
-/// (`sandbox_clear`'s `image` argument description states it on both surfaces).
-pub const SANDBOX_STATUS: &str = "Report what the machine-global SANDBOX IMAGE STORE holds: one row per cached container \
-    image, with its reference, digests, object counts and a size breakdown. MACHINE-GLOBAL, \
-    and `scope` says so: one store per asset root, shared by every repository here, so never \
-    attribute a size to the project under discussion. `bytes.total` is what an image \
-    references; `bytes.exclusive` is what dropping that image alone would free — they differ \
-    when images share a layer, so quote `exclusive` when saying what clearing one would give \
-    back. Extracted trees and disk images are a cache below this one, built on first run, so \
-    a pulled-only image is complete without them. `preserved` is state no pinned digest \
-    re-obtains, which `sandbox_clear` never removes. Read this before `sandbox_clear` and show \
-    the user the numbers: a destructive verb with no way to see what it will destroy is \
-    invoked blind. Read-only.";
-
-/// `sandbox_clear` — delete cached images; the one tool that changes anything.
-///
-/// # What #675 cut, and why none of it was a safety change
-///
-/// The scope rule is **enforced, not merely described**, and on both surfaces:
-/// `crate::mcp`'s `sandbox_clear` and `roteiro`'s `GraphToolRegistry::sandbox_clear`
-/// each refuse `image` with `everything` (*"different requests; pass exactly
-/// one"*) and each refuse neither (*"Supplying neither does not mean
-/// everything"*), pinned by `sandbox_clear_refuses_a_scope_it_was_not_given` on
-/// each. It is stated again in the **argument** descriptions, which go out beside
-/// this text on both surfaces (*"Mutually exclusive with `image`; supplying
-/// neither is an error"*, *"Report what would be removed and remove nothing"*).
-/// So the description's own *"Neither is an error and does not mean everything;
-/// both is an error"* was the third statement of one rule, and the second one to
-/// be unenforceable prose — it went, along with the `dry_run`/`applied` sentence
-/// the `dry_run` argument description already carries.
-///
-/// The three refusals at the end — a registered box, an unrecognised entry under
-/// the store root, an index row pointing outside it — went for a different
-/// reason: they are `rto_exec::sandbox_store`'s, each with its own test, and each
-/// reaches the caller as an **error**. Prose read beforehand cannot improve on a
-/// refusal that already happened.
-///
-/// **`DIFFERENT REQUESTS` stayed**, not because it is unenforced but because
-/// `the_mutating_tool_states_its_obligations_where_a_model_reads_them` and its
-/// served twin require it: ADR-0014 v1.6's obligations were deliberately put in
-/// the one string a model reads. What also stayed is the part nothing else
-/// upholds at all: look before you delete, quote what it freed, and escalate a
-/// `complete: false` retention.
-pub const SANDBOX_CLEAR: &str = "DELETE cached container images from the machine-global sandbox image store, and report \
-    what that freed. The one tool here that changes anything, and it cannot reach findings, \
-    memory or the graph: everything it drops is re-obtainable from a pinned digest, so it \
-    costs a re-download and never information. MACHINE-GLOBAL: one store per asset root, \
-    shared by every repository this server hosts, so clearing for one project slows the next \
-    sandboxed run for all. Call `sandbox_status` first and show the user what is cached and \
-    what it costs — a re-pull is minutes to tens of minutes and gigabytes. `image` and \
-    `everything` are DIFFERENT REQUESTS with no default: pass exactly one, `image` with a \
-    reference from `sandbox_status` or `everything: true`. Report what it \
-    freed: quote `freed_bytes`, with `store_bytes_before`/`store_bytes_after` either side, \
-    rather than saying it worked. `retained` re-checks every surviving image against the disk \
-    afterwards; if any `complete` is false say so prominently — that is a damaged store, not \
-    a successful clear, and `roteiro security prefetch` is the repair.";
 
 /// `security_list` — stored findings, with the run evidence behind them.
 ///
@@ -200,10 +127,7 @@ pub const SECURITY_STATUS: &str = "Report SECURITY READINESS in TWO SEPARATELY S
     INSTALLS ANALYZERS — ask the user to install it or to `roteiro security ingest` a report \
     from elsewhere). `assets_provisioned` and `missing_programs` are ALWAYS present, so when \
     the state is not `ready` read both: a host can lack both, and `host_readiness` names only \
-    the first remedy. The sandboxed backend supplies analyzers from a digest-pinned image, so \
-    `binary-not-found` \
-    does not block it, and this tool does not inspect the image store, so it reports no \
-    sandbox verdict. `repository` describes ONE PROJECT: which findings layers are live, how \
+    the first remedy. `repository` describes ONE PROJECT: which findings layers are live, how \
     many findings each holds, how old the advisory data behind each is. \
     `possibly_stale: true` whenever advisory data is involved and NEVER means current; `false` \
     means only that there is no advisory axis. Read `repository.coverage` first: \
@@ -217,8 +141,8 @@ pub const SECURITY_STATUS: &str = "Report SECURITY READINESS in TWO SEPARATELY S
 /// Deliberately the shortest description here. It stands in for whole classes of
 /// prose an operator chose not to advertise, and a long stand-in would spend the
 /// saving it exists to protect: at ~90 tokens it replaces the `security` class's
-/// ~819 or the `sandbox` class's ~713.
-pub const LIST_TOOL_CLASSES: &str = "Name this server's tool CLASSES — `query`, `quality`, `security`, `sandbox` — the tools in \
+/// ~819.
+pub const LIST_TOOL_CLASSES: &str = "Name this server's tool CLASSES — `query`, `quality`, `security` — the tools in \
     each, and which are LOADED here. Call it before telling a user Roteiro cannot do \
     something: a class can be left out at startup to keep its descriptions out of every \
     turn's prompt, and `not-loaded-here` means not advertised to this session, NOT a missing \
@@ -362,8 +286,6 @@ pub fn for_tool(name: &str) -> Option<String> {
         "list_projects" => LIST_PROJECTS,
         "list_tool_classes" => LIST_TOOL_CLASSES,
         "path" => PATH,
-        "sandbox_clear" => SANDBOX_CLEAR,
-        "sandbox_status" => SANDBOX_STATUS,
         "search" => SEARCH,
         "security_list" => SECURITY_LIST,
         "security_status" => SECURITY_STATUS,
@@ -371,7 +293,7 @@ pub fn for_tool(name: &str) -> Option<String> {
     };
     // Every description goes through the substitution, not just the one that
     // needs it: `CONTEXT` is the only const carrying a `{cap}` placeholder
-    // today, and for the other thirteen this is a no-op. An early return for
+    // today, and for the other twelve this is a no-op. An early return for
     // `context` beside a `context` arm in the match would leave a second path
     // that returns the placeholder unreplaced — dead until somebody reorders
     // the function, and then wrong in the output rather than at compile time.
@@ -383,7 +305,7 @@ mod tests {
     use super::for_tool;
 
     /// Every name this module owns.
-    const OWNED: [&str; 15] = [
+    const OWNED: [&str; 13] = [
         "check",
         "config_secrets",
         "context",
@@ -394,8 +316,6 @@ mod tests {
         "list_projects",
         "list_tool_classes",
         "path",
-        "sandbox_clear",
-        "sandbox_status",
         "search",
         "security_list",
         "security_status",
@@ -412,10 +332,12 @@ mod tests {
     /// raises the number in the same commit, and the diff shows the cost being
     /// accepted rather than absorbed.
     ///
-    /// Proven non-vacuous by restoring one cut sentence — `sandbox_clear`'s three
-    /// store-integrity refusals, 166 bytes — which takes the total past this
-    /// ceiling and fails naming `sandbox_clear` as the tool that grew.
-    const DESCRIPTION_BYTE_BUDGET: usize = 10_700;
+    /// It was proven non-vacuous by restoring one cut sentence (166 bytes) and
+    /// watching it fail. ADR-0030 removed the two `sandbox_*` descriptions and
+    /// the sandbox sentences from `security_status` and `list_tool_classes`, so
+    /// the ceiling came down by what they cost: 8,446 bytes measured, 8,500 set,
+    /// keeping the same slack.
+    const DESCRIPTION_BYTE_BUDGET: usize = 8_500;
 
     /// No advertised description may still carry a `{…}` placeholder.
     ///
@@ -457,7 +379,7 @@ mod tests {
     /// this module now budgets to tens of bytes of slack.
     ///
     /// It also settles the question mechanically. Copilot read
-    /// `SANDBOX_CLEAR`'s *"Report what it \ freed:"* break as producing several
+    /// a description's *"Report what it \ freed:"* break as producing several
     /// spaces on the #675 PR. It does not, because the escape swallows the
     /// indentation — but "I read the reference and disagree" is a weaker answer
     /// than a test that runs the real `for_tool` and would fail if it ever did.

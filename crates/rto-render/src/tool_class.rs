@@ -5,10 +5,10 @@
 //!
 //! Every advertised tool costs tokens on **every turn**, whether or not the
 //! session could ever reach it. Measured on the surface this module classifies,
-//! `security` and `sandbox` are 51% of the description mass and are the two
-//! groups a code-navigation session never touches — so a session that only wants
-//! to read code pays roughly half its tool budget to advertise `sandbox_clear`,
-//! which is also the only tool on the surface that changes anything.
+//! `security` (with the `sandbox` class ADR-0030 removed) was 51% of the
+//! description mass and is a group a code-navigation session never touches — so
+//! a session that only wants to read code pays a large share of its tool budget
+//! to advertise it.
 //!
 //! `crate::mcp::restrict` already resolves an operator's list of tool *names*
 //! (issue #584). A class is that same mechanism with a name a person can actually
@@ -50,7 +50,7 @@ pub const CLASS_INDEX_TOOL: &str = "list_tool_classes";
 ///
 /// Alphabetical within a class so a diff to this table is readable, and the
 /// classes themselves ordered by what a session reaches for first.
-pub const CLASSES: [(&str, &[&str]); 4] = [
+pub const CLASSES: [(&str, &[&str]); 3] = [
     (
         "query",
         &[
@@ -73,7 +73,6 @@ pub const CLASSES: [(&str, &[&str]); 4] = [
         ],
     ),
     ("security", &["security_list", "security_status"]),
-    ("sandbox", &["sandbox_clear", "sandbox_status"]),
 ];
 
 /// The tools `class` names, or `None` for a word that is not a class.

@@ -25,10 +25,6 @@ blast radius) rather than the diff alone.
 - [ ] `cargo clippy --workspace --all-targets --all-features -- -D warnings`
       clean; any `#[allow(...)]` says why — a `reason = "…"` field or a comment.
 - [ ] `cargo test --workspace --all-features` green; new behaviour has a test.
-      `--all-features` includes `exec-boxlite`, whose build refuses until the
-      sandbox runtime is provisioned and pinned — see `AGENTS.md` for the
-      one-time `security prefetch` + `BOXLITE_RUNTIME_URL` recipe. **Both
-      passes**: the archive, then the image, from an `exec-boxlite` build.
 - [ ] **A gate verified on your machine was verified with your machine's state.**
       Three defects in one day were of this shape: a documented command that no
       longer does what the doc says, merged because the person checking had more
@@ -147,7 +143,7 @@ But adjudicate before acting, and one rule pays for itself:
       is about. Four axes, each one a way this CI is narrower than "the build":
       - **Platform.** Every compiling job runs on `ubuntu-latest`, so **nothing
         here compiles `cfg(target_os = "macos")` code**, of which this repo has a
-        good deal (Metal, the engine teardown path, the sandbox backend). The
+        good deal (Metal, the engine teardown path). The
         `GGML_ASSERT` teardown abort was macOS-only and Ubuntu CI was
         structurally blind to it.
       - **Features.** `msrv` and `checks` are `--all-features`;

@@ -22,45 +22,16 @@ hosts**, from exactly **two** call sites in the whole workspace:
 | `ocrs-models.s3-accelerate.amazonaws.com` | the OCR model only | `roteiro model pull ocrs-text` |
 | `osv-vulnerabilities.storage.googleapis.com` | OSV databases | `roteiro security prefetch --allow-download` |
 
-**`exec-boxlite` adds two more hosts and a third call site** (ADR-0014,
-Stage 24). Leave the feature off and none of this applies:
-
-| Host | What | Reached by |
-|---|---|---|
-| `github.com` | the boxlite sandbox runtime archive | `roteiro security prefetch --analyzer sandbox --allow-download`, **or `boxlite`'s own build script** — see below |
-| `docker.io` | the pinned analyzer image | `roteiro security prefetch --analyzer semgrep --allow-download` |
-
-**One of those is reached at build time rather than run time, and that is the
-trap.** Building `--features exec-boxlite` with `BOXLITE_RUNTIME_URL` unset lets
-`boxlite`'s own build script `curl` the runtime archive from `github.com`. The
-bytes are still verified — `rto-exec`'s build script checks every extracted file
-against `crates/rto-exec/src/runtime_file_pins.rs` before anything links — but a
-socket is opened, so **that build is not an offline build**. On a host with no
-egress it fails inside `boxlite`, before Roteiro's own checks are reached.
-
-To keep the build offline, provision the archive first and name it:
-
-```sh
-roteiro security prefetch --analyzer sandbox --allow-download
-export BOXLITE_RUNTIME_URL="file://$HOME/.roteiro/security/boxlite-runtime/boxlite-runtime.tar.gz"
-```
-
-`boxlite`'s `curl` then reads that local file and opens no socket, and the
-archive is verified before it is extracted as well as after.
-
-The archive goes through the same `ureq` call site as everything above when
-`prefetch` is what obtains it. The image does not: an OCI pull runs through
-`oci-client` inside the `boxlite` dependency, so it is the one egress path that
-is not first-party code. All of it is pinned — the archive by SHA-256 in
-`crates/rto-exec/src/runtime_pins.rs`, the files it extracts to by SHA-256 in
-`runtime_file_pins.rs`, the image by manifest digest in `SANDBOX_IMAGES` — so a
-host serving different bytes fails the pin rather than being trusted.
-
 Everything else — the semgrep baseline rules, the explorer's JavaScript, every
 tree-sitter grammar — is compiled into the binary. There is no lazy fetch, no
-implicit fallback and no phone-home. **Nothing Roteiro needs is unprefetchable**,
-these two included: a sandboxed *run* never pulls, and refuses with
-`ImageNotProvisioned` if the image was not fetched ahead of time.
+implicit fallback and no phone-home. **Nothing Roteiro needs is unprefetchable**:
+an analyzer *run* never provisions, and refuses with `assets-unavailable-offline`
+if its pinned inputs were not fetched ahead of time.
+
+There used to be two more hosts, reached only by the opt-in `exec-boxlite`
+microVM sandbox: `github.com` for its runtime archive and `docker.io` for the
+pinned analyzer image. That backend is removed
+([ADR-0030](adr/0030-remove-the-microvm-sandbox.md)).
 
 ---
 
@@ -108,21 +79,15 @@ Neither default changes when bytes move. `model pull` is still consent-gated;
 running an analyzer **on this host** still refuses without `--allow-unsandboxed`,
 every time.
 
-`security run` is sandboxed by default: with no flag it executes the analyzer
-inside a digest-pinned OCI image in a microVM. That backend is `exec-boxlite`,
-which is *not* a default feature, so on a stock install the default path is a
-named refusal that spells out the rebuild rather than quietly running on the host
-— see the README for the provisioning order.
-
-> **`--allow-unsandboxed` matters more now, not less.** It is what selects the
-> host: a third-party analyzer as a child process here with **no isolation
+> **`--allow-unsandboxed` is the only gate.** Roteiro has no sandbox: the
+> opt-in microVM backend was removed
+> ([ADR-0030](adr/0030-remove-the-microvm-sandbox.md)), so `security run` always
+> runs a third-party analyzer as a child process here with **no isolation
 > boundary**, and the run's own evidence records `isolation=none`. That used to
 > be gated twice — once at build time by asking for `exec-subprocess`, and once
 > per run by the flag. The build-time half is gone now that the feature is a
-> default, so the flag is the only thing left. The sandbox existing does not
-> soften it either: nothing implies it, and no failure of the sandbox is ever
-> answered by falling back to it. If you want neither, use `roteiro security
-> ingest` and never execute anything locally.
+> default, so the flag is the only thing left, and saying nothing refuses. If you
+> want neither, use `roteiro security ingest` and never execute anything locally.
 
 If you want a build that provisions and ingests but genuinely **cannot** execute
 an analyzer — a locked-down CI image, say — that is still one flag away:
@@ -296,12 +261,12 @@ None of those touched the code. Neither does a toolchain bump or a different
 `--all-features`, which is why the report names the linter's version, the rustc
 version and host, and the feature set it resolved with.
 
-#### It is sandboxed by default, so out of the box it refuses
+#### It runs on this host, so out of the box it refuses
 
-`roteiro lint` runs the linter in a sandbox unless you have said otherwise
-([ADR-0020](adr/0020-build-capable-sandboxed-execution.md) §6) — and **the
-sandboxed builder is not built yet**, so with no grant the command explains that
-and stops, having run nothing.
+`roteiro lint` runs the linter on this machine, and only once you have said so
+([ADR-0020](adr/0020-build-capable-sandboxed-execution.md) §6, as amended by
+[ADR-0030](adr/0030-remove-the-microvm-sandbox.md)). With no grant the command
+explains how to give one and stops, having run nothing.
 
 That is on purpose, not a gap someone forgot to fill. `clippy` has `cargo check`
 semantics: linting compiles the tree, which executes its build scripts and loads
@@ -309,9 +274,8 @@ its proc macros with your filesystem and your credentials — 54 build scripts a
 7 proc macros in this repository by default, 87 and 33 under `--all-features`. In
 your own repository that is the build you were going to run anyway. In a branch
 you are reviewing it is somebody else's code, and that the *toolchain* is yours
-does not make the *code* yours. Shipping host execution as the default *because*
-the sandbox is unfinished would let a missing capability decide a question that
-was supposed to be decided deliberately.
+does not make the *code* yours. There is no sandbox to run it in instead — the
+microVM backend was removed — so the only safe default is to ask.
 
 So you opt in, and **either of these is enough — you do not need both**:
 
@@ -324,26 +288,21 @@ roteiro lint clippy --allow-unsandboxed
 allow_unsandboxed = true
 ```
 
-`--sandboxed` asks for the sandbox explicitly, which is how you opt one run back
-out of a standing grant. It refuses today, and **it never falls back**: asking
-for isolation and getting execution is the one outcome this command will not
-produce.
-
 The grant is inverted, because `roteiro.toml` is committed and shared:
 
 | Layer | May deny | May grant |
 |---|---|---|
-| Built-in default | sandboxed by default | — |
+| Built-in default | refuses | — |
 | Project `roteiro.toml` | **yes** | **no** |
 | User `~/.roteiro/config.toml` | yes | **yes** |
-| `--allow-unsandboxed` / `--sandboxed` | yes | **yes** |
+| `--allow-unsandboxed` | — | **yes** |
 
 A merged line that starts running builds on every teammate's machine is consent
-granted by someone else and noticed by nobody, so a committed file may switch the
-sandbox *on* for everyone and may never switch it *off* for anyone. **Either**
-the user layer or the flag suffices — requiring both would mean typing the flag
-every run, and the key would be pointless. `roteiro config` prints the key,
-both layers, and which one decided.
+granted by someone else and noticed by nobody, so a committed file may deny host
+execution for everyone and may never grant it for anyone; a project denial is not
+overridden by the flag. **Either** the user layer or the flag suffices — requiring
+both would mean typing the flag every run, and the key would be pointless.
+`roteiro config` prints the key, both layers, and which one decided.
 
 ```sh
 roteiro lint clippy --allow-unsandboxed                 # default features

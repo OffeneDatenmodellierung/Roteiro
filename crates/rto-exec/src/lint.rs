@@ -75,7 +75,7 @@
 //! [`AnalyzerRunner`]: crate::AnalyzerRunner
 //! [`Consent`]: crate::Consent
 //!
-//! # Sandboxed is the default; the host is opt-in
+//! # Refused by default; the host is opt-in
 //!
 //! `cargo clippy` has `cargo check` semantics, so it executes every build script
 //! in the resolved tree and loads every proc macro as a dylib into the compiler —
@@ -85,20 +85,11 @@
 //! toolchain is yours does not make the code yours**: linting a branch you are
 //! reviewing runs its author's build scripts here.
 //!
-//! So ADR-0020 condition 6 puts the sandbox first and makes the host a thing a
-//! person opts into. Conditions 1–2 are now built, so the default **selects
-//! `crate::lint_sandbox`** rather than refusing — see `decide` for the
-//! layering and [`Reason`] for what each layer tells the reader.
-//!
-//! What the layers say did not change; what "denied" *amounts to* did. A project
-//! that denies host execution, a user config that denies it, or `--sandboxed`
-//! all mean **run in the boundary**, where before they meant refuse, because
-//! there was no boundary to run in. The refusal that remains is narrower and
-//! sharper: a sandbox that was selected and **cannot be had** — no image, an
-//! image without the linter, an image not in the local store, no hypervisor, a
-//! build without `exec-boxlite`. That never becomes a host run. ADR-0020 §6, and
-//! worse here than elsewhere: the person asked for isolation and would get
-//! execution.
+//! So ADR-0020 condition 6 makes the host a thing a person opts into, and with
+//! no sandbox to run in (ADR-0030 removed the microVM backend) saying nothing is
+//! a refusal that names how to grant — see `decide` for the layering and
+//! [`Reason`] for what each layer tells the reader. A project that denies host
+//! execution cannot be overridden from the command line.
 //!
 //! A granted host run still records `isolation: none` and still prints its argv
 //! first, because a grant changes who chose, not what happened.
@@ -118,7 +109,7 @@ use crate::ingest::NormalizedReport;
 use crate::runner::{ExecError, worktree_id};
 // The grant lives in its own ungated module (ADR-0020 §6 is policy, and policy
 // outlives the capability it governs); it is used here as if it were local.
-use crate::lint_grant::{Backend, Decision, Reason};
+use crate::lint_grant::{Decision, Reason};
 use crate::snippet::WorktreeSnippets;
 use crate::subprocess::{ChildEnv, SubprocessError, execute, scrub_environment, stderr_tail};
 
@@ -138,23 +129,6 @@ use crate::subprocess::{ChildEnv, SubprocessError, execute, scrub_environment, s
 /// overwhelmingly common path where nobody set one, no value at all. It is set
 /// outright in [`run`] instead. See [`ChildEnv`].
 const TOOLCHAIN_ENV: &[&str] = &["CARGO_HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN"];
-
-/// The sentence every unavailable-sandbox refusal opens with.
-///
-/// A `const` rather than repeated in each variant, so the wording of *what
-/// happened* cannot drift from the wording of *what to do about it*.
-const NOT_AVAILABLE: &str =
-    "`roteiro lint` runs the linter sandboxed, and the sandbox is not available here.";
-
-/// The promise this refusal exists to keep, in the words ADR-0020 §6 uses.
-///
-/// Its own line, and last before the escape, so that the reader has been told
-/// what did **not** happen before being offered the thing that would make it
-/// happen deliberately.
-const NEVER_FELL_BACK: Guidance = Guidance::new(&[Line::Note(&[
-    "Nothing ran, and nothing fell back to this host: asking for isolation and",
-    "getting execution is the one outcome this command will not produce.",
-])]);
 
 /// What [`LintError::ToolchainMissing`] says about a program no adapter
 /// declares.
@@ -178,45 +152,21 @@ const UNKNOWN_TOOL: Guidance = Guidance::new(&[Line::Note(&[
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum LintError {
-    /// The sandbox was selected and cannot be had on this machine, so **nothing
-    /// ran** (ADR-0020 §6).
+    /// Nothing granted a run on this host, so **nothing ran** (ADR-0020 §6).
     ///
-    /// The one refusal this command must never turn into a completed run. A
-    /// boundary that vanishes while the command still reports success is worse
-    /// here than anywhere else in the system: the person asked for isolation and
-    /// would get execution, on a tree whose build scripts are the reason they
-    /// asked.
-    ///
-    /// Both bodies are [`Guidance`], so the template below is one short literal
-    /// with no wrapping in it. It used to wrap, and leaked nine columns of source
-    /// indentation into the middle of a sentence — see [`crate::guidance`].
-    #[error("{}{what}{}{}", NOT_AVAILABLE, NEVER_FELL_BACK, .escape.map(|e| e.to_string()).unwrap_or_default())]
-    SandboxUnavailable {
-        /// What is missing, and what to do about it — because "the sandbox is
-        /// unavailable" is a state and not an instruction.
-        what: Guidance,
-        /// How host execution could be reached instead, if it could.
-        ///
-        /// [`Reason::host_escape`], which is `None` for the person it would not
-        /// help: nothing overrides a project's denial, so offering them a flag
-        /// is the failure #426's refusals rule is about.
-        escape: Option<Guidance>,
-    },
-    /// A sandboxed run failed inside the boundary, or could not obtain one.
-    ///
-    /// **Deliberately not `transparent`.** Every refusal on this path ends with
-    /// the same promise — nothing ran, and nothing fell back to this host — and
-    /// one wrapper appending it is what makes that true of *all* of them,
-    /// including a variant somebody adds later without reading this. It was
-    /// per-variant for one revision and a refusal shipped without it; the test
-    /// that caught it now asserts the property here, once, rather than variant
-    /// by variant.
-    #[cfg(feature = "exec-boxlite")]
-    #[error("{sandbox}{}", NEVER_FELL_BACK)]
-    Sandbox {
-        /// What went wrong with the boundary.
-        #[from]
-        sandbox: crate::lint_sandbox::BuilderError,
+    /// The message names which layer refused and, through
+    /// [`Reason::host_escape`], how to grant — except to the person it would
+    /// not help: nothing overrides a project's denial, so offering them a flag
+    /// is the failure #426's refusals rule is about.
+    #[error(
+        "`roteiro lint` compiles the tree on this host, which needs your consent, and nothing \
+         ran: {}.{}",
+        .reason.explanation(),
+        .reason.host_escape().map(|e| e.to_string()).unwrap_or_default()
+    )]
+    NotGranted {
+        /// Which layer refused.
+        reason: Reason,
     },
     /// `roteiro lint` was asked for an analyzer it does not drive.
     #[error(
@@ -389,26 +339,13 @@ pub enum LintError {
     /// over a run that never compiled anything.
     #[error(
         "`{command}` exited {status} without completing the build and without a single \
-         diagnostic, so there is nothing to report — this is not a clean tree.{}{stderr}",
-        .hint.map(|h| h.to_string()).unwrap_or_default()
+         diagnostic, so there is nothing to report — this is not a clean tree.{stderr}"
     )]
     BuildProducedNothing {
         /// The argv that ran.
         command: String,
         /// Its exit status.
         status: i32,
-        /// What to look at first, when the backend narrows it.
-        ///
-        /// Empty for a host run, where a build that will not build is the user's
-        /// own tree and their own machine and they know both. For a sandboxed
-        /// one it names the cause that is **new** and therefore not yet obvious:
-        /// the image has to be able to *build* the tree, not merely lint it, and
-        /// a native build dependency the image lacks fails inside a machine the
-        /// reader cannot inspect. Measured on this repository — `--all-targets`
-        /// compiles a dev-dependency on vendored llama.cpp, whose build script
-        /// needs `libclang`, and an image without it panics in `bindgen` with no
-        /// diagnostic to show for it.
-        hint: Option<Guidance>,
         /// The tail of its standard error.
         stderr: String,
     },
@@ -454,17 +391,8 @@ pub struct LintOutcome {
     pub isolation: Isolation,
     /// The exact argv that ran, so the run is reproducible by hand.
     pub command: Vec<String>,
-    /// The workspace root it ran in, as a **host** path — where the tree
-    /// actually is, whatever a guest called it.
+    /// The workspace root it ran in.
     pub worktree: PathBuf,
-    /// The digest-pinned image the run happened inside, or `None` for a host
-    /// run.
-    ///
-    /// `Some` is the whole of what makes [`LintOutcome::isolation`] checkable
-    /// rather than asserted: an image reference names the thing the boundary was
-    /// made of, and a reader who wants to know what executed their build scripts
-    /// can look it up.
-    pub image: Option<String>,
     /// Where the build wrote — the `CARGO_TARGET_DIR` [`run`] chose.
     ///
     /// Reported rather than kept private, and that is the whole answer to the
@@ -475,24 +403,15 @@ pub struct LintOutcome {
     pub scratch: PathBuf,
 }
 
-/// The argv `analyzer` would run on `backend` at this feature set, or `None` if
-/// this is not a linter roteiro drives.
+/// The argv `analyzer` would run at this feature set, or `None` if this is not
+/// a linter roteiro drives.
 ///
 /// Exists so a caller can disclose the command **before** running it without
 /// having to know which analyzer maps to which argv — a caller that guessed
 /// would eventually announce one linter's command under another one's name.
-///
-/// `backend` is a parameter for the same reason, one level down. The two
-/// backends' argvs differ by `--offline`, which the sandboxed one passes because
-/// its network is denied by the hypervisor — so a disclosure that ignored the
-/// backend would print a command that is one token away from the one that ran,
-/// in the one line a user is relying on being told the truth.
 #[must_use]
-pub fn invocation(analyzer: &str, features: &FeatureSet, backend: Backend) -> Option<Invocation> {
-    (analyzer == clippy::ANALYZER).then(|| match backend {
-        Backend::Host => Clippy::invocation(features),
-        Backend::Sandbox => Clippy::offline_invocation(features),
-    })
+pub fn invocation(analyzer: &str, features: &FeatureSet) -> Option<Invocation> {
+    (analyzer == clippy::ANALYZER).then(|| Clippy::invocation(features))
 }
 
 /// Run `analyzer` over the cargo workspace containing `dir`, and return what it
@@ -510,32 +429,13 @@ pub fn invocation(analyzer: &str, features: &FeatureSet, backend: Backend) -> Op
 /// `decision` is the outcome of `decide`, and it is a **required argument
 /// rather than something read from a global** for the reason
 /// [`crate::SubprocessRunner::new`] takes its flag at construction: a caller must
-/// not be able to execute a build here by forgetting to check something. It
-/// chooses the backend and nothing else — whether that backend can be *had* is
-/// asked below, and answered with a refusal rather than the other one.
-///
-/// `image` is `[lint] image`: the digest-pinned OCI image a sandboxed run
-/// happens inside. Roteiro ships no default and will not choose one, because
-/// there is no first-party Rust image carrying `clippy` — `rust-lang/docker-rust`
-/// builds every stable and nightly variant `--profile minimal` — and picking a
-/// third party's would make somebody else's container the boundary, chosen here
-/// and noticed by nobody. `None` with the sandbox selected is a refusal that
-/// says how to supply one.
-///
-/// # The guest's toolchain is not this machine's, and the count moves with it
-///
-/// A sandboxed run reports what the **image's** rustc and clippy said. Lint
-/// names are symbols in a compiler, so a different compiler legitimately fires a
-/// different set: `roteiro lint clippy` sandboxed can disagree with `cargo
-/// clippy` run in the same tree on the same day, with no defect on either side.
-/// Because nothing is stored (ADR-0020 v1.1) that is a **surprise rather than a
-/// corruption** — there is no series for it to falsify — but it is a real
-/// surprise, so [`LintOutcome::toolchain`] is read out of the guest and printed
-/// with every report.
+/// not be able to execute a build here by forgetting to check something. An
+/// ungranted decision is refused before anything — including `cargo
+/// locate-project` — is executed.
 ///
 /// # Errors
-/// Returns [`LintError`]: an unknown analyzer, no cargo project, **a selected
-/// sandbox that is not available** (which never becomes a host run), a missing
+/// Returns [`LintError`]: **no grant** (checked first), an unknown analyzer, no
+/// cargo project, a missing
 /// toolchain or linter (each naming what to install), a failed probe, a failed
 /// execution, output that is not a report, or a build that produced neither a
 /// completion nor a diagnostic.
@@ -544,14 +444,14 @@ pub fn run(
     dir: &Path,
     features: &FeatureSet,
     decision: Decision,
-    image: Option<&str>,
 ) -> Result<LintOutcome, LintError> {
-    // The request shape first. This used to come *after* the grant, so that a
-    // shut gate could not be probed for which analyzers were behind it — a
-    // property that retired with the gate. There is no longer an outcome where
-    // every request is refused: saying nothing selects the sandbox and the
-    // sandbox runs, so `clippy` and `no-such-linter` were always going to
-    // diverge, and naming the real error first is the more useful order.
+    // The grant first, so a shut gate executes nothing at all and cannot be
+    // probed for which analyzers are behind it.
+    if !decision.granted() {
+        return Err(LintError::NotGranted {
+            reason: decision.reason,
+        });
+    }
     if !LINT_ANALYZERS.contains(&analyzer) {
         return Err(LintError::UnknownAnalyzer {
             requested: analyzer.to_owned(),
@@ -559,98 +459,14 @@ pub fn run(
         });
     }
 
-    // Located on the host for both backends, because the sandboxed one has to
-    // know **what to mount** before it has a guest to ask. Worth being exact
-    // about what that spends: `cargo locate-project` reads manifests and exits.
-    // It compiles nothing, so it runs none of the build scripts and loads none
-    // of the proc macros that are the whole reason the sandbox exists — the
-    // exposure ADR-0020 inverts the threat model over is not opened by finding
-    // out where a `Cargo.toml` is.
     let root = workspace_root(dir, analyzer)?;
 
-    match decision.backend() {
-        Backend::Host => run_on_host(analyzer, &root, features),
-        Backend::Sandbox => run_sandboxed(analyzer, &root, features, image, decision.reason),
-    }
-}
-
-/// Run the linter in a sandbox, or refuse — never fall back (ADR-0020 §6).
-///
-/// The `exec-boxlite` half. Its counterpart below is the same function in a
-/// build that has no sandboxed backend compiled in, and the two exist as a pair
-/// rather than as one function with an `if` so that **there is no branch in
-/// which a missing boundary reaches a host run**: in a build without the
-/// feature this function cannot call the host runner, because it cannot see it.
-#[cfg(feature = "exec-boxlite")]
-fn run_sandboxed(
-    analyzer: &str,
-    root: &Path,
-    features: &FeatureSet,
-    image: Option<&str>,
-    reason: Reason,
-) -> Result<LintOutcome, LintError> {
-    let Some(image) = image else {
-        return Err(LintError::SandboxUnavailable {
-            what: crate::lint_sandbox::NO_IMAGE_CONFIGURED,
-            escape: reason.host_escape(),
-        });
-    };
-    crate::lint_sandbox::run(analyzer, root, features, image)
-}
-
-/// What a build with no sandboxed backend says, and how to get one.
-///
-/// Compiled **only** into the build that needs it, so the sentence and the
-/// `cfg` that produces it cannot drift apart. The bootstrap order is spelled out
-/// rather than named because `exec-boxlite`'s build script requires the verified
-/// runtime archive at compile time — a reader told only "enable the feature"
-/// gets a build failure instead of a sandbox.
-#[cfg(not(feature = "exec-boxlite"))]
-const NO_SANDBOX_IN_THIS_BUILD: Guidance = Guidance::new(&[
-    Line::Note(&[
-        "This build was compiled without the `exec-boxlite` feature, so it contains no",
-        "sandboxed backend at all — not one that failed, one that is not there.",
-    ]),
-    Line::Note(&["Provision the runtime first, then rebuild with the feature:"]),
-    Line::Command("roteiro security prefetch --analyzer sandbox --allow-download"),
-    Line::Command("cargo install roteiro --features exec-boxlite"),
-    Line::Note(&[
-        "That order is not arbitrary: the feature's build script verifies the runtime",
-        "archive at compile time, so a rebuild without it fails rather than degrades.",
-        "It also needs `protoc >= 3.12` on the build host.",
-    ]),
-    Line::Note(&[
-        "Or ingest a report produced elsewhere, which needs no sandbox at all:",
-        "`roteiro security ingest`.",
-    ]),
-]);
-
-/// The same function in a build with no sandboxed backend.
-///
-/// A refusal that names the feature, rather than a host run. The alternative —
-/// "the sandbox is not compiled in, so use the other backend" — is precisely the
-/// silent downgrade ADR-0020 §6 forbids, and it would be reached by the people
-/// least equipped to notice: a stock install, where `exec-boxlite` is off.
-#[cfg(not(feature = "exec-boxlite"))]
-fn run_sandboxed(
-    _analyzer: &str,
-    _root: &Path,
-    _features: &FeatureSet,
-    _image: Option<&str>,
-    reason: Reason,
-) -> Result<LintOutcome, LintError> {
-    Err(LintError::SandboxUnavailable {
-        what: NO_SANDBOX_IN_THIS_BUILD,
-        escape: reason.host_escape(),
-    })
+    run_on_host(analyzer, &root, features)
 }
 
 /// Run the linter on this machine, with this user's toolchain and credentials.
 ///
-/// Unchanged in substance by conditions 1-2: the host path is what it was, and
-/// the sandbox is an addition beside it rather than a rewrite of it. What
-/// changed is only that reaching this function now takes a **grant** rather than
-/// being what happens by default.
+/// Reaching this function takes a **grant**; see [`run`].
 fn run_on_host(
     analyzer: &str,
     root: &Path,
@@ -659,7 +475,7 @@ fn run_on_host(
     // Chosen before anything is run, and a failure to get one stops the run:
     // every process below this line is a cargo whose default target directory is
     // inside the tree being linted.
-    let scratch = scratch_dir(root, Backend::Host)?;
+    let scratch = scratch_dir(root)?;
     let set = [(
         "CARGO_TARGET_DIR",
         std::ffi::OsString::from(scratch.as_os_str()),
@@ -709,7 +525,6 @@ fn run_on_host(
         return Err(LintError::BuildProducedNothing {
             command: command.join(" "),
             status: output.status,
-            hint: None,
             stderr: stderr_tail(&output.stderr),
         });
     }
@@ -725,7 +540,6 @@ fn run_on_host(
         isolation: Isolation::None,
         command,
         worktree: root.to_path_buf(),
-        image: None,
         scratch,
     })
 }
@@ -765,25 +579,10 @@ fn run_on_host(
 /// rather than inventing a second one, and it needs no git — `roteiro lint`
 /// works on a directory that was never a repository at all.
 ///
-/// # Why it is keyed per backend as well as per tree
-///
-/// Because the two backends put **different operating systems' executables** in
-/// it under the same names. Cargo does not separate them: without `--target` a
-/// build lands in `<scratch>/debug`, so a guest's `build-script-build` and a
-/// host's occupy one path and each invalidates the other — which on a macOS host
-/// is merely churn, and on a Linux host is the hazard ADR-0014 v1.6 draws the
-/// line at, run backwards. A build script compiled *inside the boundary* would
-/// be sitting in a directory a later host lint builds into, which is the
-/// execution boundary defeated through a cache rather than through a mount.
-///
-/// So a sandboxed run gets its own, and the suffix is on the directory rather
-/// than inside it so that the two can never be confused by a person reading
-/// `~/.roteiro/lint/target` either.
-///
 /// # Errors
 /// Returns [`LintError::ScratchUnavailable`] if the directory cannot be created,
 /// or whatever [`scratch_path`] refused with.
-pub(crate) fn scratch_dir(root: &Path, backend: Backend) -> Result<PathBuf, LintError> {
+pub(crate) fn scratch_dir(root: &Path) -> Result<PathBuf, LintError> {
     let dir = scratch_path(
         &scratch_roots_from(
             std::env::var_os("ROTEIRO_HOME").map(PathBuf::from),
@@ -793,7 +592,6 @@ pub(crate) fn scratch_dir(root: &Path, backend: Backend) -> Result<PathBuf, Lint
             std::env::temp_dir(),
         ),
         root,
-        backend,
     )?;
     std::fs::create_dir_all(&dir).map_err(|source| LintError::ScratchUnavailable {
         path: dir.display().to_string(),
@@ -815,18 +613,12 @@ pub(crate) fn scratch_dir(root: &Path, backend: Backend) -> Result<PathBuf, Lint
 /// relative path, [`LintError::ScratchWouldBeInsideTheTree`] if every candidate
 /// in `roots` lies within `root`, and [`LintError::ScratchUnavailable`] if no id
 /// can be derived for `root`.
-fn scratch_path(roots: &[Candidate], root: &Path, backend: Backend) -> Result<PathBuf, LintError> {
+fn scratch_path(roots: &[Candidate], root: &Path) -> Result<PathBuf, LintError> {
     let id = worktree_id(root).map_err(|source| LintError::ScratchUnavailable {
         path: root.display().to_string(),
         source: std::io::Error::other(source.to_string()),
     })?;
-    // Appended to the id rather than added as a directory level, so that the
-    // two are siblings a person can see side by side and neither can ever be a
-    // prefix of the other's path.
-    let leaf = match backend {
-        Backend::Host => id.as_str().to_owned(),
-        Backend::Sandbox => format!("{}.sandbox", id.as_str()),
-    };
+    let leaf = id.as_str().to_owned();
     for candidate in roots {
         // **Before** the containment check, and the order is the whole of it.
         // `is_inside` has to make its argument absolute to compare it with
@@ -1172,12 +964,11 @@ pub(crate) fn parse_rustc_verbose(text: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::{
-        Candidate, Guidance, LINT_ANALYZERS, Line, LintError, TOOLCHAIN_ENV, first_line, is_inside,
-        lockfile_refused, parse_rustc_verbose, run, scratch_path, scratch_roots_from,
-        short_version,
+        LINT_ANALYZERS, LintError, TOOLCHAIN_ENV, first_line, is_inside, lockfile_refused,
+        parse_rustc_verbose, run, scratch_path, scratch_roots_from, short_version,
     };
     use crate::adapter::clippy::FeatureSet;
-    use crate::lint_grant::{Backend, ConfigGrant, Requested, decide};
+    use crate::lint_grant::{ConfigGrant, Requested, decide};
     use std::path::{Path, PathBuf};
 
     /// A decision that permits the host, for tests about everything *else*.
@@ -1187,71 +978,36 @@ mod tests {
         decision
     }
 
-    /// ADR-0020 §6's **never fall back**, at the seam that enforces it.
-    ///
-    /// Saying nothing selects the sandbox, and a sandbox that cannot be had
-    /// refuses. What this pins is the thing that must not happen: it must not
-    /// come back `Ok`, and it must not come back as a host run. Asserted on the
-    /// variant rather than on the message, because the message is allowed to
-    /// improve and the outcome is not.
-    ///
-    /// It runs in a build that *has* `exec-boxlite`, where the refusal is a
-    /// missing image rather than a missing feature — both are
-    /// `SandboxUnavailable`, and both are terminal, which is the property.
+    /// Every route that does not grant refuses before anything runs — including
+    /// the routes that came from a layer the person did not type, and a project
+    /// denial, which outranks even `--allow-unsandboxed`. The path does not
+    /// exist, so reaching `cargo locate-project` would fail differently.
     #[test]
-    fn a_selected_sandbox_that_cannot_be_had_refuses_rather_than_running_here() {
-        let sandboxed = decide(ConfigGrant::default(), Requested::Unset);
-        assert!(!sandboxed.granted(), "the fixture must select the sandbox");
-        let err = run(
-            "clippy",
-            std::path::Path::new("."),
-            &FeatureSet::Defaults,
-            sandboxed,
-            // No image, which is the state every stock install is in.
-            None,
-        )
-        .expect_err("a sandbox that cannot be had must refuse");
-        assert!(
-            matches!(err, LintError::SandboxUnavailable { .. }),
-            "a selected sandbox must never become a host run: {err:?}"
-        );
-    }
-
-    /// Every route to a selected-but-unavailable sandbox refuses, including the
-    /// three that came from a layer the person did not type.
-    ///
-    /// Written across all four sandbox-selecting reasons because "it does not
-    /// fall back" is a claim about the *outcome*, and an outcome that held for
-    /// the default while quietly differing for a project denial would be the
-    /// same defect with a smaller blast radius.
-    #[test]
-    fn no_route_to_the_sandbox_ends_up_on_the_host() {
+    fn every_ungranted_route_refuses_before_running_anything() {
         let routes = [
             (ConfigGrant::default(), Requested::Unset),
-            (ConfigGrant::default(), Requested::Sandbox),
             (
                 ConfigGrant::from_layers(None, Some(false)),
                 Requested::Unset,
             ),
-            // A project denial outranks even `--allow-unsandboxed`.
             (ConfigGrant::from_layers(Some(false), None), Requested::Host),
         ];
         for (config, requested) in routes {
             let decision = decide(config, requested);
-            assert_eq!(decision.backend(), crate::lint_grant::Backend::Sandbox);
+            assert!(!decision.granted());
             let err = run(
                 "clippy",
-                std::path::Path::new("."),
+                std::path::Path::new("/nonexistent"),
                 &FeatureSet::Defaults,
                 decision,
-                None,
             )
             .expect_err("must refuse");
             assert!(
-                matches!(err, LintError::SandboxUnavailable { .. }),
-                "{:?} fell out of the sandbox: {err:?}",
+                matches!(err, LintError::NotGranted { .. }),
+                "{:?} did not refuse at the gate: {err:?}",
                 decision.reason
             );
+            assert!(err.to_string().contains("nothing ran"), "{err}");
         }
     }
 
@@ -1266,12 +1022,13 @@ mod tests {
             std::path::Path::new("."),
             &FeatureSet::Defaults,
             denied,
-            None,
         )
         .expect_err("must refuse")
         .to_string();
+        // The explanation may *name* the flag (to say it does not override the
+        // denial); what it must not do is offer it as a way forward.
         assert!(
-            !err.contains("--allow-unsandboxed"),
+            !err.contains("for this run:"),
             "a project denial cannot be escaped, so offering the flag wastes the reader's time: \
              {err}"
         );
@@ -1282,7 +1039,6 @@ mod tests {
             std::path::Path::new("."),
             &FeatureSet::Defaults,
             ordinary,
-            None,
         )
         .expect_err("must refuse")
         .to_string();
@@ -1299,7 +1055,6 @@ mod tests {
             std::path::Path::new("/nonexistent"),
             &FeatureSet::Defaults,
             granted(),
-            None,
         )
         .expect_err("must refuse");
         assert!(matches!(err, LintError::UnknownAnalyzer { .. }));
@@ -1344,7 +1099,6 @@ mod tests {
         let nothing = LintError::BuildProducedNothing {
             command: "cargo clippy".to_owned(),
             status: 101,
-            hint: None,
             stderr: String::new(),
         }
         .to_string();
@@ -1352,183 +1106,20 @@ mod tests {
             nothing.contains("this is not a clean tree"),
             "{nothing}: a build that said nothing must not read as zero findings"
         );
-
-        // A sandboxed run adds the cause a reader cannot look for themselves,
-        // because it is inside a machine they cannot open a shell in. A host run
-        // adds nothing: their tree, their machine, and they know both.
-        let hinted = LintError::BuildProducedNothing {
-            command: "cargo clippy".to_owned(),
-            status: 101,
-            hint: Some(Guidance::new(&[Line::Note(&[
-                "It ran sandboxed, so check the image first.",
-            ])])),
-            stderr: String::new(),
-        }
-        .to_string();
-        assert!(hinted.contains("ran sandboxed"), "{hinted}");
-        assert!(
-            !nothing.contains("sandboxed"),
-            "a host failure must not be explained by a boundary it did not have: {nothing}"
-        );
     }
 
-    /// The disclosed argv is the one that will actually run.
-    ///
-    /// The two backends' argvs differ by `--offline`, which the sandboxed one
-    /// passes because its network is denied by the hypervisor. A disclosure that
-    /// ignored the backend would print a command one token away from the one
-    /// that ran — in the one line a user is relying on being told the truth,
-    /// which makes it worse than printing nothing.
+    /// The disclosed argv is the one that will actually run, and an analyzer
+    /// this build does not drive gets none, so a caller cannot announce one
+    /// linter's command under another one's name.
     #[test]
     fn the_disclosed_argv_is_the_one_that_will_run() {
         let features = FeatureSet::Defaults;
-        let host = super::invocation("clippy", &features, Backend::Host).expect("an argv");
-        let sandbox = super::invocation("clippy", &features, Backend::Sandbox).expect("an argv");
-        assert!(
-            !host.args.contains(&"--offline".to_owned()),
-            "the host may reach a registry, and conditions 1-2 did not change that: {:?}",
-            host.args
+        let disclosed = super::invocation("clippy", &features).expect("an argv");
+        assert_eq!(
+            disclosed,
+            crate::adapter::clippy::Clippy::invocation(&features)
         );
-        assert!(
-            sandbox.args.contains(&"--offline".to_owned()),
-            "a guest with no interface must be told so: {:?}",
-            sandbox.args
-        );
-        // Otherwise identical, so the difference is *only* the boundary — a
-        // sandboxed run that quietly linted something else would be the harder
-        // bug to see.
-        let without: Vec<&String> = sandbox
-            .args
-            .iter()
-            .filter(|a| a.as_str() != "--offline")
-            .collect();
-        assert_eq!(without, host.args.iter().collect::<Vec<_>>());
-        assert_eq!(sandbox.program, host.program);
-        assert_eq!(sandbox.success_statuses, host.success_statuses);
-        // And an analyzer this build does not drive gets no argv on either
-        // backend, so a caller cannot announce one linter's command under
-        // another one's name.
-        for backend in [Backend::Host, Backend::Sandbox] {
-            assert!(super::invocation("semgrep", &features, backend).is_none());
-        }
-    }
-
-    /// **Every** sandbox refusal ends with the promise, because one wrapper
-    /// appends it rather than each variant remembering to.
-    ///
-    /// Written after breaking it. The promise was per-variant, converting one of
-    /// them to a [`Guidance`] dropped it, and the refusal that shipped for a
-    /// revision said an image was missing without saying that nothing had run
-    /// here — which is the single thing ADR-0020 §6 asks this command to
-    /// guarantee.
-    ///
-    /// Driven over every variant rather than a representative one, so a variant
-    /// added later is covered by construction: it cannot reach a caller except
-    /// through [`LintError::Sandbox`].
-    #[cfg(feature = "exec-boxlite")]
-    #[test]
-    fn every_sandbox_refusal_promises_that_nothing_fell_back_to_the_host() {
-        use crate::lint_sandbox::BuilderError;
-
-        let variants: Vec<LintError> = vec![
-            BuilderError::ImageNotProvisioned {
-                analyzer: "clippy".to_owned(),
-                reference: "x@sha256:0".to_owned(),
-            }
-            .into(),
-            BuilderError::ImageLacksLinter {
-                analyzer: "clippy".to_owned(),
-                reference: "x@sha256:0".to_owned(),
-                probe: "cargo clippy --version".to_owned(),
-                stderr: String::new(),
-            }
-            .into(),
-            BuilderError::ProbeFailed {
-                probe: "rustc -vV".to_owned(),
-                reference: "x@sha256:0".to_owned(),
-                stderr: String::new(),
-            }
-            .into(),
-            BuilderError::ColdCache {
-                stderr: String::new(),
-            }
-            .into(),
-            BuilderError::NoPackageCache {
-                path: "/nowhere".to_owned(),
-            }
-            .into(),
-            BuilderError::Killed {
-                command: "cargo clippy".to_owned(),
-                signal: 9,
-                memory_mib: 4096,
-            }
-            .into(),
-            BuilderError::OutputTooLarge {
-                command: "cargo clippy".to_owned(),
-                max: 1,
-            }
-            .into(),
-            BuilderError::UnexpectedStatus {
-                analyzer: "clippy".to_owned(),
-                command: "cargo clippy".to_owned(),
-                status: 42,
-                expected: "0, 101".to_owned(),
-                stderr: String::new(),
-            }
-            .into(),
-        ];
-        for error in variants {
-            let message = error.to_string();
-            assert!(
-                message.contains("nothing fell back to this host"),
-                "a sandbox refusal that does not say nothing ran here:\n{message}"
-            );
-            // And it is said **once** — the wrapper owns it, so a variant that
-            // also says it is a duplicate a reader would read twice.
-            assert_eq!(
-                message.matches("nothing fell back to this host").count(),
-                1,
-                "said more than once:\n{message}"
-            );
-        }
-    }
-
-    /// A sandboxed run and a host run of the same tree must **not** share a
-    /// scratch directory.
-    ///
-    /// They put different operating systems' executables under the same names:
-    /// without `--target`, cargo lands both in `<scratch>/debug`, so a guest's
-    /// `build-script-build` and a host's occupy one path. On a macOS host that
-    /// is churn; on a Linux host it is ADR-0014 v1.6's hazard run backwards — a
-    /// build script compiled *inside* the boundary sitting in a directory a
-    /// later host lint builds into.
-    ///
-    /// Measured: the two really do differ in format. A guest-built build script
-    /// is `ELF 64-bit … ARM aarch64 … GNU/Linux`; the same host's is `Mach-O`.
-    #[test]
-    fn the_two_backends_never_share_a_build_directory() {
-        let roots = vec![Candidate {
-            variable: "TMPDIR",
-            path: PathBuf::from("/elsewhere/lint/target"),
-        }];
-        let root = Path::new("/repo");
-        let host = scratch_path(&roots, root, Backend::Host).expect("host scratch");
-        let sandbox = scratch_path(&roots, root, Backend::Sandbox).expect("sandbox scratch");
-        assert_ne!(host, sandbox);
-        // Neither may contain the other, or one backend's artefacts would be
-        // inside the other's tree and `cargo clean`-shaped operations would
-        // cross the boundary this separation exists to keep.
-        assert!(
-            !sandbox.starts_with(&host),
-            "{sandbox:?} is inside {host:?}"
-        );
-        assert!(
-            !host.starts_with(&sandbox),
-            "{host:?} is inside {sandbox:?}"
-        );
-        // And they stay siblings, so a person reading `~/.roteiro/lint/target`
-        // sees the pair rather than having to open one to find the other.
-        assert_eq!(host.parent(), sandbox.parent());
+        assert!(super::invocation("semgrep", &features).is_none());
     }
 
     /// The two lists answer different questions, and conflating them would send
@@ -1621,9 +1212,7 @@ mod tests {
         // The shipped chooser, not a restatement of it: a test that rebuilt the
         // `<root>/<id>` join here would keep passing with the id dropped, which
         // is how this test first failed to catch anything.
-        let for_tree = |path: &str| {
-            scratch_path(&roots, Path::new(path), Backend::Host).expect("a scratch path")
-        };
+        let for_tree = |path: &str| scratch_path(&roots, Path::new(path)).expect("a scratch path");
         assert_ne!(
             for_tree("/repos/alpha"),
             for_tree("/repos/beta"),
@@ -1702,7 +1291,7 @@ mod tests {
         // `ROTEIRO_HOME` inside the tree, the next candidate is the one used.
         let candidates =
             scratch_roots_from(Some("/repos/alpha/.state".into()), None, "/tmp".into());
-        let chosen = scratch_path(&candidates, root, Backend::Host).expect("a scratch path");
+        let chosen = scratch_path(&candidates, root).expect("a scratch path");
         assert!(
             chosen.starts_with("/tmp/lint/target"),
             "{} — the candidate inside the tree should have been skipped",
@@ -1716,7 +1305,7 @@ mod tests {
             Some("/repos/alpha".into()),
             "/repos/alpha/tmp".into(),
         );
-        let err = scratch_path(&all_inside, root, Backend::Host).expect_err("must refuse");
+        let err = scratch_path(&all_inside, root).expect_err("must refuse");
         assert!(
             matches!(err, LintError::ScratchWouldBeInsideTheTree { .. }),
             "{err:?}"
@@ -1749,8 +1338,7 @@ mod tests {
             ),
             ("TMPDIR", scratch_roots_from(None, None, "reltmp".into())),
         ] {
-            let err =
-                scratch_path(&roots, root, Backend::Host).expect_err("a relative root must refuse");
+            let err = scratch_path(&roots, root).expect_err("a relative root must refuse");
             assert!(
                 matches!(err, LintError::ScratchRootNotAbsolute { .. }),
                 "{source}: {err:?}"
@@ -1799,7 +1387,7 @@ mod tests {
             scratch_roots_from(None, Some("relhome".into()), "/tmp".into()),
             scratch_roots_from(None, None, "reltmp".into()),
         ] {
-            if let Ok(path) = scratch_path(&roots, root, Backend::Host) {
+            if let Ok(path) = scratch_path(&roots, root) {
                 assert!(
                     path.is_absolute(),
                     "{} is relative — cargo would resolve it against the worktree",
@@ -1827,7 +1415,7 @@ mod tests {
     fn absoluteness_is_checked_before_containment_not_after() {
         let cwd = std::env::current_dir().expect("a working directory");
         let roots = scratch_roots_from(Some("relstate".into()), None, std::env::temp_dir());
-        let err = scratch_path(&roots, &cwd, Backend::Host).expect_err(
+        let err = scratch_path(&roots, &cwd).expect_err(
             "a relative ROTEIRO_HOME must refuse, not be quietly skipped as \
              'inside the tree' and replaced by the next candidate",
         );

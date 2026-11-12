@@ -1,10 +1,4 @@
 # Mirrors the vulnerability ignores in deny.toml; the reasoning lives there.
-# Remove the zstd three when `boxlite` moves to zstd 0.14, and RUSTSEC-2026-0459
-# (bundled SQLite) when `boxlite` allows `rusqlite` 0.41.
+# There are none at present.
 [advisories]
-ignore = [
-    "RUSTSEC-2026-0391",
-    "RUSTSEC-2026-0398",
-    "RUSTSEC-2026-0403",
-    "RUSTSEC-2026-0459",
-]
+ignore = []

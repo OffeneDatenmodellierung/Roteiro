@@ -24,14 +24,16 @@ Useful things to include, to the extent you have them: what you did, what
 happened, which version or commit, and which feature flags were enabled. Roteiro
 keeps its heavier surface behind opt-in features (`serve`,
 `inference-local-models`, `pdf-text`, `image-ocr`, `image-vision`,
-`audio-transcribe`, `exec-boxlite`), so knowing whether a build was affected
+`audio-transcribe`), so knowing whether a build was affected
 usually depends on knowing which of those were on.
 
 `execution`, `models` and `exec-subprocess` are **on by default** — assume all
 three unless the reporter says otherwise. Concretely, a stock
 `cargo install roteiro` has the consent-gated downloader (`ureq`/`rustls`)
 compiled in, and can execute an analyzer as a child process on the host if the
-operator passes `--allow-unsandboxed`. Reports touching either path should say
+operator passes `--allow-unsandboxed` — Roteiro has no sandbox, so that flag is
+the only gate on host execution
+([ADR-0030](docs/adr/0030-remove-the-microvm-sandbox.md)). Reports touching either path should say
 so; `--no-default-features --features execution` is the build that can do
 neither.
 

@@ -33,23 +33,13 @@ rto-render = { path = "crates/rto-render", version = "6.2.0" }
 rto-serve = { path = "crates/rto-serve", version = "6.2.0" }
 anyhow = "1.0"
 clap = { version = "4.6", features = ["derive", "env"] }
-# Pinned to 0.39 (not the latest 0.40.x). TWO constraints held it here and
-# only one of them has lifted.
-#
-# The first was an MSRV blocker: libsqlite3-sys's build script from 0.38.0
-# onward uses the std `cfg_select!` macro, stabilized in Rust 1.95 — newer
-# than the 1.94 MSRV in force at the time, which broke the `bundled`
-# feature's build.rs. That one is **gone** as of the 1.96 MSRV.
-#
-# The second still stands and is not ours to lift: `boxlite` 0.10.4 requires
-# `rusqlite ^0.39`, and `libsqlite3-sys` declares `links = "sqlite3"`, so the
-# graph admits exactly one version of it. Under `--all-features` (which turns
-# on `exec-boxlite`) moving to 0.40 is therefore a resolution conflict, not a
-# choice — boxlite has to move first.
-#
-# So this is a dependency-upgrade task gated on an upstream crate, NOT an
-# MSRV-gated one. Do not re-file it under the MSRV (see ADR-0001 for that).
-rusqlite = { version = "0.39", features = ["bundled"] }
+# Held on 0.39 for a long time by two constraints, both gone: libsqlite3-sys's
+# build script needed Rust 1.95 (MSRV is now 1.96), and `boxlite` required
+# `rusqlite ^0.39` (`links = "sqlite3"` admits one copy per graph) until
+# ADR-0030 removed it. 0.41 bundles SQLite 3.54.x, which fixes CVE-2026-119375
+# (RUSTSEC-2026-0459). Not 0.42: it is younger than the 48-hour minimum release
+# age (ADR-0017).
+rusqlite = { version = "0.41", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"

@@ -11,8 +11,8 @@ architectural-significance: VERY HIGH  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.6"
-last-modified: 2026-08-19
+version: "1.7"
+last-modified: 2026-11-11
 confluence-url:
 ---
 
@@ -20,11 +20,22 @@ confluence-url:
 
 |  |  |
 |---|---|
-| **Document version** | 1.6 |
+| **Document version** | 1.7 |
 | **State** | Draft |
 | **Decision makers** | The Roteiro Project Team |
 | **Amends** | [[docs/adr/0014-sandboxed-analyzer-execution.md]] |
 | **Related** | [[docs/adr/0012-analyzer-findings-artifact-model.md]] · [[docs/adr/0017-dependency-security-policy.md]] · [[docs/adr/0019-remote-model-tier.md]] |
+| **Partly superseded by** | [[docs/adr/0030-remove-the-microvm-sandbox.md]] |
+
+> **§6's sandboxed-by-default rule is superseded by
+> [[docs/adr/0030-remove-the-microvm-sandbox.md]] (2026-11-11).** The microVM
+> sandbox is removed, so there is nothing to run a builder in: `roteiro lint`
+> runs on the host only when granted, and with no grant it **refuses**. §6's
+> inverted grant stands unchanged — `--allow-unsandboxed` for one run or
+> `[lint] allow_unsandboxed = true` in the user config may grant; a project
+> `roteiro.toml` may deny and never grant. Conditions 1, 2 and 2a (the writable
+> build directory inside a guest, the mounted package cache, the supplied image
+> and `[lint] image`) describe removed code and are history.
 
 ## Reference
 
@@ -350,6 +361,10 @@ publishes lint names; they are release notes.
 
 ### 6. Sandboxed is the default; the host is opt-in
 
+> *Superseded in part by ADR-0030: there is no sandbox, so the default is
+> refusal. The grant table below stands, with "sandboxed by default" read as
+> "refuses by default".*
+
 A builder runs in the sandbox unless the person running it has said otherwise.
 This reverses what `roteiro lint` first shipped with, and the reverse is the
 correct way round: linting a tree you did not write executes that tree's build
@@ -626,3 +641,4 @@ of scope for a sandboxed run of this repository, though not for others.
 | 1.4 | 2026-08-19 | **Corrects a claim this document's own measurement was used to justify.** v1.3 measured that `cargo clippy` completes against a fully read-only source tree with `CARGO_TARGET_DIR` outside it; `roteiro lint` then cited that result as a description of itself while *inheriting* the variable by name and never setting it — so on any shell that had not set one, the linter wrote `target/` and `Cargo.lock` into the tree it was reviewing, under a doc comment saying it did not. The module now sets `CARGO_TARGET_DIR` to a per-checkout directory outside the tree (ADR-0014 v1.6: a build scratch holds compiled build scripts and is never shared between trees) and passes `--locked` so the lockfile is not rewritten either, with a test that runs the shipped command with the variable unset and asserts the tree is unchanged — by content, not merely by filename, since `Cargo.lock` is rewritten in place and a listing of names cannot see that. A relative scratch root is refused rather than resolved, and the refusal is ordered before the containment check because that check resolves against roteiro's working directory while cargo resolves against the worktree, so on a relative path it decides a question about the wrong directory. **Condition 1's open question is answered**: measured with `CARGO_HOME` and the source tree both `chmod -R a-w`, `CARGO_TARGET_DIR` outside and `--locked --offline`, `cargo clippy` exits 0, reports `build-finished` successfully, and executes 4 build scripts compiled from the read-only cache — so a package cache can be mounted read-only rather than copied, with the honest caveat that the cache was warm and the probe was 4 crates rather than an `--all-features` build of this repository. Finally, **withdraws "the argv and environment seam a builder needs" as a blocker**: the seam existed, and was the wrong kind — a list of names to *inherit* where a builder needs pairs to *set*. Conflating the two is what produced the defect above, so they are now separate fields on one type and the blocker is a split rather than a build. |
 | 1.5 | 2026-08-19 | **Conditions 1 and 2 are built**, and one assumption in this document was false. Condition 1 needed no relaxation of `check_request` at all — a builder's writable surface is a third `VolumeSpec` with `read_only: false` beside two that stay `true`, an *added mount* rather than a *removed guarantee*, now asserted by a test rather than argued. Condition 2's `cargo vendor` is not needed either: the package cache is a read-only mount of the host's existing one, so none of the 414 MB / 556 MB / 1.10 GB is spent — but building it found what the probe could not, since the probe had no credentials in it, and **`$CARGO_HOME` itself is therefore not what is mounted**. Its root holds `credentials.toml`, and "egress is denied" does not answer that, because the run's output returns to the host and `cargo::warning=` is a channel a build script can write to; only `registry/` and `git/` are mounted, at the cost — stated here rather than discovered — that a `$CARGO_HOME/config.toml` source redirect is invisible to the guest. **The image is supplied by the user, not chosen by Roteiro**, because the assumption that an official Rust image would satisfy `SANDBOX_IMAGES`' rule is wrong: rust-lang builds every stable *and* nightly variant `--profile minimal`, so no first-party image carries `clippy`, confirmed from inside a running guest. Pointing at a third party's was declined on a sharper ground than the rule states — an image is not a dependency of the analysis, it **is the boundary**, and choosing whose container that is in a default is a security decision made here and noticed by nobody. A tag is refused for the same reason rather than for reproducibility, which this document retires for builders. Adds the fourth reading a lint count carries — a sandboxed run reports what the *image's* rustc said — to condition 5 and to both output shapes. Records that **parity did not weaken** as predicted, because a builder is not an `AnalyzerRunner` and the parity test is a reader-contract test; that the scratch is keyed per **backend** as well as per checkout, since the two put different operating systems' executables under one name; and that the environment seam is reconciled into one type whose `inherit` half is host-only by construction, a guest having no parent environment to inherit from. |
 | 1.6 | 2026-08-19 | **Removes the argument §6 was made on and replaces it with a stronger one.** The section framed the sandbox default as protecting against *builders* — tools that compile, and therefore execute what the repository declares. Measured, that framing is false: a `.pylintrc` containing nothing but an `init-hook=` was executed by `pylint`, which wrote its marker, exited 16, and emitted **no diagnostic about having done so**; the same shape was measured for `mypy` (`plugins=`), `sqlfluff` (`library_path`) and `eslint` (its config is imported and run). Only `ruff` and `black` resisted, and only for want of a plugin system. So reader-versus-builder is a property of **the repository**, not of the tool, and the two axes are orthogonal — writable surface is `(tool, invocation)` and genuinely tabulable, code execution is `(tool, repository)` and is not. Records the consequence that would otherwise be got wrong: **a per-tool exemption table must not be added**, because it would be right for `ruff` and `black`, wrong for everything with a plugin system, and wrong in the direction that ships execution while reporting isolation. The decision is unchanged; the default is not for a class of *tool* but for a class of *input* — any tree you did not write. Also corrects a paragraph this document's own v1.5 made stale: §6 still said `roteiro lint` refuses "until conditions 1 and 2 are built", when they are built and the refusal a stock machine actually meets is condition 2a's — no image is configured, because Roteiro deliberately ships no default. |
+| 1.7 | 2026-11-11 | **§6's sandboxed-by-default rule is superseded by [[docs/adr/0030-remove-the-microvm-sandbox.md]].** The microVM sandbox, `[lint] image`, `lint --sandboxed` and `lint --image` are removed, so with no grant `roteiro lint` refuses, as it did before the sandbox was built. §6's inverted grant (user layer or flag may grant; project may deny, never grant) and the rest of the decision — the narrowed `code_interpreter` non-goal, builder output not stored — stand. Notes at the top and on §6 mark what is now history. |

@@ -494,13 +494,10 @@ pub struct RepositoryScope {
 ///
 /// # What "on this host" excludes, and it is not a caveat on the word
 ///
-/// The sandboxed backend runs the analyzer inside a digest-pinned OCI image
-/// (ADR-0014/ADR-0019), which supplies the program — so `binary-not-found` does
-/// **not** block a sandboxed run, and it is the only state where the two backends
-/// disagree. This says nothing about sandbox readiness: it does not inspect the
-/// local image store, and reporting a sandbox verdict it has not checked would be
-/// issue #464 committed a second time. `security run` still refuses, naming what
-/// is missing, when the sandbox cannot run.
+/// Nothing: since ADR-0030 the host is the only place a local run happens, so
+/// this verdict is the whole of local readiness. (A microVM backend that
+/// supplied the program from an image used to make `binary-not-found` a
+/// host-only blocker; it was removed.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Readiness {

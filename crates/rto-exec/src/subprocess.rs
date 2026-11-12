@@ -19,8 +19,8 @@
 //!   nothing it needs *would* require a fetch;
 //! - but a subprocess on the host can open a socket, and nothing here stops it.
 //!
-//! Only the sandboxed backend can enforce egress denial. Until it lands, the
-//! honest reading of a `subprocess` run's evidence is *isolation none, egress
+//! Nothing in Roteiro enforces egress denial: the microVM backend that could
+//! was removed (ADR-0030). The honest reading of a `subprocess` run's evidence is *isolation none, egress
 //! configured off*, and `isolation=none` on the record is what says so. This is
 //! written out rather than left implied because "network: deny" on a stored
 //! record is exactly the kind of field a reader assumes was enforced.
@@ -33,8 +33,7 @@
 //!   third-party binary.
 //! - **The worktree is not written.** Every shipped invocation is read-only, and
 //!   the shared preflight refuses a request that asks for a writable tree. This
-//!   is a property of the commands, not a mount option; the sandboxed backend is
-//!   what makes it a boundary.
+//!   is a property of the commands, not a mount option, and not a boundary.
 //! - **A failed run yields nothing.** A status the adapter did not declare
 //!   successful is an error, never an empty finding set — a scan that fell over
 //!   must not read as a clean bill of health.
@@ -383,13 +382,8 @@ pub(crate) fn execute(
     })
 }
 
-// `ChildEnv` and `scrub_environment` used to live here, and moving them out is
-// the point rather than a tidy-up. They were this backend's, while the guest
-// backend built its environment from nothing in `boxlite.rs` — two mechanisms
-// for one concept, which is the shape that let `CARGO_TARGET_DIR` be listed as
-// a passthrough under a promise that it was configured. They are now one type
-// with two consumers in `crate::child_env`, which is also where the reason a
-// guest cannot have an `inherit` half is written down.
+// `ChildEnv` and `scrub_environment` live in `crate::child_env`, shared with
+// the linter.
 pub(crate) use crate::child_env::{ChildEnv, scrub_environment, stderr_tail};
 
 /// Ask the analyzer for its version, best effort.
@@ -762,9 +756,7 @@ mod tests {
     /// The document whose job is telling someone how to prepare is the worst
     /// place for a stale quote: it is read by a person who cannot check it,
     /// because they are reading it precisely because the tool is not in front of
-    /// them yet. Editing the message alone fails here, which is the point —
-    /// `lint_sandbox`'s Dockerfile-count test is the same guard for the same
-    /// reason.
+    /// them yet. Editing the message alone fails here, which is the point.
     ///
     /// **The quoted block, not the file.** The first version of this searched
     /// the whole document for each line, and passed over a corrupted quote
