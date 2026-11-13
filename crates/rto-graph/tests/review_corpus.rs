@@ -746,7 +746,7 @@ fn every_row_reconstructs_a_non_empty_reviewed_diff() {
             names.replace('\n', ", ")
         );
 
-        assert_reachability(row, &out(&["diff", "-U0", &fork, sha, "--", &row.path]));
+        assert_reachability(row, &out(&["diff", "-U3", &fork, sha, "--", &row.path]));
     }
 }
 
@@ -754,7 +754,9 @@ fn every_row_reconstructs_a_non_empty_reviewed_diff() {
 /// shows, and matching credits it within `LINE_WINDOW` of the anchor — so a row
 /// further than that from every shown line is unreachable, and its declared
 /// `reachable` must say so. Checked in both directions: a stale `false` hides a
-/// scorable row from recall too. `hunks` is `git diff -U0` for the row's path.
+/// scorable row from recall too. `hunks` is `git diff -U3` for the row's path:
+/// three lines of context, as `roteiro review` shows the reviewer
+/// (`crates/roteiro/src/diff.rs`), which numbers and can anchor on them.
 fn assert_reachability(row: &rto_graph::review_corpus::CorpusRow, hunks: &str) {
     let distance = hunks
         .lines()

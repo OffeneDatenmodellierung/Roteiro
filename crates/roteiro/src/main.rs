@@ -3839,13 +3839,18 @@ fn run_sync(
         sync_worktree(&mut store, &repo, &cache, &registry)?
     };
 
+    let raw_warning = repo.workdir().and_then(symlinked_raw_warning);
     if json {
-        emit_json(&sync_json(&report)?)?;
+        let mut value = sync_json(&report)?;
+        // The same diagnostic a human gets, so `--json` is not the one route
+        // that cannot see the skip (#815).
+        value["warnings"] = serde_json::json!(raw_warning.iter().collect::<Vec<_>>());
+        emit_json(&value)?;
     } else {
         report_foreign_worktree(&report);
         report_content_failures(&report);
         report_pdf_screening(&report);
-        if let Some(warning) = repo.workdir().and_then(symlinked_raw_warning) {
+        if let Some(warning) = &raw_warning {
             eprintln!("{warning}");
         }
         let tree = &report.tree[..report.tree.len().min(12)];
@@ -3885,9 +3890,10 @@ fn symlinked_raw_warning(root: &std::path::Path) -> Option<String> {
     let raw = root.join("raw");
     let target = std::fs::read_link(&raw).ok()?;
     Some(format!(
-        "warning: `raw/` is a symlink (→ {}), and the scan does not follow symlinks, \
-         so nothing under it was extracted. Mount the shared storage AT `raw/` \
-         instead — a mount point is a directory to the walker (ADR-0026, #815)",
+        "warning: `raw/` in the working tree is a symlink (→ {}), and the scan does \
+         not follow symlinks, so files that exist only behind it are not extracted \
+         (anything committed under `raw/` still is). Mount the shared storage AT \
+         `raw/` instead — a mount point is a directory to the walker (ADR-0026, #815)",
         target.display()
     ))
 }
@@ -4159,7 +4165,11 @@ fn run_check(
     warn_dead_ignore_patterns(debt_ignore);
 
     if json {
-        emit_json(&report)?;
+        // `parse_errors` rides beside the report, so a machine reader learns
+        // what a human sees (#833): which files only parsed under recovery.
+        let mut value = serde_json::to_value(&report)?;
+        value["parse_errors"] = serde_json::to_value(parse_recovery(&store)?)?;
+        emit_json(&value)?;
     } else {
         for v in &report.violations {
             eprintln!("drift [{}]: {}", v.kind.label(), v.message);
@@ -10825,7 +10835,22 @@ fn resolve_upload(
 /// in the graph with whatever recovery salvaged, and the visible failure is
 /// usually somewhere else entirely — broken ADR links to symbols it lost.
 fn parse_recovery_lines(store: &rto_graph::Store) -> anyhow::Result<Vec<String>> {
-    let mut lines: Vec<String> = store
+    Ok(parse_recovery(store)?
+        .into_iter()
+        .map(|(path, line)| {
+            format!(
+                "warning: {path}:{line} parsed only under error recovery, so symbols \
+                 after that line may be missing from the graph — and an ADR link to \
+                 one of them reads as broken"
+            )
+        })
+        .collect())
+}
+
+/// `(path, line)` for every file extracted under parse-error recovery, sorted.
+/// Serialises as `[path, line]` pairs in `check --json`'s `parse_errors`.
+fn parse_recovery(store: &rto_graph::Store) -> anyhow::Result<Vec<(String, u64)>> {
+    let mut found: Vec<(String, u64)> = store
         .nodes_by_kind(&rto_graph::NodeKind::File)?
         .into_iter()
         .filter_map(|node| {
@@ -10834,16 +10859,11 @@ fn parse_recovery_lines(store: &rto_graph::Store) -> anyhow::Result<Vec<String>>
                 .get("line")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0);
-            Some(format!(
-                "warning: {}:{line} parsed only under error recovery, so symbols after \
-                 that line may be missing from the graph — and an ADR link to one of \
-                 them reads as broken",
-                node.path.as_deref().unwrap_or(&node.name)
-            ))
+            Some((node.path.unwrap_or(node.name), line))
         })
         .collect();
-    lines.sort();
-    Ok(lines)
+    found.sort();
+    Ok(found)
 }
 
 fn debt_summary(report: &rto_graph::DebtReport) -> String {
