@@ -1461,7 +1461,7 @@ pub(crate) fn start_backend(
                  model your provider has (for example `qwen3:8b`); see docs/MODEL_SETUP.md"
             );
         };
-        let engine = crate::provider::ProviderEngine::new(base_url, vec![model.to_owned()])?;
+        let engine = crate::provider_engine(cfg, base_url, vec![model.to_owned()])?;
         return Ok((
             Backend::Provider(engine),
             model.to_owned(),

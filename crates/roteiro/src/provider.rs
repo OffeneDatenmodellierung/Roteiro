@@ -53,7 +53,23 @@ pub struct ProviderEngine {
     base: String,
     models: Vec<String>,
     agent: ureq::Agent,
+    /// Where the bearer token comes from when `ROTEIRO_PROVIDER_API_KEY` is unset.
+    token_command: Option<Vec<String>>,
+    /// The last token `token_command` printed, and when — reused for
+    /// [`TOKEN_TTL`] so a tool loop does not run the helper on every round.
+    token_cache: std::sync::Mutex<Option<(String, std::time::Instant)>>,
+    /// Extra headers sent on every call (`[provider] headers`).
+    headers: Vec<(String, String)>,
 }
+
+/// How long a `token_command` token is reused before the command runs again.
+/// Short against the ~1 hour OAuth access tokens typically last, and a 401
+/// refreshes early regardless.
+const TOKEN_TTL: std::time::Duration = std::time::Duration::from_mins(5);
+
+/// Headers that carry a credential, refused in `[provider] headers`: a header
+/// value lives in a file that may be committed, and credentials never do.
+const CREDENTIAL_HEADERS: &[&str] = &["authorization", "proxy-authorization", "x-api-key"];
 
 impl ProviderEngine {
     /// An engine over `base_url` (ending in `/v1`) offering `models`, the
@@ -92,7 +108,72 @@ impl ProviderEngine {
             base,
             models,
             agent,
+            token_command: None,
+            token_cache: std::sync::Mutex::new(None),
+            headers: Vec::new(),
         })
+    }
+
+    /// Take the bearer token from `token_command` when the environment variable
+    /// is unset, and send `headers` on every call (ADR-0032).
+    ///
+    /// # Errors
+    /// An empty command, or a header that carries a credential or is not a
+    /// valid header name — refused at startup, not on the first question.
+    pub fn with_auth(
+        mut self,
+        token_command: Option<Vec<String>>,
+        headers: &std::collections::BTreeMap<String, String>,
+    ) -> anyhow::Result<Self> {
+        if token_command.as_ref().is_some_and(Vec::is_empty) {
+            anyhow::bail!(
+                "`[provider] token_command` is empty: give the command and its arguments"
+            );
+        }
+        for (name, value) in headers {
+            let lower = name.to_ascii_lowercase();
+            if CREDENTIAL_HEADERS.contains(&lower.as_str()) {
+                anyhow::bail!(
+                    "`[provider] headers` sets `{name}`, which carries a credential — credentials \
+                     never go in a config file. Use `ROTEIRO_PROVIDER_API_KEY`, or \
+                     `token_command` in your own ~/.roteiro/config.toml (ADR-0032)"
+                );
+            }
+            ureq::http::HeaderName::try_from(name.as_str()).map_err(|e| {
+                anyhow::anyhow!("`[provider] headers`: `{name}` is not a header name: {e}")
+            })?;
+            ureq::http::HeaderValue::try_from(value.as_str()).map_err(|e| {
+                anyhow::anyhow!("`[provider] headers`: `{name}` has an invalid value: {e}")
+            })?;
+            self.headers.push((name.clone(), value.clone()));
+        }
+        self.token_command = token_command;
+        Ok(self)
+    }
+
+    /// The bearer token for one call: `ROTEIRO_PROVIDER_API_KEY` if set, else a
+    /// fresh-enough `token_command` result (run again when `refresh` or stale),
+    /// else none.
+    fn bearer(&self, refresh: bool) -> Result<Option<String>, EngineError> {
+        if let Some(key) = api_key() {
+            return Ok(Some(key));
+        }
+        let Some(argv) = &self.token_command else {
+            return Ok(None);
+        };
+        let mut cache = self
+            .token_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !refresh
+            && let Some((token, at)) = cache.as_ref()
+            && at.elapsed() < TOKEN_TTL
+        {
+            return Ok(Some(token.clone()));
+        }
+        let token = run_token_command(argv)?;
+        *cache = Some((token.clone(), std::time::Instant::now()));
+        Ok(Some(token))
     }
 
     /// POST `body` to `path` under the base URL, returning the response once its
@@ -104,16 +185,29 @@ impl ProviderEngine {
         body: &serde_json::Value,
     ) -> Result<ureq::http::Response<ureq::Body>, EngineError> {
         let url = format!("{}{path}", self.base);
-        let mut request = self
-            .agent
-            .post(&url)
-            .header("content-type", "application/json");
-        if let Some(key) = api_key() {
-            request = request.header("authorization", format!("Bearer {key}"));
+        let send = |refresh: bool| -> Result<ureq::http::Response<ureq::Body>, EngineError> {
+            let mut request = self
+                .agent
+                .post(&url)
+                .header("content-type", "application/json");
+            for (name, value) in &self.headers {
+                request = request.header(name.as_str(), value.as_str());
+            }
+            if let Some(token) = self.bearer(refresh)? {
+                request = request.header("authorization", format!("Bearer {token}"));
+            }
+            request.send(body.to_string()).map_err(|e| {
+                EngineError::Inference(format!("the provider at {url} did not answer: {e}"))
+            })
+        };
+        let mut response = send(false)?;
+        // A token from `token_command` may have expired inside its reuse window:
+        // run the command again and retry once. Only then — an env-var key has
+        // no fresher value to fetch, and a second 401 is the provider's answer.
+        if response.status().as_u16() == 401 && self.token_command.is_some() && api_key().is_none()
+        {
+            response = send(true)?;
         }
-        let mut response = request.send(body.to_string()).map_err(|e| {
-            EngineError::Inference(format!("the provider at {url} did not answer: {e}"))
-        })?;
         let status = response.status().as_u16();
         if (200..300).contains(&status) {
             return Ok(response);
@@ -177,6 +271,56 @@ impl Engine for ProviderEngine {
             .map_err(|e| EngineError::Inference(format!("reading embeddings: {e}")))?;
         parse_embeddings(&text, inputs.len())
     }
+}
+
+/// Run `argv` (no shell) and take its trimmed standard output as the token.
+///
+/// The token is never echoed into an error: a failure names the command, its
+/// exit status and the tail of its *standard error* only.
+// shortcut: no timeout on the helper — a hung credential helper hangs the call;
+// add one if a real helper is seen to stall.
+fn run_token_command(argv: &[String]) -> Result<String, EngineError> {
+    let (program, rest) = argv
+        .split_first()
+        .ok_or_else(|| EngineError::Inference("`[provider] token_command` is empty".to_owned()))?;
+    let out = std::process::Command::new(program)
+        .args(rest)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| {
+            EngineError::Inference(format!(
+                "`[provider] token_command` could not run `{program}`: {e}"
+            ))
+        })?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let tail: String = stderr
+            .trim()
+            .chars()
+            .rev()
+            .take(300)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        return Err(EngineError::Inference(format!(
+            "`[provider] token_command` (`{program}`) failed ({}): {tail}",
+            out.status
+        )));
+    }
+    let token = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    if token.is_empty() || token.contains(char::is_whitespace) {
+        return Err(EngineError::Inference(format!(
+            "`[provider] token_command` (`{program}`) printed {} — expected one bare token \
+             (for `ant`, pass `--access-token`; without it, it prints JSON)",
+            if token.is_empty() {
+                "nothing"
+            } else {
+                "more than one word"
+            }
+        )));
+    }
+    Ok(token)
 }
 
 /// The credential, if one is set and non-blank.
@@ -499,43 +643,64 @@ mod tests {
     /// A one-shot HTTP server on loopback that answers with `status` and `body`,
     /// and hands back the request it received.
     fn stub(status: u16, body: &'static str) -> (String, std::thread::JoinHandle<String>) {
+        let (base, handle) = stub_seq(vec![(status, body)]);
+        (
+            base,
+            std::thread::spawn(move || handle.join().expect("server").remove(0)),
+        )
+    }
+
+    /// A loopback server that answers one connection per entry of `replies`, in
+    /// order, and hands back every request it received.
+    fn stub_seq(
+        replies: Vec<(u16, &'static str)>,
+    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let base = format!("http://{}/v1", listener.local_addr().expect("addr"));
         let handle = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept");
-            let mut request = Vec::new();
-            let mut buf = [0u8; 8192];
-            // Read until the declared body has arrived.
-            loop {
-                let n = stream.read(&mut buf).expect("read");
-                request.extend_from_slice(&buf[..n]);
-                let text = String::from_utf8_lossy(&request);
-                if let Some(split) = text.find("\r\n\r\n") {
-                    let length = text[..split]
-                        .lines()
-                        .find_map(|l| {
-                            l.to_ascii_lowercase()
-                                .strip_prefix("content-length:")
-                                .map(|v| v.trim().parse::<usize>().unwrap_or(0))
-                        })
-                        .unwrap_or(0);
-                    if request.len() >= split + 4 + length {
-                        break;
-                    }
-                }
-                if n == 0 {
+            replies
+                .into_iter()
+                .map(|(status, body)| answer(&listener, status, body))
+                .collect()
+        });
+        (base, handle)
+    }
+
+    /// Accept one connection on `listener`, read the whole request, answer with
+    /// `status` and `body`, and return the request.
+    fn answer(listener: &std::net::TcpListener, status: u16, body: &str) -> String {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let mut request = Vec::new();
+        let mut buf = [0u8; 8192];
+        // Read until the declared body has arrived.
+        loop {
+            let n = stream.read(&mut buf).expect("read");
+            request.extend_from_slice(&buf[..n]);
+            let text = String::from_utf8_lossy(&request);
+            if let Some(split) = text.find("\r\n\r\n") {
+                let length = text[..split]
+                    .lines()
+                    .find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                    })
+                    .unwrap_or(0);
+                if request.len() >= split + 4 + length {
                     break;
                 }
             }
-            write!(
-                stream,
-                "HTTP/1.1 {status} X\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                body.len()
-            )
-            .expect("write");
-            String::from_utf8_lossy(&request).into_owned()
-        });
-        (base, handle)
+            if n == 0 {
+                break;
+            }
+        }
+        write!(
+            stream,
+            "HTTP/1.1 {status} X\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .expect("write");
+        String::from_utf8_lossy(&request).into_owned()
     }
 
     fn request(model: &str) -> ChatRequest {
@@ -576,6 +741,111 @@ mod tests {
         assert!(sent.contains("\"stream\":true"), "{sent}");
         // A request offering no tools sends no `tools` field.
         assert!(!sent.contains("\"tools\""), "{sent}");
+    }
+
+    const OK_STREAM: &str = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+
+    /// The command form used below: a shell one-liner, run without a shell by
+    /// Roteiro (`sh` is the program, the script its argument).
+    fn sh(script: &str) -> Vec<String> {
+        vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()]
+    }
+
+    /// ADR-0032: with the environment variable unset, `token_command`'s output
+    /// is the bearer token, and `[provider] headers` go on the request too.
+    #[test]
+    fn a_token_command_supplies_the_bearer_and_headers_are_sent() {
+        if api_key().is_some() {
+            return; // the environment variable wins by design; nothing to prove here
+        }
+        let (base, server) = stub(200, OK_STREAM);
+        let headers = std::collections::BTreeMap::from([(
+            "anthropic-beta".to_owned(),
+            "oauth-2025-04-20".to_owned(),
+        )]);
+        let engine = ProviderEngine::new(&base, vec!["m".to_owned()])
+            .expect("engine")
+            .with_auth(Some(sh("echo tok-abc")), &headers)
+            .expect("auth");
+        engine.chat(&request("m")).expect("completes");
+        let sent = server.join().expect("server").to_ascii_lowercase();
+        assert!(sent.contains("authorization: bearer tok-abc"), "{sent}");
+        assert!(sent.contains("anthropic-beta: oauth-2025-04-20"), "{sent}");
+    }
+
+    /// A 401 runs the command again and retries once, with the fresh token —
+    /// an OAuth token can expire inside the reuse window.
+    #[test]
+    fn a_401_refreshes_the_token_and_retries_once() {
+        if api_key().is_some() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("rto-tokcmd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let counter = dir.join("n");
+        let script = format!(
+            "n=$(cat '{0}' 2>/dev/null || echo 0); n=$((n+1)); echo $n > '{0}'; echo tok$n",
+            counter.display()
+        );
+        let (base, server) = stub_seq(vec![(401, "{}"), (200, OK_STREAM)]);
+        let engine = ProviderEngine::new(&base, vec!["m".to_owned()])
+            .expect("engine")
+            .with_auth(Some(sh(&script)), &std::collections::BTreeMap::new())
+            .expect("auth");
+        engine.chat(&request("m")).expect("the retry succeeds");
+        let sent = server.join().expect("server");
+        assert!(
+            sent[0].to_ascii_lowercase().contains("bearer tok1"),
+            "{}",
+            sent[0]
+        );
+        assert!(
+            sent[1].to_ascii_lowercase().contains("bearer tok2"),
+            "{}",
+            sent[1]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Credentials never go in a config file, a failing command names itself
+    /// without echoing anything it printed, and JSON (the `ant` foot-gun of
+    /// omitting `--access-token`) is refused as not one token.
+    #[test]
+    fn credential_headers_and_bad_command_output_are_refused() {
+        for name in ["Authorization", "x-api-key", "Proxy-Authorization"] {
+            let headers = std::collections::BTreeMap::from([(name.to_owned(), "v".to_owned())]);
+            let err = ProviderEngine::new("http://127.0.0.1:1/v1", Vec::new())
+                .expect("engine")
+                .with_auth(None, &headers)
+                .err()
+                .expect("refused");
+            assert!(err.to_string().contains("credential"), "{name}: {err}");
+        }
+        assert!(
+            ProviderEngine::new("http://127.0.0.1:1/v1", Vec::new())
+                .expect("engine")
+                .with_auth(Some(Vec::new()), &std::collections::BTreeMap::new())
+                .is_err(),
+            "an empty command is refused at startup"
+        );
+        let failed = run_token_command(&[
+            "sh".into(),
+            "-c".into(),
+            "echo secret; echo nope >&2; exit 3".into(),
+        ])
+        .expect_err("a failing helper is an error");
+        assert!(
+            !failed.to_string().contains("secret"),
+            "stdout is never echoed: {failed}"
+        );
+        assert!(failed.to_string().contains("nope"), "{failed}");
+        let json = run_token_command(&[
+            "sh".into(),
+            "-c".into(),
+            "echo '{\"access_token\": \"x\"}'".into(),
+        ])
+        .expect_err("JSON is not a bare token");
+        assert!(json.to_string().contains("--access-token"), "{json}");
     }
 
     /// A call cut off by the token limit is left open, so the loop reads it as

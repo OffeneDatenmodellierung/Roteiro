@@ -9278,7 +9278,7 @@ fn spec_draft_provider(
              model your provider has (for example `qwen3:8b`); see docs/MODEL_SETUP.md"
         );
     };
-    let engine = provider::ProviderEngine::new(base_url, vec![model.to_owned()])?;
+    let engine = provider_engine(cfg, base_url, vec![model.to_owned()])?;
     let drafts = draft_sections(&engine, model, scaffold, ctx, repair)?;
     eprintln!(
         "drafted {} section(s) with {model} (via {base_url})",
@@ -17767,6 +17767,22 @@ mod chat_model_selection {
     }
 }
 
+/// A provider engine over `base_url`, with the credential source and headers
+/// `[provider]` configures (ADR-0032). Every construction goes through here, so
+/// `serve`, `spec draft` and `review --llm` cannot disagree about how to
+/// authenticate.
+#[cfg(feature = "provider")]
+fn provider_engine(
+    cfg: &config::Config,
+    base_url: &str,
+    models: Vec<String>,
+) -> anyhow::Result<provider::ProviderEngine> {
+    provider::ProviderEngine::new(base_url, models)?.with_auth(
+        cfg.provider.token_command.clone(),
+        &cfg.provider.headers.clone().unwrap_or_default(),
+    )
+}
+
 /// The engine `serve` answers with, and the served names it logs: the external
 /// provider when `[provider] base_url` is set (ADR-0027), else the in-process
 /// llama.cpp engine over `served`.
@@ -17788,7 +17804,7 @@ fn serve_engine(
         }
         let names = ids.join(", ");
         (
-            std::sync::Arc::new(provider::ProviderEngine::new(base_url, ids)?),
+            std::sync::Arc::new(provider_engine(cfg, base_url, ids)?),
             names,
         )
     } else {

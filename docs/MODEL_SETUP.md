@@ -123,6 +123,70 @@ A committed `roteiro.toml` can set this for a whole team, so check a
 repository's `[provider]` table before running Roteiro in it. Anthropic serves no
 embeddings, so leave `embedding` unset.
 
+### OAuth instead of an API key (enterprise)
+
+Where your organisation issues OAuth access tokens rather than static keys, let
+Roteiro ask a command for a fresh token (ADR-0032). For Anthropic, that command
+is `ant`, Anthropic's CLI.
+
+**Install `ant`:**
+
+```sh
+# macOS
+brew install anthropics/tap/ant
+
+# Linux / WSL — pick VERSION from github.com/anthropics/anthropic-cli/releases
+curl -fsSL "https://github.com/anthropics/anthropic-cli/releases/download/v${VERSION}/ant_${VERSION}_$(uname -s | tr A-Z a-z)_$(uname -m | sed -e s/x86_64/amd64/ -e s/aarch64/arm64/).tar.gz" \
+  | sudo tar -xz -C /usr/local/bin ant
+
+# Or from source (Go 1.25+)
+go install github.com/anthropics/anthropic-cli/v2/cmd/ant@latest
+```
+
+**Log in once** (opens a browser; on a remote host add `--no-browser`), then
+check which organisation and workspace the token is for:
+
+```sh
+ant auth login
+ant auth status
+```
+
+**Point Roteiro at it** in your own `~/.roteiro/config.toml` — `token_command`
+is ignored in a project's `roteiro.toml`, because a committed command would run
+code from any repository you clone:
+
+```toml
+[provider]
+base_url = "https://api.anthropic.com/v1"
+token_command = ["ant", "auth", "print-credentials", "--access-token"]
+
+[provider.headers]
+anthropic-beta = "oauth-2025-04-20"   # Anthropic requires this beside an OAuth token
+
+[models]
+generative = "claude-sonnet-5-5"
+```
+
+Leave `ROTEIRO_PROVIDER_API_KEY` unset: when it is set it wins over the command.
+Roteiro reuses a token for five minutes and runs the command again when the
+provider answers `401`. Always pass `--access-token` — without it `ant` prints
+JSON, which Roteiro refuses.
+
+Other providers take the same shape with their own command:
+
+| Provider | `token_command` |
+|---|---|
+| Google Vertex AI | `["gcloud", "auth", "print-access-token"]` |
+| Azure / Microsoft Foundry | `["az", "account", "get-access-token", "--resource", "<resource>", "--query", "accessToken", "-o", "tsv"]` |
+| A corporate gateway | its credential helper |
+
+`[provider] headers` may be committed, so a team can share them, but a header
+that carries a credential (`authorization`, `x-api-key`) is refused.
+
+Not yet confirmed: whether Anthropic's OpenAI-compatible endpoint accepts OAuth
+tokens (it is documented for its native API). If the first question fails with
+`401`, see ADR-0032's open question for the check.
+
 ## Which models each feature needs
 
 | Feature | `[models]` key | Suggested | Needed? |
