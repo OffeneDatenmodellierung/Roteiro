@@ -17969,6 +17969,21 @@ fn serve_limits(cfg: &config::Config) -> rto_serve::Limits {
     }
 }
 
+/// What a person should open first, for `serve`'s startup banner. With the
+/// explorer compiled in that is the UI at `/`: leading with `/v1`, an API base
+/// that shows nothing in a browser, sent people to an empty page. Without it,
+/// `/v1` is all there is.
+#[cfg(feature = "serve")]
+fn serve_banner_lead(scheme: &str, socket: std::net::SocketAddr) -> String {
+    if cfg!(feature = "explorer") {
+        format!(
+            "{scheme}://{socket}/ (open in a browser; Ask is on) — API at {scheme}://{socket}/v1"
+        )
+    } else {
+        format!("{scheme}://{socket}/v1")
+    }
+}
+
 /// Assemble the graph tools and serve the endpoint: `/v1` alone, or — with
 /// `--mcp` — `/v1` **and** `/mcp` merged on one port (ADR-0008). Blocks until
 /// shutdown.
@@ -18089,16 +18104,7 @@ fn serve_v1_tail(
     let graph_note = " + /v1/graph";
     #[cfg(not(feature = "explorer"))]
     let graph_note = "";
-    // What a person should open first. With the explorer compiled in, that is the
-    // UI at `/` — leading with `/v1`, an API base that shows nothing in a
-    // browser, sent people to an empty page. Without it, `/v1` is all there is.
-    let lead = if cfg!(feature = "explorer") {
-        format!(
-            "{scheme}://{socket}/ (open in a browser; Ask is on) — API at {scheme}://{socket}/v1"
-        )
-    } else {
-        format!("{scheme}://{socket}/v1")
-    };
+    let lead = serve_banner_lead(scheme, socket);
 
     // The OKF viewer (ADR-0022 v1.2), one mount per hosted project that has
     // rendered a bundle, plus the current directory's. Under `/okf` rather than
