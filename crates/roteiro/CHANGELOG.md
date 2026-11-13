@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.3.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v7.2.2...roteiro-v7.3.0) - 2026-11-13
+
+### Added
+
+- *(provider)* OAuth access tokens via a token command, and extra headers (ADR-0032)
+
+### Fixed
+
+- *(provider)* refuse token_command with no home directory instead of running from /tmp
+- *(provider)* run the token helper from home, and accept only an RFC 6750 bearer token
+
+### Other
+
+- Merge pull request #981 from OffeneDatenmodellierung/feat/provider-token-command
+
 ## [7.2.2](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v7.2.1...roteiro-v7.2.2) - 2026-11-13
 
 ### Fixed
