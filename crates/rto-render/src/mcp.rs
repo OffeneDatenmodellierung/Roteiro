@@ -2456,6 +2456,15 @@ mod tests {
         assert_eq!(restriction.absent, vec!["sandbox_clear", "sandbox"]);
         assert!(restriction.advertised.allows("search"));
         assert!(!restriction.advertised.allows("sandbox_clear"));
+
+        // Leniency stops at the empty-intersection rule (ADR-0007 v1.5, v1.11):
+        // a list of only removed names leaves nothing and must refuse to start,
+        // never fall back to the full surface.
+        let only_removed: Vec<String> = super::REMOVED_TOOLS.map(str::to_owned).to_vec();
+        assert_eq!(
+            super::restrict(&only_removed),
+            Err(super::RestrictError::Empty)
+        );
     }
 
     /// The decision this issue was filed for: the two scopes are labelled in the

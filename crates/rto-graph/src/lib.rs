@@ -45,6 +45,7 @@ mod git;
 #[cfg(feature = "inference")]
 mod infer;
 pub mod layering;
+mod licence;
 mod links;
 mod markers;
 // Generated media content (ADR-0015): ASR transcripts and VLM descriptions. Like
@@ -144,6 +145,7 @@ pub use infer::{
     DuplicateConfig, DuplicatePair, DuplicateReport, EMBED_REF, Embedder, HashEmbedder,
     InferenceConfig, duplicates, duplicates_with, embed, infer_edges, infer_edges_with, similarity,
 };
+pub use licence::{LICENCE_EXCEPTIONS, PERMISSIVE_LICENCES, check_licence};
 pub use links::{
     EXTERNAL_REF_KIND, LINKS_AUTHORED_REF, LINKS_REF, external_ref_key, external_ref_node,
     external_ref_node_with, external_ref_target,

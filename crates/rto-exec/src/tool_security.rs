@@ -438,6 +438,11 @@ pub struct MachineScope {
     pub scope: &'static str,
     /// The pinned-asset cache these digests describe.
     pub asset_root: String,
+    /// Ids of the assets whose bytes are present and **fail** verification —
+    /// each one's `integrity` says why and what fixes it. Always present, empty
+    /// when nothing fails, and placed above the per-asset detail so a failed
+    /// verification is not discoverable only by reading a nested key (#900).
+    pub integrity_failures: Vec<&'static str>,
     /// What each shipped analyzer covers, read off the adapters rather than off a
     /// document, and whether this machine can actually run it — **both** halves of
     /// that, since they have different remedies (see [`Readiness`]).
@@ -770,13 +775,19 @@ pub fn security_status(
         (Coverage::Analyzed, Some(staleness), None)
     };
 
+    let assets = status(root, analyzer);
     ToolSecurityStatus {
         schema: TOOL_SECURITY_STATUS_SCHEMA,
         machine: MachineScope {
             scope: "machine",
             asset_root: root.display().to_string(),
+            integrity_failures: assets
+                .iter()
+                .filter(|a| a.integrity.is_failure())
+                .map(|a| a.id)
+                .collect(),
             analyzers: coverage_matrix(root, analyzer),
-            assets: status(root, analyzer),
+            assets,
         },
         repository: RepositoryScope {
             scope: "repository",
@@ -1040,6 +1051,37 @@ mod tests {
         assert_eq!(json["repository"]["project"], "spoke");
         assert!(json["machine"].get("project").is_none(), "{json}");
         assert!(json["repository"].get("asset_root").is_none(), "{json}");
+        // Nothing provisioned is a readiness gap, not a failed verification.
+        assert_eq!(json["machine"]["integrity_failures"], serde_json::json!([]));
+    }
+
+    /// #900: a failed verification is summarised at the top of the machine half,
+    /// not only in a nested per-asset key.
+    #[test]
+    fn status_summarises_integrity_failures_above_the_assets() {
+        let root = std::env::temp_dir().join(format!(
+            "roteiro-integrity-summary-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        let spec = crate::assets::asset("semgrep-rules").expect("known asset");
+        crate::assets::provision(&root, spec).expect("provision");
+        std::fs::write(crate::assets::asset_path(&root, spec), b"tampered").expect("tamper");
+
+        let doc = security_status(&root, Some("semgrep"), "p", &[], "2026-08-19T00:00:00Z");
+        let json = serde_json::to_value(&doc).expect("serialise");
+        std::fs::remove_dir_all(&root).ok();
+        assert_eq!(
+            json["machine"]["integrity_failures"],
+            serde_json::json!(["semgrep-rules"]),
+            "{json}"
+        );
+        assert_eq!(
+            json["machine"]["assets"][0]["integrity"]["state"],
+            "digest-mismatch"
+        );
     }
 
     /// The status document's repository half carries the same discriminator as the

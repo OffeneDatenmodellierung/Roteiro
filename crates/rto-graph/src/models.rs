@@ -1669,6 +1669,16 @@ mod tests {
         dir
     }
 
+    /// Every model in the registry carries an allowlisted licence (#904).
+    #[test]
+    fn every_registry_licence_is_permissive_or_argued() {
+        for spec in REGISTRY {
+            if let Err(e) = crate::check_licence(spec.name, spec.licence) {
+                panic!("{e}");
+            }
+        }
+    }
+
     /// Widen a length for comparison against a byte count.
     fn u(n: usize) -> u64 {
         u64::try_from(n).expect("length fits u64")
