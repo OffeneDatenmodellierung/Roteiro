@@ -1583,6 +1583,14 @@ enum SpecAction {
         /// Write to this file instead of stdout.
         #[arg(long)]
         out: Option<String>,
+        /// Rewrite each section against its style findings, at most this many
+        /// passes (0–3; off by default). A rewrite that mentions fewer of the
+        /// supplied symbols and decisions is discarded however well it scores,
+        /// and the best version is kept (ADR-0031 §3). Every pass is another
+        /// model call — against a hosted provider, another copy of repository
+        /// content sent.
+        #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=3))]
+        repair: u8,
     },
 }
 
@@ -8881,7 +8889,16 @@ fn run_spec(
             title,
             kind,
             out,
-        } => run_spec_draft(cfg, ingest, &topic, title.as_deref(), &kind, out.as_deref()),
+            repair,
+        } => run_spec_draft(
+            cfg,
+            ingest,
+            &topic,
+            title.as_deref(),
+            &kind,
+            out.as_deref(),
+            repair,
+        ),
     }
 }
 
@@ -9061,6 +9078,7 @@ fn run_spec_draft(
     title: Option<&str>,
     kind: &str,
     out: Option<&str>,
+    repair: u8,
 ) -> anyhow::Result<()> {
     let (scaffold, label, ctx) = build_scaffold(ingest, topic, title, kind)?;
 
@@ -9072,7 +9090,7 @@ fn run_spec_draft(
         return spec_draft_provider(
             &cfg.effective,
             base_url,
-            topic,
+            repair,
             &scaffold,
             &label,
             &ctx,
@@ -9087,14 +9105,14 @@ fn run_spec_draft(
         rto_graph::ModelTask::Draft,
         &cfg.effective.models.resolve(),
     )?;
-    spec_draft_local(&choice, topic, &scaffold, &label, &ctx, out)
+    spec_draft_local(&choice, repair, &scaffold, &label, &ctx, out)
 }
 
 /// Draft with the local llama.cpp model the resolver chose.
 #[cfg(any(feature = "serve", feature = "inference-local-models"))]
 fn spec_draft_local(
     choice: &rto_graph::ModelChoice,
-    topic: &str,
+    repair: u8,
     scaffold: &str,
     label: &str,
     ctx: &rto_spec::SpecContext,
@@ -9140,7 +9158,7 @@ fn spec_draft_local(
         0,
     )
     .map_err(|e| anyhow::anyhow!("starting llama.cpp: {e}"))?;
-    let drafts = draft_sections(&engine, model, scaffold, topic, ctx)?;
+    let drafts = draft_sections(&engine, model, scaffold, ctx, repair)?;
     eprintln!(
         "drafted {} section(s) with {} (via {GEN_BACKEND})",
         drafts.len(),
@@ -9161,7 +9179,7 @@ fn spec_draft_local(
 fn spec_draft_provider(
     cfg: &config::Config,
     base_url: &str,
-    topic: &str,
+    repair: u8,
     scaffold: &str,
     label: &str,
     ctx: &rto_spec::SpecContext,
@@ -9174,7 +9192,7 @@ fn spec_draft_provider(
         );
     };
     let engine = provider::ProviderEngine::new(base_url, vec![model.to_owned()])?;
-    let drafts = draft_sections(&engine, model, scaffold, topic, ctx)?;
+    let drafts = draft_sections(&engine, model, scaffold, ctx, repair)?;
     eprintln!(
         "drafted {} section(s) with {model} (via {base_url})",
         drafts.len()
@@ -9196,7 +9214,7 @@ fn spec_draft_provider(
 ))]
 fn spec_draft_local(
     _choice: &rto_graph::ModelChoice,
-    _topic: &str,
+    _repair: u8,
     _scaffold: &str,
     _label: &str,
     _ctx: &rto_spec::SpecContext,
@@ -9233,25 +9251,14 @@ fn draft_sections(
     engine: &dyn rto_llama::Engine,
     model: &str,
     scaffold: &str,
-    topic: &str,
     ctx: &rto_spec::SpecContext,
+    repair: u8,
 ) -> anyhow::Result<Vec<(String, String)>> {
     let mut drafts = Vec::new();
     for (heading, hint) in rto_spec::draft_targets(scaffold) {
-        let prompt = rto_spec::draft_prompt(topic, ctx, &heading, &hint);
+        let prompt = rto_spec::draft_prompt(&ctx.topic, ctx, &heading, &hint);
         let completion = engine
-            .chat(&rto_llama::ChatRequest {
-                tools: None,
-                model: model.to_owned(),
-                messages: vec![rto_llama::Message {
-                    role: "user".to_owned(),
-                    content: prompt,
-                }],
-                images: vec![],
-                audio: vec![],
-                temperature: 0.0,
-                max_tokens: DRAFT_MAX_TOKENS,
-            })
+            .chat(&draft_request(model, prompt.clone()))
             .map_err(|e| anyhow::anyhow!("drafting `{heading}`: {e}"))?;
         // A reasoning-capable GGUF (Qwen3, DeepSeek-R1, …) emits a
         // `<think>…</think>` block before its answer; keep only the answer so the
@@ -9263,11 +9270,103 @@ fn draft_sections(
         // reachable with the model this command is configured for (#583).
         let prose = rto_llama::thinking::answer(&completion.content, completion.finish_reason)
             .map_err(|why| unanswered_draft(&heading, why, DRAFT_MAX_TOKENS))?;
-        if !prose.trim().is_empty() {
-            drafts.push((heading, prose.to_owned()));
+        if prose.trim().is_empty() {
+            continue;
         }
+        let prose = if repair > 0 {
+            repair_section(
+                engine,
+                model,
+                &prompt,
+                &heading,
+                prose.to_owned(),
+                ctx,
+                repair,
+            )
+        } else {
+            prose.to_owned()
+        };
+        drafts.push((heading, prose));
     }
     Ok(drafts)
+}
+
+/// One drafting request: a single user message, deterministic, capped at
+/// [`DRAFT_MAX_TOKENS`].
+#[cfg(any(
+    feature = "serve",
+    feature = "inference-local-models",
+    feature = "provider"
+))]
+fn draft_request(model: &str, content: String) -> rto_llama::ChatRequest {
+    rto_llama::ChatRequest {
+        tools: None,
+        model: model.to_owned(),
+        messages: vec![rto_llama::Message {
+            role: "user".to_owned(),
+            content,
+        }],
+        images: vec![],
+        audio: vec![],
+        temperature: 0.0,
+        max_tokens: DRAFT_MAX_TOKENS,
+    }
+}
+
+/// Up to `passes` rewrites of one section against its style findings, keeping
+/// the best (ADR-0031 §3). A pass is accepted only through
+/// [`rto_spec::repair_accepts`], which refuses any rewrite that drops a symbol
+/// or decision the draft mentioned. A pass that fails or never answers ends the
+/// loop and keeps what it has: the draft itself already succeeded, so a failed
+/// improvement is not a failed command.
+#[cfg(any(
+    feature = "serve",
+    feature = "inference-local-models",
+    feature = "provider"
+))]
+fn repair_section(
+    engine: &dyn rto_llama::Engine,
+    model: &str,
+    prompt: &str,
+    heading: &str,
+    draft: String,
+    ctx: &rto_spec::SpecContext,
+    passes: u8,
+) -> String {
+    let first = rto_graph::prose::lint(&draft).score;
+    let mut best = draft;
+    let mut ran = 0_u8;
+    for _ in 0..passes {
+        let report = rto_graph::prose::lint(&best);
+        if report.issues.is_empty() {
+            break;
+        }
+        ran += 1;
+        let issues: Vec<String> = report.issues.iter().map(|i| i.message.clone()).collect();
+        let ask = rto_spec::repair_prompt(prompt, &best, &issues);
+        let completion = match engine.chat(&draft_request(model, ask)) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("repair `{heading}`: pass {ran} failed ({e}); keeping the best so far");
+                break;
+            }
+        };
+        let Ok(candidate) =
+            rto_llama::thinking::answer(&completion.content, completion.finish_reason)
+        else {
+            eprintln!("repair `{heading}`: pass {ran} gave no answer; keeping the best so far");
+            break;
+        };
+        let candidate = candidate.to_owned();
+        if rto_spec::repair_accepts(ctx, &best, &candidate) {
+            best = candidate;
+        }
+    }
+    eprintln!(
+        "repair `{heading}`: style {first} → {} after {ran} pass(es)",
+        rto_graph::prose::lint(&best).score
+    );
+    best
 }
 
 /// Report on stderr which supplied symbols and decisions the draft never
@@ -9382,6 +9481,7 @@ fn run_spec_draft(
     _title: Option<&str>,
     _kind: &str,
     _out: Option<&str>,
+    _repair: u8,
 ) -> anyhow::Result<()> {
     anyhow::bail!(
         "`spec draft` needs a generation backend: build with `--features provider` \

@@ -493,6 +493,43 @@ fn has_identifier(hay: &str, needle: &str) -> bool {
         })
 }
 
+/// The prompt for one repair pass (ADR-0031 §3): the original section prompt,
+/// the draft to revise, and the style issues to fix — with the instruction that
+/// keeps a rewrite from scoring better by saying less.
+#[must_use]
+pub fn repair_prompt(section_prompt: &str, draft: &str, issues: &[String]) -> String {
+    use std::fmt::Write as _;
+
+    let mut p = format!(
+        "{section_prompt}\n\nYour previous draft was:\n\n{draft}\n\nRewrite it to fix these \
+         style issues:\n"
+    );
+    for issue in issues {
+        let _ = writeln!(p, "- {issue}");
+    }
+    p.push_str(
+        "Keep every fact, symbol and decision the draft mentions — do not shorten it by \
+         dropping content. Output only the revised prose, no heading.",
+    );
+    p
+}
+
+/// Whether a repair pass's `candidate` replaces `best` (ADR-0031 §3): it must
+/// score better on style **and** mention everything `best` mentioned of `ctx`.
+/// A rewrite that trades coverage for style is discarded however well it scores.
+#[must_use]
+pub fn repair_accepts(ctx: &SpecContext, best: &str, candidate: &str) -> bool {
+    if candidate.trim().is_empty() {
+        return false;
+    }
+    let kept = draft_coverage(ctx, candidate).mentioned;
+    let covers = draft_coverage(ctx, best)
+        .mentioned
+        .iter()
+        .all(|m| kept.contains(m));
+    covers && rto_graph::prose::lint(candidate).score > rto_graph::prose::lint(best).score
+}
+
 /// Splice generated prose back into a scaffold: each `_TODO…_` line under a
 /// heading present in `drafts` (as `(heading, prose)`) is replaced by that prose.
 /// Headings without a draft, and all other lines, are left unchanged.
@@ -569,6 +606,35 @@ mod tests {
         let ctx = cov_ctx(&["login"], &["adr:0007"]);
         let cov = super::draft_coverage(&ctx, "relogin, login_user, adr:00071 and ADR-00070");
         assert!(cov.mentioned.is_empty(), "{cov:?}");
+    }
+
+    #[test]
+    fn a_repair_must_score_better_and_drop_nothing_it_mentioned() {
+        let ctx = cov_ctx(&["login"], &["adr:0007"]);
+        let best = "We utilize `login` in order to check tokens, per ADR-0007.";
+        // Better style, same coverage: accepted.
+        assert!(super::repair_accepts(
+            &ctx,
+            best,
+            "`login` checks tokens, per ADR-0007."
+        ));
+        // Better style, but ADR-0007 dropped: refused however well it scores.
+        assert!(!super::repair_accepts(&ctx, best, "`login` checks tokens."));
+        // Same coverage, no better: refused.
+        assert!(!super::repair_accepts(&ctx, best, best));
+        // Empty: refused.
+        assert!(!super::repair_accepts(&ctx, best, "  "));
+    }
+
+    #[test]
+    fn the_repair_prompt_lists_each_issue_and_forbids_shortening() {
+        let p = super::repair_prompt("BASE", "DRAFT", &["\"utilize\" — use \"use\"".to_owned()]);
+        assert!(
+            p.starts_with("BASE\n\nYour previous draft was:\n\nDRAFT"),
+            "{p}"
+        );
+        assert!(p.contains("- \"utilize\" — use \"use\"\n"), "{p}");
+        assert!(p.contains("do not shorten it by dropping content"), "{p}");
     }
 
     #[test]

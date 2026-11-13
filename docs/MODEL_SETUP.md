@@ -78,6 +78,23 @@ The model list is taken from `[models]`; Roteiro does not ask the provider at
 startup. A model the provider does not have is reported on the first request,
 by name.
 
+## How a draft is checked
+
+`roteiro spec draft` prints two report lines on stderr. Neither one changes the
+document or the exit status (ADR-0031):
+
+- `coverage:` lists the symbols and decisions the draft was given and never
+  mentions.
+- `style:` is a controlled-English score for sentence length, plain words, filler
+  and one name for each concept. It measures style only, not correctness.
+
+`--repair N` rewrites each section against its style findings, up to N passes
+(at most 3). Roteiro keeps a rewrite only if it scores better and still
+mentions everything the draft mentioned. Each pass is another model call.
+Against a hosted provider, each pass also sends repository content again.
+
+`roteiro docs prose` runs the same style lint over the authored documents.
+
 ## Hosted models
 
 For teams whose enterprise subscription covers sending code to a hosted model,
