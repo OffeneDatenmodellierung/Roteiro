@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v7.0.0...rto-render-v7.1.0) - 2026-11-13
+
+### Added
+
+- *(security)* check model licences, guard the screener, name an asset's integrity cause
+- *(reference)* journal articles and chapters, with a container and no editors
+
+### Fixed
+
+- second review on #970 — one buffered upload body, a Unix-only test, quote once
+- address the review on #970 — upload races, asset remedies, autolinks, APA issues, bounded findings
+- *(okf)* bound bundle-chosen values quoted into conform findings
+
+### Other
+
+- Merge branch 'sweep/security' into feat/backlog-sweep
+- Merge branch 'sweep/okf' into feat/backlog-sweep
+- delink the intra-doc links that break outside --all-features
+
 ## [7.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v6.2.0...rto-render-v7.0.0) - 2026-11-12
 
 ### Added

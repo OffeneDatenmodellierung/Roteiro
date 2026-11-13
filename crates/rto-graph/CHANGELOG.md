@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v7.0.0...rto-graph-v7.1.0) - 2026-11-13
+
+### Added
+
+- *(security)* check model licences, guard the screener, name an asset's integrity cause
+- *(reference)* journal articles and chapters, with a container and no editors
+- *(graph)* read CommonMark URI autolinks as links
+- *(docs)* `roteiro docs prose` — the style lint over authored documents
+- *(prose)* issues carry the line their sentence starts on; blank lines end paragraphs
+- *(prose)* a controlled-English style lint, and plain-English prompt rules
+
+### Fixed
+
+- address the review on #970 — upload races, asset remedies, autolinks, APA issues, bounded findings
+- *(store)* re-check each migration under the write lock
+- *(prose)* StyleRule is #[non_exhaustive]
+
+### Other
+
+- Merge branch 'sweep/security' into feat/backlog-sweep
+- Merge branch 'sweep/okf' into feat/backlog-sweep
+- Merge branch 'feat/prose-style' into feat/prose-docs
+
 ## [7.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v6.2.0...rto-graph-v7.0.0) - 2026-11-12
 
 ### Added

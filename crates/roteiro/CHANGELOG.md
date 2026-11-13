@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v7.0.0...roteiro-v7.1.0) - 2026-11-13
+
+### Added
+
+- *(security)* check model licences, guard the screener, name an asset's integrity cause
+- *(serve)* gated upload surface that writes only into raw/
+- *(graph)* read CommonMark URI autolinks as links
+- *(spec)* `spec draft --repair N` — bounded, coverage-preserving rewrites
+- *(docs)* `roteiro docs prose` — the style lint over authored documents
+- *(prose)* a controlled-English style lint, and plain-English prompt rules
+- *(spec)* report what a draft never mentions; ADR-0031
+
+### Fixed
+
+- *(upload)* a body deadline, and the permit lives as long as the buffered body
+- second review on #970 — one buffered upload body, a Unix-only test, quote once
+- address the review on #970 — upload races, asset remedies, autolinks, APA issues, bounded findings
+- *(viewer)* state what the screener found, not who wrote the bundle
+- *(render)* name a concept's source file by its blob URL in sources[]
+
+### Other
+
+- Merge branch 'sweep/security' into feat/backlog-sweep
+- Merge branch 'sweep/upload' into feat/backlog-sweep
+- Merge branch 'sweep/okf' into feat/backlog-sweep
+- *(blueprint)* six provenance tokens, and a test that reads the enum
+- delink the intra-doc links that break outside --all-features
+
 ## [7.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v6.2.0...roteiro-v7.0.0) - 2026-11-12
 
 ### Added
