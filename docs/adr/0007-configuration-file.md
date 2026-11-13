@@ -11,8 +11,8 @@ architectural-significance: MEDIUM  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.10"
-last-modified: 2026-11-11
+version: "1.11"
+last-modified: 2026-11-13
 confluence-url:
 ---
 
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | Accepted |
 | **Architectural Significance** | MEDIUM |
 | **Domain** | Developer Tooling |
-| **Document version** | 1.10 |
+| **Document version** | 1.11 |
 
 ## Reference
 
@@ -82,7 +82,7 @@ because the abstract rule did not reach it.
 
 Every setting of the key is a **denial**. Naming a tool does not ask for that
 tool; it declines every tool not named. So "the nearer layer wins" lets a nearer
-layer *un-deny*: a committed project file could restore `sandbox_clear` after
+layer *un-deny*: a committed project file could restore `security_status` after
 the machine's owner removed it in `~/.roteiro/config.toml`. That is exactly the
 outcome v1.2's inversion exists to prevent, reached from the other direction —
 not by a project file granting a capability, but by a project file cancelling a
@@ -104,6 +104,20 @@ rule each call site remembers — which is what the section below requires. An
 empty intersection is a **startup error**, never an unrestricted server: a
 restriction that quietly restricts nothing is the defect the key was added for
 (issue #584, and omnigent#5178 on the client side of the same wire).
+
+**Names, by what they refer to (v1.11).** A name that is not a Roteiro tool in
+any release is a typo and refuses to start, as v1.3 rules for a wrong value. A
+name this binary was not built with **warns** and restricts nothing, by the
+feature-availability rule below. A name a **release removed** — today
+`sandbox_status`, `sandbox_clear` and the `sandbox` class, removed by
+[[docs/adr/0030-remove-the-microvm-sandbox.md]] — takes the second path, not the
+first: the setting was correct when it was written, and a committed config
+should not stop a server starting because the tool it denied no longer exists.
+The warning names it as removed rather than as missing from this build, since
+"rebuild with a feature" would be a remedy that leads nowhere. None of this
+relaxes the empty-intersection rule: a list that names **only** removed tools
+leaves nothing to serve and refuses to start, exactly as before
+(`REMOVED_TOOLS`, read by [[crates/rto-render/src/mcp.rs#restrict]]; the Rust extractor does not record `const` items).
 
 The key sits in its own `[mcp]` table rather than in `[serve]` because
 `[serve] tools` is taken and means something else — a boolean deciding whether
@@ -286,3 +300,4 @@ Project direction incorporated: add a config file, but keep it **optional and fu
 | 1.8 | 2026-09-08 | Amended (no issue). **Re-grounds v1.5's reason for `--tools` narrowing rather than winning, which cited issue #579 — now closed *not planned*.** The conclusion is unchanged and the argument is stronger without it. v1.5 argued the invocation "is not reliably written by a person" because *Roteiro itself might one day* write a `roteiro mcp …` line into a third-party agent's config (#579). That will not happen, and it was always the weaker form of the point: it rested on a hypothetical feature rather than on what an MCP invocation already is. It is **argv in a client's configuration file** — written once by whoever wired the client up, then committed and shared with a team. Observed rather than supposed: a bundle in use against this server carried `args: [mcp, --tools, query]` in a checked-in `config.yaml`, which is precisely the "consent by pull request, granted by someone else, noticed by nobody" shape [[docs/adr/0019-remote-model-tier.md]] §3 names — reached here through a *narrowing* flag rather than a granting one, which is why intersection is the right regime whoever writes it. No key changes class and no precedence moves; this replaces a citation that no longer points at anything with the reason that was underneath it. |
 | 1.9 | 2026-09-14 | Amended (issue #840, [[docs/adr/0026-research-knowledge-layer.md]] step 1). **Two new keys — `[paths] exclude` and `[paths] opaque` — the first in this file that decide what is *in the graph* rather than how it is reported.** Until now the only exclusion list here was `[debt] ignore`, which is scoped to markers and filters the **report**: the node stays in the store and `search`, `explain`, `list_kind`, `path` and `export` all still see it, so a repository could mute a false finding from the report it reads and still publish it to a consumer. The new keys remove the node instead, which needs no per-surface honouring — a node that was never stored cannot be exported. **Three states, not two**, because *"do not mine this as configuration"* and *"do not put this in the graph"* are different requests that two live decisions need one each: `opaque` keeps a `file` node with identity and no derived content, so a committed corpus manifest stays **detectable rather than silent** while not being mined; `exclude` produces no node and never reads the bytes, so a document reached by an explicit ingest path is graphed once rather than twice. A fourth state — mined but muted — already exists and is `[debt] ignore`, deliberately not reproduced. Both classify as **values** under v1.4's test, which no clause of can fire on a key that only subtracts. Both lists **merge** across layers as `[debt] ignore` does, and neither takes a **reset**: a reset on an exclusion would let a committed project file widen what is read over a user's own declaration, and narrowing is the safe direction. **Nothing is excluded by a built-in default**, because a built-in would drop a directory out of every existing repository's graph on upgrade with nothing said. Records the requirement that decides whether the mechanism works at all: the policy is consulted by **every** reader of repository bytes, not by extraction alone — the authored layer walks every path independently and classifies by *content*, so a `type: adr` declaration is honoured wherever the file sits, and an exclusion reaching one reader and not the other would remove a manifest's `config_key` nodes while still parsing a stranger's paper as one of this project's decisions. |
 | 1.10 | 2026-11-11 | Amended by [[docs/adr/0028-one-engine-local-or-hosted.md]]. `[remote] enabled` is removed with the remote tier (the v1.2 inversion no longer applies to any key), and `[provider] base_url` is recorded as a **value by decision**: it would meet test 1 when it names another machine, and is kept a value so a committed file can point a team at one endpoint, with a per-run notice in place of precedence. |
+| 1.11 | 2026-11-13 | Amended to match [[docs/adr/0030-remove-the-microvm-sandbox.md]] §3. v1.5 had two kinds of name — a typo, which refuses to start, and a tool this build lacks, which warns — and ADR-0030 made `[mcp] tools`/`--tools` accept a third, a tool a **release removed**, without saying so here. Records that third kind under the warn-and-restrict-nothing path, since the setting was correct when written; that its warning names it as removed rather than as an absent feature; and that the empty-intersection refusal is unchanged, so a list of only removed names still refuses to start. Also replaces v1.5's illustrative `sandbox_clear`, a tool that no longer exists, with `security_status`. No key changes class and no precedence moves. |

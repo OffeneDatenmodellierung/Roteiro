@@ -235,9 +235,9 @@ So the standing position is:
   binary — never a dependency, of this workspace or of its test suite — and the
   agreement it established was frozen into `tests/okf_interop.rs`.
 
-The comparison, against `okf-core` / `okf-validator` **0.2.6** (2026-08-27) on
-2026-09-01, over every bundle published in the specification's repository at
-commit `ad30107`:
+The comparison, against `okf-core` / `okf-validator` **0.2.6** (published to
+crates.io 2026-08-27) on 2026-09-01, over every bundle published in the
+specification's repository at commit `ad30107`:
 
 | Bundle | Concepts | `okf trust` | Roteiro's reader | Result |
 |---|---|---|---|---|

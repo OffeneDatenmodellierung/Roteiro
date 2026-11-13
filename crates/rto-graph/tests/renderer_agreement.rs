@@ -101,6 +101,11 @@ fn scanned(line: &str) -> Vec<(bool, String)> {
         .collect()
 }
 
+/// Email autolinks are not read.
+const EMAIL: &str = "an email autolink (`<a@e.org>`) is not read: CommonMark's \
+     address grammar is its own, nothing in this repository writes one, and a \
+     citation is a URL. `LinkKind::Autolink` says so";
+
 /// The reason every [`Diverges`] case below gives, because they are all one rule.
 const NAMES_NOTHING: &str = "a destination that names nothing is not a link — \
      `MarkdownLink::target` is a graph key and a citation label, and the \
@@ -190,6 +195,21 @@ fn cases() -> Vec<(&'static str, Verdict)> {
         // An unescaped `<` or a missing `>` is not an angle destination.
         ("[t](<a<b>)", Agrees),
         ("[t](<a\\<b>)", Diverges(UNESCAPED)),
+        // -- autolinks ------------------------------------------------------
+        ("<https://e.org/SPEC.md>", Agrees),
+        ("See <https://e.org/a> and [b](y.md).", Agrees),
+        ("<mailto:a@e.org>", Agrees),
+        ("<irc://e.org/x>", Agrees),
+        // Not autolinks: no scheme, a one-letter scheme, a space, raw HTML, an
+        // escape, a code span.
+        ("<docs/x.md>", Agrees),
+        ("<a:b>", Agrees),
+        ("<https://e.org/a b>", Agrees),
+        ("<div>x</div>", Agrees),
+        (r#"<a href="https://e.org">x</a>"#, Agrees),
+        ("\\<https://e.org>", Agrees),
+        ("`<https://e.org>`", Agrees),
+        ("<a@e.org>", Diverges(EMAIL)),
         // -- more than one link on a line ---------------------------------
         ("[a](x.md) and [b](y.md)", Agrees),
         ("[a](x`y.md) then [b](z.md)", Agrees),

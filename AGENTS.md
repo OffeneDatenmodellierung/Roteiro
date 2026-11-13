@@ -112,7 +112,7 @@ CI (`.github/workflows/ci.yml`) enforces these; run them locally before pushing.
   repo**, so ADR `[[path#Symbol]]` links and `// @rto:` annotations must resolve.
 - `cargo deny --all-features check` and `cargo audit` — clean. **Every new
   dependency's licence must be on the allow-list** — the exact SPDX ids in
-  `deny.toml`: MIT, Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-2-Clause,
+  `deny.toml`: MIT, Apache-2.0, Apache-2.0 WITH LLVM-exception,
   BSD-3-Clause, ISC, Zlib, Unicode-3.0, CDLA-Permissive-2.0. Verify each
   grammar/model dep. Note the `--all-features`: the gate must see what the
   project *ships*, not just the default build, and it costs under a second

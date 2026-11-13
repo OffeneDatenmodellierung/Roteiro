@@ -187,9 +187,10 @@ pub static ASSETS: &[AssetSpec] = &[
         // OSV.dev aggregates upstream databases and does not relicense them; each
         // record carries its own terms. The two that dominate this set are named
         // rather than flattened into one claim, because `cargo deny` governs
-        // crates and would never have looked at an advisory file.
-        licence: "per-record, as published by OSV.dev \
-                  (CC0-1.0 for RustSec, CC-BY-4.0 for the GitHub Advisory Database)",
+        // crates and would never have looked at an advisory file. The leading
+        // SPDX expression is what `rto_graph::check_licence` reads (#904).
+        licence: "CC0-1.0 AND CC-BY-4.0 (per-record, as published by OSV.dev: \
+                  CC0-1.0 for RustSec, CC-BY-4.0 for the GitHub Advisory Database)",
     },
 ];
 
@@ -300,9 +301,129 @@ pub struct AssetStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub age_days: Option<i64>,
     /// Whether the bytes on disk still match the recorded digest. `None` when
-    /// nothing is installed.
+    /// nothing is installed. Kept for compatibility; [`Self::integrity`] says
+    /// *why* when this is `false`, and what fixes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verified: Option<bool>,
+    /// The cause behind [`Self::verified`], and its remedy. Always present.
+    pub integrity: Integrity,
+}
+
+/// Whether an asset's bytes can be trusted, and if not, **why and what to do**
+/// (#900).
+///
+/// A bare `verified: false` cannot tell an integrity failure from a record that
+/// points at the wrong bytes, nor say what fixes either; so every state that is
+/// not `ok` names its cause and carries its remedy, in the manner of
+/// `host_readiness`. Serialises as `{"state": "digest-mismatch", …}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum Integrity {
+    /// The bytes on disk match the recorded digest.
+    Ok,
+    /// Neither a record nor bytes: never provisioned.
+    NotProvisioned {
+        /// What provisions it.
+        remedy: String,
+    },
+    /// Both are present and the bytes digest differently from the record.
+    DigestMismatch {
+        /// The digest `installed.json` recorded.
+        recorded: String,
+        /// The digest of what is on disk now.
+        actual: String,
+        /// What fixes it.
+        remedy: String,
+    },
+    /// The bytes are present but there is no readable `installed.json`, so
+    /// nothing vouches for them.
+    RecordMissing {
+        /// What records them.
+        remedy: String,
+    },
+    /// `installed.json` is present and the bytes it describes are not.
+    BytesMissing {
+        /// The digest the record expects.
+        recorded: String,
+        /// What restores them.
+        remedy: String,
+    },
+    /// Something is on disk — the record, the bytes, or both — but it cannot
+    /// be read, so it is neither verified nor known to be absent.
+    Unreadable {
+        /// Which file, and the error reading it.
+        cause: String,
+        /// What fixes it.
+        remedy: String,
+    },
+}
+
+impl Integrity {
+    /// `true` when there is something present that fails to verify — every
+    /// state but [`Self::Ok`] and [`Self::NotProvisioned`]. A never-provisioned
+    /// asset is a readiness gap, not a failed verification.
+    #[must_use]
+    pub fn is_failure(&self) -> bool {
+        !matches!(self, Self::Ok | Self::NotProvisioned { .. })
+    }
+
+    /// Classify from the record and the digest of what is on disk; `unreadable`
+    /// names a file that exists but could not be read, which outranks both.
+    fn of(
+        spec: &AssetSpec,
+        record: Option<&InstalledAsset>,
+        actual: Option<String>,
+        unreadable: Option<String>,
+    ) -> Self {
+        const PREFETCH: &str = "run `roteiro security prefetch`";
+        let obtain = match spec.source {
+            AssetSource::External { hint } => format!("obtain it (`{hint}`), then {PREFETCH}"),
+            AssetSource::Vendored(_) => PREFETCH.to_owned(),
+            // Plain prefetch refuses to fetch (`FetchNotPermitted`): name the flag.
+            AssetSource::Download { .. } => format!(
+                "run `roteiro security prefetch --analyzer {} --allow-download`",
+                spec.analyzer
+            ),
+        };
+        if let Some(cause) = unreadable {
+            return Self::Unreadable {
+                cause,
+                remedy: format!(
+                    "make it readable by this user; if it is corrupt, remove it and {}",
+                    obtain.trim_start_matches("run ")
+                ),
+            };
+        }
+        match (record, actual) {
+            (Some(r), Some(actual)) if r.digest == actual => Self::Ok,
+            (Some(r), Some(actual)) => Self::DigestMismatch {
+                recorded: r.digest.clone(),
+                actual,
+                // Prefetch re-records a directory asset's *current* bytes rather
+                // than checking them against a pin, so for those it is only the
+                // remedy when the change was one the operator made.
+                remedy: match spec.source {
+                    AssetSource::Vendored(_) => {
+                        format!("{PREFETCH} — it reinstalls the vendored bytes")
+                    }
+                    _ => format!(
+                        "the contents changed after they were recorded: if you updated \
+                         them, {PREFETCH} to re-record them; otherwise remove `path` and \
+                         provision it again"
+                    ),
+                },
+            },
+            (Some(r), None) => Self::BytesMissing {
+                recorded: r.digest.clone(),
+                remedy: obtain,
+            },
+            (None, Some(_)) => Self::RecordMissing {
+                remedy: format!("{PREFETCH} to verify and record what is on disk"),
+            },
+            (None, None) => Self::NotProvisioned { remedy: obtain },
+        }
+    }
 }
 
 // Re-exported so `rto_exec::assets::asset_root` still names it; the resolution
@@ -638,9 +759,12 @@ pub fn status(root: &Path, analyzer: Option<&str>) -> Vec<AssetStatus> {
             // Re-digest what is on disk. A record that no longer matches the
             // bytes is exactly the case a status command exists to surface, and
             // reporting the record alone would hide it.
-            let verified = installed.as_ref().map(|record| {
-                current_digest(root, spec).as_deref() == Some(record.digest.as_str())
-            });
+            let actual = current_digest(root, spec);
+            let verified = installed
+                .as_ref()
+                .map(|record| actual.as_deref() == Some(record.digest.as_str()));
+            let unreadable = unreadable(root, spec, installed.is_some(), actual.is_some());
+            let integrity = Integrity::of(spec, installed.as_ref(), actual, unreadable);
             AssetStatus {
                 id: spec.id,
                 analyzer: spec.analyzer,
@@ -649,6 +773,7 @@ pub fn status(root: &Path, analyzer: Option<&str>) -> Vec<AssetStatus> {
                 installed,
                 age_days,
                 verified,
+                integrity,
             }
         })
         .collect()
@@ -687,6 +812,40 @@ pub fn advisory_db_evidence(root: &Path, analyzer: &str) -> Option<rto_graph::Ad
         digest: record.digest,
         published_at: record.published_at,
     })
+}
+
+/// The first file that exists but could not be read, with the error — so a
+/// permissions or corruption problem is not reported as "missing" (#900).
+fn unreadable(
+    root: &Path,
+    spec: &AssetSpec,
+    have_record: bool,
+    have_bytes: bool,
+) -> Option<String> {
+    let exists = |p: &Path| std::fs::symlink_metadata(p).is_ok();
+    let record = record_path(root, spec);
+    if !have_record && exists(&record) {
+        let why = match std::fs::read(&record) {
+            Err(e) => e.to_string(),
+            Ok(_) => "not a valid record".to_owned(),
+        };
+        return Some(format!("{}: {why}", record.display()));
+    }
+    let target = asset_path(root, spec);
+    if !have_bytes && exists(&target) {
+        let why = match spec.source {
+            AssetSource::Vendored(_) => std::fs::read(&target).err().map(|e| e.to_string()),
+            AssetSource::External { .. } | AssetSource::Download { .. } => {
+                digest_tree(&target).err().map(|e| e.to_string())
+            }
+        };
+        return Some(format!(
+            "{}: {}",
+            target.display(),
+            why.unwrap_or_else(|| "could not be digested".to_owned())
+        ));
+    }
+    None
 }
 
 /// Digest of what is on disk right now, or `None` if it is not there.
@@ -900,6 +1059,17 @@ mod tests {
         }
     }
 
+    /// Every asset's licence is on the permissive allowlist (#904): disclosure
+    /// prints a licence, this decides whether it is acceptable.
+    #[test]
+    fn every_asset_licence_is_permissive_or_argued() {
+        for spec in ASSETS {
+            if let Err(e) = rto_graph::check_licence(spec.id, spec.licence) {
+                panic!("{e}");
+            }
+        }
+    }
+
     #[test]
     fn provisioning_a_vendored_asset_installs_and_records_it() {
         let cache = Cache::new("vendored");
@@ -1051,6 +1221,73 @@ mod tests {
         // …and it notices when the bytes stop matching.
         std::fs::write(asset_path(&cache.0, rules()), b"rules: []\n").expect("tamper");
         assert_eq!(status(&cache.0, Some("semgrep"))[0].verified, Some(false));
+    }
+
+    /// #900: every integrity state names its cause, and the mismatch names both
+    /// digests, so a caller can act without running `shasum` by hand.
+    #[test]
+    fn status_names_the_integrity_cause_and_remedy() {
+        let cache = Cache::new("integrity");
+        let state = || status(&cache.0, Some("semgrep")).remove(0).integrity;
+        assert!(matches!(state(), super::Integrity::NotProvisioned { .. }));
+
+        let record = provision(&cache.0, rules()).expect("provision");
+        assert_eq!(state(), super::Integrity::Ok);
+
+        std::fs::write(asset_path(&cache.0, rules()), b"rules: []\n").expect("tamper");
+        match state() {
+            super::Integrity::DigestMismatch {
+                recorded,
+                actual,
+                remedy,
+            } => {
+                assert_eq!(recorded, record.digest);
+                assert_eq!(actual, super::sha256_hex(b"rules: []\n"));
+                assert!(remedy.contains("prefetch"), "{remedy}");
+            }
+            other => panic!("expected a digest mismatch, got {other:?}"),
+        }
+        let json = serde_json::to_value(status(&cache.0, Some("semgrep"))).expect("json");
+        assert_eq!(json[0]["integrity"]["state"], "digest-mismatch", "{json}");
+        assert_eq!(
+            json[0]["verified"], false,
+            "the boolean stays for compatibility"
+        );
+
+        std::fs::remove_file(asset_path(&cache.0, rules())).expect("remove bytes");
+        assert!(matches!(state(), super::Integrity::BytesMissing { .. }));
+
+        provision(&cache.0, rules()).expect("again");
+        std::fs::remove_file(super::record_path(&cache.0, rules())).expect("remove record");
+        assert!(matches!(state(), super::Integrity::RecordMissing { .. }));
+
+        // A record that exists but does not parse is not "missing".
+        std::fs::write(super::record_path(&cache.0, rules()), b"{not json").expect("corrupt");
+        match state() {
+            super::Integrity::Unreadable { cause, remedy } => {
+                assert!(cause.contains("installed.json"), "{cause}");
+                assert!(remedy.contains("prefetch"), "{remedy}");
+            }
+            other => panic!("expected unreadable, got {other:?}"),
+        }
+        assert!(state().is_failure());
+    }
+
+    /// A downloadable asset's remedy is a command that can actually fetch it:
+    /// plain `prefetch` refuses with `FetchNotPermitted`.
+    #[test]
+    fn a_downloadable_assets_remedy_names_allow_download() {
+        let spec = ASSETS
+            .iter()
+            .find(|s| matches!(s.source, AssetSource::Download { .. }))
+            .expect("a downloadable asset");
+        match super::Integrity::of(spec, None, None, None) {
+            super::Integrity::NotProvisioned { remedy } => {
+                assert!(remedy.contains("--allow-download"), "{remedy}");
+                assert!(remedy.contains(spec.analyzer), "{remedy}");
+            }
+            other => panic!("expected not provisioned, got {other:?}"),
+        }
     }
 
     #[test]

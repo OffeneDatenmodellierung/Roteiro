@@ -44,18 +44,17 @@ stability = "fixed-or-archived"
 # that repository's account name, recorded as a `group` because a handle is not
 # a surname to take initials from; APA prints a username as given.
 #
-# **Not citable yet, deliberately.** docs/OKF_BUNDLE.md gives them as "0.2.6
-# (2026-08-27)" and does not say whether that is when 0.2.6 was published or when
-# it was read; two readers of that sentence disagreed (issue #801, constraint 4).
-# Until somebody establishes which, `published` stays `unknown` and `roteiro refs`
-# reports both as refused. Once it is settled the two will share an author and a
-# year, which is APA's `2026a`/`2026b` case — `roteiro refs` reports that
-# collision rather than inventing the suffixes.
+# **The date is the publication date, established 2026-11-13** (issue #801,
+# constraint 4; it had been read both ways). The crates.io index records 0.2.6 of
+# both crates as created on 2026-08-27 — `okf-core` at 09:41:03Z and
+# `okf-validator` at 09:41:19Z (`/api/v1/crates/<name>/versions`). The two now
+# share an author and a year, which is APA's `2026a`/`2026b` case — `roteiro refs`
+# reports that collision rather than inventing the suffixes.
 [[reference]]
 id = "okf-core"
 kind = "software"
 authors = [{ group = "W4G1" }]
-published = "unknown"
+published = { known = { full = { year = 2026, month = "august", day = 27 } } }
 title = "okf-core"
 version = { known = "0.2.6" }
 descriptor = { known = "Computer software" }
@@ -67,7 +66,7 @@ stability = "fixed-or-archived"
 id = "okf-validator"
 kind = "software"
 authors = [{ group = "W4G1" }]
-published = "unknown"
+published = { known = { full = { year = 2026, month = "august", day = 27 } } }
 title = "okf-validator"
 version = { known = "0.2.6" }
 descriptor = { known = "Computer software" }

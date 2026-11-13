@@ -1158,11 +1158,9 @@ mod tests {
     /// --example print_declared_table` regenerates the block when this fails.
     #[test]
     fn the_published_table_is_this_table() {
-        let doc = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../docs/SERVING.md")
-            .canonicalize()
-            .expect("the page that publishes the declaration must exist");
-        let text = std::fs::read_to_string(&doc).expect("readable");
+        let Some(text) = crate::serving_doc() else {
+            return;
+        };
 
         let expected = super::published_table();
         let header = expected
@@ -1171,9 +1169,8 @@ mod tests {
             .expect("the generated table has a header row");
         let start = text.find(header).unwrap_or_else(|| {
             panic!(
-                "{} no longer publishes the parameter table at all — the page a \
-                 client author reads to find the boundary must show it",
-                doc.display()
+                "docs/SERVING.md no longer publishes the parameter table at all — \
+                 the page a client author reads to find the boundary must show it"
             )
         });
         // The table ends at the first line that is not a row of it.
@@ -1184,12 +1181,10 @@ mod tests {
         }
 
         assert_eq!(
-            published,
-            expected,
-            "the parameter table in {} has drifted from the code that enforces \
-             it; regenerate it with `cargo run -p rto-serve --example \
-             print_declared_table`",
-            doc.display()
+            published, expected,
+            "the parameter table in docs/SERVING.md has drifted from the code \
+             that enforces it; regenerate it with `cargo run -p rto-serve \
+             --example print_declared_table`"
         );
     }
 

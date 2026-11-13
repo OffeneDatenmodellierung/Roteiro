@@ -612,9 +612,10 @@ pub fn headings(md: &str) -> Vec<Heading> {
 ///
 /// # Deliberately closed, and not `#[non_exhaustive]`
 ///
-/// `CommonMark` has link forms this does not read — reference links (`[a][b]`)
-/// and autolinks (`<https://…>`) — so a fourth variant is imaginable, which is
-/// exactly why the set is shut rather than left open. A caller decides what
+/// `CommonMark` has a link form this does not read — reference links (`[a][b]`)
+/// — so a fifth variant is imaginable, which is exactly why the set is shut
+/// rather than left open. [`Self::Autolink`] was the fourth, and adding it was
+/// the compile error at each caller this paragraph promises. A caller decides what
 /// to *do* per kind: [`crate::markdown_links`]' own callers rewrite an inline
 /// link's text over the whole link and resolve a wiki-link's target against a
 /// node key, and there is no behaviour that is right for a kind nobody has seen.
@@ -638,6 +639,17 @@ pub enum LinkKind {
     /// rustdoc-anchor guard does — keeps the alt text and drops the source. Read
     /// as one kind and either of those is wrong.
     Image,
+    /// A `CommonMark` URI autolink, `<scheme:…>` — the form ADR-0021 cites the
+    /// OKF specification in, which made no citation edge before this was read
+    /// (ADR-0029, Consequences).
+    ///
+    /// Its text **is** its destination, which is what a reader sees. Distinct
+    /// from [`Self::Inline`] because its source is `<…>` rather than
+    /// `[…](…)`, and a caller splicing over the span or checking its shape
+    /// needs to know which. Email autolinks (`<a@b.org>`) are not read: nothing
+    /// in this repository writes one, and `renderer_agreement.rs` records the
+    /// divergence.
+    Autolink,
 }
 
 /// Whether a link destination addresses something this repository holds, or
@@ -1240,8 +1252,8 @@ fn wiki_spans(stripped: &str) -> Vec<(Range<usize>, String)> {
     out
 }
 
-/// Every `[text](destination)` on an already-stripped line, as `(whole range,
-/// text range, destination)`.
+/// Every `[text](destination)` and `<scheme:…>` autolink on an already-stripped
+/// line, as `(kind, whole range, text range, destination)`.
 ///
 /// Ranges are **source-line** offsets, and the text range is the widest source
 /// the label reduced from — a code span inside the label is part of it.
@@ -1261,6 +1273,29 @@ fn inline_spans(
     while i < bytes.len() {
         if bytes[i] == b'\\' {
             i += 2;
+            continue;
+        }
+        if bytes[i] == b'<' {
+            // A `<` inside a `[[…]]` is part of the Roteiro token, not markup.
+            let in_wiki = wiki.iter().any(|(r, _)| r.contains(&i));
+            // Read the autolink from the *source* line. An autolink and a code
+            // span bind left to right (`CommonMark` §6.1), so one opened before a
+            // backtick keeps it literally: ``<https://e.org/a`b`c>`` links to
+            // ``https://e.org/a`b`c``. Reading the stripped line instead dropped
+            // the span's text, and could join an invalid autolink into a valid one.
+            let open = map.start(i);
+            match autolink_close(source, open).filter(|_| !in_wiki) {
+                Some(close) => {
+                    out.push((
+                        LinkKind::Autolink,
+                        open..close + 1,
+                        open + 1..close,
+                        line[open + 1..close].to_owned(),
+                    ));
+                    i = map.stripped(close + 1).max(i + 1);
+                }
+                None => i += 1,
+            }
             continue;
         }
         if bytes[i] != b'[' {
@@ -1302,6 +1337,32 @@ fn inline_spans(
         i = map.stripped(end).max(i + 1);
     }
     out
+}
+
+/// The offset of the `>` closing a URI autolink whose `<` is at `open`, per
+/// `CommonMark` §6.5: a scheme of 2–32 characters (an ASCII letter, then
+/// letters, digits, `+`, `.` or `-`), a `:`, then anything but whitespace, `<`,
+/// `>` or an ASCII control character. `<div>` and `<a href="x">` have no scheme
+/// followed by a `:` before a space, so raw HTML is never read as one.
+fn autolink_close(bytes: &[u8], open: usize) -> Option<usize> {
+    let rest = &bytes[open + 1..];
+    // The scheme is at most 32 bytes, so the colon is within 33: searching the
+    // whole line made a run of `<` with no colon quadratic.
+    let colon = rest.iter().take(33).position(|b| *b == b':')?;
+    let scheme = &rest[..colon];
+    let scheme_ok = (2..=32).contains(&scheme.len())
+        && scheme[0].is_ascii_alphabetic()
+        && scheme
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'.' | b'-'));
+    if !scheme_ok {
+        return None;
+    }
+    let after = colon + 1;
+    let len = rest[after..].iter().position(|b| {
+        *b == b'>' || *b == b'<' || b.is_ascii_whitespace() || b.is_ascii_control()
+    })?;
+    (rest[after + len] == b'>').then_some(open + 1 + after + len)
 }
 
 /// The inline link whose `[` is at `open` in `stripped`.
@@ -1903,6 +1964,64 @@ mod link_tests {
     /// into a citation of `foo` and `[t](<unclosed)` into one of `<unclosed`,
     /// and a plausible wrong citation is worse than none (#801, raised in
     /// review on #806).
+    /// A URI autolink is a link whose text is its destination, and its span is
+    /// the whole `<…>` — ADR-0021 cites the OKF specification this way.
+    #[test]
+    fn a_uri_autolink_is_read_with_its_text_as_its_destination() {
+        let line = "- The specification: <https://e.org/SPEC.md> (v0.2)";
+        let links = markdown_links(line);
+        assert_eq!(
+            scanned(line),
+            vec![(
+                LinkKind::Autolink,
+                "https://e.org/SPEC.md".to_owned(),
+                "https://e.org/SPEC.md".to_owned(),
+                true
+            )]
+        );
+        assert_eq!(&line[links[0].span()], "<https://e.org/SPEC.md>");
+    }
+
+    /// Raw HTML, a path in angle brackets, a space, a one-letter scheme, an
+    /// escape and a code span are none of them autolinks.
+    #[test]
+    fn angle_brackets_without_a_scheme_are_not_autolinks() {
+        for line in [
+            "<docs/x.md>",
+            "<div>",
+            r#"<a href="https://e.org">x</a>"#,
+            "<https://e.org/a b>",
+            "<a:b>",
+            "\\<https://e.org>",
+            "`<https://e.org>`",
+            "<https://e.org",
+        ] {
+            assert!(scanned(line).is_empty(), "{line:?}: {:?}", scanned(line));
+        }
+    }
+
+    /// An autolink opened before a backtick keeps the backtick literally, as
+    /// pulldown-cmark reads it; and stripping a code span must not join an
+    /// invalid autolink into a valid one. Raised in review on #970.
+    #[test]
+    fn an_autolink_is_read_from_the_source_not_the_stripped_line() {
+        let line = "<https://e.org/a`b`c>";
+        assert_eq!(scanned(line)[0].1, "https://e.org/a`b`c");
+        assert_eq!(&line[markdown_links(line)[0].span()], line);
+        assert!(scanned("<https://e.org/a `x y` b>").is_empty());
+        assert!(scanned("<ht`x`tps://e.org>").is_empty());
+    }
+
+    /// A long run of `<` with no colon is linear: the scheme search stops at 33
+    /// bytes. Raised in review on #970.
+    #[test]
+    fn a_run_of_angle_brackets_is_not_quadratic() {
+        let line = "<".repeat(200_000);
+        let started = std::time::Instant::now();
+        assert!(scanned(&line).is_empty());
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
     #[test]
     fn malformed_and_empty_inline_links_are_not_links() {
         assert!(scanned("[text](unclosed").is_empty());

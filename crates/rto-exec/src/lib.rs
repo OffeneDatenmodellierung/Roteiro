@@ -104,8 +104,8 @@ pub use adapter::{
 pub use adapter::clippy::{Clippy, FeatureSet};
 pub use assets::{
     ASSETS, AssetKind, AssetSource, AssetSpec, AssetStatus, DownloadFile, Fetcher, InstalledAsset,
-    MissingAsset, asset, asset_path, asset_root, assets_for, provision, provision_with, resolve,
-    status,
+    Integrity, MissingAsset, asset, asset_path, asset_root, assets_for, provision, provision_with,
+    resolve, status,
 };
 // The RFC 3339 UTC formatter moved to `rto-graph` in #667: `rto-exec` is an
 // optional dependency of the CLI, and the CLI's render path — which is gated on

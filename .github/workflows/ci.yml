@@ -381,6 +381,34 @@ jobs:
       # crate. That is how #783's backlog read as 66 links in three crates when
       # it was ~136 across eight, and a job without it would report a shrinking
       # number while the tail stayed hidden.
+      #
+      # **This is one of seven documented configurations, not the gate.** A
+      # broken intra-doc link is created by a `#[cfg(feature = …)]`: a doc
+      # compiled under one cfg citing an item behind another. It only breaks in
+      # a build where the citing doc is compiled and the cited item is not —
+      # never at `--all-features`, which turns everything on (#797, #854). So
+      # each cell that already compiles a feature set also documents it:
+      #
+      #   checks               --all-features         (here)
+      #   default-features     the default set        (`provider` on, local models off)
+      #   no-default-features  none, mcp, execution, okf-viewer, explorer
+      #
+      # Why those: the floor documents every ungated doc that cites a gated item
+      # (#792's class); each single-feature cell documents that feature's docs
+      # with every other feature off (#797's `explorer`-without-`mcp`); and the
+      # default set is where `provider` is on and `inference-local-models` off,
+      # which is what `review_llm` straddles (#854). They are
+      # also the configurations this file already compiles, so the dependency
+      # metadata rustdoc needs is already built — each step costs the rustdoc
+      # pass over the workspace crates, not a build.
+      #
+      # **Not documented**, so a reader knows the gate's shape rather than
+      # assuming it is total: the other single-feature points (`models`,
+      # `provider` alone, `inference`, `inference-local-models`, `serve`,
+      # `exec-subprocess`, `refs-fetch`, `pdf-text`, the `image-*` and `audio-*`
+      # media features) and every combination of two or more features other
+      # than the default set. A link from a doc behind one of those to an item
+      # behind another is still unguarded.
       - name: Docs (intra-doc links)
         if: env.RELEASE_PR != 'true'
         run: cargo doc --workspace --all-features --no-deps --keep-going
@@ -502,6 +530,12 @@ jobs:
       - name: Test (default features)
         if: env.RELEASE_PR != 'true'
         run: cargo test --workspace --no-fail-fast
+      # Intra-doc links at the set a `cargo install roteiro` user builds. See
+      # the `checks` job's docs step for why each configuration is documented
+      # where it is compiled (#854).
+      - name: Docs (default features)
+        if: env.RELEASE_PR != 'true'
+        run: cargo doc --workspace --no-deps --keep-going
 
   # The feature sets with `execution` OFF, and the one that only provisions.
   #
@@ -648,6 +682,13 @@ jobs:
       - name: Test (no features at all)
         if: env.RELEASE_PR != 'true'
         run: cargo test --workspace --no-default-features --no-fail-fast
+      # Intra-doc links in every configuration this job compiles: an ungated doc
+      # citing a gated item breaks here and nowhere else (#792), and a doc
+      # behind one feature citing an item behind another breaks only in that
+      # feature's cell (#797). See the `checks` job's docs step for the set.
+      - name: Docs (no features at all)
+        if: env.RELEASE_PR != 'true'
+        run: cargo doc --workspace --no-default-features --no-deps --keep-going
       # The MCP server without an analyzer surface — the combination #667 found
       # broken on `main`. The test step is where `rto-render`'s three
       # `cfg(not(feature = "execution"))` arms actually run: they are inside the
@@ -659,12 +700,18 @@ jobs:
       - name: Test (mcp only, no default features)
         if: env.RELEASE_PR != 'true'
         run: cargo test --workspace --no-default-features --features mcp --no-fail-fast
+      - name: Docs (mcp only, no default features)
+        if: env.RELEASE_PR != 'true'
+        run: cargo doc --workspace --no-default-features --features mcp --no-deps --keep-going
       - name: Clippy (execution only, no default features)
         if: env.RELEASE_PR != 'true'
         run: cargo clippy --workspace --all-targets --no-default-features --features execution -- -D warnings
       - name: Test (execution only, no default features)
         if: env.RELEASE_PR != 'true'
         run: cargo test --workspace --no-default-features --features execution --no-fail-fast
+      - name: Docs (execution only, no default features)
+        if: env.RELEASE_PR != 'true'
+        run: cargo doc --workspace --no-default-features --features execution --no-deps --keep-going
 
       # ADR-0022's viewer. Clippy AND tests, matching the cells above: the route
       # tests are `#[cfg(feature = "okf-viewer")]`, so a clippy-only cell would
@@ -676,6 +723,9 @@ jobs:
       - name: Test (okf-viewer only, no default features)
         if: env.RELEASE_PR != 'true'
         run: cargo test --workspace --no-default-features --features okf-viewer --no-fail-fast
+      - name: Docs (okf-viewer only, no default features)
+        if: env.RELEASE_PR != 'true'
+        run: cargo doc --workspace --no-default-features --features okf-viewer --no-deps --keep-going
 
       # `explorer` **without** the viewer, which is no longer implied by the cell
       # above: `okf-viewer` now enables `explorer`, so that cell builds both and
@@ -690,6 +740,9 @@ jobs:
       - name: Test (explorer only, no default features)
         if: env.RELEASE_PR != 'true'
         run: cargo test --workspace --no-default-features --features explorer --no-fail-fast
+      - name: Docs (explorer only, no default features)
+        if: env.RELEASE_PR != 'true'
+        run: cargo doc --workspace --no-default-features --features explorer --no-deps --keep-going
 
   # Test coverage — MEASURING, NOT BLOCKING (issue #319).
   #

@@ -264,11 +264,14 @@ pub fn work_facts(reference: &Reference) -> FactSet {
     FactSet::new().with_node(node)
 }
 
-/// Every external inline link in markdown `text`, attributed to `from`.
+/// Every external inline link and autolink in markdown `text`, attributed to
+/// `from`.
 ///
 /// Reads through [`rto_graph::markdown_links`], the one link scanner, and skips
 /// fenced code, where a link is an example rather than a citation. Wiki-links
-/// and images are not citations; internal links name this repository.
+/// and images are not citations; internal links name this repository. An
+/// autolink (`<https://…>`) cites exactly as `[text](https://…)` does — it is
+/// how ADR-0021 and ADR-0022 cite the OKF specification.
 #[must_use]
 pub fn citations(from: &str, text: &str) -> Vec<Citation> {
     let mut in_fence = false;
@@ -284,7 +287,12 @@ pub fn citations(from: &str, text: &str) -> Vec<Citation> {
         out.extend(
             rto_graph::markdown_links(line)
                 .into_iter()
-                .filter(|l| l.kind() == rto_graph::LinkKind::Inline && l.scope().is_external())
+                .filter(|l| {
+                    matches!(
+                        l.kind(),
+                        rto_graph::LinkKind::Inline | rto_graph::LinkKind::Autolink
+                    ) && l.scope().is_external()
+                })
                 .map(|l| Citation {
                     from: from.to_owned(),
                     url: l.target().to_owned(),
@@ -430,6 +438,18 @@ stability = "fixed-or-archived"
                     [[docs/y.md]] ![img](https://example.org/i.png)\n\
                     ```\n[example](https://example.org/fenced)\n```\n";
         let found: Vec<String> = citations("site:a", text)
+            .into_iter()
+            .map(|c| c.url)
+            .collect();
+        assert_eq!(found, vec!["https://example.org/SPEC.md"]);
+    }
+
+    /// ADR-0021's form: `- The specification: <https://…>`. It made no edge
+    /// before autolinks were read (ADR-0029, Consequences).
+    #[test]
+    fn an_autolink_is_a_citation() {
+        let text = "- The specification: <https://example.org/SPEC.md> (v0.2)\n";
+        let found: Vec<String> = citations("adr:0021", text)
             .into_iter()
             .map(|c| c.url)
             .collect();

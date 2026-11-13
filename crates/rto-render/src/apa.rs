@@ -98,9 +98,12 @@
 //! alternative to leaving it out is emitting a reference with part of it
 //! invented:
 //!
-//! - **Works inside a greater whole** — journal articles, book chapters. See
-//!   [`WorkKind`]: the container is a second model, and half of it is worse
-//!   than none.
+//! - **Editors of a container.** A journal article and a chapter render (see
+//!   [`WorkKind`]), but a chapter always takes APA's no-editor form
+//!   `In *Book* (pp. 1–10)`: the corpus that asked for containers carries no
+//!   editors at all, so modelling them would mean refusing every work or
+//!   inventing names. A chapter of a book that *has* editors therefore renders
+//!   without them — an omission a reader can notice, never an invention.
 //! - **Works with no author and works with no title.** APA moves the title up
 //!   into the author position for the first, and substitutes a bracketed
 //!   description for the second. Both are real rules; both need a judgement the
@@ -143,8 +146,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use rto_graph::reference::{
-    AccessDate, Attested, Author, GivenName, Locator, PublicationDate, Reference, Stability,
-    WorkKind, is_printable_identifier,
+    AccessDate, Attested, Author, Container, GivenName, Locator, PublicationDate, Reference,
+    Stability, WorkKind, is_printable_identifier,
 };
 use serde::Serialize;
 
@@ -300,6 +303,17 @@ pub enum Missing {
     /// neither a publisher nor a locator, which leaves a reader nothing to go
     /// on.
     Source,
+    /// The kind sits inside a greater whole and no container (or a blank
+    /// container title) is recorded — or a standalone kind carries one, which
+    /// the renderer would otherwise silently drop.
+    Container,
+    /// A journal article whose container volume nobody has recorded.
+    Volume,
+    /// A journal article whose container issue nobody has recorded.
+    Issue,
+    /// A contained work whose first or last page nobody has recorded — or
+    /// whose last page is recorded without a first.
+    Pages,
 }
 
 impl Missing {
@@ -318,6 +332,10 @@ impl Missing {
             Self::Publisher => "publisher",
             Self::Locator => "locator",
             Self::Source => "source",
+            Self::Container => "container",
+            Self::Volume => "volume",
+            Self::Issue => "issue",
+            Self::Pages => "pages",
         }
     }
 }
@@ -417,7 +435,9 @@ pub struct ReferenceList {
 fn requires_descriptor(kind: WorkKind) -> bool {
     match kind {
         WorkKind::Software | WorkKind::DataSet | WorkKind::FactSheet => true,
-        WorkKind::Document | WorkKind::WebPage => false,
+        WorkKind::Document | WorkKind::WebPage | WorkKind::JournalArticle | WorkKind::Chapter => {
+            false
+        }
     }
 }
 
@@ -425,17 +445,19 @@ fn requires_descriptor(kind: WorkKind) -> bool {
 fn requires_locator(kind: WorkKind) -> bool {
     match kind {
         WorkKind::WebPage => true,
-        WorkKind::Document | WorkKind::Software | WorkKind::DataSet | WorkKind::FactSheet => false,
+        WorkKind::Document
+        | WorkKind::Software
+        | WorkKind::DataSet
+        | WorkKind::FactSheet
+        | WorkKind::JournalArticle
+        | WorkKind::Chapter => false,
     }
 }
 
 /// Whether the title of this kind of work is italicised.
 ///
-/// True for every kind currently modelled, because every kind currently
-/// modelled is a standalone work. The rule is written down as a function rather
-/// than assumed, because the branch that returns `false` — an article or a
-/// chapter, whose *container* is italicised instead — is the one that arrives
-/// with the next kind, and a reader should be able to see where it goes.
+/// True for a standalone work; false for an article or a chapter, whose
+/// *container* is italicised instead.
 fn title_is_italic(kind: WorkKind) -> bool {
     match kind {
         WorkKind::Document
@@ -443,7 +465,24 @@ fn title_is_italic(kind: WorkKind) -> bool {
         | WorkKind::DataSet
         | WorkKind::FactSheet
         | WorkKind::WebPage => true,
+        WorkKind::JournalArticle | WorkKind::Chapter => false,
     }
+}
+
+/// Whether this kind of work sits inside a [`Container`].
+fn is_contained(kind: WorkKind) -> bool {
+    !title_is_italic(kind)
+}
+
+/// The page element, `45–67` or `45`, or `None` when the work has no pages.
+///
+/// Only meaningful after [`validate`]: an unrecorded page refuses there.
+fn page_range(container: &Container) -> Option<(String, bool)> {
+    let first = attested_text(&container.first_page).value()?;
+    Some(match attested_text(&container.last_page).value() {
+        Some(last) if last != first => (format!("{first}\u{2013}{last}"), true),
+        _ => (first.to_owned(), false),
+    })
 }
 
 /// Whether `text` begins with `word` as a whole word, compared without case.
@@ -575,11 +614,47 @@ fn validate(reference: &Reference) -> Vec<Missing> {
         missing.push(Missing::RetrievalDate);
     }
 
-    if reference.publisher.is_absent_from_work() && reference.locator.is_absent_from_work() {
+    // A contained work's source is its container, so a missing publisher and
+    // locator leave a reader something to go on.
+    if !is_contained(reference.kind)
+        && reference.publisher.is_absent_from_work()
+        && reference.locator.is_absent_from_work()
+    {
         missing.push(Missing::Source);
     }
 
+    validate_container(reference, &mut missing);
     missing
+}
+
+/// The container rules: present exactly when the kind is contained, and every
+/// field APA prints for that kind recorded.
+fn validate_container(reference: &Reference, missing: &mut Vec<Missing>) {
+    match (&reference.container, is_contained(reference.kind)) {
+        (None, true) | (Some(_), false) => missing.push(Missing::Container),
+        (None, false) => {}
+        (Some(container), true) => {
+            if container.title.trim().is_empty() {
+                missing.push(Missing::Container);
+            }
+            if reference.kind == WorkKind::JournalArticle {
+                if !attested_text(&container.volume).is_recorded() {
+                    missing.push(Missing::Volume);
+                }
+                if !attested_text(&container.issue).is_recorded() {
+                    missing.push(Missing::Issue);
+                }
+            }
+            let first = attested_text(&container.first_page);
+            let last = attested_text(&container.last_page);
+            if !first.is_recorded()
+                || !last.is_recorded()
+                || (first.value().is_none() && last.value().is_some())
+            {
+                missing.push(Missing::Pages);
+            }
+        }
+    }
 }
 
 /// A string field reduced to the two questions the formatter asks of it: has
@@ -949,9 +1024,14 @@ pub fn entry(reference: &Reference) -> Result<Entry, Refusal> {
     if needs_period(&tail_of_title) {
         tail.push('.');
     }
+    if let Some(container) = reference.container.as_ref() {
+        container_spans(reference.kind, container, &mut tail, &mut spans);
+    }
     let locator = printable_locator(reference);
+    // APA prints no publisher for a periodical article: the journal is the source.
     let publisher = attested_text(&reference.publisher)
         .value()
+        .filter(|_| reference.kind != WorkKind::JournalArticle)
         .filter(|publisher| !publisher_repeats_the_author(reference, publisher));
     if let Some(publisher) = publisher {
         tail.push(' ');
@@ -978,6 +1058,51 @@ pub fn entry(reference: &Reference) -> Result<Entry, Refusal> {
         reference_id: reference.id.clone(),
         spans,
     })
+}
+
+/// The container element, appended after the title element's period (`tail`).
+///
+/// A journal article: `*Journal*, *12*(3), 45–67.` A chapter, in APA's
+/// no-editor form: `In *Book* (pp. 45–67).` On return `tail` holds the
+/// container's closing period, ready for the publisher and locator.
+fn container_spans(
+    kind: WorkKind,
+    container: &Container,
+    tail: &mut String,
+    spans: &mut Vec<EntrySpan>,
+) {
+    use std::fmt::Write as _;
+    let pages = page_range(container);
+    tail.push(' ');
+    if kind == WorkKind::Chapter {
+        tail.push_str("In ");
+    }
+    spans.push(EntrySpan::Plain(std::mem::take(tail)));
+    spans.push(EntrySpan::Italic(container.title.trim().to_owned()));
+    let mut after = String::new();
+    if kind == WorkKind::JournalArticle {
+        let volume = attested_text(&container.volume).value();
+        if let Some(volume) = volume {
+            spans.push(EntrySpan::Plain(", ".to_owned()));
+            spans.push(EntrySpan::Italic(volume.to_owned()));
+        }
+        // A journal with issues but no volumes: APA 7 puts the issue straight
+        // after the title, `*Journal*, (3), 45–67.` — never dropped.
+        if let Some(issue) = attested_text(&container.issue).value() {
+            if volume.is_none() {
+                after.push_str(", ");
+            }
+            let _ = write!(after, "({issue})");
+        }
+        if let Some((pages, _)) = pages {
+            let _ = write!(after, ", {pages}");
+        }
+    } else if let Some((pages, range)) = pages {
+        let label = if range { "pp." } else { "p." };
+        let _ = write!(after, " ({label} {pages})");
+    }
+    after.push('.');
+    *tail = after;
 }
 
 /// Render an in-text citation.
@@ -1125,8 +1250,8 @@ mod tests {
         requires_descriptor, requires_locator, title_is_italic,
     };
     use rto_graph::reference::{
-        AccessDate, Attested, Author, Day, Doi, GivenName, Locator, Month, PublicationDate,
-        Reference, Stability, WorkKind, Year,
+        AccessDate, Attested, Author, Container, Day, Doi, GivenName, Locator, Month,
+        PublicationDate, Reference, Stability, WorkKind, Year,
     };
 
     /// A person author. `given` is a space-separated list of given names, so a
@@ -1781,12 +1906,137 @@ mod tests {
             (WorkKind::DataSet, true, false, true),
             (WorkKind::FactSheet, true, false, true),
             (WorkKind::WebPage, false, true, true),
+            (WorkKind::JournalArticle, false, false, false),
+            (WorkKind::Chapter, false, false, false),
         ];
         for (kind, descriptor, locator, italic) in cases {
             assert_eq!(requires_descriptor(kind), descriptor, "{kind:?}");
             assert_eq!(requires_locator(kind), locator, "{kind:?}");
             assert_eq!(title_is_italic(kind), italic, "{kind:?}");
         }
+    }
+
+    /// A container with every field answered.
+    fn container(title: &str) -> Container {
+        let mut container = Container::new(title);
+        container.volume = Attested::Known("12".to_owned());
+        container.issue = Attested::Known("3".to_owned());
+        container.first_page = Attested::Known("45".to_owned());
+        container.last_page = Attested::Known("67".to_owned());
+        container
+    }
+
+    /// APA 7's journal-article shape: the article title plain, the journal and
+    /// volume italic, no publisher, the DOI last (#819).
+    #[test]
+    fn a_journal_article_renders_its_container() {
+        let mut article = complete("a", WorkKind::JournalArticle, "Spark at scale");
+        article.container = Some(container("Communications of the ACM"));
+        article.locator = Attested::Known(doi("10.1145/2934664"));
+        let rendered = entry(&article).expect("renders");
+        assert_eq!(
+            rendered.plain_text(),
+            "Luna, R. (2020). Spark at scale. Communications of the ACM, 12(3), 45\u{2013}67. \
+             https://doi.org/10.1145/2934664"
+        );
+        assert!(
+            rendered
+                .spans
+                .contains(&EntrySpan::Plain("Spark at scale".to_owned()))
+        );
+        assert!(
+            rendered
+                .spans
+                .contains(&EntrySpan::Italic("Communications of the ACM".to_owned()))
+        );
+        assert!(rendered.spans.contains(&EntrySpan::Italic("12".to_owned())));
+    }
+
+    /// A journal numbered by issue alone keeps its issue: APA 7 puts it straight
+    /// after the title. Raised in review on #970.
+    #[test]
+    fn a_journal_with_issues_but_no_volumes_keeps_the_issue() {
+        let mut article = complete("i", WorkKind::JournalArticle, "Spark at scale");
+        let mut journal = container("Login");
+        journal.volume = Attested::AbsentFromWork;
+        article.container = Some(journal);
+        article.locator = Attested::Known(doi("10.1145/2934664"));
+        assert_eq!(
+            entry(&article).expect("renders").plain_text(),
+            "Luna, R. (2020). Spark at scale. Login, (3), 45\u{2013}67. \
+             https://doi.org/10.1145/2934664"
+        );
+    }
+
+    /// A chapter renders APA's no-editor form: editors are not modelled, so
+    /// none is ever printed — and none is required.
+    #[test]
+    fn a_chapter_renders_in_its_book_without_editors() {
+        let mut chapter = complete("c", WorkKind::Chapter, "Resilient distributed datasets");
+        let mut book = container("Proceedings of NSDI");
+        book.volume = Attested::AbsentFromWork;
+        book.issue = Attested::AbsentFromWork;
+        chapter.container = Some(book);
+        assert_eq!(
+            entry(&chapter).expect("renders").plain_text(),
+            "Luna, R. (2020). Resilient distributed datasets. In Proceedings of NSDI \
+             (pp. 45\u{2013}67). Publisher Name. https://example.invalid/work"
+        );
+    }
+
+    /// Every container rule refuses rather than guesses.
+    #[test]
+    fn container_gaps_refuse_and_name_the_field() {
+        let mut no_container = complete("n", WorkKind::JournalArticle, "T");
+        assert_eq!(
+            entry(&no_container).expect_err("refuses").missing,
+            vec![Missing::Container]
+        );
+        let mut unresearched = container("J");
+        unresearched.volume = Attested::Unknown;
+        unresearched.issue = Attested::Unknown;
+        unresearched.last_page = Attested::Unknown;
+        no_container.container = Some(unresearched);
+        assert_eq!(
+            entry(&no_container).expect_err("refuses").missing,
+            vec![Missing::Volume, Missing::Issue, Missing::Pages]
+        );
+        let mut standalone = complete("s", WorkKind::Document, "T");
+        standalone.container = Some(container("J"));
+        assert_eq!(
+            entry(&standalone).expect_err("refuses").missing,
+            vec![Missing::Container],
+            "a standalone work carrying a container would have it silently dropped"
+        );
+    }
+
+    /// A one-page chapter says `p.`, and an article with no issue numbers
+    /// prints its volume alone.
+    #[test]
+    fn single_pages_and_absent_issues_render_without_invention() {
+        let mut article = complete("a", WorkKind::JournalArticle, "T");
+        let mut journal = container("J");
+        journal.issue = Attested::AbsentFromWork;
+        journal.last_page = Attested::AbsentFromWork;
+        article.container = Some(journal.clone());
+        assert!(
+            entry(&article)
+                .expect("renders")
+                .plain_text()
+                .contains("T. J, 12, 45. https://"),
+            "{:?}",
+            entry(&article)
+        );
+        let mut chapter = complete("c", WorkKind::Chapter, "T");
+        chapter.container = Some(journal);
+        assert!(
+            entry(&chapter)
+                .expect("renders")
+                .plain_text()
+                .contains("In J (p. 45). Publisher Name."),
+            "{:?}",
+            entry(&chapter)
+        );
     }
 
     #[test]

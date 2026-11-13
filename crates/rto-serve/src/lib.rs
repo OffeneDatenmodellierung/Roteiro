@@ -61,3 +61,62 @@ pub use tools::{
     chat_with_client_tools, chat_with_tools,
 };
 pub use types::{DEFAULT_MAX_CLIENT_TOOL_BYTES, Limits};
+
+/// `docs/SERVING.md`, for the tests that hold its published tables to the code —
+/// or `None` in a packaged crate, which does not carry the page (#828).
+///
+/// Four tests read that page and all four located it by `../../docs/SERVING.md`
+/// from the manifest, which only resolves in a workspace checkout. They share
+/// this so they cannot disagree about a packaged crate again.
+///
+/// **The skip needs two independent signals**, the rule
+/// `crates/roteiro/tests/markdown_links_parity.rs` set: this crate sits at
+/// `…/crates/rto-serve` (a packaged copy is `rto-serve-<version>`), **and** a
+/// `[workspace]` manifest sits two levels up. A manifest check alone is fooled by
+/// a vendored copy under somebody else's workspace. In a checkout the page is
+/// committed, so its absence there panics rather than skips, and so does any
+/// other I/O error — a skip that hides "could not read" is a green that means
+/// nothing. Outside a checkout the page is never read at all.
+#[cfg(test)]
+pub(crate) fn serving_doc() -> Option<String> {
+    use std::io::{ErrorKind, Write as _};
+    use std::path::Path;
+
+    let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = crate_dir.join("../..");
+    let laid_out = crate_dir.file_name().is_some_and(|n| n == "rto-serve")
+        && crate_dir
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|n| n == "crates");
+    let manifest = root.join("Cargo.toml");
+    let in_workspace = match std::fs::read_to_string(&manifest) {
+        Ok(text) => text.lines().any(|l| l.trim() == "[workspace]"),
+        Err(e) if e.kind() == ErrorKind::NotFound => false,
+        Err(e) => panic!("cannot read {} ({:?}: {e})", manifest.display(), e.kind()),
+    };
+    let doc = root.join("docs/SERVING.md");
+    // Not a checkout: skip **without reading**. A vendored copy at
+    // `project/vendor/rto-serve-<version>` would otherwise read the host
+    // project's own `docs/SERVING.md` and hold Roteiro's tables to unrelated
+    // prose. Raised in review on #970.
+    if !(laid_out && in_workspace) {
+        // `io::stderr()`, not `eprintln!`: libtest captures the latter and
+        // discards it for a passing test, so the skip would print to nobody.
+        let _ = writeln!(
+            std::io::stderr(),
+            "SKIP: not a repository checkout, so {} is not Roteiro's page",
+            doc.display()
+        );
+        return None;
+    }
+    match std::fs::read_to_string(&doc) {
+        Ok(text) => Some(text),
+        Err(e) => panic!(
+            "cannot read {} ({:?}: {e}); in a repository checkout the page is \
+             committed, so this is a failure rather than a skip",
+            doc.display(),
+            e.kind()
+        ),
+    }
+}

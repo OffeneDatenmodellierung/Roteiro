@@ -440,6 +440,14 @@ fn every_reported_link_addresses_the_text_it_was_read_from() {
                             "{where_}: wiki span {source:?} is not a `[[…]]`"
                         );
                     }
+                    rto_graph::LinkKind::Autolink => {
+                        assert!(
+                            source.starts_with('<')
+                                && source.ends_with('>')
+                                && source[1..source.len() - 1] == *link.target(),
+                            "{where_}: autolink span {source:?} is not `<` its target `>`"
+                        );
+                    }
                     rto_graph::LinkKind::Inline | rto_graph::LinkKind::Image => {
                         inline += 1;
                         let opens = if link.kind() == rto_graph::LinkKind::Image {

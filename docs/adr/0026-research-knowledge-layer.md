@@ -11,8 +11,8 @@ architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "0.2"
-last-modified: 2026-09-13
+version: "0.3"
+last-modified: 2026-11-13
 confluence-url:
 ---
 
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | For Review |
 | **Architectural Significance** | HIGH |
 | **Domain** | Developer Tooling |
-| **Document version** | 0.2 |
+| **Document version** | 0.3 |
 | **Related** | [[docs/adr/0021-open-knowledge-format-bundle.md]] · [[docs/adr/0022-dynamic-okf-viewer.md]] · [[docs/adr/0025-document-extraction-consent.md]] · [[docs/adr/0019-remote-model-tier.md]] · [[docs/adr/0013-agent-memory-artifact-store.md]] |
 
 ## Reference
@@ -227,6 +227,53 @@ explicitly **out of scope**: it would be the first tool on that surface capable
 of unrecoverable change, and uploads need authentication, quotas and size limits
 that have nothing to do with serving a graph. A separate upload service is the
 right trust boundary, not merely the right module.
+
+### The upload surface: a gated mount, not a second process
+
+**Built (v0.3, issue #814).** The maintainer's amendment to #814 replaced the
+"separate service" reading above: there is one server and one port, and the
+ingest surface is mounted only when someone asks for it. It sits behind two
+gates, following the `security prefetch` precedent. The `upload` cargo feature
+decides whether a build can serve uploads at all, and `roteiro serve
+--allow-upload` decides whether this run does. The second gate is a flag and
+not a config key. [[crates/roteiro/src/upload.rs#router]] has one route,
+`PUT /v1/raw/{name}`, and storing the bytes is all it does.
+
+Sharing a process with the graph store removes the layer process separation
+would have provided. The limits are therefore the whole containment story, and
+each one has a test:
+
+- **Confinement.** The name is one segment of `[A-Za-z0-9._-]` with no leading
+  dot. The destination's parent is resolved on every request and must equal
+  `raw/`'s real path, which is resolved at startup, so a `raw/` that is itself a
+  symlink to shared storage still works. The file is opened `create_new`, which
+  refuses an existing symlink at that name and does not follow it.
+- **Only `raw/`.** The router's state is the `raw/` path alone. It holds no store
+  handle, bundle path or config.
+- **Allowlist.** pdf, md and txt, and the declared `Content-Type` must match the
+  extension. Archives are refused outright, which is stricter than "stored, not
+  expanded".
+- **Limits.** 64 MiB per file, one file per request, 10,000 entries in `raw/`.
+  An existing name is a `409`, never an overwrite.
+- **Bind.** Loopback only. A non-loopback bind with upload enabled is a startup
+  refusal, not a warning, because no authentication exists to decide on.
+  [[crates/roteiro/src/upload.rs#resolve_raw_root]] enforces it, and also
+  refuses a missing `raw/` rather than creating it, so that the storage-mode
+  choice in resolved question 2 stays with the user.
+- **No pipeline trigger.** An upload extracts nothing. Ingest is a separate,
+  explicit run.
+
+**The read surface as a defended property.** #814's first comment corrected
+the premise that `serve` is read-only: `POST …/links/write` already mutates the
+graph store. The line that actually holds is **graph-write versus
+worktree-write**. No read-surface handler writes a file, and
+`the_read_surface_has_no_filesystem_write` in `upload.rs` fails if `graph_api`,
+`explorer_app` or `okf_viewer` gains a file-writing call in non-test code.
+`rto-serve`'s `/v1` model routes are not scanned.
+
+None of this screens the content. A correctly functioning upload that is handed
+a poisoned document is #813's problem, and the ingest-path screen required in
+resolved question 2 is still what bounds it.
 
 Project scoping needs no new design: `list_projects` and a `project` parameter
 already exist, and workspace routes already confine a registry to one workspace.
@@ -1072,3 +1119,4 @@ ingest half of that belongs in a service of its own.
 |---|---|---|
 | 0.1 | 2026-09-10 | Initial draft. Records a second knowledge source — documents rather than code — and the layer split that lets a model maintain a wiki without owning the bundle it renders into. Names the conflict that decides it: the OKF bundle is a projection, emptied on every render, while the pattern being followed requires the model to own the wiki outright. Resolves it by making the model maintain the **authored** layer instead, which is committed, diffed and drift-checked. Also settles the MCP question the same week's magpie work raised: the surface is read-only and narrow, because a skill driving the CLI beat fourteen advertised tools by 15,769 bytes at no loss of capability, and an ingest tool belongs in a separate upload service. Leaves three questions open rather than assuming them: a provenance class for model-authored content, whether `raw/` is committed, and what a reserved append-only `log.md` means inside a regenerated bundle. |
 | 0.2 | 2026-09-13 | **Resolves all three open questions; status Draft → For Review.** **Q1 — no fourth provenance class.** A model-written `knowledge/` page is `authored`. v0.1's premise that `authored` means *human* is contradicted at the definition (*"a human **or agent**"*), and [[docs/adr/0013-agent-memory-artifact-store.md]] — the precedent v0.1 pointed at — sets the test as *"deliberately wrote this in a **reviewed** file"*, refusing `authored` for agent memory because memory is unreviewed and has no source blob. A `knowledge/` page is reviewed and has one. The human/model distinction is an **actor** question, which OKF separates from the tier via `generated.by` / `verified.by`; **#799** is the render-path work that makes it honest. Step 2 must widen `Authored`'s doc comment, which enumerates ADR/blueprint/annotation and not `knowledge/`, and splitting the two actors needs a breaking `rto-render` change since `Origin` holds a single `Actor` — a **minor** under `AGENTS.md`'s `rto-*` carve-out (ADR-0001 v1.5), not a format or `Provenance` change. #801, the competing candidate for the same slot, is **closed** having independently reached *"no new provenance class"*. `authored` carries +40 in `search`, so the resolution holds only while review is genuine. **Q2 — `raw/` is local by default and excluded from the standard scan** (maintainer decision, #812/#813): a scanned `raw/` graphs each document twice, once as its summary and once as the source. With no `file:` nodes from `raw/`, committed / untracked / ignored becomes a free per-user choice, and **local** is the default because opting out stays available while opting in does not reverse — git history keeps the bytes. Reproducibility-from-the-repository-alone is **not** claimed. Three requirements follow: a **committed manifest in every mode** so an absent source is detectable rather than silent (hashed with `Repo::blob_oid`, which computes a git blob id from bytes alone and so works out of tree — not the `(path, blob id, bytes)` extraction key); **both symlink rules recorded with why they oppose**, the scan's refusals guarding a tree-relative claim that the ingest path never makes; and **the ingest path must screen**, in three parts — foreign prose (ADR-0025's carve-out was measured on this repository's own 327 prose files), PDF concealment with an honest coverage declaration, and the **distilled output**, since `knowledge/` pages are prose and prose is exempt, so a model's restatement of a foreign document would otherwise re-enter unscreened. Out-of-line storage is **decided in principle, blocked in practice** on one named question: can content be resolved and hashed from a manifest entry whose bytes are not in the object database? **Q3 — `log.md` is derived; the append-only reading is declined.** `render_log` is a pure function and `assemble` writes the file, but only `if !log.is_empty()`, and both callers pass `&[]` — so no published bundle contains it. The feed is the per-concept commit dates ADR-0021 already resolves for `verified.at`, which exist for the **authored layer only**; an ingest-time log is refused as the `SystemTime::now()` non-determinism ADR-0021 already declined. **Measured facts recorded in the body, several of which corrected this ADR's own drafts:** every extraction input path comes from git's own enumeration of one tree, so out-of-tree bytes cannot be enumerated — but `.gitignore` is **inert over a tracked path** (a committed-then-ignored `raw/` is scanned already, and `git check-ignore` reports it as not ignored), and the derived extractor **follows tracked symlinks** on the worktree overlay, storing out-of-repo bytes under a repo-relative key — a live defect in `main`, reported not fixed, absent from the committed path a bundle renders from. `block` **is** reachable for PDF input through invisible-codepoint concealment as far as the screen goes, though survival through `pdf_extract` is unverified and needs a fixture; the presentation-shaped and PDF-native classes are definitely undetected. Also: the live corpus this was framed against holds no `raw/` and no PDFs — the decision is taken before several GB enter a history that cannot forget them. |
+| 0.3 | 2026-11-13 | **The upload surface is built (#814).** Per the maintainer's amendment it is a gated mount on `roteiro serve`, not a second process: the `upload` feature plus `--allow-upload` (a flag, not a config key), with one route, `PUT /v1/raw/{name}`, that only stores bytes. Records the enumerated limits, each with a test: single-segment allowlisted names, resolve-then-verify containment against `raw/`'s startup real path, `create_new` so symlinks are never followed, a pdf/md/txt allowlist that refuses archives outright, size and count limits, no overwrite, no pipeline trigger, and a loopback-only bind enforced as a startup refusal. Restates the read-surface property as #814's comment corrected it: graph-write versus worktree-write, since `POST …/links/write` already writes the store. A source-scan test now defends it. |

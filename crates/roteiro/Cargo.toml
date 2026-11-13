@@ -37,7 +37,7 @@ serde_json = { workspace = true }
 # support; `net` pulls tokio's I/O driver, which both the signal handling and the
 # TCP listener require. Declared here so this crate is self-contained, not reliant
 # on another crate's features. Pure Rust — no C/C++ toolchain.
-tokio = { version = "1", features = ["rt", "signal", "net", "time"], optional = true }
+tokio = { version = "1", features = ["rt", "signal", "net", "sync", "time"], optional = true }
 # `explorer` only: the read-only `/v1/graph/*` JSON API router (axum 0.8). Pure
 # Rust — no llama.cpp, no `rto-serve` — so the explorer builds and tests without a
 # C/C++ toolchain.
@@ -77,7 +77,7 @@ rusqlite = { workspace = true }
 # `tower::ServiceExt::oneshot`, mirroring `rto-serve`'s server tests.
 tokio = { version = "1", features = ["rt", "macros"] }
 tower = { version = "0.5", features = ["util"] }
-http-body-util = "0.1"
+http-body-util = { version = "0.1", features = ["channel"] }
 # `tests/ci_release_pr_parity.rs` reads `.github/workflows/ci.yml` structurally —
 # job by job, step by step — rather than grepping it, because the thing it
 # asserts is the *shape* of a job and a `contains` over the text would be
@@ -242,6 +242,13 @@ explorer = ["dep:axum", "dep:tokio"]
 # carry it. The viewer is what needs it — it reads a bundle off disk on every
 # route — so the feature that brings the viewer is the feature that pays.
 okf-viewer = ["explorer", "tokio/rt-multi-thread"]
+# The upload surface: `roteiro serve --allow-upload` mounts `PUT /v1/raw/{name}`,
+# which stores one document in `raw/` and does nothing else (issue #814,
+# ADR-0026). Off by default, and the first of two gates: a build without it has
+# no upload route at all, and a build with it still refuses without the flag.
+# Implies `explorer` because it is a mount, like the viewer, and the llama-free
+# `serve` path is where it is mounted when no model is installed.
+upload = ["explorer"]
 # Offline similarity inference (`roteiro infer`) — the `inferred` provenance
 # class. Adds no dependencies (pure-Rust hashing embedding; ADR-0003).
 inference = ["rto-graph/inference"]

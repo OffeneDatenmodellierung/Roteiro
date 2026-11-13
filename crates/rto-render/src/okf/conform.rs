@@ -223,7 +223,10 @@ pub fn validate_bundle(bundle: &Bundle, root: &Path) -> CheckReport {
     // could read.
     for (path, error) in bundle.parse_errors() {
         cx.at_file(path);
-        cx.err(format!("not a readable OKF document: {error}"));
+        cx.err(format!(
+            "not a readable OKF document: {}",
+            quote(&error.to_string())
+        ));
     }
 
     for concept in bundle.concepts() {
@@ -313,7 +316,8 @@ fn check_type(cx: &mut Cx<'_>, concept: &Concept, fm: &Frontmatter) {
         && t.trim() != t
     {
         cx.info(format!(
-            "`type` has surrounding whitespace (`{t}`); consumers that compare it literally will not match"
+            "`type` has surrounding whitespace (`{}`); consumers that compare it literally will not match",
+            quote(&t)
         ));
     }
 }
@@ -370,7 +374,7 @@ fn check_trust(cx: &mut Cx<'_>, fm: &Frontmatter) {
             None => cx.warn("`generated.at` is required within `generated`"),
             Some(at) if at.datetime.is_none() => cx.warn(format!(
                 "`generated.at` is not an ISO-8601 datetime (`{}`)",
-                at.raw
+                quote(&at.raw)
             )),
             Some(_) => {}
         }
@@ -391,7 +395,7 @@ fn check_trust(cx: &mut Cx<'_>, fm: &Frontmatter) {
                 None => cx.warn(format!("`verified[{i}].at` is missing")),
                 Some(at) if at.datetime.is_none() => cx.warn(format!(
                     "`verified[{i}].at` is not an ISO-8601 datetime (`{}`)",
-                    at.raw
+                    quote(&at.raw)
                 )),
                 Some(_) => {}
             }
@@ -402,6 +406,7 @@ fn check_trust(cx: &mut Cx<'_>, fm: &Frontmatter) {
 /// §5.4 lifecycle, and §5.5's `stale_after` — its **syntax**, never its relation to now.
 fn check_lifecycle(cx: &mut Cx<'_>, fm: &Frontmatter) {
     if let Some(Status::Other(value)) = Some(Status::parse(fm.get("status").and_then(as_str))) {
+        let value = quote(&value);
         cx.info(format!(
             "`status: {value}` is outside §5.4's `draft | stable | deprecated`; \
              consumers must tolerate it, but few will act on it"
@@ -410,6 +415,7 @@ fn check_lifecycle(cx: &mut Cx<'_>, fm: &Frontmatter) {
     if let Some(raw) = fm.get("stale_after").and_then(as_str)
         && okf_core::DateTime::parse(raw).is_none()
     {
+        let raw = quote(raw);
         cx.warn(format!(
             "`stale_after` is not an ISO-8601 datetime (`{raw}`), so no consumer can act on it"
         ));
@@ -430,7 +436,7 @@ fn check_attribution(cx: &mut Cx<'_>, doc: &Document) {
         if attribution.source.is_none() {
             cx.warn(format!(
                 "footnote [^{}] matches no `sources[].id`; the label is the join key for attribution",
-                attribution.label
+                quote(&attribution.label)
             ));
         }
     }
@@ -500,6 +506,7 @@ fn check_resources(cx: &mut Cx<'_>, bundle: &Bundle, concept: &Concept) {
         if let Some(rel) = bundle_relative(raw)
             && !bundle.root().join(&rel).exists()
         {
+            let raw = quote(raw);
             cx.warn(format!(
                 "{label} names `{raw}`, which the bundle does not contain"
             ));
@@ -558,7 +565,8 @@ fn check_link_targets(cx: &mut Cx<'_>, bundle: &Bundle, concept: &Concept) {
                 cx.info(format!(
                     "link `{}` names `{}`, which the bundle does not contain; \
                      §6 tells a consumer to tolerate this",
-                    link.raw, link.target
+                    quote(&link.raw),
+                    quote(&link.target.to_string())
                 ));
             }
             continue;
@@ -570,7 +578,7 @@ fn check_link_targets(cx: &mut Cx<'_>, bundle: &Bundle, concept: &Concept) {
         }
     }
     for target in deprecated {
-        cx.warn(format!("links to deprecated concept `{target}`"));
+        cx.warn(format!("links to deprecated concept `{}`", quote(&target)));
     }
 }
 
@@ -610,8 +618,9 @@ fn check_declared_version(cx: &mut Cx<'_>, bundle: &Bundle) {
     {
         cx.at_file(&bundle.root().join("index.md"));
         cx.info(format!(
-            "the bundle declares `okf_version: {version}`; this reader implements {}, \
+            "the bundle declares `okf_version: {}`; this reader implements {}, \
              so it is read best-effort (§12)",
+            quote(version),
             super::OKF_VERSION
         ));
         cx.concept = None;
@@ -632,6 +641,7 @@ fn check_duplicate_titles(cx: &mut Cx<'_>, bundle: &Bundle) {
         if concepts.len() < 2 {
             continue;
         }
+        let title = quote(&title);
         let others: Vec<String> = concepts.iter().map(|c| c.id.to_string()).collect();
         for concept in &concepts {
             cx.at(concept);
@@ -643,7 +653,7 @@ fn check_duplicate_titles(cx: &mut Cx<'_>, bundle: &Bundle) {
                  the two are indistinguishable in any listing that shows titles",
                 siblings
                     .iter()
-                    .map(|s| format!("`{s}`"))
+                    .map(|s| format!("`{}`", quote(s)))
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
@@ -732,6 +742,7 @@ fn check_stale_indexes(cx: &mut Cx<'_>, bundle: &Bundle) {
         cx.at_file(index);
         for (target, resolved) in index_listings(bundle, index) {
             if !resolved.exists() {
+                let target = quote(&target);
                 cx.warn(format!(
                     "index lists `{target}`, which no longer exists; \
                      a reader following the listing lands on nothing"
@@ -774,7 +785,8 @@ fn lint_headings(cx: &mut Cx<'_>, doc: &Document) {
                     "L3",
                     format!(
                         "multiple top-level `#` headings found (heading `{}` at line {})",
-                        heading.text, heading.line_num
+                        quote(heading.text),
+                        heading.line_num
                     ),
                 );
             }
@@ -785,7 +797,8 @@ fn lint_headings(cx: &mut Cx<'_>, doc: &Document) {
                 "L3",
                 format!(
                     "heading level skipped: `{}` jumps from h{previous} to h{}",
-                    heading.text, heading.level
+                    quote(heading.text),
+                    heading.level
                 ),
             );
         }
@@ -814,7 +827,7 @@ fn lint_headings(cx: &mut Cx<'_>, doc: &Document) {
             cx.lint(
                 "warning",
                 "L4",
-                format!("heading `{}` has no content", heading.text),
+                format!("heading `{}` has no content", quote(heading.text)),
             );
         }
     }
@@ -826,6 +839,25 @@ fn lint_headings(cx: &mut Cx<'_>, doc: &Document) {
             "body has no top-level `#` heading; OKF docs conventionally open with one",
         );
     }
+}
+
+/// The most of a bundle-chosen value a finding message quotes, in bytes.
+///
+/// A property, not a tuning: a message is for a reader to *find* the thing it
+/// names, and a quoted prefix this long does that while making the message's
+/// size independent of the bundle's (#877 measured one 50 KB heading per concept
+/// turning `okf lint` into a 10 MB report). Escaping on output multiplies
+/// whatever the message holds, so bounding it here bounds every consumer at once.
+pub const QUOTE_MAX_BYTES: usize = 120;
+
+/// `value`, cut to [`QUOTE_MAX_BYTES`] on a char boundary, with an explicit
+/// marker when cut — so a long value is never mistaken for a mangled one.
+fn quote(value: &str) -> String {
+    if value.len() <= QUOTE_MAX_BYTES {
+        return value.to_owned();
+    }
+    let cut = value.floor_char_boundary(QUOTE_MAX_BYTES);
+    format!("{}… (truncated, {} bytes)", &value[..cut], value.len())
 }
 
 /// `L2`: frontmatter keys in the canonical order.
@@ -859,6 +891,7 @@ fn lint_unused_sources(cx: &mut Cx<'_>, concept: &Concept, doc: &Document) {
     for source in concept.sources() {
         let Some(id) = &source.id else { continue };
         if !cited.contains(id) {
+            let id = quote(id);
             cx.lint(
                 "warning",
                 "L5",
@@ -883,7 +916,7 @@ fn lint_actor_convention(cx: &mut Cx<'_>, concept: &Concept) {
                 format!(
                     "author `{}` in `sources.author` does not follow §7's `human:<id>`, \
                      `process:<id>` or `<producer>/<version>` convention",
-                    author.as_str()
+                    quote(author.as_str())
                 ),
             );
         }
@@ -952,6 +985,7 @@ fn lint_orphan(cx: &mut Cx<'_>, concept: &Concept, indexed: &BTreeSet<String>) {
 fn lint_portable_id(cx: &mut Cx<'_>, concept: &Concept) {
     for segment in concept.id.segments() {
         if !okf_core::concept_id::is_portable_segment(segment) {
+            let segment = quote(segment);
             cx.lint(
                 "warning",
                 "R1",

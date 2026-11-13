@@ -99,7 +99,8 @@ const REVIEW_N_CTX: u32 = 49_152;
 /// The estimated-token budget for one file's prompt.
 ///
 /// 35a's measured single-call figure. Kept as the budget rather than lowered to
-/// hide the estimate's imprecision: the slack belongs in [`REVIEW_N_CTX`], where
+/// hide the estimate's imprecision: the slack belongs in `REVIEW_N_CTX` (local
+/// models only, so not linked from this ungated item), where
 /// it is visible, not in a quietly smaller budget that would truncate files the
 /// measurement says fit.
 #[cfg(any(feature = "provider", feature = "inference-local-models"))]
@@ -189,7 +190,8 @@ pub enum ClassSource {
     ReplyText,
     /// From a typed question over the closed class set, read off the model's
     /// label-token distribution (`rto_llama::typed`). Carries a sharpness, an
-    /// option mass and a margin; see [`classify_findings`].
+    /// option mass and a margin; see `classify_findings` (local models only, so
+    /// a code span rather than a link).
     TypedRead,
 }
 
@@ -1363,7 +1365,8 @@ fn start_engine(model: &str) -> anyhow::Result<rto_llama::llama::LlamaEngine> {
 ///
 /// An enum rather than a bare `&dyn Engine` because the two are not
 /// interchangeable for one job: `--typed-class` reads the label-token
-/// distribution through [`rto_llama::llama::LlamaEngine::ask_choice`], which an
+/// distribution through `rto_llama::llama::LlamaEngine::ask_choice` (behind the
+/// `llama` feature, so named rather than linked), which an
 /// HTTP provider cannot answer. Everything else only chats, through
 /// [`Backend::engine`].
 #[cfg(any(feature = "provider", feature = "inference-local-models"))]
@@ -1418,7 +1421,7 @@ impl Backend {
     }
 
     /// Overwrite each finding's class with a typed read — see
-    /// [`classify_findings`].
+    /// `classify_findings`.
     ///
     /// # Errors
     /// If the engine fails on a question, or this backend has no typed read

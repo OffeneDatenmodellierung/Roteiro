@@ -29,10 +29,12 @@ serves it over a single query surface (CLI `--json`, MCP, and renderers). The
 operator-facing surface is the `roteiro` binary
 ([[crates/roteiro/src/main.rs]]): `sync`, `check`, `review`, `query`, `context`,
 `debt`, `path`, `infer`, `spec`, `import`, `render`, `serve`, and `model`. Every
-fact carries one of three provenance classes — **derived** (a pure function of the
-code), **authored** (ADRs/blueprints/`@rto:` intent), and **inferred** (embeddings,
-content) — so consumers can trust each fact exactly as much as its source
-(ADR-0001).
+fact carries one of six provenance tokens: three ways a fact is produced —
+**derived** (a pure function of the code), **authored** (ADRs/blueprints/`@rto:`
+intent), and **inferred** (embeddings, content) — each qualified by **who**
+produced it, so a fact imported from a peer's OKF bundle is `external-derived`,
+`external-authored` or `external-inferred`. Consumers can trust each fact exactly
+as much as its source (ADR-0001 v1.5).
 
 This blueprint is the map from those decisions to the crates that implement them.
 

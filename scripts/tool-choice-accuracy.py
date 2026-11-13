@@ -35,7 +35,7 @@ import urllib.request
 # string matching. `expect` is a set where two tools are defensibly correct.
 #
 # Every "miss" here has so far been the fixture's fault rather than the model's,
-# twice over: `sandbox_clear` scored protocol-following behaviour as a failure
+# twice over: `sandbox_clear` (removed with ADR-0030) scored protocol-following behaviour as a failure
 # (the server tells callers to show `sandbox_status` before a destructive verb),
 # and `path`/`context` were asked about symbols by name when both take node
 # **keys**, so resolving the name with `search` first was correct. Before
@@ -69,15 +69,6 @@ CASES = [
     ("What config keys here look like secrets?", {"config_secrets"}),
     ("What security findings have been recorded for this repo?", {"security_list"}),
     ("Has anything been analyzed for vulnerabilities yet, and what is provisioned?", {"security_status"}),
-    ("How much disk is the container image cache using?", {"sandbox_status"}),
-    # Both are correct here, and that is not a hedge. `sandbox_clear` is the one
-    # tool on this surface that destroys anything, and the server's own
-    # instructions tell a caller to show `sandbox_status` first and quote the
-    # bytes it reports freeing. A model that reaches for status before a
-    # destructive verb is following the documented protocol, not missing the
-    # tool — an expectation of `sandbox_clear` alone scored correct behaviour as
-    # a failure.
-    ("Delete the cached boxlite image to free space.", {"sandbox_clear", "sandbox_status"}),
 ]
 
 

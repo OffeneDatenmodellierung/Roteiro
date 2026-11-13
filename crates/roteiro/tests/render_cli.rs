@@ -879,6 +879,15 @@ fn bundle_files(root: &Path) -> Vec<(String, String)> {
     out
 }
 
+/// Whether a concept lists `source` as a `sources[]` entry naming its blob URL
+/// under the attribution fixture's remote.
+fn sourced_from_blob(text: &str, source: &str) -> bool {
+    text.lines().any(|l| {
+        l.starts_with("  - resource: \"https://github.com/example/attribution/blob/")
+            && l.ends_with(&format!("/{source}\""))
+    })
+}
+
 /// The `human:` verifier names whoever last touched **that document**, and the
 /// bundle is dated by the **commit**, not by the clock.
 ///
@@ -896,9 +905,12 @@ fn the_verifier_is_the_documents_own_author_and_the_bundle_is_dated_by_the_commi
     const ADA: &str = "2020-01-02T03:04:05+00:00";
     const GRACE: &str = "2021-02-03T04:05:06+00:00";
     const HEAD: &str = "2022-03-04T05:06:07+00:00";
+    const REMOTE: &str = "https://github.com/example/attribution.git";
 
     let dir = fresh_dir("okf-attribution");
     git(&dir, &["init", "-q"]);
+    // A remote, so concepts carry a followable blob URL as their source.
+    git(&dir, &["remote", "add", "origin", REMOTE]);
 
     let adr = |id: &str, title: &str| {
         format!(
@@ -960,7 +972,7 @@ fn the_verifier_is_the_documents_own_author_and_the_bundle_is_dated_by_the_commi
     ] {
         let concepts: Vec<&(String, String)> = files
             .iter()
-            .filter(|(_, text)| text.contains(&format!("- resource: \"/{source}\"")))
+            .filter(|(_, text)| sourced_from_blob(text, source))
             .filter(|(_, text)| text.contains("verified:\n  - by: \"human:"))
             .collect();
         assert!(
@@ -978,6 +990,13 @@ fn the_verifier_is_the_documents_own_author_and_the_bundle_is_dated_by_the_commi
             );
         }
     }
+
+    // §6.2 reads a leading `/` as bundle-relative, and the bundle holds no source files (#820 §1).
+    let unfollowable = carrying("  - resource: \"/".to_owned());
+    assert!(
+        unfollowable.is_empty(),
+        "unfollowable sources: {unfollowable:?}"
+    );
 
     // The `HEAD` author confirmed nothing: they touched neither document.
     let leaked = carrying("human:Mallory".to_owned());

@@ -55,7 +55,11 @@
 //!   over one document;
 //! - **deterministic, with no model in the loop.** Using a language model to
 //!   judge whether text is attacking a language model is circular, and it would
-//!   make a workspace scan depend on inference;
+//!   make a workspace scan depend on inference. Not only a promise: this crate
+//!   has an optional `rto-llama` edge, so the `tests` module's
+//!   `the_screening_path_names_nothing_that_could_reach_a_model` allowlists
+//!   every path root this module and its PDF half name, and refuses anything
+//!   else (#898);
 //! - **conservative defaults**, preferring a false positive;
 //! - its **hidden-content classes**: zero-width characters, and content hidden by
 //!   presentation.
@@ -1458,6 +1462,83 @@ mod tests {
         ConcealedText, FindingKind, Verdict, escape_for_diagnostic, screen_text,
         screen_text_with_concealed,
     };
+
+    /// The root of every path the non-test part of `src` names: `std` for
+    /// `std::fmt::Write`, and `crate::screen` for an in-crate edge, so a guard
+    /// can allowlist *which* module of this crate is reached. Lowercase roots
+    /// only — an uppercase one (`Self`, `Vec`, `Verdict`) is a type already in
+    /// scope, and a type from elsewhere needs a lowercase `use` to get there.
+    fn path_roots(src: &str) -> std::collections::BTreeSet<String> {
+        let code = src.split("\n#[cfg(test)]\nmod tests").next().unwrap_or(src);
+        let mut roots = std::collections::BTreeSet::new();
+        for line in code.lines() {
+            let line = line.split(" // ").next().unwrap_or(line);
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+            for (at, _) in line.match_indices("::") {
+                let head = &line[..at];
+                let start = head.rfind(|c: char| !ident(c)).map_or(0, |i| i + 1);
+                let root = &head[start..];
+                // `a::b` continues a path; `.collect::<_>` is a method turbofish.
+                let continued = head[..start].ends_with([':', '.']);
+                if continued || !root.starts_with(|c: char| c.is_ascii_lowercase() || c == '_') {
+                    continue;
+                }
+                if matches!(root, "crate" | "super" | "self") {
+                    let tail = &line[at + 2..];
+                    let next = &tail[..tail.find(|c: char| !ident(c)).unwrap_or(tail.len())];
+                    roots.insert(format!("{root}::{next}"));
+                } else {
+                    roots.insert(root.to_owned());
+                }
+            }
+        }
+        roots
+    }
+
+    /// #898: "no model in the loop" is enforced here, not only stated in the
+    /// module docs. `rto-graph` has an optional `rto-llama` edge (for
+    /// `image-vision`/`audio-transcribe`), so an engine is one `use` away from
+    /// the screen. This allowlists every path root the screening code — this
+    /// module and its PDF half — may name; an engine, `crate::infer`, or any
+    /// other module of this crate is refused until someone argues it in.
+    #[test]
+    fn the_screening_path_names_nothing_that_could_reach_a_model() {
+        let allowed: &[(&str, &str, &[&str])] = &[
+            (
+                "screen.rs",
+                include_str!("screen.rs"),
+                &["serde", "std", "u32"],
+            ),
+            (
+                "screen_pdf.rs",
+                include_str!("screen_pdf.rs"),
+                &[
+                    "char",
+                    "clippy",
+                    "crate::screen",
+                    "f64",
+                    "lopdf",
+                    "mechanism",
+                    "pdf_extract",
+                    "std",
+                ],
+            ),
+        ];
+        for (file, src, allow) in allowed {
+            let unexpected: Vec<_> = path_roots(src)
+                .into_iter()
+                .filter(|r| !allow.contains(&r.as_str()))
+                .collect();
+            assert!(
+                unexpected.is_empty(),
+                "{file} names {unexpected:?}, outside the screen's allowlist: the screen \
+                 must stay deterministic with no model in the loop (#898, ADR-0024)"
+            );
+        }
+    }
 
     #[test]
     fn ordinary_prose_passes_unchanged() {

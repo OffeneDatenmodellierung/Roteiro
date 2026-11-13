@@ -26,8 +26,12 @@ mod init;
 mod okf_discovery;
 #[cfg(feature = "okf-viewer")]
 mod okf_viewer;
+// `roteiro serve --allow-upload`: the one route that writes bytes into the
+// worktree, and only into `raw/` (issue #814, ADR-0026).
 mod overview;
 mod pins;
+#[cfg(feature = "upload")]
+mod upload;
 // The external model provider (ADR-0027): an `Engine` over a local
 // OpenAI-compatible server.
 #[cfg(feature = "provider")]
@@ -1125,6 +1129,16 @@ enum Command {
         /// `--features serve,mcp`).
         #[arg(long)]
         mcp: bool,
+        /// Mount the upload surface: `PUT /v1/raw/{name}` stores one document
+        /// (pdf, md or txt, with a matching `Content-Type`) in this repository's
+        /// `raw/`, which must already exist (issue #814, ADR-0026). Never
+        /// overwrites, never extracts, refuses anything off the allowlist or over
+        /// 64 MiB. **Loopback only** — there is no authentication, so a
+        /// non-loopback `--addr` with this flag is refused rather than warned
+        /// about. A flag and not a config key, on purpose.
+        #[cfg(feature = "upload")]
+        #[arg(long)]
+        allow_upload: bool,
         /// Restrict what this server advertises **and dispatches** — over `/mcp`
         /// and to the served model alike — to these tools (comma-separated,
         /// repeatable). Accepts a tool name, a CLASS (`query`, `quality`,
@@ -2488,11 +2502,24 @@ fn main() -> anyhow::Result<()> {
             workspace_name,
             sync_on_access,
             mcp,
+            #[cfg(feature = "upload")]
+            allow_upload,
             tools,
         } => run_serve(
             ingest,
             &cfg.effective,
             &ServeOptions {
+                // Resolved before anything is built or bound, so a refused bind
+                // or a missing `raw/` fails at startup (issue #814).
+                #[cfg(feature = "upload")]
+                upload: if allow_upload {
+                    Some(upload::resolve_raw_root(serve_socket(
+                        &cfg.effective,
+                        addr.as_deref(),
+                    )?)?)
+                } else {
+                    None
+                },
                 models,
                 http,
                 addr,
@@ -13123,8 +13150,9 @@ struct SecurityRunReport {
 /// Run an analyzer against this worktree and file its findings.
 ///
 /// The host is the only backend (ADR-0030), and `--allow-unsandboxed` is its
-/// consent: without it [`rto_exec::SubprocessRunner::new`] refuses before
-/// anything is executed, naming the flag.
+/// consent: without it `rto_exec::SubprocessRunner::new` refuses before
+/// anything is executed, naming the flag. (A code span: the runner is behind
+/// `exec-subprocess`, and this function is compiled under `execution` alone.)
 #[cfg(feature = "execution")]
 fn run_security_run(analyzer: &str, allow_unsandboxed: bool, json: bool) -> anyhow::Result<()> {
     run_security_run_on_this_host(analyzer, allow_unsandboxed, json)
@@ -14062,17 +14090,43 @@ fn run_security_status(analyzer: Option<&str>, json: bool) -> anyhow::Result<()>
                 &record.digest[..12.min(record.digest.len())],
                 record.fetched_at,
                 asset.age_days.unwrap_or_default(),
-                if asset.verified == Some(false) {
-                    "  ** ON-DISK BYTES NO LONGER MATCH — re-run prefetch **"
-                } else {
-                    ""
+                // The cause and its remedy, not a bare "no longer matches" (#900).
+                match &asset.integrity {
+                    rto_exec::Integrity::DigestMismatch { actual, remedy, .. } => format!(
+                        "  ** DIGEST MISMATCH: on disk {} — {remedy} **",
+                        &actual[..12.min(actual.len())]
+                    ),
+                    rto_exec::Integrity::BytesMissing { remedy, .. } => {
+                        format!("  ** BYTES MISSING — {remedy} **")
+                    }
+                    rto_exec::Integrity::Unreadable { cause, remedy } => {
+                        format!("  ** UNREADABLE: {cause} — {remedy} **")
+                    }
+                    _ => String::new(),
                 }
             ),
-            None => println!(
-                "  {:<22} {:<12} not provisioned — run `roteiro security prefetch`",
-                asset.id,
-                asset.kind.as_str()
-            ),
+            None => match &asset.integrity {
+                rto_exec::Integrity::RecordMissing { remedy } => println!(
+                    "  {:<22} {:<12} ** UNRECORDED: bytes present, no record — {remedy} **",
+                    asset.id,
+                    asset.kind.as_str()
+                ),
+                rto_exec::Integrity::Unreadable { cause, remedy } => println!(
+                    "  {:<22} {:<12} ** UNREADABLE: {cause} — {remedy} **",
+                    asset.id,
+                    asset.kind.as_str()
+                ),
+                rto_exec::Integrity::NotProvisioned { remedy } => println!(
+                    "  {:<22} {:<12} not provisioned — {remedy}",
+                    asset.id,
+                    asset.kind.as_str()
+                ),
+                _ => println!(
+                    "  {:<22} {:<12} not provisioned — run `roteiro security prefetch`",
+                    asset.id,
+                    asset.kind.as_str()
+                ),
+            },
         }
     }
 
@@ -14262,7 +14316,7 @@ fn run_explorer(
              `[[workspaces]]` and use `--scope all` for a reloadable set",
         );
     }
-    serve_graph_ui(cfg, "explorer", set, default, addr)
+    serve_graph_ui(cfg, "explorer", set, default, addr, None)
 }
 
 /// Serve the bundles in `mounts` and nothing else.
@@ -14384,6 +14438,8 @@ fn serve_graph_ui(
     set: std::sync::Arc<rto_graph::WorkspaceSet>,
     default: Option<String>,
     addr: Option<String>,
+    // `serve --allow-upload`'s router (issue #814); `explorer` never passes one.
+    extra: Option<axum::Router>,
 ) -> anyhow::Result<()> {
     // Address precedence: CLI flag > `[serve] addr` > default loopback.
     let addr = addr
@@ -14405,6 +14461,10 @@ fn serve_graph_ui(
     // `/v1/chat/completions`. A `roteiro serve` build with a model installed mounts these same
     // surfaces beside `/v1` (with Ask on) via `mount_explorer_surfaces` instead.
     let router = graph_api::router(set.clone(), default.clone()).merge(explorer_app::router());
+    let router = match extra {
+        Some(extra) => router.merge(extra),
+        None => router,
+    };
 
     // The OKF viewer beside them (ADR-0022 v1.2): one mount per hosted project
     // that has rendered a bundle, plus the current directory's.
@@ -14565,10 +14625,19 @@ fn resolve_mcp_surface(cfg: &config::Loaded, flag: &[String]) -> anyhow::Result<
             // ADR-0007's feature-availability rule, applied to a name: the
             // setting is valid and this binary cannot act on it, so it warns.
             // Silence here would be indistinguishable from a name that worked.
-            eprintln!(
-                "warning: {where_} names `{name}`, which this build does not \
-                 compile in — it restricts nothing here"
-            );
+            // A removed tool says so: "not compiled in" would point at a
+            // rebuild that cannot bring it back (ADR-0007 v1.11).
+            if rto_render::mcp::REMOVED_TOOLS.contains(&name.as_str()) {
+                eprintln!(
+                    "warning: {where_} names `{name}`, which a release removed \
+                     (ADR-0030) — it restricts nothing; drop it from the list"
+                );
+            } else {
+                eprintln!(
+                    "warning: {where_} names `{name}`, which this build does not \
+                     compile in — it restricts nothing here"
+                );
+            }
         }
         surface = meet(&surface, &restriction.advertised);
     }
@@ -14681,6 +14750,21 @@ struct ServeOptions {
     /// What that `/mcp` advertises and dispatches (`--tools` ∩ `[mcp] tools`),
     /// resolved once in the command dispatch and carried — see [`McpSurface`].
     mcp_surface: McpSurface,
+    /// `raw/`'s resolved real path when `--allow-upload` was given (issue #814).
+    #[cfg(feature = "upload")]
+    upload: Option<std::path::PathBuf>,
+}
+
+/// The address `serve` will bind, by the same precedence its servers apply:
+/// CLI flag > `[serve] addr` > loopback default. Read early by the upload gate,
+/// which must refuse a non-loopback bind before anything starts.
+#[cfg(feature = "upload")]
+fn serve_socket(cfg: &config::Config, addr: Option<&str>) -> anyhow::Result<std::net::SocketAddr> {
+    let addr = addr
+        .or(cfg.serve.addr.as_deref())
+        .unwrap_or("127.0.0.1:8017");
+    addr.parse()
+        .map_err(|e| anyhow::anyhow!("invalid serve address `{addr}`: {e}"))
 }
 
 /// The server a `serve`/`mcp` invocation resolves to, factored out of the
@@ -15645,6 +15729,15 @@ fn run_serve(
     ) {
         eprintln!("{note}");
     }
+    // The upload surface is mounted on the graph servers only. Refused rather
+    // than silently dropped where it would not be (issue #814).
+    #[cfg(feature = "upload")]
+    if opts.upload.is_some() && (opts.http.is_some() || scope.scope.workspaces().is_none()) {
+        anyhow::bail!(
+            "`--allow-upload` mounts on the graph server only — not with `--scope bundle` \
+             or the deprecated `--http` MCP alias"
+        );
+    }
     let Some(ws_scope) = scope.scope.workspaces() else {
         // `--scope bundle <PATH>`: one bundle, no graph, no explorer app.
         // Dispatched here rather than inside `route_serve`, because it selects a
@@ -15799,7 +15892,11 @@ fn run_serve_network(
         }
         let default = explorer_default_workspace(&set, workspace_name);
         let _ = &flat; // the llama-free UI uses `set`; `flat` backs the model tools only.
-        return serve_graph_ui(cfg, "serve", set, default, opts.addr.clone());
+        #[cfg(feature = "upload")]
+        let extra = opts.upload.as_deref().map(upload::mount);
+        #[cfg(not(feature = "upload"))]
+        let extra = None;
+        return serve_graph_ui(cfg, "serve", set, default, opts.addr.clone(), extra);
     }
 
     #[cfg(not(feature = "explorer"))]
@@ -15823,9 +15920,11 @@ fn run_serve_network(
 /// multi-workspace [`rto_graph::WorkspaceSet`] backing the read-only `/v1/graph/*`
 /// API + UI) and `flat` (one workspace over every hosted project, backing the model
 /// tools + MCP router) — from config plus any `--workspace <ROOT>` roots (ADR-0008).
-/// Shared by [`run_serve`] and [`run_mcp`]. `cmd` names the caller for the startup
-/// line. A lone repo with no workspace config builds its graph now and hosts it
-/// alone as `default` (the one path still needing a git cwd).
+/// Shared by [`run_serve`] and `run_mcp` — a code span, not a link, because
+/// `run_mcp` is not compiled in an `explorer`-only build and this is (#797).
+/// `cmd` names the caller for the startup line. A lone repo with no workspace
+/// config builds its graph now and hosts it alone as `default` (the one path
+/// still needing a git cwd).
 ///
 /// # `scope` decides which of those two shapes is built (issue #810)
 ///
@@ -17865,6 +17964,12 @@ fn serve_v1_tail(
     #[cfg(not(feature = "okf-viewer"))]
     let okf_note = String::new();
 
+    #[cfg(feature = "upload")]
+    let router = match opts.upload.as_deref() {
+        Some(raw) => router.merge(upload::mount(raw)),
+        None => router,
+    };
+
     // `--models --mcp`: also mount the MCP graph server at `/mcp` on the SAME port.
     if opts.mcp {
         #[cfg(feature = "mcp")]
@@ -19492,20 +19597,21 @@ fn okf_concept<'a>(
     // confirmation to a moment they had nothing to do with is a second false
     // claim on top of the first.
     let at = attribution.map_or_else(|| r.at.to_owned(), |a| okf_instant(a.at));
+    // `source_blob_base` ends at the commit id with no trailing slash, so the
+    // separator belongs here. Without it the URL reads
+    // `.../blob/<sha>docs/adr/0001.md` and 404s.
+    let blob_url = ex
+        .node
+        .path
+        .as_deref()
+        .and_then(|p| r.source_base.map(|b| format!("{b}/{p}")));
     okf::Concept {
         explanation: ex,
         frontmatter: okf::Frontmatter {
             type_: ex.node.kind.clone(),
             title: Some(ex.node.name.clone()),
             description: None,
-            // `source_blob_base` ends at the commit id with no trailing slash, so
-            // the separator belongs here. Without it the URL reads
-            // `.../blob/<sha>docs/adr/0001.md` and 404s.
-            resource: ex
-                .node
-                .path
-                .as_deref()
-                .and_then(|p| r.source_base.map(|b| format!("{b}/{p}"))),
+            resource: blob_url.clone(),
             tags,
             // Read from the source's own `status:`, not invented here — an ADR
             // that says `Superseded` should not read as `stable` in a bundle.
@@ -19539,11 +19645,15 @@ fn okf_concept<'a>(
             // The concept's own file, then each external work it cites from the
             // reference register (ADR-0029), with `id`/`title`/`author` and a
             // `[^id]` footnote carrying its APA 7 entry or refusal.
-            sources: ex
-                .node
-                .path
-                .iter()
-                .map(|p| okf::Source::resource(format!("/{p}")))
+            //
+            // The file is named by its blob URL, never `/<path>`: §6.2 reads a
+            // leading `/` as bundle-relative, and the bundle does not contain the
+            // repository's source files, so that entry pointed at nothing on
+            // every concept (#820 §1). With no remote there is no followable
+            // location, and the entry is omitted rather than invented.
+            sources: blob_url
+                .into_iter()
+                .map(okf::Source::resource)
                 .chain(works.iter().map(okf::Source::from_reference))
                 .collect(),
         },
