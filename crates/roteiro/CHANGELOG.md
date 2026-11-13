@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.2.2](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v7.2.1...roteiro-v7.2.2) - 2026-11-13
+
+### Fixed
+
+- *(serve)* move the banner lead into a helper, under the line limit
+- *(serve)* lead the startup banner with the UI at `/`, not the API base
+- review on #978 — verdicts keep unreachable rows, -U3 reachability, JSON diagnostics
+- *(graph)* stop the graph answering confidently from incomplete or fabricated facts
+
+### Other
+
+- Merge remote-tracking branch 'origin/main' into fix/silent-wrong-answers
+
 ## [7.2.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v7.2.0...roteiro-v7.2.1) - 2026-11-13
 
 ### Fixed

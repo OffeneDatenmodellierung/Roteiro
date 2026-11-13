@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.2.2](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v7.2.1...rto-graph-v7.2.2) - 2026-11-13
+
+### Fixed
+
+- review on #978 — verdicts keep unreachable rows, -U3 reachability, JSON diagnostics
+- *(graph)* stop the graph answering confidently from incomplete or fabricated facts
+
 ## [7.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v7.0.0...rto-graph-v7.1.0) - 2026-11-13
 
 ### Added
