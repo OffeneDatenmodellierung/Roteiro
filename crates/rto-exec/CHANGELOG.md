@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-exec-v7.0.0...rto-exec-v7.1.0) - 2026-11-13
+
+### Added
+
+- *(security)* check model licences, guard the screener, name an asset's integrity cause
+
+### Fixed
+
+- address the review on #970 — upload races, asset remedies, autolinks, APA issues, bounded findings
+
 ## [7.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-exec-v6.2.0...rto-exec-v7.0.0) - 2026-11-12
 
 ### Added
