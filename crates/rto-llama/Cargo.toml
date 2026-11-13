@@ -60,13 +60,22 @@ serde_json = { workspace = true }
 # compiled": true of linking, false of building, and it misled two workers and an
 # orchestrator before it was measured. `cargo build`/`cargo install` never paid
 # it either way.
-llama-cpp-2 = { version = "0.1.154", optional = true }
+# **Exact pins, on both halves** (the boxlite lesson, #888). Upstream ships API
+# breaks in patch releases: `llama-cpp-2` 0.1.161 removed `AddBos` and moved the
+# tokenizer methods, so a fresh resolution — which is what `cargo install` without
+# `--locked` does — stopped compiling `rto-llama` while CI, building from the
+# committed lock, stayed green. And `llama-cpp-2` takes its `-sys` sibling with a
+# caret (`^0.1.157`), so pinning the wrapper alone would still float the C++
+# bindings underneath it; `llama-cpp-sys-2` is named here only to pin it. Bump the
+# pair together, to versions CI has built.
+llama-cpp-2 = { version = "=0.1.157", optional = true }
+llama-cpp-sys-2 = { version = "=0.1.160", optional = true }
 encoding_rs = { version = "0.8", optional = true }
 
 [features]
 # The real llama.cpp-backed engine. Off by default so downstream default builds
 # stay pure-Rust; callers turn it on when they need local inference.
-llama = ["dep:llama-cpp-2", "llama-cpp-2/mtmd", "dep:encoding_rs"]
+llama = ["dep:llama-cpp-2", "llama-cpp-2/mtmd", "dep:llama-cpp-sys-2", "dep:encoding_rs"]
 
 [lints]
 workspace = true

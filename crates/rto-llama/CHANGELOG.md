@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.2.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v7.2.0...rto-llama-v7.2.1) - 2026-11-13
+
+### Fixed
+
+- *(deps)* pin llama-cpp-2 and its sys crate exactly, so `cargo install` builds
+
 ## [7.2.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v7.1.0...rto-llama-v7.2.0) - 2026-11-13
 
 ### Fixed
