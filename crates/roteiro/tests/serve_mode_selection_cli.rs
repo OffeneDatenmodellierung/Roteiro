@@ -580,13 +580,13 @@ fn mount_labels_are_workspace_slash_project_and_the_cwd_is_the_exception() {
     assert_eq!(
         chooser_rows(&addr),
         vec![
-            ("one/alpha".to_owned(), canon(&fx.alpha.join("okf"))),
-            ("two/beta".to_owned(), canon(&fx.beta.join("okf"))),
-            ("okf".to_owned(), canon(&cwd.join("okf"))),
+            ("one/alpha".to_owned(), None),
+            ("two/beta".to_owned(), None),
+            ("okf".to_owned(), None),
         ],
         "the label is `{{ws}}/{{project}}` for a hosted project and the bare \
          directory name for the current directory's bundle, workspace mounts \
-         first"
+         first; distinct labels print no directory (#836)"
     );
 }
 
@@ -664,8 +664,8 @@ fn a_bundle_reachable_twice_is_mounted_once() {
     assert_eq!(
         chooser_rows(&addr),
         vec![
-            ("one/alpha".to_owned(), canon(&fx.alpha.join("okf"))),
-            ("two/beta".to_owned(), canon(&fx.beta.join("okf"))),
+            ("one/alpha".to_owned(), None),
+            ("two/beta".to_owned(), None),
         ],
         "`<alpha>/okf` is reachable from the workspace walk and from the current \
          directory; it must appear once, under the workspace label"
@@ -2268,8 +2268,11 @@ fn http_get(addr: &str, path: &str) -> (u16, String, String) {
 }
 
 /// The `(label, origin)` of every row the `/okf` chooser lists, in page order.
+///
+/// `origin` is `None` for a row the chooser names by label alone: since #836 a
+/// directory is printed only when two mounts share a label.
 #[cfg(feature = "okf-viewer")]
-fn chooser_rows(addr: &str) -> Vec<(String, PathBuf)> {
+fn chooser_rows(addr: &str) -> Vec<(String, Option<PathBuf>)> {
     let (status, location, body) = http_get(addr, "/okf");
     assert_eq!(
         status, 200,
@@ -2279,11 +2282,11 @@ fn chooser_rows(addr: &str) -> Vec<(String, PathBuf)> {
     let mut rows = Vec::new();
     for row in body.split("<li>").skip(1) {
         let label = between(row, "\">", "</a>");
-        let origin = between(row, "<span class=\"deg\">", "</span>");
-        rows.push((
-            unescape(&unisolate(&label)),
-            canon(Path::new(&unescape(&unisolate(&origin)))),
-        ));
+        let origin = row
+            .contains("<span class=\"deg\">")
+            .then(|| between(row, "<span class=\"deg\">", "</span>"))
+            .map(|o| canon(Path::new(&unescape(&unisolate(&o)))));
+        rows.push((unescape(&unisolate(&label)), origin));
     }
     assert!(!rows.is_empty(), "no chooser rows parsed out of: {body}");
     rows

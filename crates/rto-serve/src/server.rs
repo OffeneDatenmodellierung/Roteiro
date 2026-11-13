@@ -427,6 +427,9 @@ enum ChatScope {
     Project(String),
     /// `/v1/workspaces/{ws}/…`: a registry confined to one workspace's projects.
     Workspace(Arc<dyn ToolRegistry>),
+    /// The caller sent `tools: []` — explicitly no tools (#827). Any route: no
+    /// graph tools are advertised and the completion is a plain generation.
+    Untooled,
 }
 
 /// `POST /v1/chat/completions` — a full JSON completion, or an SSE stream of
@@ -471,6 +474,13 @@ async fn chat_completions_workspace_scoped(
 /// path, carrying the tool scope for the tool loop.
 async fn run_chat(state: Shared, body: ChatCompletionRequest, scope: ChatScope) -> Response {
     let stream = body.stream == Some(true);
+    // `tools: []` is the caller saying "no tools" (#827), on every route. Absent
+    // `tools` is Ask mode; a non-empty array is general mode.
+    let scope = if body.tools.as_ref().is_some_and(Vec::is_empty) {
+        ChatScope::Untooled
+    } else {
+        scope
+    };
     let normalised = match body.normalise(state.limits) {
         Ok(n) => n,
         Err(msg) => return error(StatusCode::BAD_REQUEST, msg, "invalid_request_error"),
@@ -486,6 +496,7 @@ async fn run_chat(state: Shared, body: ChatCompletionRequest, scope: ChatScope) 
         client_tools,
         tool_choice: _,
         parallel_tool_calls: _,
+        include_usage,
     } = normalised;
     // Validate the model up front so the streaming and non-streaming paths agree:
     // an unknown model is a 404 either way, not a 200 SSE that fails mid-stream.
@@ -493,7 +504,7 @@ async fn run_chat(state: Shared, body: ChatCompletionRequest, scope: ChatScope) 
         return refusal;
     }
     if stream {
-        stream_chat(state, req, scope, client_tools)
+        stream_chat(state, req, scope, client_tools, include_usage)
     } else {
         chat_json(state, req, scope, client_tools).await
     }
@@ -583,6 +594,9 @@ fn complete(
             }
             None => chat_with_client_tools(engine, &NoTools, client_tools, req, MAX_TOOL_ROUNDS),
         },
+        ChatScope::Untooled => {
+            chat_with_client_tools(engine, &NoTools, client_tools, req, MAX_TOOL_ROUNDS)
+        }
     }
 }
 
@@ -592,6 +606,7 @@ fn complete(
 fn scope_has_tools(state: &AppState, scope: &ChatScope) -> bool {
     match scope {
         ChatScope::Workspace(tools) => !tools.tools().is_empty(),
+        ChatScope::Untooled => false,
         _ => state.tools.as_ref().is_some_and(|t| !t.tools().is_empty()),
     }
 }
@@ -686,6 +701,14 @@ enum StreamMsg {
     /// Generation finished cleanly with this wire reason (`stop` | `length` |
     /// `tool_calls`).
     Done(&'static str),
+    /// The final `usage` chunk, sent after [`Self::Done`] only when the client
+    /// asked for it with `stream_options.include_usage` (#855).
+    Usage {
+        /// Tokens in the prompt.
+        prompt: u32,
+        /// Tokens generated.
+        completion: u32,
+    },
     /// Generation failed part-way; carry the message **and its kind** for a
     /// final error event. The kind because the status code is already spent by
     /// the time a stream can fail — see [`error_kind`].
@@ -755,6 +778,7 @@ fn stream_chat(
     req: ChatRequest,
     scope: ChatScope,
     client_tools: Vec<ToolDef>,
+    include_usage: bool,
 ) -> Response {
     let id = format!("chatcmpl-{}", next_id());
     let created = unix_seconds();
@@ -803,11 +827,24 @@ fn stream_chat(
                         &outcome.client_tool_calls,
                     )));
                     let _ = tx.send(StreamMsg::Done("tool_calls"));
+                    if include_usage {
+                        let _ = tx.send(StreamMsg::Usage {
+                            prompt: outcome.completion.prompt_tokens,
+                            completion: outcome.completion.completion_tokens,
+                        });
+                    }
                 }
                 Ok(outcome) => {
                     let reason = outcome.completion.finish_reason.as_str();
+                    let (prompt, completion) = (
+                        outcome.completion.prompt_tokens,
+                        outcome.completion.completion_tokens,
+                    );
                     let _ = tx.send(StreamMsg::Delta(outcome.completion.content));
                     let _ = tx.send(StreamMsg::Done(reason));
+                    if include_usage {
+                        let _ = tx.send(StreamMsg::Usage { prompt, completion });
+                    }
                 }
                 Err(e) => {
                     let _ = tx.send(StreamMsg::Failed {
@@ -827,6 +864,12 @@ fn stream_chat(
             match stream_untooled(&state, &req, &mut emit) {
                 Ok(usage) => {
                     let _ = tx.send(StreamMsg::Done(usage.finish_reason.as_str()));
+                    if include_usage {
+                        let _ = tx.send(StreamMsg::Usage {
+                            prompt: usage.prompt_tokens,
+                            completion: usage.completion_tokens,
+                        });
+                    }
                 }
                 Err(e) => {
                     let _ = tx.send(StreamMsg::Failed {
@@ -848,6 +891,16 @@ fn stream_chat(
             StreamMsg::Done(reason) => {
                 chunk_json(&id, created, &model, Delta::default(), Some(reason))
             }
+            StreamMsg::Usage { prompt, completion } => usage_chunk_json(
+                &id,
+                created,
+                &model,
+                Usage {
+                    prompt_tokens: prompt,
+                    completion_tokens: completion,
+                    total_tokens: prompt.saturating_add(completion),
+                },
+            ),
             StreamMsg::Failed { message, kind } => {
                 serde_json::to_string(&ErrorResponse::new(message, kind))
                     .unwrap_or_else(|_| "{\"error\":{\"message\":\"stream failed\"}}".to_owned())
@@ -877,7 +930,9 @@ async fn responses(State(state): State<Shared>, Json(body): Json<ResponsesReques
     // request back into Ask mode: graph tools advertised and executed for a
     // client that asked for the opposite, plus the ~3,100 tokens of schemas
     // that behaviour exists to spare it. Raised in review of #825.
-    let declared_tools = body.tools.as_ref().is_some_and(|t| !t.is_empty());
+    // Present at all, including `[]`, which is the caller saying "no tools"
+    // (#827): only an absent `tools` key gets the graph tools.
+    let declared_tools = body.tools.is_some();
     let normalised = match body.normalise(state.limits) {
         Ok(n) => n,
         Err(msg) => return error(StatusCode::BAD_REQUEST, msg, "invalid_request_error"),
@@ -891,6 +946,9 @@ async fn responses(State(state): State<Shared>, Json(body): Json<ResponsesReques
         client_tools,
         tool_choice: _,
         parallel_tool_calls: _,
+        // The Responses wire has its own `stream_options` row (dropped): the
+        // chat-wire usage chunk does not exist there.
+        include_usage: _,
     } = normalised;
     if let Some(refusal) = unknown_model(&state, &req.model) {
         return refusal;
@@ -1117,6 +1175,21 @@ fn chunk_json(
             delta,
             finish_reason,
         }],
+        usage: None,
+    };
+    serde_json::to_string(&chunk).unwrap_or_default()
+}
+
+/// The last chunk `stream_options.include_usage` asks for: empty `choices`,
+/// and the request's `usage`, as OpenAI sends it (#855).
+fn usage_chunk_json(id: &str, created: u64, model: &str, usage: Usage) -> String {
+    let chunk = ChatCompletionChunk {
+        id: id.to_owned(),
+        object: "chat.completion.chunk",
+        created,
+        model: model.to_owned(),
+        choices: Vec::new(),
+        usage: Some(usage),
     };
     serde_json::to_string(&chunk).unwrap_or_default()
 }
@@ -1772,6 +1845,62 @@ mod tests {
         assert_eq!(json["choices"][0]["message"]["content"], "HI THERE");
         assert_eq!(json["choices"][0]["finish_reason"], "stop");
         assert_eq!(json["usage"]["total_tokens"], 5);
+    }
+
+    /// #855: `stream_options.include_usage` is honoured, not refused — one last
+    /// chunk with empty `choices` and the request's `usage`, after the finish
+    /// chunk and before `[DONE]`; and none at all when it is not asked for.
+    #[tokio::test]
+    async fn include_usage_adds_one_usage_chunk_before_done() {
+        let stream = |options: serde_json::Value| async move {
+            let mut body = serde_json::json!({
+                "model": "echo",
+                "messages": [{"role": "user", "content": "hi there"}],
+                "stream": true,
+            });
+            if !options.is_null() {
+                body["stream_options"] = options;
+            }
+            let resp = test_app()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/chat/completions")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            String::from_utf8_lossy(&bytes).into_owned()
+        };
+        let text = stream(serde_json::json!({"include_usage": true})).await;
+        let events: Vec<&str> = text
+            .lines()
+            .filter_map(|l| l.strip_prefix("data: "))
+            .collect();
+        let usage_at = events
+            .iter()
+            .position(|e| e.contains("\"usage\""))
+            .unwrap_or_else(|| panic!("a usage chunk: {text}"));
+        let usage: serde_json::Value = serde_json::from_str(events[usage_at]).expect("json");
+        assert_eq!(usage["choices"], serde_json::json!([]), "{usage}");
+        assert_eq!(usage["usage"]["total_tokens"], 5, "{usage}");
+        assert!(
+            events[usage_at - 1].contains("\"finish_reason\":\"stop\""),
+            "{text}"
+        );
+        assert_eq!(events[usage_at + 1], "[DONE]", "{text}");
+
+        for options in [
+            serde_json::Value::Null,
+            serde_json::json!({"include_usage": false}),
+        ] {
+            let text = stream(options).await;
+            assert!(!text.contains("\"usage\""), "{text}");
+        }
     }
 
     #[tokio::test]
@@ -3684,6 +3813,69 @@ mod tests {
             "a client that sent `tools` does not also get Roteiro's, even when \
              every tool it sent was one this endpoint drops: {prompt}"
         );
+    }
+
+    /// #827: `tools: []` is the caller saying "no tools", on both wires and on
+    /// every chat route — a plain completion, with no graph tool advertised and
+    /// none executed. Only an absent `tools` key is Ask mode.
+    #[tokio::test]
+    async fn an_empty_tools_array_gets_no_tools_on_either_wire() {
+        let sent_tools = |engine: &ScriptedServeEngine| {
+            engine
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .flatten()
+                .any(|m| m.content.contains("graph_only_tool"))
+        };
+        for uri in ["/v1/chat/completions", "/v1/myproj/chat/completions"] {
+            for stream in [false, true] {
+                let engine = ScriptedServeEngine::new(&["a plain answer"]);
+                let router = app_with_tools(engine.clone(), std::sync::Arc::new(PanicRegistry));
+                let body = serde_json::json!({
+                    "model": "echo",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "tools": [],
+                    "stream": stream,
+                });
+                let resp = router
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri(uri)
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.to_string()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), StatusCode::OK, "{uri} stream={stream}");
+                let text =
+                    String::from_utf8_lossy(&resp.into_body().collect().await.unwrap().to_bytes())
+                        .into_owned();
+                assert!(
+                    text.contains("a plain answer"),
+                    "{uri} stream={stream}: {text}"
+                );
+                assert!(
+                    !sent_tools(&engine),
+                    "{uri} stream={stream}: graph tools advertised"
+                );
+            }
+        }
+
+        let engine = ScriptedServeEngine::new(&["a plain answer"]);
+        let router = app_with_tools(engine.clone(), std::sync::Arc::new(PanicRegistry));
+        let resp = router
+            .oneshot(responses_body(&serde_json::json!({
+                "model": "echo", "stream": true, "input": "hi", "tools": [],
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(responses_content(&sse_text(resp).await), "a plain answer");
+        assert!(!sent_tools(&engine), "Responses: graph tools advertised");
     }
 
     /// The Ask path must keep working: no `tools` key at all still gets the

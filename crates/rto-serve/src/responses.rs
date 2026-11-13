@@ -928,6 +928,7 @@ impl ResponsesRequest {
             temperature: self.temperature,
             max_tokens: self.max_output_tokens,
             stream: Some(true),
+            stream_options: None,
             tools: (!tools.is_empty()).then_some(tools),
             tool_choice: self.tool_choice,
             parallel_tool_calls: self.parallel_tool_calls,
@@ -1979,15 +1980,11 @@ mod tests {
         .expect("a boolean is accepted, and not enforced");
     }
 
-    /// **The two wires must agree on what an empty `tools` array means**, and
-    /// they do: it is read as "the caller brought no tools", so the graph tools
-    /// are injected exactly as they are for a request with no `tools` key.
-    ///
-    /// Recorded as a test because the published mode table says "`tools`
-    /// present", and an empty array is literally present — a reading under which
-    /// this would be a bug on *both* wires. The rule the table means is "did the
-    /// caller bring tools", and `[]` answers no. Pinning it here stops the two
-    /// wires drifting apart on a question neither of them should answer alone.
+    /// **The two wires must agree on what an empty `tools` array means.** It
+    /// normalises to no client tools on both; the *mode* — no graph tools either,
+    /// because `[]` is the caller saying "no tools" (#827) — is decided from the
+    /// raw body in `server`, and pinned there by
+    /// `an_empty_tools_array_gets_no_tools_on_either_wire`.
     #[test]
     fn an_empty_tools_array_means_the_same_on_both_wires() {
         let via_responses = serde_json::from_value::<ResponsesRequest>(json!({

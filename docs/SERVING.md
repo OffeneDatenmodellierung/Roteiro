@@ -20,16 +20,20 @@ endpoint, bound to loopback (ADR-0006). It is enabled by building with the
 ## It has two modes, and the request chooses
 
 This is the single most useful thing to know about it. The mode is decided by
-whether you send a `tools` array — nothing else.
+the `tools` field, and by nothing else.
 
 | you send | mode | the model's tools are | grounded in your graph |
 |---|---|---|---|
-| **no `tools`**, or an empty `tools: []` | **Ask** | Roteiro's graph tools — `search`, `context`, `path`, `debt`, … | **yes** |
+| **no `tools` key** | **Ask** | Roteiro's graph tools — `search`, `context`, `path`, `debt`, … | **yes** |
 | **a non-empty `tools`** | **general** | **yours only** — the graph tools are not injected | no |
+| **an empty `tools: []`** | **plain** | **none** — a plain completion | no |
 
-The question is *did you bring tools*, so an empty array answers no and is read
-exactly as an absent one. Both wires agree on that, and a test pins them together
-so they cannot drift apart on it.
+**To get Ask mode, leave `tools` out.** An empty array is a request for no tools at
+all, and it is answered as one (#827): no graph tool is advertised or run. Some
+OpenAI-compatible clients send `tools: []` by default; for those, turn that off
+(or configure them to omit the field) if you want answers grounded in your graph.
+Both wires (`/v1/chat/completions` and `/v1/responses`) read it the same way, on
+every chat route, and a test pins them together.
 
 In Ask mode the endpoint is the Ask panel over HTTP: the server runs an agent
 loop, calls the graph's own tools, and answers from what it finds. That is the
@@ -200,7 +204,7 @@ Four statuses, the same four the divergence table above uses:
 | `stop` | **400** | `stop` is not supported: no stop sequence is applied, so generation runs to the `max_tokens` budget and your marker appears in the output rather than ending it. Truncate at your marker on the client side, and set `max_tokens` as the ceiling. |
 | `store` | **dropped** | asks OpenAI to retain the completion for its evals products; Roteiro stores nothing and sends nothing anywhere |
 | `stream` | **supported** | SSE chunks terminated by `data: [DONE]` |
-| `stream_options` | **400** | `stream_options` is not supported: the extra `usage` chunk `include_usage` promises is never streamed, so a client waiting for one before `[DONE]` waits for something that will not arrive. Read `usage` from the non-streaming response, which does carry it. |
+| `stream_options` | **supported** | `include_usage: true` adds one last chunk before `[DONE]`, with empty `choices` and the request's `usage` |
 | `temperature` | **supported** | the one sampling control this endpoint honours; `0` (or omitted) is greedy |
 | `tool_choice` | **accepted, not enforced** | forcing a named function is grammar-constrained sampling, which lands with the grammar work; half-implementing it would tell a client it was honoured |
 | `tools` | **supported** | advertised to the model; calls are returned, never run — bounded at 128 entries / 32 KiB |

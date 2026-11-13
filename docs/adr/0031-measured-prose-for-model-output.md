@@ -11,8 +11,8 @@ architectural-significance: MEDIUM  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Inference
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.3"
-last-modified: 2026-11-12
+version: "1.4"
+last-modified: 2026-11-13
 confluence-url:
 ---
 
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | Accepted |
 | **Architectural Significance** | MEDIUM |
 | **Domain** | Inference |
-| **Document version** | 1.3 |
+| **Document version** | 1.4 |
 
 ## Reference
 
@@ -154,3 +154,4 @@ that is wrong sometimes must not block a merge.
 | 1.1 | 2026-11-12 | §2 and §4 implemented: `rto_graph::prose::lint`, a `style:` line from `spec draft` beside the coverage line, and the partial controlled-English rules in the `spec draft`, verdict and Ask prompts. The prompt rules are not yet measured against a model. |
 | 1.2 | 2026-11-12 | §5 implemented: `roteiro docs prose [PATH…]` lints authored Markdown (default `docs/`), skipping frontmatter, and prints `path:line: rule — message` and a score per file. It always exits 0 and is not part of `roteiro check`. Issues now carry the line their sentence starts on, and an `un-` participle after *be* (`is unchanged`) is no longer read as passive. |
 | 1.3 | 2026-11-12 | §3 implemented: `spec draft --repair N` (0–3, off by default) rewrites each section against its style findings and keeps the best version. `rto_spec::repair_accepts` takes a rewrite only if it scores better **and** mentions every symbol and decision the draft did. A failed or unanswered pass ends the loop and keeps the best so far. |
+| 1.4 | 2026-11-13 | §4 measured: the plain-English sentence in the shared tool prompt does not change tool choice. `scripts/tool-choice-accuracy.py` against `roteiro serve` on Ollama `qwen3.8:27b`, with tools sent natively (#971), scored **13/13 with and 13/13 without** the sentence. Measured on tool choice only; answer quality is not measured. |

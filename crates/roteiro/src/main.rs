@@ -2118,6 +2118,33 @@ fn is_long_lived_server(cmd: &Command) -> bool {
     }
 }
 
+/// The environment variable that makes this process exit once its parent is gone.
+const EXIT_WITH_PARENT_ENV: &str = "ROTEIRO_EXIT_WITH_PARENT";
+
+/// A test-harness hook (#857): with [`EXIT_WITH_PARENT_ENV`] set, exit as soon as
+/// the process that started this one is gone.
+///
+/// A test's `Drop` guard reaps its server on every exit path the test itself
+/// survives, but not when the test process is killed — an interrupted run, a
+/// timeout, a `pkill` — and then the server is reparented and lives on. One was
+/// found 19h49m later holding a port. Polling the parent id is the portable
+/// signal for that on Unix; off Unix the hook does nothing.
+fn exit_with_parent() {
+    #[cfg(unix)]
+    if std::env::var_os(EXIT_WITH_PARENT_ENV).is_some() {
+        let parent = std::os::unix::process::parent_id();
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                if std::os::unix::process::parent_id() != parent {
+                    eprintln!("roteiro: parent {parent} is gone ({EXIT_WITH_PARENT_ENV}); exiting");
+                    std::process::exit(1);
+                }
+            }
+        });
+    }
+}
+
 // `main` is a one-arm-per-subcommand dispatcher; splitting the match further just
 // scatters the CLI wiring, so the line-count lint is noise here.
 #[allow(clippy::too_many_lines)]
@@ -2134,6 +2161,7 @@ fn main() -> anyhow::Result<()> {
     // operation, so this does not affect them. (We forbid `unsafe` workspace-wide,
     // hence the `sigpipe` wrapper rather than a raw `libc::signal` call.)
     sigpipe::reset();
+    exit_with_parent();
     let cli = Cli::parse();
     // Handle SIGHUP for every long-lived server, **as early as the command is
     // known**. Its default disposition *terminates the process*, so this is first

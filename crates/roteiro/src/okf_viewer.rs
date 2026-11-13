@@ -397,6 +397,23 @@ pub struct Mount {
     pub root: PathBuf,
 }
 
+/// `path` with the home directory written as `~`, so a disambiguating path does
+/// not also publish whose machine it is on.
+fn home_relative(path: &str, home: Option<&std::path::Path>) -> String {
+    let Some(home) = home
+        .map(|h| h.display().to_string())
+        .filter(|h| !h.is_empty())
+    else {
+        return path.to_owned();
+    };
+    match path.strip_prefix(&home) {
+        Some(rest) if rest.is_empty() || rest.starts_with(std::path::MAIN_SEPARATOR) => {
+            format!("~{rest}")
+        }
+        _ => path.to_owned(),
+    }
+}
+
 /// A URL-safe segment for `raw`, keeping only what a path segment carries plainly.
 ///
 /// Workspace and project names are directory names, so they may hold anything a
@@ -549,18 +566,30 @@ fn chooser(base: &str, mounts: &[Mount], explorer: Option<&str>) -> Response {
         let _ = write!(
             body,
             "<article><h1>OKF bundles</h1><p class=\"scope\">{} bundles are mounted \
-             here. Each is served read-only from the directory named beside it.</p>\
-             <ol class=\"hubs\">",
+             here, each served read-only.</p><ol class=\"hubs\">",
             mounts.len()
         );
+        // The directory is shown only where it is needed to tell two bundles
+        // apart — a label another mount shares — and home-relative even then
+        // (#836). Always printing the absolute path published the operator's
+        // filesystem layout to anyone who could reach the port.
+        let home = crate::config::home_dir();
         for m in mounts {
+            let shared = mounts.iter().filter(|o| o.label == m.label).count() > 1;
+            let origin = if shared {
+                format!(
+                    " <span class=\"deg\">{}</span>",
+                    bdi(&home_relative(&m.origin, home.as_deref()))
+                )
+            } else {
+                String::new()
+            };
             let _ = write!(
                 body,
-                "<li><a href=\"{}/{}\">{}</a> <span class=\"deg\">{}</span></li>",
+                "<li><a href=\"{}/{}\">{}</a>{origin}</li>",
                 escape(base),
                 escape(&m.slug),
                 bdi(&m.label),
-                bdi(&m.origin)
             );
         }
         body.push_str("</ol></article>");
@@ -707,18 +736,15 @@ const FILE_CSP: &str = "default-src 'none'; sandbox; base-uri 'none'";
 /// served down this route.
 const MAX_FILE_BYTES: u64 = 32 * 1024 * 1024;
 
-/// `Cache-Control` for the two compiled-in assets.
-///
-/// They are `include_str!`ed, so they change only when the binary does — the
-/// same reasoning and the same hour as `explorer_app`'s `CACHE_JS`. Without it a
-/// browser refetches the whole of cytoscape on every navigation, which on a
-/// bundle whose pages are otherwise cheap is the largest thing on the wire.
-///
-/// Deliberately **not** applied to any bundle content. `/f/` serves files an
-/// author is editing, and `/`, `/c/` and the graph are rendered from a bundle
-/// that changes underneath the server — caching those in the browser would undo
-/// the reload guarantee the server-side cache is careful to keep.
-const CACHE_ASSET: &str = "public, max-age=3600";
+// The two compiled-in assets are served through `explorer_app::revalidated`:
+// `no-cache` plus an `ETag`, so the browser keeps cytoscape and the stylesheet
+// but asks before reusing them (#835). A `max-age` at these stable paths made a
+// restarted server serve the previous build's stylesheet for up to an hour.
+//
+// No caching header at all is applied to bundle content. `/f/` serves files an
+// author is editing, and `/`, `/c/` and the graph are rendered from a bundle
+// that changes underneath the server — caching those in the browser would undo
+// the reload guarantee the server-side cache is careful to keep.
 
 /// The application's name, as the explorer shell's own breadcrumb states it.
 ///
@@ -1676,31 +1702,28 @@ async fn file(State(v): State<Viewer>, UrlPath(path): UrlPath<String>) -> Respon
     response
 }
 
-async fn stylesheet() -> Response {
-    (
-        [
-            (header::CONTENT_TYPE, "text/css; charset=utf-8"),
-            (header::CONTENT_SECURITY_POLICY, CSP),
-            (header::CACHE_CONTROL, CACHE_ASSET),
-        ],
+async fn stylesheet(request: axum::http::HeaderMap) -> Response {
+    with_csp(crate::explorer_app::revalidated(
+        &request,
+        "text/css; charset=utf-8",
         STYLE.as_str(),
-    )
-        .into_response()
+    ))
 }
 
-async fn cytoscape() -> Response {
-    (
-        [
-            (
-                header::CONTENT_TYPE,
-                "application/javascript; charset=utf-8",
-            ),
-            (header::CONTENT_SECURITY_POLICY, CSP),
-            (header::CACHE_CONTROL, CACHE_ASSET),
-        ],
+async fn cytoscape(request: axum::http::HeaderMap) -> Response {
+    with_csp(crate::explorer_app::revalidated(
+        &request,
+        "application/javascript; charset=utf-8",
         CYTOSCAPE,
-    )
-        .into_response()
+    ))
+}
+
+fn with_csp(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        header::HeaderValue::from_static(CSP),
+    );
+    response
 }
 
 #[cfg(test)]
@@ -3054,13 +3077,10 @@ mod tests {
     /// Every route a mounted bundle answers on, and a 404 from inside it —
     /// scanned for the fixture's own root, which is a real absolute path.
     ///
-    /// **The chooser is the one page that still prints one, and it is excluded
-    /// here deliberately rather than by omission** — see
-    /// `the_chooser_still_names_each_bundles_directory` below, which pins that it
-    /// does. It is `Mount::origin`, a v1.2 column whose stated job is letting a
-    /// reader tell two similarly-named bundles apart; whether that is worth the
-    /// same disclosure is a decision about the chooser, not about the header, and
-    /// it is not this change's to make.
+    /// **The chooser is excluded here deliberately**: it prints a directory, and
+    /// only home-relative, when two mounts share a label and the path is the one
+    /// thing that tells them apart — see
+    /// `the_chooser_shows_a_directory_only_to_tell_shared_labels_apart` (#836).
     #[tokio::test]
     async fn no_mounted_page_publishes_the_bundle_path() {
         let a = named_bundle("nopath-a", "Alpha");
@@ -3481,44 +3501,58 @@ mod tests {
         );
     }
 
-    /// **Characterisation, not endorsement.** The chooser lists each bundle's
-    /// directory beside its name, and that directory is an absolute path — so a
-    /// `serve` bound off loopback publishes the operator's filesystem layout on
-    /// this one page, which is the same disclosure the header stopped making.
-    ///
-    /// It is deliberately left alone by the header change and pinned here so the
-    /// state of the world is stated rather than assumed: `Mount::origin` exists
-    /// because two projects may carry the same `<workspace>/<project>` label
-    /// after `slug` folds them, and dropping it takes away the only thing that
-    /// tells them apart. Trading that off is a decision about the chooser.
-    ///
-    /// If it is ever changed, this test fails and should be deleted, not relaxed.
+    /// #836: the chooser names a bundle's directory only when another mount
+    /// shares its label, and then home-relative. Distinct labels print no path
+    /// at all, so a `serve` off loopback no longer publishes the filesystem
+    /// layout on this page.
     #[tokio::test]
-    async fn the_chooser_still_names_each_bundles_directory() {
+    async fn the_chooser_shows_a_directory_only_to_tell_shared_labels_apart() {
         let (a, b) = (
             named_bundle("origin-a", "Alpha"),
             named_bundle("origin-b", "Beta"),
         );
         let roots = [a.display().to_string(), b.display().to_string()];
-        let mounts = vec![
-            labelled("one", "Acme/widgets", a),
-            labelled("two", "Acme/gadgets", b),
+        let distinct = vec![
+            labelled("one", "Acme/widgets", a.clone()),
+            labelled("two", "Acme/gadgets", b.clone()),
         ];
-        let app = host().merge(mounts_router("/okf", mounts, Some("/".to_owned())));
+        let app = host().merge(mounts_router("/okf", distinct, Some("/".to_owned())));
         let (status, body, _) = get_mounted(&app, "/okf").await;
         assert_eq!(status, StatusCode::OK);
-        // **Every** row, not the first. Captured only `origin-a` until review
-        // pointed out that a regression dropping the second row's `origin` — or
-        // printing the first bundle's for both — would have passed. "Each" is the
-        // word in the name and it has to be the assertion too.
         for root in &roots {
             assert!(
-                body.contains(&escape(root)),
-                "the chooser no longer prints `Mount::origin` for every bundle \
-                 (missing `{root}`) — if that was on purpose, delete this test \
-                 rather than weakening it"
+                !body.contains(&escape(root)),
+                "a path with no collision: {body}"
             );
         }
+
+        let shared = vec![
+            labelled("one", "Acme/widgets", a),
+            labelled("two", "Acme/widgets", b),
+        ];
+        let app = host().merge(mounts_router("/okf", shared, Some("/".to_owned())));
+        let (_, body, _) = get_mounted(&app, "/okf").await;
+        // **Every** colliding row names its directory, or the two stay
+        // indistinguishable.
+        for root in &roots {
+            let shown = home_relative(root, crate::config::home_dir().as_deref());
+            assert!(body.contains(&escape(&shown)), "missing `{shown}`: {body}");
+        }
+    }
+
+    #[test]
+    fn a_path_under_home_is_written_with_a_tilde() {
+        let home = std::path::Path::new("/Users/someone");
+        assert_eq!(
+            home_relative("/Users/someone/GIT/x/okf", Some(home)),
+            "~/GIT/x/okf"
+        );
+        assert_eq!(
+            home_relative("/Users/someoneelse/x", Some(home)),
+            "/Users/someoneelse/x"
+        );
+        assert_eq!(home_relative("/srv/okf", Some(home)), "/srv/okf");
+        assert_eq!(home_relative("/srv/okf", None), "/srv/okf");
     }
 
     /// The mounted header wears the explorer shell's chrome rather than a second

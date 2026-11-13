@@ -91,7 +91,8 @@ topic, then `query` the key it returns.
 
 For **natural-language** questions, run `roteiro serve --models` and ask over the
 OpenAI-compatible `/v1` endpoint — the server calls `search`/`path`/`debt` for
-you and answers from the graph, not from memory. Use a model that tool-calls
+you and answers from the graph, not from memory. **Leave `tools` out of the
+request** to get that: `tools: []` means no tools, and the answer is ungrounded. Use a model that tool-calls
 reliably (e.g. `qwen3-8b`); very small models will hallucinate.
 
 ## Plan a change (author an ADR/blueprint)
