@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v7.0.0...roteiro-v7.1.0) - 2026-11-13
+
+### Added
+
+- *(spec)* `spec draft --repair N` — bounded, coverage-preserving rewrites
+- *(docs)* `roteiro docs prose` — the style lint over authored documents
+- *(prose)* a controlled-English style lint, and plain-English prompt rules
+- *(spec)* report what a draft never mentions; ADR-0031
+
 ## [7.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v6.2.0...roteiro-v7.0.0) - 2026-11-12
 
 ### Added
