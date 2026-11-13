@@ -494,6 +494,48 @@ fn a_huge_heading_is_quoted_bounded_and_marked() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Every finding that quotes a bundle-chosen value is bounded, not only L4's:
+/// a duplicated title, invalid `generated.at`/`verified[].at`, a padded `type`,
+/// an unmatched footnote label and an uncited source id are each 50 KB here,
+/// and no message may grow with them. Raised in review on #970.
+#[test]
+fn no_finding_message_grows_with_the_bundle() {
+    let big = "x".repeat(50_000);
+    let concept = |n: u8| {
+        format!(
+            "---\ntype: \" Metric \"\ntitle: {big}\n\
+             generated: {{ by: human:a, at: {big} }}\n\
+             verified: [{{ by: human:b, at: {big} }}]\n\
+             sources: [{{ id: s{big}, resource: https://e.org/{n} }}]\n---\n\n\
+             # Head\n\nBody[^l{big}].\n"
+        )
+    };
+    let (one, two) = (concept(1), concept(2));
+    let root = bundle(
+        "huge-values",
+        &[
+            ("index.md", ROOT_INDEX),
+            ("metrics/one.md", &one),
+            ("metrics/two.md", &two),
+        ],
+    );
+    let mut found = messages(&conform::validate_report(&root).expect("load"), None);
+    found.extend(messages(&conform::lint_report(&root).expect("load"), None));
+    assert!(
+        found.iter().filter(|m| m.contains("(truncated, ")).count() >= 5,
+        "the fixture must actually reach the quoting sites: {found:?}"
+    );
+    for message in &found {
+        assert!(
+            message.len() < 4 * conform::QUOTE_MAX_BYTES + 400,
+            "a finding grew with the bundle ({} bytes): {}…",
+            message.len(),
+            &message[..200.min(message.len())]
+        );
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// A bundle with no concepts reports that, rather than reporting nothing wrong.
 #[test]
 fn an_empty_bundle_says_it_examined_nothing() {

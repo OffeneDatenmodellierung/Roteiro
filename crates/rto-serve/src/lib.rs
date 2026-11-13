@@ -74,9 +74,9 @@ pub use types::{DEFAULT_MAX_CLIENT_TOOL_BYTES, Limits};
 /// `…/crates/rto-serve` (a packaged copy is `rto-serve-<version>`), **and** a
 /// `[workspace]` manifest sits two levels up. A manifest check alone is fooled by
 /// a vendored copy under somebody else's workspace. In a checkout the page is
-/// committed, so its absence there panics rather than skips, and so does any I/O
-/// error other than `NotFound` — a skip that hides "could not read" is a green
-/// that means nothing.
+/// committed, so its absence there panics rather than skips, and so does any
+/// other I/O error — a skip that hides "could not read" is a green that means
+/// nothing. Outside a checkout the page is never read at all.
 #[cfg(test)]
 pub(crate) fn serving_doc() -> Option<String> {
     use std::io::{ErrorKind, Write as _};
@@ -96,18 +96,22 @@ pub(crate) fn serving_doc() -> Option<String> {
         Err(e) => panic!("cannot read {} ({:?}: {e})", manifest.display(), e.kind()),
     };
     let doc = root.join("docs/SERVING.md");
+    // Not a checkout: skip **without reading**. A vendored copy at
+    // `project/vendor/rto-serve-<version>` would otherwise read the host
+    // project's own `docs/SERVING.md` and hold Roteiro's tables to unrelated
+    // prose. Raised in review on #970.
+    if !(laid_out && in_workspace) {
+        // `io::stderr()`, not `eprintln!`: libtest captures the latter and
+        // discards it for a passing test, so the skip would print to nobody.
+        let _ = writeln!(
+            std::io::stderr(),
+            "SKIP: not a repository checkout, so {} is not Roteiro's page",
+            doc.display()
+        );
+        return None;
+    }
     match std::fs::read_to_string(&doc) {
         Ok(text) => Some(text),
-        Err(e) if e.kind() == ErrorKind::NotFound && !(laid_out && in_workspace) => {
-            // `io::stderr()`, not `eprintln!`: libtest captures the latter and
-            // discards it for a passing test, so the skip would print to nobody.
-            let _ = writeln!(
-                std::io::stderr(),
-                "SKIP: {} is absent and this is not a repository checkout",
-                doc.display()
-            );
-            None
-        }
         Err(e) => panic!(
             "cannot read {} ({:?}: {e}); in a repository checkout the page is \
              committed, so this is a failure rather than a skip",

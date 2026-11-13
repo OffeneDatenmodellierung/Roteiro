@@ -77,7 +77,38 @@ impl Limits {
 struct Upload {
     /// `raw/`'s real path, resolved once at startup.
     raw: Arc<PathBuf>,
+    /// `raw/`'s identity at startup, so a write can prove it landed in that
+    /// directory and not in whatever a swapped path now points at.
+    raw_id: Option<FileId>,
     limits: Limits,
+    /// Held from the count check to the file's creation, so concurrent uploads
+    /// cannot both take the last slot under [`Limits::max_files`].
+    // shortcut: one process only; two servers over one raw/ can still race the
+    // count by one file each — move the count into a lock file if that is ever supported.
+    gate: Arc<std::sync::Mutex<()>>,
+}
+
+/// `(device, inode)` on Unix; `None` elsewhere, where only the path check runs.
+type FileId = (u64, u64);
+
+#[cfg_attr(
+    unix,
+    allow(
+        clippy::unnecessary_wraps,
+        reason = "always `Some` on Unix; the non-Unix build returns `None`"
+    )
+)]
+fn file_id(meta: &std::fs::Metadata) -> Option<FileId> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        Some((meta.dev(), meta.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        None
+    }
 }
 
 /// The upload router over `raw`, which must already be the resolved real path
@@ -87,8 +118,10 @@ pub fn router(raw: PathBuf, limits: Limits) -> Router {
         .route(ROUTE, put(store))
         .layer(DefaultBodyLimit::max(limits.max_bytes))
         .with_state(Upload {
+            raw_id: std::fs::metadata(&raw).ok().as_ref().and_then(file_id),
             raw: Arc::new(raw),
             limits,
+            gate: Arc::default(),
         })
 }
 
@@ -178,6 +211,11 @@ fn store_blocking(up: &Upload, name: &str, declared: &str, body: &[u8]) -> (Stat
             format!("refused: `.{ext}` must be sent as `Content-Type: {expected}`\n"),
         );
     }
+    // A poisoned lock only means another upload panicked; the count is re-read.
+    let _held = up
+        .gate
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     match std::fs::read_dir(up.raw.as_path()).map(Iterator::count) {
         Ok(held) if held >= up.limits.max_files => {
             return (
@@ -198,7 +236,7 @@ fn store_blocking(up: &Upload, name: &str, declared: &str, body: &[u8]) -> (Stat
             "refused: destination resolves outside raw/\n".to_owned(),
         );
     }
-    match write_new(&dest, body) {
+    match write_new(&dest, up.raw_id, body) {
         Ok(()) => (
             StatusCode::CREATED,
             format!(
@@ -207,6 +245,9 @@ fn store_blocking(up: &Upload, name: &str, declared: &str, body: &[u8]) -> (Stat
                 body.len()
             ),
         ),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            (StatusCode::FORBIDDEN, format!("refused: {e}\n"))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (
             StatusCode::CONFLICT,
             format!("refused: raw/{name} already exists, and uploads never overwrite\n"),
@@ -239,11 +280,38 @@ fn contained(raw: &Path, dest: &Path) -> bool {
 /// `create_new` is `O_CREAT | O_EXCL`: it refuses an existing file and an
 /// existing symlink alike, never following it. A failed write removes the
 /// partial file it created.
-fn write_new(dest: &Path, body: &[u8]) -> std::io::Result<()> {
+///
+/// `create_new` protects only the final component, so before any byte is
+/// written the new file must be the entry `dest` names *and* sit in the
+/// directory `raw_id` identified at startup. An ancestor swapped for a symlink
+/// between [`contained`] and the open leaves an empty file elsewhere, which is
+/// removed, and the upload is refused with nothing written.
+// shortcut: a swap *and* swap-back inside this window is not caught; closing it
+// needs `openat` on a held directory handle, which std does not expose.
+fn write_new(dest: &Path, raw_id: Option<FileId>, body: &[u8]) -> std::io::Result<()> {
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(dest)?;
+    let ours = file.metadata().ok().as_ref().and_then(file_id);
+    let named = std::fs::symlink_metadata(dest)
+        .ok()
+        .as_ref()
+        .and_then(file_id);
+    let parent = dest
+        .parent()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .as_ref()
+        .and_then(file_id);
+    if raw_id.is_some() && (ours != named || parent != raw_id) {
+        if ours.is_some() && ours == named {
+            let _ = std::fs::remove_file(dest);
+        }
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "the destination moved outside raw/ while it was being created",
+        ));
+    }
     file.write_all(body)
         .and_then(|()| file.sync_all())
         .inspect_err(|_| {
@@ -380,6 +448,67 @@ mod tests {
             .status();
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(entries(&outside), 0);
+    }
+
+    /// The window `contained` cannot close: the path check passed, then the
+    /// directory the name lands in is not the one identified at startup. Driven
+    /// directly with a startup identity that does not match, so it needs no race.
+    #[test]
+    fn a_write_that_lands_outside_the_startup_raw_is_undone() {
+        let (raw, outside) = fixture("landed");
+        let raw_id = std::fs::metadata(&raw)
+            .ok()
+            .as_ref()
+            .and_then(super::file_id);
+        let err = super::write_new(&outside.join("x.md"), raw_id, b"secret")
+            .expect_err("a file outside raw/ is refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(entries(&outside), 0, "the stray empty file is removed");
+        super::write_new(&raw.join("x.md"), raw_id, b"ok").expect("inside raw/ is fine");
+    }
+
+    /// One slot left and sixteen uploads under different names released at
+    /// once: exactly one may take it. `raw/` is pre-filled so each count is a
+    /// slow directory read, which keeps every thread inside the
+    /// check-then-create window together when nothing serialises them.
+    #[test]
+    fn concurrent_uploads_cannot_overfill_the_count() {
+        const SEEDED: usize = 2_000;
+        const THREADS: usize = 16;
+        let (raw, _) = fixture("race");
+        for i in 0..SEEDED {
+            std::fs::write(raw.join(format!("seed{i}.txt")), "s").expect("seed");
+        }
+        let up = super::Upload {
+            raw_id: std::fs::metadata(&raw)
+                .ok()
+                .as_ref()
+                .and_then(super::file_id),
+            raw: std::sync::Arc::new(raw.clone()),
+            limits: Limits {
+                max_files: SEEDED + 1,
+                ..Limits::DEFAULT
+            },
+            gate: std::sync::Arc::default(),
+        };
+        let start = std::sync::Barrier::new(THREADS);
+        let created = std::thread::scope(|s| {
+            let runs: Vec<_> = (0..THREADS)
+                .map(|i| {
+                    let (up, start) = (&up, &start);
+                    s.spawn(move || {
+                        start.wait();
+                        super::store_blocking(up, &format!("f{i}.txt"), "text/plain", b"x").0
+                    })
+                })
+                .collect();
+            runs.into_iter()
+                .map(|r| r.join().expect("join"))
+                .filter(|status| *status == StatusCode::CREATED)
+                .count()
+        });
+        assert_eq!(created, 1);
+        assert_eq!(entries(&raw), SEEDED + 1);
     }
 
     #[tokio::test]

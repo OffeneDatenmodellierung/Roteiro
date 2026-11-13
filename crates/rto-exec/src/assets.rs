@@ -349,6 +349,14 @@ pub enum Integrity {
         /// What restores them.
         remedy: String,
     },
+    /// Something is on disk — the record, the bytes, or both — but it cannot
+    /// be read, so it is neither verified nor known to be absent.
+    Unreadable {
+        /// Which file, and the error reading it.
+        cause: String,
+        /// What fixes it.
+        remedy: String,
+    },
 }
 
 impl Integrity {
@@ -360,13 +368,33 @@ impl Integrity {
         !matches!(self, Self::Ok | Self::NotProvisioned { .. })
     }
 
-    /// Classify from the record and the digest of what is on disk.
-    fn of(spec: &AssetSpec, record: Option<&InstalledAsset>, actual: Option<String>) -> Self {
+    /// Classify from the record and the digest of what is on disk; `unreadable`
+    /// names a file that exists but could not be read, which outranks both.
+    fn of(
+        spec: &AssetSpec,
+        record: Option<&InstalledAsset>,
+        actual: Option<String>,
+        unreadable: Option<String>,
+    ) -> Self {
         const PREFETCH: &str = "run `roteiro security prefetch`";
         let obtain = match spec.source {
             AssetSource::External { hint } => format!("obtain it (`{hint}`), then {PREFETCH}"),
-            AssetSource::Vendored(_) | AssetSource::Download { .. } => PREFETCH.to_owned(),
+            AssetSource::Vendored(_) => PREFETCH.to_owned(),
+            // Plain prefetch refuses to fetch (`FetchNotPermitted`): name the flag.
+            AssetSource::Download { .. } => format!(
+                "run `roteiro security prefetch --analyzer {} --allow-download`",
+                spec.analyzer
+            ),
         };
+        if let Some(cause) = unreadable {
+            return Self::Unreadable {
+                cause,
+                remedy: format!(
+                    "make it readable by this user; if it is corrupt, remove it and {}",
+                    obtain.trim_start_matches("run ")
+                ),
+            };
+        }
         match (record, actual) {
             (Some(r), Some(actual)) if r.digest == actual => Self::Ok,
             (Some(r), Some(actual)) => Self::DigestMismatch {
@@ -735,7 +763,8 @@ pub fn status(root: &Path, analyzer: Option<&str>) -> Vec<AssetStatus> {
             let verified = installed
                 .as_ref()
                 .map(|record| actual.as_deref() == Some(record.digest.as_str()));
-            let integrity = Integrity::of(spec, installed.as_ref(), actual);
+            let unreadable = unreadable(root, spec, installed.is_some(), actual.is_some());
+            let integrity = Integrity::of(spec, installed.as_ref(), actual, unreadable);
             AssetStatus {
                 id: spec.id,
                 analyzer: spec.analyzer,
@@ -783,6 +812,40 @@ pub fn advisory_db_evidence(root: &Path, analyzer: &str) -> Option<rto_graph::Ad
         digest: record.digest,
         published_at: record.published_at,
     })
+}
+
+/// The first file that exists but could not be read, with the error — so a
+/// permissions or corruption problem is not reported as "missing" (#900).
+fn unreadable(
+    root: &Path,
+    spec: &AssetSpec,
+    have_record: bool,
+    have_bytes: bool,
+) -> Option<String> {
+    let exists = |p: &Path| std::fs::symlink_metadata(p).is_ok();
+    let record = record_path(root, spec);
+    if !have_record && exists(&record) {
+        let why = match std::fs::read(&record) {
+            Err(e) => e.to_string(),
+            Ok(_) => "not a valid record".to_owned(),
+        };
+        return Some(format!("{}: {why}", record.display()));
+    }
+    let target = asset_path(root, spec);
+    if !have_bytes && exists(&target) {
+        let why = match spec.source {
+            AssetSource::Vendored(_) => std::fs::read(&target).err().map(|e| e.to_string()),
+            AssetSource::External { .. } | AssetSource::Download { .. } => {
+                digest_tree(&target).err().map(|e| e.to_string())
+            }
+        };
+        return Some(format!(
+            "{}: {}",
+            target.display(),
+            why.unwrap_or_else(|| "could not be digested".to_owned())
+        ));
+    }
+    None
 }
 
 /// Digest of what is on disk right now, or `None` if it is not there.
@@ -1197,6 +1260,34 @@ mod tests {
         provision(&cache.0, rules()).expect("again");
         std::fs::remove_file(super::record_path(&cache.0, rules())).expect("remove record");
         assert!(matches!(state(), super::Integrity::RecordMissing { .. }));
+
+        // A record that exists but does not parse is not "missing".
+        std::fs::write(super::record_path(&cache.0, rules()), b"{not json").expect("corrupt");
+        match state() {
+            super::Integrity::Unreadable { cause, remedy } => {
+                assert!(cause.contains("installed.json"), "{cause}");
+                assert!(remedy.contains("prefetch"), "{remedy}");
+            }
+            other => panic!("expected unreadable, got {other:?}"),
+        }
+        assert!(state().is_failure());
+    }
+
+    /// A downloadable asset's remedy is a command that can actually fetch it:
+    /// plain `prefetch` refuses with `FetchNotPermitted`.
+    #[test]
+    fn a_downloadable_assets_remedy_names_allow_download() {
+        let spec = ASSETS
+            .iter()
+            .find(|s| matches!(s.source, AssetSource::Download { .. }))
+            .expect("a downloadable asset");
+        match super::Integrity::of(spec, None, None, None) {
+            super::Integrity::NotProvisioned { remedy } => {
+                assert!(remedy.contains("--allow-download"), "{remedy}");
+                assert!(remedy.contains(spec.analyzer), "{remedy}");
+            }
+            other => panic!("expected not provisioned, got {other:?}"),
+        }
     }
 
     #[test]

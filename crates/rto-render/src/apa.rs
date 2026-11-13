@@ -1081,12 +1081,18 @@ fn container_spans(
     spans.push(EntrySpan::Italic(container.title.trim().to_owned()));
     let mut after = String::new();
     if kind == WorkKind::JournalArticle {
-        if let Some(volume) = attested_text(&container.volume).value() {
+        let volume = attested_text(&container.volume).value();
+        if let Some(volume) = volume {
             spans.push(EntrySpan::Plain(", ".to_owned()));
             spans.push(EntrySpan::Italic(volume.to_owned()));
-            if let Some(issue) = attested_text(&container.issue).value() {
-                let _ = write!(after, "({issue})");
+        }
+        // A journal with issues but no volumes: APA 7 puts the issue straight
+        // after the title, `*Journal*, (3), 45–67.` — never dropped.
+        if let Some(issue) = attested_text(&container.issue).value() {
+            if volume.is_none() {
+                after.push_str(", ");
             }
+            let _ = write!(after, "({issue})");
         }
         if let Some((pages, _)) = pages {
             let _ = write!(after, ", {pages}");
@@ -1944,6 +1950,22 @@ mod tests {
                 .contains(&EntrySpan::Italic("Communications of the ACM".to_owned()))
         );
         assert!(rendered.spans.contains(&EntrySpan::Italic("12".to_owned())));
+    }
+
+    /// A journal numbered by issue alone keeps its issue: APA 7 puts it straight
+    /// after the title. Raised in review on #970.
+    #[test]
+    fn a_journal_with_issues_but_no_volumes_keeps_the_issue() {
+        let mut article = complete("i", WorkKind::JournalArticle, "Spark at scale");
+        let mut journal = container("Login");
+        journal.volume = Attested::AbsentFromWork;
+        article.container = Some(journal);
+        article.locator = Attested::Known(doi("10.1145/2934664"));
+        assert_eq!(
+            entry(&article).expect("renders").plain_text(),
+            "Luna, R. (2020). Spark at scale. Login, (3), 45\u{2013}67. \
+             https://doi.org/10.1145/2934664"
+        );
     }
 
     /// A chapter renders APA's no-editor form: editors are not modelled, so

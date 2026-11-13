@@ -14099,12 +14099,25 @@ fn run_security_status(analyzer: Option<&str>, json: bool) -> anyhow::Result<()>
                     rto_exec::Integrity::BytesMissing { remedy, .. } => {
                         format!("  ** BYTES MISSING — {remedy} **")
                     }
+                    rto_exec::Integrity::Unreadable { cause, remedy } => {
+                        format!("  ** UNREADABLE: {cause} — {remedy} **")
+                    }
                     _ => String::new(),
                 }
             ),
             None => match &asset.integrity {
                 rto_exec::Integrity::RecordMissing { remedy } => println!(
                     "  {:<22} {:<12} ** UNRECORDED: bytes present, no record — {remedy} **",
+                    asset.id,
+                    asset.kind.as_str()
+                ),
+                rto_exec::Integrity::Unreadable { cause, remedy } => println!(
+                    "  {:<22} {:<12} ** UNREADABLE: {cause} — {remedy} **",
+                    asset.id,
+                    asset.kind.as_str()
+                ),
+                rto_exec::Integrity::NotProvisioned { remedy } => println!(
+                    "  {:<22} {:<12} not provisioned — {remedy}",
                     asset.id,
                     asset.kind.as_str()
                 ),

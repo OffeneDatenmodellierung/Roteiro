@@ -1278,15 +1278,21 @@ fn inline_spans(
         if bytes[i] == b'<' {
             // A `<` inside a `[[…]]` is part of the Roteiro token, not markup.
             let in_wiki = wiki.iter().any(|(r, _)| r.contains(&i));
-            match autolink_close(bytes, i).filter(|_| !in_wiki) {
+            // Read the autolink from the *source* line. An autolink and a code
+            // span bind left to right (`CommonMark` §6.1), so one opened before a
+            // backtick keeps it literally: ``<https://e.org/a`b`c>`` links to
+            // ``https://e.org/a`b`c``. Reading the stripped line instead dropped
+            // the span's text, and could join an invalid autolink into a valid one.
+            let open = map.start(i);
+            match autolink_close(source, open).filter(|_| !in_wiki) {
                 Some(close) => {
                     out.push((
                         LinkKind::Autolink,
-                        map.start(i)..map.start(close) + 1,
-                        map.widest(&(i + 1..close)),
-                        stripped[i + 1..close].to_owned(),
+                        open..close + 1,
+                        open + 1..close,
+                        line[open + 1..close].to_owned(),
                     ));
-                    i = close + 1;
+                    i = map.stripped(close + 1).max(i + 1);
                 }
                 None => i += 1,
             }
@@ -1340,7 +1346,9 @@ fn inline_spans(
 /// followed by a `:` before a space, so raw HTML is never read as one.
 fn autolink_close(bytes: &[u8], open: usize) -> Option<usize> {
     let rest = &bytes[open + 1..];
-    let colon = rest.iter().position(|b| *b == b':')?;
+    // The scheme is at most 32 bytes, so the colon is within 33: searching the
+    // whole line made a run of `<` with no colon quadratic.
+    let colon = rest.iter().take(33).position(|b| *b == b':')?;
     let scheme = &rest[..colon];
     let scheme_ok = (2..=32).contains(&scheme.len())
         && scheme[0].is_ascii_alphabetic()
@@ -1990,6 +1998,28 @@ mod link_tests {
         ] {
             assert!(scanned(line).is_empty(), "{line:?}: {:?}", scanned(line));
         }
+    }
+
+    /// An autolink opened before a backtick keeps the backtick literally, as
+    /// pulldown-cmark reads it; and stripping a code span must not join an
+    /// invalid autolink into a valid one. Raised in review on #970.
+    #[test]
+    fn an_autolink_is_read_from_the_source_not_the_stripped_line() {
+        let line = "<https://e.org/a`b`c>";
+        assert_eq!(scanned(line)[0].1, "https://e.org/a`b`c");
+        assert_eq!(&line[markdown_links(line)[0].span()], line);
+        assert!(scanned("<https://e.org/a `x y` b>").is_empty());
+        assert!(scanned("<ht`x`tps://e.org>").is_empty());
+    }
+
+    /// A long run of `<` with no colon is linear: the scheme search stops at 33
+    /// bytes. Raised in review on #970.
+    #[test]
+    fn a_run_of_angle_brackets_is_not_quadratic() {
+        let line = "<".repeat(200_000);
+        let started = std::time::Instant::now();
+        assert!(scanned(&line).is_empty());
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
     }
 
     #[test]

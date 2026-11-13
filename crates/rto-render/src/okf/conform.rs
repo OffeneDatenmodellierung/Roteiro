@@ -223,7 +223,10 @@ pub fn validate_bundle(bundle: &Bundle, root: &Path) -> CheckReport {
     // could read.
     for (path, error) in bundle.parse_errors() {
         cx.at_file(path);
-        cx.err(format!("not a readable OKF document: {error}"));
+        cx.err(format!(
+            "not a readable OKF document: {}",
+            quote(&error.to_string())
+        ));
     }
 
     for concept in bundle.concepts() {
@@ -313,7 +316,8 @@ fn check_type(cx: &mut Cx<'_>, concept: &Concept, fm: &Frontmatter) {
         && t.trim() != t
     {
         cx.info(format!(
-            "`type` has surrounding whitespace (`{t}`); consumers that compare it literally will not match"
+            "`type` has surrounding whitespace (`{}`); consumers that compare it literally will not match",
+            quote(&t)
         ));
     }
 }
@@ -370,7 +374,7 @@ fn check_trust(cx: &mut Cx<'_>, fm: &Frontmatter) {
             None => cx.warn("`generated.at` is required within `generated`"),
             Some(at) if at.datetime.is_none() => cx.warn(format!(
                 "`generated.at` is not an ISO-8601 datetime (`{}`)",
-                at.raw
+                quote(&at.raw)
             )),
             Some(_) => {}
         }
@@ -391,7 +395,7 @@ fn check_trust(cx: &mut Cx<'_>, fm: &Frontmatter) {
                 None => cx.warn(format!("`verified[{i}].at` is missing")),
                 Some(at) if at.datetime.is_none() => cx.warn(format!(
                     "`verified[{i}].at` is not an ISO-8601 datetime (`{}`)",
-                    at.raw
+                    quote(&at.raw)
                 )),
                 Some(_) => {}
             }
@@ -432,7 +436,7 @@ fn check_attribution(cx: &mut Cx<'_>, doc: &Document) {
         if attribution.source.is_none() {
             cx.warn(format!(
                 "footnote [^{}] matches no `sources[].id`; the label is the join key for attribution",
-                attribution.label
+                quote(&attribution.label)
             ));
         }
     }
@@ -561,7 +565,8 @@ fn check_link_targets(cx: &mut Cx<'_>, bundle: &Bundle, concept: &Concept) {
                 cx.info(format!(
                     "link `{}` names `{}`, which the bundle does not contain; \
                      §6 tells a consumer to tolerate this",
-                    link.raw, link.target
+                    quote(&link.raw),
+                    quote(&link.target.to_string())
                 ));
             }
             continue;
@@ -573,7 +578,7 @@ fn check_link_targets(cx: &mut Cx<'_>, bundle: &Bundle, concept: &Concept) {
         }
     }
     for target in deprecated {
-        cx.warn(format!("links to deprecated concept `{target}`"));
+        cx.warn(format!("links to deprecated concept `{}`", quote(&target)));
     }
 }
 
@@ -613,8 +618,9 @@ fn check_declared_version(cx: &mut Cx<'_>, bundle: &Bundle) {
     {
         cx.at_file(&bundle.root().join("index.md"));
         cx.info(format!(
-            "the bundle declares `okf_version: {version}`; this reader implements {}, \
+            "the bundle declares `okf_version: {}`; this reader implements {}, \
              so it is read best-effort (§12)",
+            quote(version),
             super::OKF_VERSION
         ));
         cx.concept = None;
@@ -635,6 +641,7 @@ fn check_duplicate_titles(cx: &mut Cx<'_>, bundle: &Bundle) {
         if concepts.len() < 2 {
             continue;
         }
+        let title = quote(&title);
         let others: Vec<String> = concepts.iter().map(|c| c.id.to_string()).collect();
         for concept in &concepts {
             cx.at(concept);
@@ -646,7 +653,7 @@ fn check_duplicate_titles(cx: &mut Cx<'_>, bundle: &Bundle) {
                  the two are indistinguishable in any listing that shows titles",
                 siblings
                     .iter()
-                    .map(|s| format!("`{s}`"))
+                    .map(|s| format!("`{}`", quote(s)))
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
@@ -889,7 +896,8 @@ fn lint_unused_sources(cx: &mut Cx<'_>, concept: &Concept, doc: &Document) {
                 "warning",
                 "L5",
                 format!(
-                    "source `{id}` is declared in frontmatter but never cited with footnote `[^{id}]`"
+                    "source `{0}` is declared in frontmatter but never cited with footnote `[^{0}]`",
+                    quote(&id)
                 ),
             );
         }
