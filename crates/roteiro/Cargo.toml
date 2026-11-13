@@ -242,6 +242,13 @@ explorer = ["dep:axum", "dep:tokio"]
 # carry it. The viewer is what needs it — it reads a bundle off disk on every
 # route — so the feature that brings the viewer is the feature that pays.
 okf-viewer = ["explorer", "tokio/rt-multi-thread"]
+# The upload surface: `roteiro serve --allow-upload` mounts `PUT /v1/raw/{name}`,
+# which stores one document in `raw/` and does nothing else (issue #814,
+# ADR-0026). Off by default, and the first of two gates: a build without it has
+# no upload route at all, and a build with it still refuses without the flag.
+# Implies `explorer` because it is a mount, like the viewer, and the llama-free
+# `serve` path is where it is mounted when no model is installed.
+upload = ["explorer"]
 # Offline similarity inference (`roteiro infer`) — the `inferred` provenance
 # class. Adds no dependencies (pure-Rust hashing embedding; ADR-0003).
 inference = ["rto-graph/inference"]

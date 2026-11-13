@@ -565,3 +565,46 @@ are deliberate (ADR-0006):
 - **It speaks HTTP/1.1, not HTTP/2.** HTTP/2 in practice requires TLS, which is the
   proxy's job, and the multiplexing it buys is worth nothing over loopback against
   a bottleneck that is model inference. See ADR-0006 for the full reasoning.
+
+## Uploading documents into `raw/` (`--allow-upload`)
+
+`roteiro serve` can also accept documents for the research knowledge layer
+(ADR-0026, issue #814). The upload surface is **off twice over**. A build needs the
+`upload` feature, and a server built with it still refuses uploads until it is
+started with `--allow-upload`. That is a flag and not a config key on purpose.
+
+```sh
+mkdir raw    # first decide whether raw/ is committed, ignored, or a symlink
+roteiro serve --allow-upload
+curl -T paper.pdf -H 'Content-Type: application/pdf' \
+  http://127.0.0.1:8017/v1/raw/paper.pdf
+```
+
+The surface has one route, `PUT /v1/raw/{name}`, and the only thing it does is
+store the bytes in `raw/`. It does not extract them, summarise them or put them in
+the graph. Those stay separate runs that you start yourself. Its limits are the
+whole of its containment, because it runs in the same process as the graph store:
+
+| Limit | Behaviour |
+|---|---|
+| Name | One path segment of `[A-Za-z0-9._-]` that does not start with `.`. Anything else, including `..` and absolute paths, gets a `400`. |
+| Containment | The destination's parent is resolved on every request and must be `raw/`'s real path. A `raw/` that is a symlink to another volume works. A `raw/` swapped for a symlink after startup gets a `403`. |
+| Symlinks | The file is opened with `O_CREAT \| O_EXCL`, so an existing symlink at the name is never followed. That holds for a dangling one too. |
+| Overwrite | Never allowed. An existing name gets a `409`. |
+| Types | An allowlist: `.pdf` (`application/pdf`), `.md` (`text/markdown`) and `.txt` (`text/plain`), and the declared `Content-Type` has to match the extension. Archives get a `415`, so they are never stored and never expanded. |
+| Size and count | 64 MiB per file, one file per request, and at most 10,000 entries in `raw/` (`413` / `507`). |
+| Bind | Loopback only. There is no authentication, so `--allow-upload` with a non-loopback `--addr` stops the server at startup, before it binds. To expose it, run an authenticating proxy on the same host. |
+| Reach | The handler's state is the `raw/` path and nothing else: no store, no bundle and no config. |
+
+`raw/` is `<repository>/raw` for the directory `serve` was started in, and it must
+already exist. The server never creates it, because whether it is committed,
+ignored or a symlink to shared storage is your decision (ADR-0026). `--allow-upload`
+is refused together with `--scope bundle` and with the deprecated `--http` alias.
+
+Nothing here screens the **content**. A document that arrives through this route
+is exactly as trusted as one you copied into `raw/` yourself (see #813).
+
+The graph API already writes to the graph store (`POST …/links/write`). What no
+read-surface module does is write a file: `upload.rs` holds the only
+file-writing route, and `the_read_surface_has_no_filesystem_write` fails if
+`graph_api.rs`, `explorer_app.rs` or `okf_viewer.rs` ever gains one.
