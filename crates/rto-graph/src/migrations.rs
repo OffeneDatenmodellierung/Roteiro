@@ -884,19 +884,43 @@ pub(crate) fn apply(conn: &mut Connection) -> rusqlite::Result<()> {
         );",
     )?;
     let applied = applied_versions(conn)?;
-    // Iterating MIGRATIONS (ascending) rather than the set keeps ordering a
-    // property of the slice; each version appears once, so the set never needs
-    // re-reading mid-loop.
+    apply_pending(conn, &applied)
+}
+
+/// Run every migration `applied` does not list — **re-checking each one under
+/// the write lock**, because `applied` may already be stale.
+///
+/// `applied` is read before any lock is held, so two processes opening one
+/// fresh store (two `roteiro sync`s started together, an MCP client and a
+/// terminal) both read "nothing applied" and both run migration 1; the loser
+/// failed with `table nodes already exists` (#859, reproduced with eight
+/// concurrent syncs: five of eight died). Each transaction is `Immediate` — it
+/// takes the write lock when it opens, so `busy_timeout` queues the second
+/// process behind the first — and then asks the table again, which by then
+/// answers truthfully. The snapshot is kept as a cheap filter so an
+/// up-to-date store takes no write lock at all on open.
+///
+/// Iterating [`MIGRATIONS`] (ascending) rather than the set keeps ordering a
+/// property of the slice.
+fn apply_pending(conn: &mut Connection, applied: &BTreeSet<u32>) -> rusqlite::Result<()> {
     for m in MIGRATIONS {
-        if !applied.contains(&m.version) {
-            let tx = conn.transaction()?;
+        if applied.contains(&m.version) {
+            continue;
+        }
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let recorded: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?1)",
+            [m.version],
+            |r| r.get(0),
+        )?;
+        if !recorded {
             tx.execute_batch(m.sql)?;
             tx.execute(
                 "INSERT INTO schema_migrations (version) VALUES (?1)",
                 [m.version],
             )?;
-            tx.commit()?;
         }
+        tx.commit()?;
     }
     Ok(())
 }
@@ -975,7 +999,7 @@ pub(crate) fn versions_ahead_of_build(conn: &Connection) -> rusqlite::Result<Vec
 
 #[cfg(test)]
 mod tests {
-    use super::{MIGRATIONS, apply, latest_version};
+    use super::{MIGRATIONS, apply, apply_pending, latest_version};
     use rusqlite::Connection;
 
     fn recorded_versions(conn: &Connection) -> Vec<u32> {
@@ -1235,6 +1259,29 @@ mod tests {
             after_second.last().copied(),
             Some(latest_version()),
             "schema should be at the latest version"
+        );
+    }
+
+    /// The concurrent-open race (#859), made deterministic: a process that read
+    /// "nothing applied" before another process migrated the store must find
+    /// the migrations recorded once it holds the lock, and skip them — not run
+    /// migration 1 again and fail with `table nodes already exists`.
+    ///
+    /// A stale snapshot handed straight to [`apply_pending`] is exactly what the
+    /// losing process holds, so no threads or timing are needed to reach it.
+    #[test]
+    fn a_stale_applied_snapshot_does_not_rerun_a_recorded_migration() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        apply(&mut conn).expect("the first process migrates the store");
+        let before = recorded_versions(&conn);
+
+        apply_pending(&mut conn, &std::collections::BTreeSet::new())
+            .expect("a process holding a stale, empty snapshot must not fail");
+
+        assert_eq!(
+            recorded_versions(&conn),
+            before,
+            "no migration may be recorded twice or re-run"
         );
     }
 
