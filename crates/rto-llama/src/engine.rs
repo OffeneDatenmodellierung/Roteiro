@@ -90,8 +90,8 @@ pub struct ChatRequest {
     /// cannot know and so cannot render itself. A model whose template ignores
     /// `tools`, or which resolves to a builtin template *name* with no such
     /// slot, gets a plain advertisement spliced into the conversation instead.
-    /// An external provider (`ProviderEngine`) is sent no `tools` field, so for
-    /// it the conversation is the only channel there is (ADR-0027 §3).
+    /// An external provider (`ProviderEngine`) is sent them as OpenAI `tools`,
+    /// and its streamed calls come back as `<tool_call>` text (ADR-0027 §3, #971).
     ///
     /// [`Engine::carries_tools`] is how a caller finds out which, and it must be
     /// asked rather than assumed — it is what decides whether the caller states

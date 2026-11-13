@@ -11,8 +11,8 @@ architectural-significance: VERY HIGH  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Inference
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "0.2"
-last-modified: 2026-11-11
+version: "0.3"
+last-modified: 2026-11-13
 confluence-url:
 ---
 
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | For Review |
 | **Architectural Significance** | VERY HIGH |
 | **Domain** | Inference |
-| **Document version** | 0.2 |
+| **Document version** | 0.3 |
 
 ## Reference
 
@@ -99,13 +99,24 @@ discovered by the first call, which names the URL when it fails.
 no longer validates the name against a registry, because it no longer owns the
 list. `[models] ocr` is the exception and still names a registry entry.
 
-### 3. The tool protocol does not change
+### 3. Tools travel natively; the loop above the engine does not change
 
-The provider engine reports that it does **not** carry tools, so the existing
-loop keeps advertising tools in a system turn and parsing the model's
-`<tool_call>` text. That keeps the protocol identical across providers, rather
-than depending on whether a given server version parses a given model's
-tool-call dialect.
+*Amended in v0.3.* The provider engine reports that it **does** carry tools
+([[crates/roteiro/src/provider.rs#ProviderEngine]]). The request's tools go on
+the wire as OpenAI `tools`, and the `delta.tool_calls` the provider streams back
+are handed to the tool loop as the `<tool_call>{…}</tool_call>` text it already
+parses. The loop, its grounding rules and its one-call-per-turn reading are
+unchanged.
+
+v0.1–0.2 kept tools in the prompt, on the argument that this keeps the protocol
+identical across providers instead of depending on whether a server parses a
+given model's tool-call dialect. Measurement refuted it (#971). Ollama runs its
+own qwen tool-call parser on the generated text whether or not it was sent
+`tools`. It claims the `<tool_call>` the prompt asked for and, with no tools to
+match, deletes it: the reply arrives empty, or the stream ends without a finish
+reason. `scripts/tool-choice-accuracy.py` scored 0/13 on `qwen3.8:27b`. The
+dependency on the server's parser was there either way; sending `tools` is what
+makes that parser work for the call rather than against it.
 
 ### 4. Model identity is what the provider can attest
 
@@ -157,3 +168,4 @@ llama.cpp and uses it when `[provider] base_url` is unset.
 |---|---|---|
 | 0.1 | 2026-10-30 | Initial. Records D1 (keep `/v1`), D2 (keep OCR weights) and D3 (keep transcription via an audio-capable provider). |
 | 0.2 | 2026-11-11 | §1 amended by [[docs/adr/0028-one-engine-local-or-hosted.md]]: a hosted `https://` provider is allowed and announced; the loopback-only rule is withdrawn. |
+| 0.3 | 2026-11-13 | §3 reversed (#971): the provider engine sends tools natively and reads `delta.tool_calls` back as `<tool_call>` text. Keeping tools in the prompt was measured to fail on Ollama, whose qwen parser deletes a prompt-text call it was given no `tools` for (0/13 on the tool-choice fixture). |

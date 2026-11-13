@@ -15,13 +15,15 @@
 //! prints the host on stderr whenever it is not this machine, so a committed
 //! `roteiro.toml` cannot send content anywhere without every run saying so.
 //!
-//! # Tools stay in the prompt
+//! # Tools travel natively
 //!
-//! [`Engine::carries_tools`] keeps its default `false`, so the tool loop
-//! advertises tools in a system turn and parses `<tool_call>` text exactly as it
-//! does for the in-process engine. Sending OpenAI `tools` instead would make the
-//! protocol depend on whether a given server version parses a given model's
-//! tool-call dialect (ADR-0027 §3).
+//! [`Engine::carries_tools`] answers `true`: the request's `tools` go on the
+//! wire as OpenAI `tools`, and the `delta.tool_calls` the provider streams back
+//! are handed to the tool loop as the `<tool_call>{…}</tool_call>` text it
+//! already parses, so nothing above this engine changes. Keeping tools in the
+//! prompt instead was measured to fail (#971): Ollama runs its own tool-call
+//! parser on a qwen model's output, claims the `<tool_call>` the prompt asked
+//! for, finds no `tools` it was given, and deletes the call (ADR-0027 v0.3 §3).
 //!
 //! # No probe
 //!
@@ -142,6 +144,11 @@ impl ProviderEngine {
 }
 
 impl Engine for ProviderEngine {
+    /// Every OpenAI-compatible provider takes a `tools` field; see the module docs.
+    fn carries_tools(&self, _model: &str) -> bool {
+        true
+    }
+
     fn models(&self) -> Vec<ModelInfo> {
         self.models
             .iter()
@@ -214,8 +221,8 @@ fn checked_base(url: &str) -> Result<(String, Option<String>), String> {
 /// The `/v1/chat/completions` body for `req`, streaming.
 ///
 /// Images and audio ride on the **last user turn**, as OpenAI content parts,
-/// because that is the turn the in-process engine attached them to. `tools` is
-/// deliberately absent: see the module docs.
+/// because that is the turn the in-process engine attached them to. `tools` goes
+/// on the wire when the request offers any: see the module docs.
 fn chat_body(req: &ChatRequest) -> serde_json::Value {
     let last_user = req.messages.iter().rposition(|m| m.role == "user");
     let messages: Vec<serde_json::Value> = req
@@ -240,14 +247,76 @@ fn chat_body(req: &ChatRequest) -> serde_json::Value {
             serde_json::json!({ "role": m.role, "content": parts })
         })
         .collect();
-    serde_json::json!({
+    let mut body = serde_json::json!({
         "model": req.model,
         "messages": messages,
         "temperature": req.temperature,
         "max_tokens": req.max_tokens,
         "stream": true,
         "stream_options": { "include_usage": true },
-    })
+    });
+    if let Some(tools) = req
+        .tools
+        .as_ref()
+        .filter(|t| t.as_array().is_some_and(|a| !a.is_empty()))
+    {
+        body["tools"] = tools.clone();
+    }
+    body
+}
+
+/// One native tool call being assembled from `delta.tool_calls` fragments.
+#[derive(Default)]
+struct PendingCall {
+    name: String,
+    arguments: String,
+}
+
+/// The `<tool_call>` text the tool loop parses, for each assembled native call.
+/// Arguments that are not valid JSON are passed on as a string, so the loop's
+/// own refusal names them rather than this layer guessing.
+fn tool_call_text(calls: &std::collections::BTreeMap<u64, PendingCall>) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    for c in calls.values().filter(|c| !c.name.is_empty()) {
+        let arguments = if c.arguments.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(&c.arguments)
+                .unwrap_or_else(|_| serde_json::Value::String(c.arguments.clone()))
+        };
+        let call = serde_json::json!({ "name": c.name, "arguments": arguments });
+        let _ = write!(out, "<tool_call>{call}</tool_call>");
+    }
+    out
+}
+
+/// Fold one event's `delta.tool_calls` fragments into the calls being assembled,
+/// keyed by each fragment's `index`.
+fn absorb_tool_calls(
+    choice: &serde_json::Value,
+    calls: &mut std::collections::BTreeMap<u64, PendingCall>,
+) {
+    for fragment in choice
+        .pointer("/delta/tool_calls")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let index = fragment
+            .get("index")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let call = calls.entry(index).or_default();
+        let text = |key: &str| {
+            fragment
+                .pointer(key)
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+        };
+        call.name.push_str(text("/function/name"));
+        call.arguments.push_str(text("/function/arguments"));
+    }
 }
 
 fn b64(bytes: &[u8]) -> String {
@@ -298,6 +367,7 @@ fn read_stream(
     };
     let mut finished = false;
     let mut in_reasoning = false;
+    let mut calls: std::collections::BTreeMap<u64, PendingCall> = std::collections::BTreeMap::new();
     for line in reader.lines() {
         let line = line.map_err(|e| EngineError::Inference(format!("reading the stream: {e}")))?;
         let Some(data) = line.strip_prefix("data:").map(str::trim) else {
@@ -336,6 +406,7 @@ fn read_stream(
                 }
                 on_token(piece);
             }
+            absorb_tool_calls(choice, &mut calls);
             match choice.get("finish_reason").and_then(|v| v.as_str()) {
                 Some("length") => {
                     stats.finish_reason = FinishReason::Length;
@@ -363,6 +434,13 @@ fn read_stream(
              `[DONE]`, so what arrived may be only part of the answer"
                 .to_owned(),
         ));
+    }
+    let text = tool_call_text(&calls);
+    if !text.is_empty() {
+        if in_reasoning {
+            on_token("</think>");
+        }
+        on_token(&text);
     }
     Ok(stats)
 }
@@ -478,8 +556,37 @@ mod tests {
         assert!(sent.starts_with("POST /v1/chat/completions "), "{sent}");
         assert!(sent.contains("\"model\":\"qwen3:8b\""), "{sent}");
         assert!(sent.contains("\"stream\":true"), "{sent}");
-        // Tools stay in the prompt (ADR-0027 §3), so none go on the wire.
+        // A request offering no tools sends no `tools` field.
         assert!(!sent.contains("\"tools\""), "{sent}");
+    }
+
+    /// #971: offered tools go on the wire natively, and the provider's streamed
+    /// `delta.tool_calls` fragments come back as the `<tool_call>` text the tool
+    /// loop parses — after any reasoning, which is closed first.
+    #[test]
+    fn native_tool_calls_are_sent_and_read_back_as_tool_call_text() {
+        let (base, server) = stub(
+            200,
+            "data: {\"choices\":[{\"delta\":{\"reasoning\":\"look it up\"}}]}\n\n\
+             data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"list_kind\",\"arguments\":\"{\\\"kind\\\":\"}}]}}]}\n\n\
+             data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"adr\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n\
+             data: [DONE]\n\n",
+        );
+        let engine =
+            ProviderEngine::new(&base, vec!["qwen3:8b".to_owned()]).expect("a loopback stub");
+        assert!(engine.carries_tools("qwen3:8b"));
+        let mut req = request("qwen3:8b");
+        req.tools = Some(serde_json::json!([{
+            "type": "function",
+            "function": { "name": "list_kind", "parameters": { "type": "object" } }
+        }]));
+        let completion = engine.chat(&req).expect("completes");
+        assert_eq!(
+            completion.content,
+            "<think>look it up</think><tool_call>{\"arguments\":{\"kind\":\"adr\"},\"name\":\"list_kind\"}</tool_call>"
+        );
+        let sent = server.join().expect("server");
+        assert!(sent.contains("\"tools\":[{"), "{sent}");
     }
 
     #[test]
