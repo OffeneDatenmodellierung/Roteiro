@@ -18086,9 +18086,19 @@ fn serve_v1_tail(
         mount_explorer_surfaces(router, set, default, model_ids)
     };
     #[cfg(feature = "explorer")]
-    let graph_note = " + /v1/graph + / (UI, Ask on)";
+    let graph_note = " + /v1/graph";
     #[cfg(not(feature = "explorer"))]
     let graph_note = "";
+    // What a person should open first. With the explorer compiled in, that is the
+    // UI at `/` — leading with `/v1`, an API base that shows nothing in a
+    // browser, sent people to an empty page. Without it, `/v1` is all there is.
+    let lead = if cfg!(feature = "explorer") {
+        format!(
+            "{scheme}://{socket}/ (open in a browser; Ask is on) — API at {scheme}://{socket}/v1"
+        )
+    } else {
+        format!("{scheme}://{socket}/v1")
+    };
 
     // The OKF viewer (ADR-0022 v1.2), one mount per hosted project that has
     // rendered a bundle, plus the current directory's. Under `/okf` rather than
@@ -18119,7 +18129,7 @@ fn serve_v1_tail(
         {
             let combined = router.merge(rto_render::mcp::mcp_router(flat, &opts.mcp_surface));
             eprintln!(
-                "roteiro server listening on {scheme}://{socket} — /v1{tools_note}{graph_note}{okf_note} + /mcp — serving: {names}"
+                "roteiro server listening on {lead}{tools_note}{graph_note}{okf_note} + /mcp — serving: {names}"
             );
             return match tls {
                 Some((cert, key)) => {
@@ -18135,7 +18145,7 @@ fn serve_v1_tail(
     }
 
     eprintln!(
-        "roteiro model server listening on {scheme}://{socket}/v1{tools_note}{graph_note}{okf_note} — serving: {names}"
+        "roteiro model server listening on {lead}{tools_note}{graph_note}{okf_note} — serving: {names}"
     );
     match tls {
         Some((cert, key)) => rto_serve::serve_blocking_router_tls(router, socket, &cert, &key),
