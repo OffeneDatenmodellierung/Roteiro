@@ -138,6 +138,10 @@ pub struct ChatCompletionRequest {
     /// `chat.completion.chunk` events terminated by `data: [DONE]`.
     #[serde(default)]
     pub stream: Option<bool>,
+    /// `{"include_usage": true}` asks a streamed response to end with one
+    /// chunk carrying `usage` (#855). Anything but an object is refused.
+    #[serde(default)]
+    pub stream_options: Option<serde_json::Value>,
     /// Tools the **client** will execute (OpenAI `tools`). When present, Roteiro's
     /// own graph tools are **suppressed** for the request (see
     /// [`crate::tools::chat_with_client_tools`]) and a call to one of these ends
@@ -371,6 +375,9 @@ pub struct NormalisedChat {
     /// as [`Self::tool_choice`] is. See
     /// [`ChatCompletionRequest::parallel_tool_calls`].
     pub parallel_tool_calls: Option<bool>,
+    /// `stream_options.include_usage`: a streamed response ends with one chunk
+    /// carrying `usage` (#855). Meaningless, and ignored, without `stream`.
+    pub include_usage: bool,
 }
 
 /// The rejection message for an oversized `tools` array, naming what to cut.
@@ -593,6 +600,7 @@ impl ChatCompletionRequest {
         // `check_declared` so the declared boundary keeps first refusal: a
         // request that is refused outright has no budget worth resolving.
         let max_tokens = crate::openai_params::generation_budget(self.max_tokens, &self.extra)?;
+        let include_usage = include_usage(self.stream_options.as_ref())?;
         let client_tools =
             client_tools_from(self.tools.unwrap_or_default(), limits.max_client_tool_bytes)?;
         let (tool_choice, parallel_tool_calls) = (self.tool_choice, self.parallel_tool_calls);
@@ -671,7 +679,29 @@ impl ChatCompletionRequest {
             client_tools,
             tool_choice,
             parallel_tool_calls,
+            include_usage,
         })
+    }
+}
+
+/// `stream_options.include_usage`. `null` or an
+/// absent key is no request; anything but a boolean is refused rather than
+/// guessed at.
+fn include_usage(options: Option<&serde_json::Value>) -> Result<bool, String> {
+    let Some(options) = options.filter(|v| !v.is_null()) else {
+        return Ok(false);
+    };
+    let Some(options) = options.as_object() else {
+        return Err(format!(
+            "`stream_options` must be an object such as {{\"include_usage\": true}}, not `{options}`"
+        ));
+    };
+    match options.get("include_usage") {
+        None | Some(serde_json::Value::Null) => Ok(false),
+        Some(serde_json::Value::Bool(b)) => Ok(*b),
+        Some(other) => Err(format!(
+            "`stream_options.include_usage` must be true or false, not `{other}`"
+        )),
     }
 }
 
@@ -737,6 +767,10 @@ pub struct Usage {
 /// One `chat.completion.chunk` streamed over SSE when `stream: true`.
 #[derive(Debug, Clone, Serialize)]
 pub struct ChatCompletionChunk {
+    /// Present only on the final chunk `stream_options.include_usage` asks for,
+    /// whose `choices` is empty (#855).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
     /// The completion id (stable across the stream).
     pub id: String,
     /// Always `"chat.completion.chunk"`.

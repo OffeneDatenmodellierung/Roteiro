@@ -22,7 +22,9 @@ orienting:
 
 For natural-language "what/why" questions, `roteiro serve` (the network HTTP
 server) exposes the same `search` plus an OpenAI-compatible `/v1` endpoint and the
-web UI; MCP agents run `roteiro mcp` and get
+web UI. To have `/v1` answer from the graph, **omit `tools`** from the request:
+that is Ask mode, and the server runs the graph tools for you. `tools: []` asks
+for no tools at all and gets an ungrounded answer (`docs/SERVING.md`, #827). MCP agents run `roteiro mcp` and get
 `search`/`explain`/`context`/`check`/`path`/`debt` directly — every one of them
 read-only, and `check` returning a `gate` of `not-run` rather than a clean
 verdict when it cannot see the repository or a current graph. The deeper operational guide (node

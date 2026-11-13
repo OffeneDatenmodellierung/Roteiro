@@ -767,9 +767,9 @@ pub fn chat_with_client_tools(
     // all.
     //
     // Otherwise here, in the system turn. `carries_tools` is what decides, and it
-    // has to be asked rather than assumed: an external provider is sent no
-    // `tools` field (ADR-0027 §3), so for it the conversation is the only way
-    // tools can travel.
+    // has to be asked rather than assumed: a template with no `tools` slot leaves
+    // the conversation as the only way tools can travel. The external provider
+    // carries them natively, as OpenAI `tools` (ADR-0027 §3, #971).
     //
     // The rest of the system turn goes out either way, because it is not the tool
     // list: it states the `<tool_call>` protocol this server parses, and the
@@ -786,17 +786,14 @@ pub fn chat_with_client_tools(
     // together if that ever stops being so.
     let engine_advertises = tools_for_template.is_some() && engine.carries_tools(&req.model);
 
-    let mut messages = Vec::with_capacity(req.messages.len() + 1);
-    messages.push(Message {
-        role: "system".to_owned(),
-        content: if engine_advertises {
-            grounding_rules(graph_reachable)
-        } else {
-            tool_system_prompt(&advertised, graph_reachable)
-        },
-    });
-    messages.extend(req.messages.iter().cloned());
+    let grounding = if engine_advertises {
+        grounding_rules(graph_reachable)
+    } else {
+        tool_system_prompt(&advertised, graph_reachable)
+    };
+    let messages = with_grounding(grounding, &req.messages);
 
+    let mut messages = messages;
     let generate = |messages: &[Message]| {
         engine
             .chat(&round_request(req, messages, tools_for_template.clone()))
@@ -915,6 +912,34 @@ fn into_client_calls(calls: Vec<ToolCall>) -> Vec<ClientToolCall> {
         .collect()
 }
 
+/// The conversation with Roteiro's system turn **folded into** the caller's own
+/// first system turn, or prepended when there is none (#853).
+///
+/// Never a second system turn: a chat template may reject a system message that
+/// is not the first — `qwen3.8-27b`'s raises `System message must be at the
+/// beginning.` — and `rto-llama`'s `render_advertising` folds for the same
+/// reason. Roteiro's rules come first, the caller's instructions after them.
+fn with_grounding(grounding: String, conversation: &[Message]) -> Vec<Message> {
+    let mut messages = Vec::with_capacity(conversation.len() + 1);
+    match conversation.split_first() {
+        Some((first, rest)) if first.role == "system" => {
+            messages.push(Message {
+                role: "system".to_owned(),
+                content: format!("{grounding}\n\n{}", first.content),
+            });
+            messages.extend(rest.iter().cloned());
+        }
+        _ => {
+            messages.push(Message {
+                role: "system".to_owned(),
+                content: grounding,
+            });
+            messages.extend(conversation.iter().cloned());
+        }
+    }
+    messages
+}
+
 /// The turn a tool result is fed back as: the capped result inside the
 /// `<tool_response>` markers the system prompt told the model to expect.
 ///
@@ -955,10 +980,10 @@ fn truncate(s: &str) -> String {
 ///
 /// Since #492 a model whose engine reports [`Engine::carries_tools`] gets the
 /// tools from its own chat template instead, and this listing is not sent to it
-/// at all — it receives the grounding rules alone. The full listing still goes to
-/// engines that cannot carry tools, the external provider among them, so this remains
-/// the number to shrink: it is what the worst-served model pays, and no model
-/// pays more.
+/// at all — it receives the grounding rules alone; so does the external provider,
+/// which sends them natively (#971). The full listing still goes to engines that
+/// cannot carry tools, so this remains the number to shrink: it is what the
+/// worst-served model pays, and no model pays more.
 #[must_use]
 pub fn advertised_system_prompt(tools: &[&ToolDef]) -> String {
     tool_system_prompt(tools, true)
@@ -3107,6 +3132,61 @@ mod tests {
             refusal.content.contains("supplied its own tools"),
             "{refusal:?}"
         );
+    }
+
+    /// #853: a caller's own system turn is folded into, never followed by a
+    /// second one — `qwen3.8-27b`'s template refuses a system message that is
+    /// not the first. Roteiro's rules come first, the caller's after them.
+    #[test]
+    fn a_callers_system_turn_is_folded_into_not_preceded_by_a_second() {
+        let engine = RecordingEngine::new("no tool needed");
+        let mut req = user_request();
+        req.messages.insert(
+            0,
+            Message {
+                role: "system".to_owned(),
+                content: "Answer in French.".to_owned(),
+            },
+        );
+        chat_with_client_tools(
+            &engine,
+            &NoGraphTools,
+            &[client_tool("get_weather")],
+            &req,
+            4,
+        )
+        .expect("outcome");
+        let sent = engine.seen.lock().unwrap()[0].clone();
+        assert_eq!(
+            sent.iter().filter(|m| m.role == "system").count(),
+            1,
+            "exactly one system turn: {sent:?}"
+        );
+        assert_eq!(sent[0].role, "system");
+        assert!(
+            sent[0].content.ends_with("\n\nAnswer in French."),
+            "{:?}",
+            sent[0]
+        );
+        assert!(
+            sent[0].content.contains("get_weather"),
+            "the rules lead: {:?}",
+            sent[0]
+        );
+        assert_eq!(sent[1].role, "user");
+
+        // With no system turn of its own, one is still added.
+        let engine = RecordingEngine::new("no tool needed");
+        chat_with_client_tools(
+            &engine,
+            &NoGraphTools,
+            &[client_tool("get_weather")],
+            &user_request(),
+            4,
+        )
+        .expect("outcome");
+        let sent = engine.seen.lock().unwrap()[0].clone();
+        assert_eq!(sent.iter().filter(|m| m.role == "system").count(), 1);
     }
 
     #[test]

@@ -148,10 +148,15 @@ impl IsolatedHome {
     /// `ROTEIRO_HOME` (the direct override) plus `HOME`/`USERPROFILE` (the
     /// `~/.roteiro` fallback), so the child is hermetic regardless of the real
     /// `~/.roteiro`.
+    ///
+    /// Also sets `ROTEIRO_EXIT_WITH_PARENT`, so a server this test starts exits
+    /// when the test process dies — the one exit path no `Drop` guard runs on
+    /// (#857).
     pub fn apply<'c>(&self, cmd: &'c mut Command) -> &'c mut Command {
         cmd.env("ROTEIRO_HOME", &self.path)
             .env("HOME", &self.path)
             .env("USERPROFILE", &self.path)
+            .env("ROTEIRO_EXIT_WITH_PARENT", "1")
     }
 }
 

@@ -22,7 +22,7 @@
 //! which stays a single self-contained file with no JavaScript.
 
 use axum::Router;
-use axum::http::header;
+use axum::http::{HeaderMap, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 
@@ -71,12 +71,15 @@ const HTML: &str = "text/html; charset=utf-8";
 const JS: &str = "text/javascript; charset=utf-8";
 const SVG: &str = "image/svg+xml; charset=utf-8";
 
-/// `Cache-Control` for the assets, which change only when the binary does. The
-/// shell is the entry point, so it is cached only briefly; the scripts — chiefly
-/// the ~365 KB vendored cytoscape bundle — are cached for an hour so a browser
-/// re-uses them across page loads instead of re-fetching on every visit.
-const CACHE_HTML: &str = "public, max-age=300";
-const CACHE_JS: &str = "public, max-age=3600";
+/// `Cache-Control` for every embedded asset: keep it, but ask before reusing it
+/// (#835).
+///
+/// The paths are stable across builds, so a `max-age` made an upgraded,
+/// restarted server serve the *previous* build's CSS and JS to an open browser
+/// for up to an hour, with fresh HTML referencing it. `no-cache` plus an `ETag`
+/// revalidates every load and answers `304` when nothing changed. On loopback,
+/// where this server almost always runs, that costs a round trip and no body.
+pub(crate) const REVALIDATE: &str = "no-cache";
 
 /// Build the static web-app router: the HTML shell, the app script, and the
 /// vendored cytoscape bundle. Stateless (`Router`), so it merges cleanly into the
@@ -85,37 +88,59 @@ pub fn router() -> Router {
     Router::new()
         .route(
             "/",
-            get(|| async { asset(HTML, CACHE_HTML, SHELL_HTML.as_str()) }),
+            get(|h: HeaderMap| async move { revalidated(&h, HTML, SHELL_HTML.as_str()) }),
         )
         .route(
             "/explorer",
-            get(|| async { asset(HTML, CACHE_HTML, SHELL_HTML.as_str()) }),
+            get(|h: HeaderMap| async move { revalidated(&h, HTML, SHELL_HTML.as_str()) }),
         )
-        .route("/app.js", get(|| async { asset(JS, CACHE_JS, APP_JS) }))
+        .route(
+            "/app.js",
+            get(|h: HeaderMap| async move { revalidated(&h, JS, APP_JS) }),
+        )
         .route(
             "/vendor/cytoscape.min.js",
-            get(|| async { asset(JS, CACHE_JS, CYTOSCAPE_JS) }),
+            get(|h: HeaderMap| async move { revalidated(&h, JS, CYTOSCAPE_JS) }),
         )
-        // The sticker logo changes only when the binary does, like the scripts, so
-        // it takes the same hour-long `Cache-Control` as the vendored bundle.
         .route(
             "/sticker.svg",
-            get(|| async { asset(SVG, CACHE_JS, STICKER_SVG) }),
+            get(|h: HeaderMap| async move { revalidated(&h, SVG, STICKER_SVG) }),
         )
 }
 
-/// One embedded asset as a `200 OK` with an explicit content-type and a
-/// `Cache-Control` so browsers actually cache it. Bodies are `&'static str`, so
-/// serving copies nothing but the headers.
-fn asset(content_type: &'static str, cache_control: &'static str, body: &'static str) -> Response {
-    (
-        [
-            (header::CONTENT_TYPE, content_type),
-            (header::CACHE_CONTROL, cache_control),
-        ],
-        body,
-    )
-        .into_response()
+/// The strong `ETag` of an embedded asset: a hash of its bytes, so it changes
+/// exactly when a new build changes the asset.
+fn etag(body: &str) -> String {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::hash::DefaultHasher::new();
+    body.hash(&mut hasher);
+    format!("\"{:016x}\"", hasher.finish())
+}
+
+/// One embedded asset under [`REVALIDATE`]: `304 Not Modified` when the
+/// request's `If-None-Match` names its current [`etag`], otherwise `200` with
+/// the body. Bodies are `&'static str`, so serving copies nothing but headers.
+pub(crate) fn revalidated(
+    request: &HeaderMap,
+    content_type: &'static str,
+    body: &'static str,
+) -> Response {
+    let tag = etag(body);
+    let fresh = request
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| {
+            v.split(',')
+                .any(|t| matches!(t.trim(), "*") || t.trim() == tag)
+        });
+    let headers = [
+        (header::CACHE_CONTROL, REVALIDATE.to_owned()),
+        (header::ETAG, tag),
+    ];
+    if fresh {
+        return (axum::http::StatusCode::NOT_MODIFIED, headers).into_response();
+    }
+    (headers, [(header::CONTENT_TYPE, content_type)], body).into_response()
 }
 
 #[cfg(test)]
@@ -570,15 +595,59 @@ mod tests {
         );
     }
 
+    /// #835: an asset at a stable path is never reused without asking. A
+    /// matching `If-None-Match` is a body-less `304`; a stale one gets the new
+    /// bytes, so a restarted server cannot replay an old build.
+    #[tokio::test]
+    async fn assets_revalidate_by_etag() {
+        for uri in ["/", "/app.js", "/vendor/cytoscape.min.js", "/sticker.svg"] {
+            let first = router()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(first.status(), StatusCode::OK, "{uri}");
+            let tag = first.headers()[header::ETAG].to_str().unwrap().to_owned();
+            let again = |if_none_match: &str| {
+                router().oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header(header::IF_NONE_MATCH, if_none_match)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+            };
+            let unchanged = again(&tag).await.unwrap();
+            assert_eq!(unchanged.status(), StatusCode::NOT_MODIFIED, "{uri}");
+            let body = unchanged.into_body().collect().await.unwrap().to_bytes();
+            assert!(body.is_empty(), "{uri}: a 304 carries no body");
+            let stale = again("\"0000000000000000\"").await.unwrap();
+            assert_eq!(
+                stale.status(),
+                StatusCode::OK,
+                "{uri}: a stale tag gets the bytes"
+            );
+        }
+    }
+
+    /// The web UI's Ask panels want Ask mode, which is an **absent** `tools` key:
+    /// since #827 `tools: []` is a request for no tools at all, and an Ask body
+    /// carrying it would silently lose its graph grounding.
+    #[test]
+    fn the_ask_requests_never_send_a_tools_key() {
+        for needle in ["tools:", "\"tools\"", "'tools'"] {
+            assert!(
+                !APP_JS.contains(needle),
+                "app.js sends `{needle}` — an Ask request must omit `tools`"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn app_js_is_served_as_javascript() {
         let (status, ct, cache, body) = get("/app.js").await;
         assert_eq!(status, StatusCode::OK);
         assert!(ct.contains("javascript"), "content-type was {ct}");
-        assert!(
-            cache.contains("max-age="),
-            "app.js must be cacheable: {cache}"
-        );
+        assert_eq!(cache, REVALIDATE, "app.js revalidates (#835)");
         assert!(!body.is_empty());
         // It must talk to the data API it is built against.
         assert!(body.contains("/v1/graph/workspaces"));
@@ -595,10 +664,7 @@ mod tests {
             ct.contains("image/svg+xml"),
             "sticker must be served as SVG: {ct}"
         );
-        assert!(
-            cache.contains("max-age=") && cache.contains("public"),
-            "sticker must send a caching Cache-Control: {cache}"
-        );
+        assert_eq!(cache, REVALIDATE, "the sticker revalidates (#835)");
         assert!(!body.is_empty(), "the sticker asset must be non-empty");
         assert!(body.contains("<svg"), "it is an SVG document");
     }
@@ -632,11 +698,9 @@ mod tests {
         let (status, ct, cache, body) = get("/vendor/cytoscape.min.js").await;
         assert_eq!(status, StatusCode::OK);
         assert!(ct.contains("javascript"), "content-type was {ct}");
-        // The ~365 KB bundle must be cached by the browser, not re-fetched each load.
-        assert!(
-            cache.contains("max-age=") && cache.contains("public"),
-            "vendored bundle must send a caching Cache-Control: {cache}"
-        );
+        // The ~365 KB bundle is kept by the browser and revalidated, so an
+        // unchanged one costs a 304 rather than a re-download (#835).
+        assert_eq!(cache, REVALIDATE, "{cache}");
         assert!(
             body.len() > 100_000,
             "the vendored UMD bundle is substantial"

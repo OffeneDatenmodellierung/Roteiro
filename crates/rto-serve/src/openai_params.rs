@@ -663,17 +663,9 @@ pub const OPENAI_CHAT_PARAMS: &[Param] = &[
     Param {
         name: "stream_options",
         served_by: None,
-        note: "",
-        support: Support::Rejected {
-            because: "the extra `usage` chunk `include_usage` promises is never \
-                      streamed, so a client waiting for one before `[DONE]` waits for \
-                      something that will not arrive",
-            forward: Forward::Do {
-                mentions: &[Mention::NotAParameter("usage")],
-                prose: "Read `usage` from the non-streaming response, which does carry it.",
-            },
-        },
-        inert: &["{}", "{\"include_usage\":false}"],
+        note: "`include_usage: true` adds one last chunk before `[DONE]`, with empty `choices` and the request's `usage`",
+        support: Support::Supported,
+        inert: &[],
     },
     Param {
         name: "temperature",
@@ -1302,8 +1294,8 @@ mod tests {
     ///
     /// 1. a span that is not a name at all (`<think>`, `temperature: 0`);
     /// 2. a span that is a wire-shaped name but deliberately not a parameter —
-    ///    `stream_options` says to read `usage` from the response, and `usage`
-    ///    is a field of the response, not something a caller sends;
+    ///    `usage`, say, is a field of the response, not something a caller
+    ///    sends;
     /// 3. a span meant as a parameter and absent from the table — the defect.
     ///
     /// Shape alone separates (1), which is what
@@ -1727,20 +1719,12 @@ mod tests {
         }
 
         // (2) Skipped by declaration, not by shape: `usage` is wire-shaped and
-        // is not a parameter, and `stream_options` says so out loud.
+        // is not a parameter. No row declares a `Mention::NotAParameter` today —
+        // `stream_options`, which did, is now supported (#855) — so the shape
+        // half is what is asserted here, and the declaration half is exercised
+        // by the loop above the next time a row needs it.
         assert!(looks_like_a_wire_parameter("usage"));
         assert!(param("usage").is_none());
-        let Support::Rejected { forward, .. } = param("stream_options").expect("declared").support
-        else {
-            panic!("`stream_options` is refused, and its way forward points at the response")
-        };
-        assert!(
-            forward
-                .mentions()
-                .contains(&Mention::NotAParameter("usage")),
-            "`stream_options` reads `usage` from the *response*; the guard must \
-             skip it because the row says so, never because a lookup failed"
-        );
 
         // `temperature: 0` is a value of a real parameter, and the extraction
         // resolves it to that parameter rather than to a name nobody has.
