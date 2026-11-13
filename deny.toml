@@ -104,7 +104,38 @@ allow = [
 ]
 
 [bans]
-multiple-versions = "warn"
+# A **new** duplicate is a failure; the duplicates already in the tree are a
+# recorded baseline (#871). This is the gate that catches #849's class: a bump
+# that leaves two versions of one crate in the lock. `cargo metadata --locked`
+# cannot — once the lock is regenerated the pair is consistently resolved and
+# `--locked` is satisfied — and `"warn"` saw #849's pair and said nothing loud
+# enough to matter. `cargo deny` already runs on every PR and every push to
+# `main` (the `checks` job), so this costs no CI time.
+#
+# Skipped **by name**, not by `name@version`, deliberately: a pinned version
+# would turn every dependabot bump of an already-duplicated crate into a
+# hand-edit here, and the policy is about *which crates* are duplicated, not at
+# which versions. The cost is that a third version of a listed crate goes
+# unnoticed; that is the trade. Removing a name once its duplicate is gone keeps
+# the baseline honest — `cargo deny` reports an unused skip entry.
+#
+# Baseline, measured 2026-11-13 with `cargo deny --all-features check bans`
+# (dev-only duplicates are not counted: `multiple-versions-include-dev` is off).
+multiple-versions = "deny"
+skip = [
+    "bitflags",
+    "block-buffer",
+    "cpufeatures",
+    "crypto-common",
+    "digest",
+    "getrandom",
+    "hashbrown",
+    "nom",
+    "sha2",
+    "shlex",
+    "syn",
+    "windows-sys",
+]
 
 [advisories]
 yanked = "deny"
