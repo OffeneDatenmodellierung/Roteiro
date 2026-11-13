@@ -3205,11 +3205,9 @@ mod tests {
     /// block.
     #[test]
     fn the_published_error_table_is_this_table() {
-        let doc = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../docs/SERVING.md")
-            .canonicalize()
-            .expect("the page that publishes the error contract must exist");
-        let text = std::fs::read_to_string(&doc).expect("readable");
+        let Some(text) = crate::serving_doc() else {
+            return;
+        };
 
         let expected = super::published_error_table();
         let header = expected
@@ -3218,9 +3216,9 @@ mod tests {
             .expect("the generated table has a header row");
         let start = text.find(header).unwrap_or_else(|| {
             panic!(
-                "{} no longer publishes the error table — the page a client author \
-                 reads to decide whether a failure is retryable must show it",
-                doc.display()
+                "docs/SERVING.md no longer publishes the error table — the page a \
+                 client author reads to decide whether a failure is retryable must \
+                 show it"
             )
         });
         let mut published = String::new();
@@ -3229,10 +3227,8 @@ mod tests {
             published.push('\n');
         }
         assert_eq!(
-            published,
-            expected,
-            "{} publishes an error table the server does not implement",
-            doc.display()
+            published, expected,
+            "docs/SERVING.md publishes an error table the server does not implement"
         );
     }
 

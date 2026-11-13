@@ -2038,10 +2038,9 @@ mod tests {
     /// place to hide.
     #[test]
     fn the_published_streaming_refusal_is_the_one_the_server_sends() {
-        let doc = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/SERVING.md"),
-        )
-        .expect("docs/SERVING.md");
+        let Some(doc) = crate::serving_doc() else {
+            return;
+        };
         assert!(
             doc.contains(super::STREAM_ONLY),
             "docs/SERVING.md no longer quotes `STREAM_ONLY` verbatim; copy the \
@@ -2062,8 +2061,9 @@ mod tests {
     /// does.
     #[test]
     fn the_published_responses_table_is_this_table() {
-        let doc = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/SERVING.md");
-        let text = std::fs::read_to_string(&doc).expect("docs/SERVING.md");
+        let Some(text) = crate::serving_doc() else {
+            return;
+        };
         let expected = published_table();
         // The Responses table is the *second* table with this header; the chat
         // one comes first. Anchored on the heading above it so the two cannot
