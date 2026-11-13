@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.2.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v7.2.0...roteiro-v7.2.1) - 2026-11-13
+
+### Fixed
+
+- review on #973 — unrepaired native calls, component-wise `~`, zombie-aware test
+
+### Other
+
+- Merge pull request #975 from OffeneDatenmodellierung/feat/serve-compat
+
 ## [7.2.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v7.1.0...roteiro-v7.2.0) - 2026-11-13
 
 ### Added

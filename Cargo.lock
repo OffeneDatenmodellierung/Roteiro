@@ -2998,7 +2998,7 @@ dependencies = [
 
 [[package]]
 name = "roteiro"
-version = "7.2.0"
+version = "7.2.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3155,7 +3155,7 @@ dependencies = [
 
 [[package]]
 name = "rto-exec"
-version = "7.2.0"
+version = "7.2.1"
 dependencies = [
  "rto-graph",
  "serde",
@@ -3166,7 +3166,7 @@ dependencies = [
 
 [[package]]
 name = "rto-faithful"
-version = "7.2.0"
+version = "7.2.1"
 dependencies = [
  "rto-graph",
  "serde",
@@ -3175,7 +3175,7 @@ dependencies = [
 
 [[package]]
 name = "rto-graph"
-version = "7.2.0"
+version = "7.2.1"
 dependencies = [
  "gix",
  "icu_properties",
@@ -3217,7 +3217,7 @@ dependencies = [
 
 [[package]]
 name = "rto-llama"
-version = "7.2.0"
+version = "7.2.1"
 dependencies = [
  "anyhow",
  "encoding_rs",
@@ -3248,7 +3248,7 @@ dependencies = [
 
 [[package]]
 name = "rto-render"
-version = "7.2.0"
+version = "7.2.1"
 dependencies = [
  "axum",
  "okf-core",
@@ -3267,7 +3267,7 @@ dependencies = [
 
 [[package]]
 name = "rto-serve"
-version = "7.2.0"
+version = "7.2.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3286,7 +3286,7 @@ dependencies = [
 
 [[package]]
 name = "rto-spec"
-version = "7.2.0"
+version = "7.2.1"
 dependencies = [
  "rto-graph",
  "serde",
