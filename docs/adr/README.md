@@ -37,6 +37,7 @@
 | [0029](0029-external-work-references.md) | External works are cited from an authored reference register, rendered APA 7, and refused when incomplete | For Review |
 | [0030](0030-remove-the-microvm-sandbox.md) | Remove the microVM sandbox — analyzers and linters run on the host, behind the consent gate, or not at all | Accepted |
 | [0031](0031-measured-prose-for-model-output.md) | Model prose is measured on three separate axes — faithfulness, coverage and style — each deterministic | Accepted |
+| [0032](0032-provider-credentials-token-command.md) | Provider credentials — a token command from the user's own config, and extra headers from any layer | Accepted |
 
 > **ADR 0018** is the third of the analyzer trio: 0012 decides how findings are
 > stored, 0014 how analyzers are executed and provisioned (its microVM backend

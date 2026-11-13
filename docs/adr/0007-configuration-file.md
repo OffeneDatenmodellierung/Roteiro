@@ -11,7 +11,7 @@ architectural-significance: MEDIUM  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.11"
+version: "1.12"
 last-modified: 2026-11-13
 confluence-url:
 ---
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | Accepted |
 | **Architectural Significance** | MEDIUM |
 | **Domain** | Developer Tooling |
-| **Document version** | 1.11 |
+| **Document version** | 1.12 |
 
 ## Reference
 
@@ -57,6 +57,8 @@ Everything else is a **value**, and values follow the ordinary order above. Most
 
 | Key | Class | Why |
 |---|---|---|
+| `[provider] token_command` | **user layer only** | test 2 — it runs a command, so a project file setting it would execute a repository author's code on first question. Stronger than a capability: no project layer may grant it; a project file that sets it is warned about and ignored — [[docs/adr/0032-provider-credentials-token-command.md]] §2 |
+| `[provider] headers` | value | extra request headers a team may standardise; credential-bearing headers are refused at startup, so it cannot carry a secret — [[docs/adr/0032-provider-credentials-token-command.md]] §3 |
 | `[provider] base_url` | value — **by decision** | meets test 1 when it names another machine, and is a value anyway so a team can standardise on one endpoint; bounded by a notice on every run, not by precedence — [[docs/adr/0028-one-engine-local-or-hosted.md]] §2 |
 | `[serve] max_client_tool_bytes` | **capability** | test 4. The built-in denies everything above 32 KiB, so a project raising it spends materially more of every teammate's machine — and the mirror image of `[serve] max_context_tokens` one row below, which is a *value* only because its built-in already grants. See [[docs/adr/0006-local-model-serving.md]] §1.11 |
 | `[serve] prefix_cache_mb` | **capability** | test 4. The built-in is `0` — off — so a project raising it claims hundreds of MiB per entry on every teammate's machine that would not otherwise be claimed. See [[docs/adr/0006-local-model-serving.md]] §1.12 |
@@ -301,3 +303,4 @@ Project direction incorporated: add a config file, but keep it **optional and fu
 | 1.9 | 2026-09-14 | Amended (issue #840, [[docs/adr/0026-research-knowledge-layer.md]] step 1). **Two new keys — `[paths] exclude` and `[paths] opaque` — the first in this file that decide what is *in the graph* rather than how it is reported.** Until now the only exclusion list here was `[debt] ignore`, which is scoped to markers and filters the **report**: the node stays in the store and `search`, `explain`, `list_kind`, `path` and `export` all still see it, so a repository could mute a false finding from the report it reads and still publish it to a consumer. The new keys remove the node instead, which needs no per-surface honouring — a node that was never stored cannot be exported. **Three states, not two**, because *"do not mine this as configuration"* and *"do not put this in the graph"* are different requests that two live decisions need one each: `opaque` keeps a `file` node with identity and no derived content, so a committed corpus manifest stays **detectable rather than silent** while not being mined; `exclude` produces no node and never reads the bytes, so a document reached by an explicit ingest path is graphed once rather than twice. A fourth state — mined but muted — already exists and is `[debt] ignore`, deliberately not reproduced. Both classify as **values** under v1.4's test, which no clause of can fire on a key that only subtracts. Both lists **merge** across layers as `[debt] ignore` does, and neither takes a **reset**: a reset on an exclusion would let a committed project file widen what is read over a user's own declaration, and narrowing is the safe direction. **Nothing is excluded by a built-in default**, because a built-in would drop a directory out of every existing repository's graph on upgrade with nothing said. Records the requirement that decides whether the mechanism works at all: the policy is consulted by **every** reader of repository bytes, not by extraction alone — the authored layer walks every path independently and classifies by *content*, so a `type: adr` declaration is honoured wherever the file sits, and an exclusion reaching one reader and not the other would remove a manifest's `config_key` nodes while still parsing a stranger's paper as one of this project's decisions. |
 | 1.10 | 2026-11-11 | Amended by [[docs/adr/0028-one-engine-local-or-hosted.md]]. `[remote] enabled` is removed with the remote tier (the v1.2 inversion no longer applies to any key), and `[provider] base_url` is recorded as a **value by decision**: it would meet test 1 when it names another machine, and is kept a value so a committed file can point a team at one endpoint, with a per-run notice in place of precedence. |
 | 1.11 | 2026-11-13 | Amended to match [[docs/adr/0030-remove-the-microvm-sandbox.md]] §3. v1.5 had two kinds of name — a typo, which refuses to start, and a tool this build lacks, which warns — and ADR-0030 made `[mcp] tools`/`--tools` accept a third, a tool a **release removed**, without saying so here. Records that third kind under the warn-and-restrict-nothing path, since the setting was correct when written; that its warning names it as removed rather than as an absent feature; and that the empty-intersection refusal is unchanged, so a list of only removed names still refuses to start. Also replaces v1.5's illustrative `sandbox_clear`, a tool that no longer exists, with `security_status`. No key changes class and no precedence moves. |
+| 1.12 | 2026-11-13 | Two `[provider]` keys from [[docs/adr/0032-provider-credentials-token-command.md]]: `token_command` is **user layer only** (test 2, and no project layer may grant it — a project file setting it is warned about and ignored), and `headers` is a value whose credential-bearing names are refused. |

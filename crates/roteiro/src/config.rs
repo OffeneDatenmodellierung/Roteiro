@@ -760,11 +760,11 @@ impl TelemetryConfig {
 /// `[provider]` — the OpenAI-compatible server Roteiro's models run in (ADR-0027),
 /// e.g. Ollama or `llama-server`.
 ///
-/// A *value* under ADR-0007, not a capability: a non-loopback `base_url` is
-/// refused where it is used (ADR-0027 §1), so a committed project file cannot
-/// use this key to send repository content off the machine. The credential, if
-/// the server wants one, is the `ROTEIRO_PROVIDER_API_KEY` environment variable
-/// and never a key here, because `roteiro.toml` is committed.
+/// `base_url` is a *value* under ADR-0007 by decision (ADR-0028 §2): a hosted
+/// endpoint is allowed from any layer and announced on every run. The
+/// credential is never a key here, because `roteiro.toml` is committed: it is
+/// the `ROTEIRO_PROVIDER_API_KEY` environment variable, or the output of
+/// `token_command`, which only the user layer can set (ADR-0032).
 #[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ProviderConfig {
@@ -772,13 +772,35 @@ pub struct ProviderConfig {
     /// `http://127.0.0.1:11434/v1` (Ollama) or `http://127.0.0.1:8080/v1`
     /// (`llama-server`).
     pub base_url: Option<String>,
+    /// A command whose standard output is the bearer token to send — an OAuth
+    /// access token from `ant auth print-credentials --access-token`, `gcloud
+    /// auth print-access-token`, `az account get-access-token …` or a corporate
+    /// credential helper (ADR-0032). An argument vector, run without a shell.
+    ///
+    /// **Read from the user layer only.** A command in a committed
+    /// `roteiro.toml` would let any repository a person clones run code on
+    /// their machine the first time they ask it a question; a project file that
+    /// sets it is warned about and ignored. `ROTEIRO_PROVIDER_API_KEY`, when
+    /// set, wins over it.
+    pub token_command: Option<Vec<String>>,
+    /// Extra request headers for every provider call — for example Anthropic's
+    /// `anthropic-beta = "oauth-2025-04-20"`, which its OAuth tokens require.
+    /// Read from any layer, so a team can standardise them; a credential-bearing
+    /// header (`authorization`, `x-api-key`, `proxy-authorization`) is refused,
+    /// because credentials never belong in a committed file (ADR-0032).
+    pub headers: Option<std::collections::BTreeMap<String, String>>,
 }
 
 impl ProviderConfig {
-    /// Overlay `over` on top of `self`, taking `over`'s value wherever set.
+    /// Overlay `over` on top of `self`, taking `over`'s value wherever set —
+    /// except `token_command`, which only the bottom (user) layer can supply.
+    /// The merge is always `user.overlaid_with(&project)`, so `self` is the user
+    /// layer here (see [`Config::overlaid_with`]).
     fn overlaid_with(&self, over: &Self) -> Self {
         Self {
             base_url: over.base_url.clone().or_else(|| self.base_url.clone()),
+            token_command: self.token_command.clone(),
+            headers: over.headers.clone().or_else(|| self.headers.clone()),
         }
     }
 }
@@ -2165,6 +2187,16 @@ pub fn load(cwd: &Path) -> anyhow::Result<Loaded> {
 fn load_from(user_path: Option<PathBuf>, project_path: Option<PathBuf>) -> anyhow::Result<Loaded> {
     let user = read_config(user_path.as_deref())?;
     let project = read_config(project_path.as_deref())?;
+    if project.provider.token_command.is_some() {
+        eprintln!(
+            "warning: {} sets `[provider] token_command`, which is read only from your own \
+             ~/.roteiro/config.toml: a command in a project file would run code from any \
+             repository you clone. It is ignored here (ADR-0032).",
+            project_path
+                .as_deref()
+                .map_or_else(|| "roteiro.toml".to_owned(), |p| p.display().to_string())
+        );
+    }
     let effective = user.overlaid_with(&project);
     Ok(Loaded {
         effective,
@@ -2966,6 +2998,47 @@ mod tests {
     /// Merging is scoped to the **exclusion** list. Discovery and selection lists
     /// stay replace-wins, so a global `[workspace] roots` cannot silently add
     /// repos a project never named.
+    /// ADR-0032: `[provider] token_command` is read only from the user layer —
+    /// a project file's command is ignored, so cloning a repository can never
+    /// make Roteiro run its code — while `headers` merge like any value.
+    #[test]
+    fn token_command_comes_only_from_the_user_layer() {
+        let dir = std::env::temp_dir().join(format!("roteiro-cfg-tokcmd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let user = dir.join("config.toml");
+        let project = dir.join("roteiro.toml");
+        std::fs::write(
+            &project,
+            "[provider]\ntoken_command = [\"sh\", \"-c\", \"evil\"]\n\
+             [provider.headers]\nanthropic-beta = \"oauth-2025-04-20\"\n",
+        )
+        .expect("project");
+        let only_project = load_from(None, Some(project.clone())).expect("load");
+        assert_eq!(
+            only_project.effective.provider.token_command, None,
+            "ignored from a project"
+        );
+        assert_eq!(
+            only_project
+                .effective
+                .provider
+                .headers
+                .as_ref()
+                .and_then(|h| h.get("anthropic-beta"))
+                .map(String::as_str),
+            Some("oauth-2025-04-20"),
+            "headers are read from any layer"
+        );
+        std::fs::write(&user, "[provider]\ntoken_command = [\"ant\", \"auth\"]\n").expect("user");
+        let both = load_from(Some(user), Some(project)).expect("load");
+        assert_eq!(
+            both.effective.provider.token_command,
+            Some(vec!["ant".to_owned(), "auth".to_owned()]),
+            "the user's command, never the project's"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn other_list_keys_still_replace_rather_than_merge() {
         let dir = std::env::temp_dir().join(format!("roteiro-cfg-lists-{}", std::process::id()));
