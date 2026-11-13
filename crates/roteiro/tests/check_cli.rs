@@ -423,3 +423,54 @@ fn staging_a_file_does_not_change_what_check_says_about_it() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// #833: `check --json` names a file extracted under parse-error recovery, as
+/// the human output does — a machine reader must not be the one who cannot
+/// tell why ADR links broke.
+#[test]
+fn check_json_names_a_file_parsed_under_error_recovery() {
+    let dir = fresh_dir("parse-recovery");
+    git(&dir, &["init", "-q"]);
+    write(&dir, "src/ok.rs", "pub fn ok() {}\n");
+    write(&dir, "src/bad.rs", "pub fn fine() {}\n\npub fn broken( {\n");
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+
+    let out = roteiro(&dir, &["check", "--json"]);
+    let report: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("check --json is valid JSON");
+    assert_eq!(
+        report["parse_errors"],
+        serde_json::json!([["src/bad.rs", 3]]),
+        "{report}"
+    );
+}
+
+/// #815: `sync --json` carries the symlinked-`raw/` warning a human sees on
+/// stderr, and an empty `warnings` array when there is nothing to say.
+#[cfg(unix)]
+#[test]
+fn sync_json_warns_about_a_symlinked_raw() {
+    let dir = fresh_dir("raw-symlink");
+    git(&dir, &["init", "-q"]);
+    write(&dir, "src/ok.rs", "pub fn ok() {}\n");
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+
+    let quiet: serde_json::Value =
+        serde_json::from_slice(&roteiro(&dir, &["sync", "--json"]).stdout).expect("json");
+    assert_eq!(quiet["warnings"], serde_json::json!([]), "{quiet}");
+
+    let share = fresh_dir("raw-symlink-share");
+    std::fs::create_dir_all(&share).expect("mkdir share");
+    std::os::unix::fs::symlink(&share, dir.join("raw")).expect("link");
+    let warned: serde_json::Value =
+        serde_json::from_slice(&roteiro(&dir, &["sync", "--json"]).stdout).expect("json");
+    let warnings = warned["warnings"].as_array().expect("warnings");
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().is_some_and(|w| w.contains("raw/"))),
+        "{warned}"
+    );
+}

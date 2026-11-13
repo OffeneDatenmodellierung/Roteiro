@@ -17,7 +17,7 @@
 //! [`CorpusRow`] is `deny_unknown_fields` with no optional fields, so a row with
 //! an extra, missing or misspelled key fails to deserialise. The schema check that
 //! used to compare key sets by hand is thereby structural: a corpus this crate can
-//! load is a corpus with exactly the eleven documented fields.
+//! load is a corpus with exactly the twelve documented fields.
 //!
 //! # Loading never touches the network
 //!
@@ -208,7 +208,7 @@ impl std::fmt::Display for DefectClass {
 
 /// One adjudicated review comment.
 ///
-/// `deny_unknown_fields` and no `Option`s: the eleven documented fields, exactly.
+/// `deny_unknown_fields` and no `Option`s: the twelve documented fields, exactly.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CorpusRow {
@@ -244,6 +244,16 @@ pub struct CorpusRow {
     pub path: String,
     /// Line in that file, new-side.
     pub line: u32,
+    /// Whether a finding *can* match this row: its anchor lies within
+    /// [`crate::review_score::LINE_WINDOW`] of a line its own diff shows (#910).
+    ///
+    /// A row anchored outside the diff it belongs to is unreachable by any
+    /// reviewer at any quality, so counting it in recall's denominator understates
+    /// every measurement, silently. Declared on every row rather than optional,
+    /// and **computed, not remembered**: `tests/review_corpus.rs` recomputes it
+    /// from the reviewed diff and fails on a row whose flag disagrees, in either
+    /// direction — so the corpus cannot acquire another unreachable row unnoticed.
+    pub reachable: bool,
     /// What the maintainer decided.
     pub verdict: Verdict,
     /// The kind of defect asserted.
@@ -482,6 +492,7 @@ mod tests {
             ),
             ("path", "\"crates/rto-graph/src/engine_slot.rs\"".to_owned()),
             ("line", "16".to_owned()),
+            ("reachable", "true".to_owned()),
             ("verdict", "\"real\"".to_owned()),
             ("defect_class", "\"contract-drift\"".to_owned()),
             ("fix_commit", "\"41cb5e9\"".to_owned()),

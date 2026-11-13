@@ -745,5 +745,49 @@ fn every_row_reconstructs_a_non_empty_reviewed_diff() {
             row.path,
             names.replace('\n', ", ")
         );
+
+        assert_reachability(row, &out(&["diff", "-U3", &fork, sha, "--", &row.path]));
     }
+}
+
+/// #910: can any finding match `row` at all? A finding lands on a line the diff
+/// shows, and matching credits it within `LINE_WINDOW` of the anchor — so a row
+/// further than that from every shown line is unreachable, and its declared
+/// `reachable` must say so. Checked in both directions: a stale `false` hides a
+/// scorable row from recall too. `hunks` is `git diff -U3` for the row's path:
+/// three lines of context, as `roteiro review` shows the reviewer
+/// (`crates/roteiro/src/diff.rs`), which numbers and can anchor on them.
+fn assert_reachability(row: &rto_graph::review_corpus::CorpusRow, hunks: &str) {
+    let distance = hunks
+        .lines()
+        .filter_map(|l| l.strip_prefix("@@ "))
+        .filter_map(|h| h.split_whitespace().find(|p| p.starts_with('+')))
+        .filter_map(|p| {
+            let mut it = p.trim_start_matches('+').split(',');
+            let start: u32 = it.next()?.parse().ok()?;
+            let len: u32 = it.next().map_or(Some(1), |n| n.parse().ok())?;
+            // A pure deletion (`+c,0`) shows no new line; it sits at `c`.
+            let end = if len == 0 { start } else { start + len - 1 };
+            Some(if row.line < start {
+                start - row.line
+            } else {
+                row.line.saturating_sub(end)
+            })
+        })
+        .min()
+        .unwrap_or(u32::MAX);
+    let reachable = distance <= rto_graph::review_score::LINE_WINDOW;
+    assert_eq!(
+        row.reachable,
+        reachable,
+        "row {} ({}:{}): declared `reachable: {}`, but its anchor is {} line(s) \
+         from the nearest line its own diff shows (window {}). Set the flag from \
+         the diff, not by hand",
+        row.id,
+        row.path,
+        row.line,
+        row.reachable,
+        distance,
+        rto_graph::review_score::LINE_WINDOW
+    );
 }

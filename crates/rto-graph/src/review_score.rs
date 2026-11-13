@@ -694,6 +694,9 @@ pub struct Score {
     pub found: usize,
     /// Real rows in scope.
     pub real_in_scope: usize,
+    /// Rows on attempted commits left out of every denominator because no
+    /// finding can match them — their anchor lies outside their own diff (#910).
+    pub unreachable_excluded: usize,
     /// Of the corpus's known-false rows in scope, how many the candidate repeated.
     /// The only measured precision signal the corpus licenses.
     pub known_false_reproduced: usize,
@@ -817,6 +820,14 @@ impl Score {
     #[must_use]
     pub fn caveats(&self) -> Vec<String> {
         let mut out = Vec::new();
+        if self.unreachable_excluded > 0 {
+            out.push(format!(
+                "{} row(s) anchor outside their own diff, so no finding can match \
+                 them; they are excluded from every denominator rather than counted \
+                 as misses",
+                self.unreachable_excluded
+            ));
+        }
         if self.attempted_shas < self.corpus_shas {
             out.push(format!(
                 "partial run: {} of {} corpus commits attempted, so rows on the \
@@ -1002,11 +1013,15 @@ pub fn score(corpus: &Corpus, run: &CandidateRun) -> Result<Score, ScoreError> {
     let known: BTreeSet<&str> = corpus.reviewed_shas();
     check_shas(&known, run)?;
 
-    let in_scope: Vec<&CorpusRow> = corpus
+    let attempted: Vec<&CorpusRow> = corpus
         .rows()
         .iter()
         .filter(|r| run.attempted_shas.contains(&r.reviewed_sha))
         .collect();
+    // A row no finding can match is out of every denominator, as a row on an
+    // unattempted commit is — counted, and said, in `unreachable_excluded` (#910).
+    let unreachable_excluded = attempted.iter().filter(|r| !r.reachable).count();
+    let in_scope: Vec<&CorpusRow> = attempted.iter().copied().filter(|r| r.reachable).collect();
 
     let emitted = match_findings(&in_scope, &run.findings);
     let withheld = match_findings(&in_scope, &run.suppressed);
@@ -1067,7 +1082,10 @@ pub fn score(corpus: &Corpus, run: &CandidateRun) -> Result<Score, ScoreError> {
             .count()
     };
 
-    let verdicts_contradicted = contradicted_verdicts(&in_scope, &run.verdicts);
+    // Whole-change verdicts need no inline anchor, so an unreachable row still
+    // adjudicates one: a `clean` verdict on a commit whose only real defect is
+    // anchored outside its diff is still contradicted by that defect.
+    let verdicts_contradicted = contradicted_verdicts(&attempted, &run.verdicts);
 
     Ok(Score {
         schema: SCORE_SCHEMA,
@@ -1079,6 +1097,7 @@ pub fn score(corpus: &Corpus, run: &CandidateRun) -> Result<Score, ScoreError> {
         per_class,
         found: count_by_verdict(&emitted, Verdict::Real),
         real_in_scope,
+        unreachable_excluded,
         known_false_reproduced: count_by_verdict(&emitted, Verdict::False),
         known_false_in_scope,
         unadjudicated: run.findings.len() - emitted.by_row.len(),
@@ -1204,7 +1223,7 @@ mod tests {
         format!(
             "{{\"id\": {id}, \"pr\": 300, \"reviewer\": \"github-copilot\", \
              \"reviewed_sha\": {sha:?}, \"path\": {path:?}, \"line\": {line}, \
-             \"verdict\": {verdict:?}, \"defect_class\": {class:?}, \
+             \"reachable\": true, \"verdict\": {verdict:?}, \"defect_class\": {class:?}, \
              \"fix_commit\": \"\", \"description\": \"d\", \
              \"comment_url\": \"https://example.invalid/{id}\"}}"
         )
@@ -1926,6 +1945,33 @@ mod tests {
     /// test built on it counted 1 against an implementation that inverted the
     /// stance — found by injecting exactly that, which is why this fixture is
     /// here rather than the convenient one.
+    /// #910, raised in review on #978: an **unreachable** real row leaves the
+    /// recall denominator — no finding can match it — but still contradicts a
+    /// `clean` whole-change verdict, which needs no inline anchor.
+    #[test]
+    fn an_unreachable_row_leaves_recall_but_still_contradicts_a_clean_verdict() {
+        let text = row(1, SHA_A, "src/a.rs", 100, "real", "contract-drift")
+            .replace("\"reachable\": true", "\"reachable\": false");
+        let corpus = Corpus::parse(&text).expect("parses");
+        let clean = CandidateRun {
+            verdicts: vec![verdict(SHA_A, VerdictStance::Clean)],
+            ..run(&[SHA_A], vec![])
+        };
+        let scored = score(&corpus, &clean).expect("scores");
+        assert_eq!(scored.real_in_scope, 0, "out of the denominator");
+        assert_eq!(scored.unreachable_excluded, 1);
+        assert_eq!(
+            scored.verdicts_contradicted, 1,
+            "but still a defect the verdict missed"
+        );
+        assert!(
+            scored
+                .caveats()
+                .iter()
+                .any(|c| c.contains("anchor outside their own diff"))
+        );
+    }
+
     #[test]
     fn a_clean_verdict_over_a_known_defect_is_contradicted_and_said_so_loudly() {
         let text = [

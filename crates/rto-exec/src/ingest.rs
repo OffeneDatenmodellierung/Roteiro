@@ -469,11 +469,14 @@ mod tests {
 
     #[test]
     fn rejects_a_report_missing_its_evidence() {
-        for mutate in [
-            (|r: &mut NormalizedReport| r.analyzer_version = String::new()) as fn(&mut _),
-            |r: &mut NormalizedReport| r.started_at = "  ".to_owned(),
-            |r: &mut NormalizedReport| r.ended_at = String::new(),
-        ] {
+        // Typed on the binding rather than with `as fn(&mut _)`, which
+        // tree-sitter-rust cannot parse (#833).
+        let mutations: [fn(&mut NormalizedReport); 3] = [
+            |r| r.analyzer_version = String::new(),
+            |r| r.started_at = "  ".to_owned(),
+            |r| r.ended_at = String::new(),
+        ];
+        for mutate in mutations {
             let mut rep = report();
             mutate(&mut rep);
             assert!(

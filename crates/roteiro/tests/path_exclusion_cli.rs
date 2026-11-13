@@ -15,13 +15,14 @@
 //! * **Issue #839** — `config_key` extraction is keyed on file extension alone,
 //!   so a `.json` data manifest is mined as configuration, one node per JSON
 //!   leaf.
-//! * **Issue #838** — marker scanning has no arm for data, so a `.json` file is
-//!   treated as prose and scanned in full with the noisy phrase rules armed.
-//!   `"Long-Term Follow-Up of Ventricular Arrhythmias"` — a real cardiology
-//!   paper title — matches the `follow-up` DEFERRED rule.
+//! * **Issue #838** — marker scanning had no arm for data, so a `.json` file was
+//!   treated as prose and `"Long-Term Follow-Up of Ventricular Arrhythmias"` — a
+//!   real cardiology paper title — matched the `follow-up` DEFERRED rule. That
+//!   one is now **fixed by default** (data files are never scanned for markers),
+//!   and the baseline test pins its absence instead.
 //!
-//! Neither defect is fixed here, deliberately: this is the mechanism that makes
-//! them declarable, not a substitute for fixing them.
+//! #839 is not fixed here, deliberately: this is the mechanism that makes it
+//! declarable, not a substitute for fixing it.
 //!
 //! # And it contains the two-scan hazard
 //!
@@ -233,12 +234,6 @@ fn declaring_a_path_invalidates_the_extraction_cache_that_holds_its_old_facts() 
         !mined.is_empty(),
         "the first run must mine the manifest, or the cache has nothing stale to serve"
     );
-    assert!(
-        nodes(&before)
-            .iter()
-            .any(|(_, kind, path)| kind == "marker" && path.starts_with("manifest/")),
-        "and must fabricate the marker"
-    );
 
     // Declare it opaque. The blob is untouched: same bytes, same git oid, so the
     // cache key moves only if the policy is part of the extraction identity.
@@ -304,16 +299,15 @@ fn without_a_declaration_the_manifest_is_mined_and_the_foreign_doc_is_one_of_our
          or this fixture does not contain the defect: {cfgkeys:?}"
     );
 
-    // #838: a paper title, scanned as prose, becomes an intent-debt marker.
+    // #838, fixed: a paper title in a data file is no longer scanned as prose,
+    // so it fabricates no intent-debt marker even without a declaration.
     let markers: Vec<_> = nodes(&artifact)
         .into_iter()
         .filter(|(key, kind, _)| kind == "marker" && key.contains("manifest/papers.json"))
         .collect();
-    assert_eq!(
-        markers.len(),
-        1,
-        "a marker word in a paper title must fabricate a finding without a \
-         declaration, or this fixture does not contain the defect: {markers:?}"
+    assert!(
+        markers.is_empty(),
+        "a data file must not be scanned for markers (#838): {markers:?}"
     );
 
     // The second reader: a downloaded document parsed as one of our decisions.

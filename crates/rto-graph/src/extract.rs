@@ -156,7 +156,12 @@ pub(crate) const EXTRACT_VERSION: u32 = EXTRACT_BASE_VERSION
 /// through indirect references. PDFs that 16 passed can now block, and some it
 /// flagged (outlined headings, spot colours) now pass, so `meta.screen` and
 /// `meta.content` change on unchanged bytes — the 13 → 14 reason again.
-pub(crate) const EXTRACT_BASE_VERSION: u32 = 17;
+///
+/// **17 → 18** (#805, #838): a Rust function's `meta.calls` now includes calls
+/// written inside macro invocations (`assert_eq!(f(x), …)`), and data files
+/// (`.json`, `.jsonl`, `.csv`, …) are no longer scanned for markers. Both change
+/// the fact set derived from unchanged bytes.
+pub(crate) const EXTRACT_BASE_VERSION: u32 = 18;
 
 /// The stride between feature namespaces above. Each of the three
 /// extraction-affecting features occupies a distinct power-of-ten *bit* slot
@@ -1769,6 +1774,23 @@ fn rust_facts(path: &str, blob_id: &str, bytes: &[u8], ingest: IngestConfig) -> 
         edges: Vec::new(),
     };
     let root = tree.root_node();
+    // A file tree-sitter could only parse under **error recovery** extracts
+    // whatever the recovery salvaged — `main.rs` once went from 302 items to 2
+    // on one more `#[cfg]` field, and the only symptom was twenty broken ADR
+    // links in other files (#833). So the degradation is recorded as a fact on
+    // the file node, where `sync` and `check` can name the file and the line.
+    if root.has_error()
+        && let Some(at) = first_error(root)
+        && let Some(obj) = walk.nodes[0].meta.as_object_mut()
+    {
+        obj.insert(
+            "parse_error".into(),
+            serde_json::json!({
+                "line": at.start_position().row + 1,
+                "byte": at.start_byte(),
+            }),
+        );
+    }
     let mut cursor = root.walk();
     let children: Vec<_> = root.children(&mut cursor).collect();
     for child in children {
@@ -2209,7 +2231,54 @@ impl RustWalk<'_> {
             {
                 out.push(name);
             }
+            if child.kind() == "token_tree" {
+                self.token_tree_calls(child, out);
+                continue;
+            }
             self.collect_calls(child, out);
+        }
+    }
+
+    /// Calls written inside a macro invocation (#805).
+    ///
+    /// A macro's arguments are a `token_tree`, not expressions, so no
+    /// `call_expression` exists inside `assert_eq!(f(x), …)` and every such call
+    /// was silently missing from `calls` — a confident under-count concentrated
+    /// in tests. This reads the tokens instead: an identifier, `a::b` path or
+    /// `self.f` immediately followed by a parenthesised token tree is a call, and
+    /// is qualified exactly as [`Self::callee_name`] would qualify it.
+    ///
+    /// Token-level, so it errs towards a false positive — a macro whose syntax is
+    /// not Rust can produce a spurious edge — which is the preferable direction
+    /// for "who calls X": a missing caller is the answer that misleads.
+    /// `name!(…)` is not a call (the `!` breaks the pattern), nor is `if (x)`.
+    fn token_tree_calls(&self, tree: tree_sitter::Node, out: &mut Vec<String>) {
+        let mut cursor = tree.walk();
+        let tokens: Vec<tree_sitter::Node> = tree.children(&mut cursor).collect();
+        for (i, token) in tokens.iter().enumerate() {
+            if token.kind() != "token_tree" {
+                continue;
+            }
+            self.token_tree_calls(*token, out);
+            if !self.text(*token).starts_with('(') || i == 0 {
+                continue;
+            }
+            let callee = tokens[i - 1];
+            if callee.kind() != "identifier" || is_rust_keyword(self.text(callee)) {
+                continue;
+            }
+            let name = self.text(callee);
+            let qualifier = match (i.checked_sub(3), i.checked_sub(2)) {
+                (Some(q), Some(sep)) if matches!(tokens[q].kind(), "identifier" | "self") => {
+                    match self.text(tokens[sep]) {
+                        "::" => Some(self.text(tokens[q]).to_owned()),
+                        "." if self.text(tokens[q]) == "self" => Some("Self".to_owned()),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            out.push(qualify_callee(qualifier.as_deref(), name));
         }
     }
 
@@ -2927,14 +2996,52 @@ fn extend(scope: &[Scope], seg: &str, key: Option<String>) -> Vec<Scope> {
     next
 }
 
+/// The first `ERROR` or `MISSING` node under `node`, in source order.
+fn first_error(node: tree_sitter::Node) -> Option<tree_sitter::Node> {
+    if node.is_error() || node.is_missing() {
+        return Some(node);
+    }
+    let mut cursor = node.walk();
+    let children: Vec<_> = node.children(&mut cursor).collect();
+    children
+        .into_iter()
+        .filter(tree_sitter::Node::has_error)
+        .find_map(first_error)
+}
+
+/// Rust keywords that can precede a parenthesised group inside a macro without
+/// being a call: `if (x)`, `match (a, b)`, `return (v)`.
+fn is_rust_keyword(word: &str) -> bool {
+    matches!(
+        word,
+        "if" | "match"
+            | "while"
+            | "for"
+            | "return"
+            | "in"
+            | "as"
+            | "move"
+            | "loop"
+            | "else"
+            | "let"
+            | "mut"
+            | "ref"
+            | "where"
+            | "impl"
+            | "dyn"
+            | "fn"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Extractor, FileNodeExtractor, PdfOutcome, Registry, RustExtractor};
     use crate::{EdgeKind, Node, NodeKind};
 
     /// The dispatch-level proof, with the real defect in the fixture: a `.json`
-    /// manifest is mined into `config_key` nodes (#839) and its English prose is
-    /// scanned for markers (#838) — until the repository declares it opaque.
+    /// manifest is mined into `config_key` nodes (#839) until the repository
+    /// declares it opaque. (Its prose is no longer scanned for markers either way:
+    /// a data file is never scanned, since #838.)
     #[test]
     fn an_opaque_path_yields_a_file_node_and_nothing_else() {
         const MANIFEST: &[u8] = br#"{"papers": {"a": {"title": "Long-Term Follow-Up of X"}}}"#;
@@ -2947,9 +3054,11 @@ mod tests {
             "the manifest is mined as configuration today: {:?}",
             open.nodes.iter().map(|n| &n.key).collect::<Vec<_>>()
         );
+        // The marker half is closed by default since #838: a data file is not
+        // scanned for markers at all, opaque or not.
         assert!(
-            open.nodes.iter().any(|n| n.kind == NodeKind::Marker),
-            "and its prose fabricates a marker today"
+            !open.nodes.iter().any(|n| n.kind == NodeKind::Marker),
+            "a data file's prose no longer fabricates a marker (#838)"
         );
 
         let policy = crate::PathPolicy::new(Vec::new(), vec!["manifest/**".to_owned()]);
@@ -3296,6 +3405,64 @@ mod inner {
         let mut k: Vec<_> = fs.nodes.iter().map(|n| n.key.clone()).collect();
         k.sort();
         k
+    }
+
+    /// #833: a file that only parses under error recovery says so, with the
+    /// line of the first error; a clean file carries no such fact.
+    #[test]
+    fn a_file_parsed_under_error_recovery_records_where() {
+        let bad = "fn ok() {}\n\nfn broken( {\n";
+        let fs = RustExtractor.extract("src/bad.rs", "blob1", bad.as_bytes());
+        let file = fs
+            .nodes
+            .iter()
+            .find(|n| n.key == "file:src/bad.rs")
+            .expect("file");
+        assert_eq!(file.meta["parse_error"]["line"], 3, "{}", file.meta);
+        let good = RustExtractor.extract("src/ok.rs", "blob1", b"fn ok() {}\n");
+        let file = good
+            .nodes
+            .iter()
+            .find(|n| n.key == "file:src/ok.rs")
+            .expect("file");
+        assert!(file.meta.get("parse_error").is_none(), "{}", file.meta);
+    }
+
+    /// #805: a call written only inside a macro is still a call. `only_macro`
+    /// calls `target` solely through `assert_eq!` and `matches!`; a bare call,
+    /// a `self.` call and a path call inside macros are qualified as they would
+    /// be outside one; `vec![…]` and `if (…)` are not calls.
+    #[test]
+    fn calls_inside_macros_are_recorded() {
+        let src = r"
+fn target(x: u8) -> u8 { x }
+fn only_macro() {
+    assert_eq!(target(1), 1);
+    assert!(matches!(m::other(2), _));
+    let v = vec![1, 2];
+    debug_assert!(if (true) { true } else { false });
+}
+struct S;
+impl S {
+    fn run(&self) { assert!(self.go()); }
+    fn go(&self) -> bool { true }
+}
+";
+        let fs = RustExtractor.extract("src/lib.rs", "blob1", src.as_bytes());
+        let calls = |key: &str| {
+            fs.nodes
+                .iter()
+                .find(|n| n.key == key)
+                .unwrap_or_else(|| panic!("{key}"))
+                .meta["calls"]
+                .clone()
+        };
+        let only = calls("sym:rust:src/lib.rs#only_macro");
+        assert_eq!(only, serde_json::json!(["m::other", "target"]), "{only}");
+        assert_eq!(
+            calls("sym:rust:src/lib.rs#S::run"),
+            serde_json::json!(["Self::go"])
+        );
     }
 
     #[test]
