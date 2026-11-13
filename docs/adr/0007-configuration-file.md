@@ -117,7 +117,7 @@ The warning names it as removed rather than as missing from this build, since
 "rebuild with a feature" would be a remedy that leads nowhere. None of this
 relaxes the empty-intersection rule: a list that names **only** removed tools
 leaves nothing to serve and refuses to start, exactly as before
-([[crates/rto-render/src/mcp.rs#REMOVED_TOOLS]]).
+(`REMOVED_TOOLS`, read by [[crates/rto-render/src/mcp.rs#restrict]]; the Rust extractor does not record `const` items).
 
 The key sits in its own `[mcp]` table rather than in `[serve]` because
 `[serve] tools` is taken and means something else — a boolean deciding whether
