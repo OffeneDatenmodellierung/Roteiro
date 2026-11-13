@@ -19492,20 +19492,21 @@ fn okf_concept<'a>(
     // confirmation to a moment they had nothing to do with is a second false
     // claim on top of the first.
     let at = attribution.map_or_else(|| r.at.to_owned(), |a| okf_instant(a.at));
+    // `source_blob_base` ends at the commit id with no trailing slash, so the
+    // separator belongs here. Without it the URL reads
+    // `.../blob/<sha>docs/adr/0001.md` and 404s.
+    let blob_url = ex
+        .node
+        .path
+        .as_deref()
+        .and_then(|p| r.source_base.map(|b| format!("{b}/{p}")));
     okf::Concept {
         explanation: ex,
         frontmatter: okf::Frontmatter {
             type_: ex.node.kind.clone(),
             title: Some(ex.node.name.clone()),
             description: None,
-            // `source_blob_base` ends at the commit id with no trailing slash, so
-            // the separator belongs here. Without it the URL reads
-            // `.../blob/<sha>docs/adr/0001.md` and 404s.
-            resource: ex
-                .node
-                .path
-                .as_deref()
-                .and_then(|p| r.source_base.map(|b| format!("{b}/{p}"))),
+            resource: blob_url.clone(),
             tags,
             // Read from the source's own `status:`, not invented here — an ADR
             // that says `Superseded` should not read as `stable` in a bundle.
@@ -19539,11 +19540,15 @@ fn okf_concept<'a>(
             // The concept's own file, then each external work it cites from the
             // reference register (ADR-0029), with `id`/`title`/`author` and a
             // `[^id]` footnote carrying its APA 7 entry or refusal.
-            sources: ex
-                .node
-                .path
-                .iter()
-                .map(|p| okf::Source::resource(format!("/{p}")))
+            //
+            // The file is named by its blob URL, never `/<path>`: §6.2 reads a
+            // leading `/` as bundle-relative, and the bundle does not contain the
+            // repository's source files, so that entry pointed at nothing on
+            // every concept (#820 §1). With no remote there is no followable
+            // location, and the entry is omitted rather than invented.
+            sources: blob_url
+                .into_iter()
+                .map(okf::Source::resource)
                 .chain(works.iter().map(okf::Source::from_reference))
                 .collect(),
         },
