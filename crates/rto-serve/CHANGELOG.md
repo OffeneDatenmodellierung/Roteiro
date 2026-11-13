@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v7.0.0...rto-serve-v7.1.0) - 2026-11-13
+
+### Added
+
+- *(prose)* a controlled-English style lint, and plain-English prompt rules
+
 ## [7.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v6.2.0...rto-serve-v7.0.0) - 2026-11-12
 
 ### Added
