@@ -283,8 +283,14 @@ fn run_token_command(argv: &[String]) -> Result<String, EngineError> {
     let (program, rest) = argv
         .split_first()
         .ok_or_else(|| EngineError::Inference("`[provider] token_command` is empty".to_owned()))?;
+    // Run from the home directory, never the repository Roteiro was started in:
+    // a trusted `python3 -m helper` would otherwise import a cloned repository's
+    // `helper.py` first, which is the code execution this key is user-only to
+    // prevent (raised in review on #981).
+    let cwd = crate::config::home_dir().unwrap_or_else(std::env::temp_dir);
     let out = std::process::Command::new(program)
         .args(rest)
+        .current_dir(cwd)
         .stdin(std::process::Stdio::null())
         .output()
         .map_err(|e| {
@@ -309,18 +315,26 @@ fn run_token_command(argv: &[String]) -> Result<String, EngineError> {
         )));
     }
     let token = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-    if token.is_empty() || token.contains(char::is_whitespace) {
+    if !is_bearer_token(&token) {
         return Err(EngineError::Inference(format!(
-            "`[provider] token_command` (`{program}`) printed {} — expected one bare token \
-             (for `ant`, pass `--access-token`; without it, it prints JSON)",
-            if token.is_empty() {
-                "nothing"
-            } else {
-                "more than one word"
-            }
+            "`[provider] token_command` (`{program}`) did not print one bare token — \
+             expected only the characters RFC 6750 allows in a bearer token (for `ant`, \
+             pass `--access-token`; without it, it prints JSON)"
         )));
     }
     Ok(token)
+}
+
+/// Whether `s` is an RFC 6750 `b64token`: `ALPHA / DIGIT / "-" / "." / "_" / "~" /
+/// "+" / "/"`, then optional trailing `=`. An allowlist, so a credential object
+/// printed as compact JSON — which may carry a refresh token — is refused rather
+/// than sent as a bearer.
+fn is_bearer_token(s: &str) -> bool {
+    let body = s.trim_end_matches('=');
+    !body.is_empty()
+        && body.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~' | b'+' | b'/')
+        })
 }
 
 /// The credential, if one is set and non-blank.
@@ -751,6 +765,22 @@ mod tests {
         vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()]
     }
 
+    /// The helper runs from the home directory, not the repository Roteiro was
+    /// started in, so a relative import cannot pick up repository code.
+    #[test]
+    fn the_token_command_runs_outside_the_repository() {
+        let home = crate::config::home_dir().unwrap_or_else(std::env::temp_dir);
+        let printed = run_token_command(&[
+            "sh".into(),
+            "-c".into(),
+            "pwd | tr -cd 'A-Za-z0-9/._-'".into(),
+        ])
+        .expect("pwd is a valid token shape");
+        let canon =
+            |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        assert_eq!(canon(std::path::Path::new(&printed)), canon(&home));
+    }
+
     /// ADR-0032: with the environment variable unset, `token_command`'s output
     /// is the bearer token, and `[provider] headers` go on the request too.
     #[test]
@@ -839,6 +869,15 @@ mod tests {
             "stdout is never echoed: {failed}"
         );
         assert!(failed.to_string().contains("nope"), "{failed}");
+        // Compact JSON has no whitespace, so only an allowlist refuses it.
+        let compact = run_token_command(&[
+            "sh".into(),
+            "-c".into(),
+            "printf '%s' '{\"access_token\":\"a\",\"refresh_token\":\"r\"}'".into(),
+        ])
+        .expect_err("compact JSON is not a bearer token");
+        assert!(!compact.to_string().contains("refresh"), "{compact}");
+        assert!(super::is_bearer_token("eyJhbGc.eyJzdWI-_~+/x=="));
         let json = run_token_command(&[
             "sh".into(),
             "-c".into(),
