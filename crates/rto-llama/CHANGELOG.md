@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.2.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v7.1.0...rto-llama-v7.2.0) - 2026-11-13
+
+### Fixed
+
+- *(provider)* send tools natively, so a tool call survives Ollama
+
 ## [7.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-llama-v6.2.0...rto-llama-v7.0.0) - 2026-11-12
 
 ### Added
