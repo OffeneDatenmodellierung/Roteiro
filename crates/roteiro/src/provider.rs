@@ -286,8 +286,17 @@ fn run_token_command(argv: &[String]) -> Result<String, EngineError> {
     // Run from the home directory, never the repository Roteiro was started in:
     // a trusted `python3 -m helper` would otherwise import a cloned repository's
     // `helper.py` first, which is the code execution this key is user-only to
-    // prevent (raised in review on #981).
-    let cwd = crate::config::home_dir().unwrap_or_else(std::env::temp_dir);
+    // prevent (raised in review on #981). With no home directory it refuses
+    // rather than falling back to a shared directory such as `/tmp`, where
+    // anyone could plant the same module.
+    let cwd = crate::config::home_dir().ok_or_else(|| {
+        EngineError::Inference(
+            "`[provider] token_command` needs a home directory to run from (`HOME`, or \
+             `USERPROFILE` on Windows), and none is set — it is never run from a shared \
+             directory"
+                .to_owned(),
+        )
+    })?;
     let out = std::process::Command::new(program)
         .args(rest)
         .current_dir(cwd)
@@ -769,7 +778,9 @@ mod tests {
     /// started in, so a relative import cannot pick up repository code.
     #[test]
     fn the_token_command_runs_outside_the_repository() {
-        let home = crate::config::home_dir().unwrap_or_else(std::env::temp_dir);
+        let Some(home) = crate::config::home_dir() else {
+            return; // no home: the command refuses to run, by design
+        };
         let printed = run_token_command(&[
             "sh".into(),
             "-c".into(),
