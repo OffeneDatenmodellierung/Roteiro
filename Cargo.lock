@@ -3222,6 +3222,7 @@ dependencies = [
  "anyhow",
  "encoding_rs",
  "llama-cpp-2",
+ "llama-cpp-sys-2",
  "minijinja",
  "minijinja-contrib",
  "serde_json",
