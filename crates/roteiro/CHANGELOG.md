@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.2.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v7.1.0...roteiro-v7.2.0) - 2026-11-13
+
+### Added
+
+- *(serve)* OpenAI-client compatibility — include_usage, one system turn, `tools: []`, fresh assets
+
+### Fixed
+
+- *(provider)* send tools natively, so a tool call survives Ollama
+
 ## [7.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v7.0.0...roteiro-v7.1.0) - 2026-11-13
 
 ### Added
