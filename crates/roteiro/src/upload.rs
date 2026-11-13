@@ -63,13 +63,17 @@ pub struct Limits {
     pub max_bytes: usize,
     /// Most entries `raw/` may hold before uploads are refused with `507`.
     pub max_files: usize,
+    /// Longest a request may take to deliver its body once it holds the upload
+    /// permit; slower is a `408`, so a stalled client cannot hold it forever.
+    pub body_deadline: std::time::Duration,
 }
 
 impl Limits {
-    /// 64 MiB a file, 10,000 files.
+    /// 64 MiB a file, 10,000 files, two minutes to send the body.
     pub const DEFAULT: Self = Self {
         max_bytes: 64 * 1024 * 1024,
         max_files: 10_000,
+        body_deadline: std::time::Duration::from_secs(120),
     };
 }
 
@@ -181,15 +185,25 @@ async fn store(
     headers: HeaderMap,
     body: axum::body::Body,
 ) -> (StatusCode, String) {
-    let Ok(_permit) = up.inflight.clone().acquire_owned().await else {
+    let Ok(permit) = up.inflight.clone().acquire_owned().await else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "upload surface closed\n".to_owned(),
         );
     };
-    let body: Bytes = match axum::body::to_bytes(body, up.limits.max_bytes).await {
-        Ok(bytes) => bytes,
-        Err(e) => {
+    let read = axum::body::to_bytes(body, up.limits.max_bytes);
+    let body: Bytes = match tokio::time::timeout(up.limits.body_deadline, read).await {
+        Ok(Ok(bytes)) => bytes,
+        Err(_) => {
+            return (
+                StatusCode::REQUEST_TIMEOUT,
+                format!(
+                    "refused: the body did not arrive within {}s\n",
+                    up.limits.body_deadline.as_secs()
+                ),
+            );
+        }
+        Ok(Err(e)) => {
             return (
                 StatusCode::PAYLOAD_TOO_LARGE,
                 format!(
@@ -205,9 +219,14 @@ async fn store(
         .unwrap_or_default()
         .to_owned();
     // Blocking file I/O off the runtime thread: `serve` may run current-thread.
-    tokio::task::spawn_blocking(move || store_blocking(&up, &name, &declared, &body))
-        .await
-        .unwrap_or_else(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}\n")))
+    // The permit moves into the blocking task: if this request is cancelled the
+    // task still runs with the buffered body, and must keep the slot until it ends.
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        store_blocking(&up, &name, &declared, &body)
+    })
+    .await
+    .unwrap_or_else(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}\n")))
 }
 
 fn store_blocking(up: &Upload, name: &str, declared: &str, body: &[u8]) -> (StatusCode, String) {
@@ -524,6 +543,48 @@ mod tests {
         drop(held);
         let status = call.await.expect("join").expect("response").status();
         assert_eq!(status, StatusCode::CREATED);
+    }
+
+    /// A client that sends headers and never finishes the body loses the permit
+    /// at the deadline, and the next upload proceeds. Raised in review on #970.
+    #[tokio::test]
+    async fn a_stalled_body_cannot_hold_the_permit_forever() {
+        let (raw, _) = fixture("stalled");
+        let limits = Limits {
+            body_deadline: std::time::Duration::from_millis(200),
+            ..Limits::DEFAULT
+        };
+        let app = router(raw.clone(), limits);
+        let (_sender, stalled) =
+            http_body_util::channel::Channel::<axum::body::Bytes, std::convert::Infallible>::new(1);
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/v1/raw/slow.txt")
+                    .header("content-type", "text/plain")
+                    .body(Body::new(stalled))
+                    .expect("request"),
+            )
+            .await
+            .expect("response")
+            .status();
+        assert_eq!(first, StatusCode::REQUEST_TIMEOUT);
+        // The same router, so the same permit: it must have been released.
+        let next = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/v1/raw/next.txt")
+                    .header("content-type", "text/plain")
+                    .body(Body::from("x"))
+                    .expect("request"),
+            )
+            .await
+            .expect("response")
+            .status();
+        assert_eq!(next, StatusCode::CREATED);
     }
 
     /// One slot left and sixteen uploads under different names released at
