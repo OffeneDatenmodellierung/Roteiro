@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v7.0.0...rto-graph-v7.1.0) - 2026-11-13
+
+### Added
+
+- *(prose)* issues carry the line their sentence starts on; blank lines end paragraphs
+- *(prose)* a controlled-English style lint, and plain-English prompt rules
+
+### Fixed
+
+- *(prose)* StyleRule is #[non_exhaustive]
+
 ## [7.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v6.2.0...rto-graph-v7.0.0) - 2026-11-12
 
 ### Added
