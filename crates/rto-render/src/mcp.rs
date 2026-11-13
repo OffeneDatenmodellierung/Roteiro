@@ -74,7 +74,7 @@
 //!   first. The data does distinguish them (a clean run leaves a layer with no
 //!   findings; never running leaves no layer), but the *document* does not say so.
 //!   The fix is the shape `check` already uses here, and it is now
-//!   [`rto_exec::Coverage`]: a discriminator that is always present, and the
+//!   `rto_exec::Coverage`: a discriminator that is always present, and the
 //!   payload omitted entirely in the case that has no answer. So `coverage:
 //!   "no-analyzer-on-record"` carries **no `report` at all**, while a clean run is
 //!   `coverage: "analyzed"` with `findings: 0`.
@@ -98,14 +98,19 @@
 //!   bound is **per layer** rather than per document: a document-wide bound spends
 //!   its budget on the first layer in key order and reports the second as empty,
 //!   which reads as "that analyzer found nothing" — the first bullet's defect,
-//!   arrived at from the other direction. See [`rto_exec::security_list`] for why
+//!   arrived at from the other direction. See `rto_exec::security_list` for why
 //!   the page is ordered by severity when the store's listing is not.
 //!
 //! Both are thin wrappers, as every tool here is: the documents are built by
-//! [`rto_exec::tool_security`], which the CLI's `security status` also draws its
+//! `rto_exec::tool_security`, which the CLI's `security status` also draws its
 //! coverage matrix and staleness rows from. That shared home is the point rather
 //! than a convenience — `possibly_stale` and `ready` are judgements about
 //! evidence, and issue #321 is what three copies of one judgement costs.
+//!
+//! The three `rto_exec` names above are code spans rather than links: this
+//! module doc is compiled under `mcp` alone, and `rto_exec` is reachable only
+//! with `execution` on too, so a link would be unresolved in an `mcp`-only
+//! build (#797).
 //!
 //! This crate gains its own `execution` feature to reach those types, and the
 //! `roteiro` binary's `execution` feature forwards it. That forwarding is

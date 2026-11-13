@@ -13123,8 +13123,9 @@ struct SecurityRunReport {
 /// Run an analyzer against this worktree and file its findings.
 ///
 /// The host is the only backend (ADR-0030), and `--allow-unsandboxed` is its
-/// consent: without it [`rto_exec::SubprocessRunner::new`] refuses before
-/// anything is executed, naming the flag.
+/// consent: without it `rto_exec::SubprocessRunner::new` refuses before
+/// anything is executed, naming the flag. (A code span: the runner is behind
+/// `exec-subprocess`, and this function is compiled under `execution` alone.)
 #[cfg(feature = "execution")]
 fn run_security_run(analyzer: &str, allow_unsandboxed: bool, json: bool) -> anyhow::Result<()> {
     run_security_run_on_this_host(analyzer, allow_unsandboxed, json)
@@ -15823,9 +15824,11 @@ fn run_serve_network(
 /// multi-workspace [`rto_graph::WorkspaceSet`] backing the read-only `/v1/graph/*`
 /// API + UI) and `flat` (one workspace over every hosted project, backing the model
 /// tools + MCP router) — from config plus any `--workspace <ROOT>` roots (ADR-0008).
-/// Shared by [`run_serve`] and [`run_mcp`]. `cmd` names the caller for the startup
-/// line. A lone repo with no workspace config builds its graph now and hosts it
-/// alone as `default` (the one path still needing a git cwd).
+/// Shared by [`run_serve`] and `run_mcp` — a code span, not a link, because
+/// `run_mcp` is not compiled in an `explorer`-only build and this is (#797).
+/// `cmd` names the caller for the startup line. A lone repo with no workspace
+/// config builds its graph now and hosts it alone as `default` (the one path
+/// still needing a git cwd).
 ///
 /// # `scope` decides which of those two shapes is built (issue #810)
 ///

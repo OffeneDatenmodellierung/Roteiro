@@ -4,10 +4,14 @@
 //! dark — and every in-app surface is themed from it and from nothing else:
 //!
 //! - the workspace hub and the project graph view, spliced into the explorer
-//!   shell's inline `<style>` ([`crate::explorer_app`]);
-//! - the OKF viewer, prepended to its served stylesheet ([`crate::okf_viewer`]);
+//!   shell's inline `<style>` (`crate::explorer_app`);
+//! - the OKF viewer, prepended to its served stylesheet (`crate::okf_viewer`);
 //! - the `links --matrix --html` export, inlined into the page
 //!   ([`crate::overview::render_html`]).
+//!
+//! The first two are code spans, not links: those modules exist only under the
+//! `explorer` and `okf-viewer` features, and this module does not, so a link
+//! would be unresolved in exactly the builds that lack them.
 //!
 //! It lives here, under the crate directory, precisely so all three can reach it
 //! with `include_str!`. That was the constraint that used to force the viewer to
