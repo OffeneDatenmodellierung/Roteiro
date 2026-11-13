@@ -195,7 +195,7 @@ pub use query::{
     works_cited,
 };
 pub use reference::{
-    AccessDate, Attested, Author, Day, Doi, GivenName, Locator, Month, NotADay, NotADoi,
+    AccessDate, Attested, Author, Container, Day, Doi, GivenName, Locator, Month, NotADay, NotADoi,
     NotAGivenName, NotAYear, PublicationDate, Reference, Stability, WorkKind, Year,
     is_printable_identifier,
 };

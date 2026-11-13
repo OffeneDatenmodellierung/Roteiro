@@ -563,6 +563,17 @@ fn is_given_name_char(c: char) -> bool {
         || matches!(c, '.' | '\'' | '\u{2019}')
 }
 
+/// Whether `c` joins two parts of a hyphenated given name: the ASCII
+/// hyphen-minus, U+2010 HYPHEN and U+2011 NON-BREAKING HYPHEN.
+///
+/// Not only `-`: `Wouter‐Jan` typed with U+2010 is the same name as
+/// `Wouter-Jan`, and refusing it refused five real authors in one corpus
+/// (#819). Dashes are deliberately not hyphens — an en dash in a given name is
+/// a typo to argue about, not a spelling to accept.
+fn is_hyphen(c: char) -> bool {
+    matches!(c, '-' | '\u{2010}' | '\u{2011}')
+}
+
 /// Whether `name` is a generational suffix rather than a given name.
 ///
 /// A deliberately short, closed list, and not a rule about spelling — these are
@@ -620,7 +631,7 @@ impl GivenName {
             part.starts_with(char::is_alphabetic) && part.chars().all(is_given_name_char)
         };
         let usable = !trimmed.is_empty()
-            && trimmed.split('-').all(is_a_name)
+            && trimmed.split(is_hyphen).all(is_a_name)
             && !is_generational_suffix(trimmed);
         if usable {
             Ok(Self(trimmed.to_owned()))
@@ -639,7 +650,7 @@ impl GivenName {
     /// and a part carries no whitespace — so a part is exactly one name and
     /// there is exactly one initial to take from it.
     pub fn parts(&self) -> impl Iterator<Item = &str> {
-        self.0.split('-')
+        self.0.split(is_hyphen)
     }
 
     /// The initial APA prints for this name: `M.` for `Mary` and for `M.`, and
@@ -1150,13 +1161,15 @@ pub enum Locator {
 
 /// What kind of thing a work is.
 ///
-/// Deliberately a short list of **standalone** works, because those are the
-/// ones this phase can render correctly. A journal article or a book chapter is
-/// a work inside a greater whole, and citing one needs a second model — the
-/// container, its editors, the volume, the issue, the page range. Rather than
-/// carry half of that and emit a reference with the container guessed at, the
-/// kind is simply not spellable yet. Refusing at the type is the same rule this
-/// module applies everywhere else, one level up.
+/// Five **standalone** kinds, and two that sit inside a greater whole:
+/// [`WorkKind::JournalArticle`] and [`WorkKind::Chapter`], whose
+/// [`Reference::container`] carries the journal or the book. The container
+/// model holds the title, volume, issue and page range a research corpus
+/// actually supplies (#819: 573 of 719 unrepresentable works had pages, 316 a
+/// container title) and **no editors**: the corpus that motivated it carries
+/// editors on none of them, so a container that required editors would refuse
+/// every one, and one that invented them would be worse. A chapter therefore
+/// renders APA's no-editor form, `In *Title* (pp. 1–10)`.
 ///
 /// Deliberately not `#[non_exhaustive]`, and this is the enum here most likely
 /// to gain a variant. That is the reason rather than an objection: the kind
@@ -1181,6 +1194,12 @@ pub enum WorkKind {
     FactSheet,
     /// A page on a website.
     WebPage,
+    /// An article in a periodical — a journal, or proceedings published as one.
+    /// Requires a [`Reference::container`] naming the periodical.
+    JournalArticle,
+    /// A chapter or paper in an edited book or a proceedings volume. Requires a
+    /// [`Reference::container`] naming the book.
+    Chapter,
 }
 
 impl WorkKind {
@@ -1194,6 +1213,8 @@ impl WorkKind {
             Self::DataSet => "data-set",
             Self::FactSheet => "fact-sheet",
             Self::WebPage => "web-page",
+            Self::JournalArticle => "journal-article",
+            Self::Chapter => "chapter",
         }
     }
 }
@@ -1262,6 +1283,53 @@ pub struct Reference {
     /// Whether the work holds still, carrying the retrieval date when it does
     /// not.
     pub stability: Stability,
+    /// The greater whole the work appears in — required by
+    /// [`WorkKind::JournalArticle`] and [`WorkKind::Chapter`], refused on any
+    /// standalone kind. Optional on the wire, so every record written before
+    /// it existed reads exactly as it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<Container>,
+}
+
+/// The journal or book a [`WorkKind::JournalArticle`] or [`WorkKind::Chapter`]
+/// appears in.
+///
+/// The fields a research corpus supplies, each [`Attested`] so that "this
+/// journal has no issue numbers" is not confused with "nobody looked". The
+/// publisher is [`Reference::publisher`], not repeated here. **Editors are not
+/// modelled** — see [`WorkKind`] for why that is the honest shape rather than an
+/// omission.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Container {
+    /// The journal's or book's title, ready to print.
+    pub title: String,
+    /// The volume, recorded bare — `12`, not `Vol. 12`.
+    #[serde(default)]
+    pub volume: Attested<String>,
+    /// The issue, recorded bare — `3`, not `No. 3`.
+    #[serde(default)]
+    pub issue: Attested<String>,
+    /// The first page, or an article number, as printed by the work.
+    #[serde(default)]
+    pub first_page: Attested<String>,
+    /// The last page. [`Attested::AbsentFromWork`] is a one-page work.
+    #[serde(default)]
+    pub last_page: Attested<String>,
+}
+
+impl Container {
+    /// A container with every field but its title [`Attested::Unknown`].
+    #[must_use]
+    pub fn new(title: impl Into<String>) -> Self {
+        Self {
+            title: title.into(),
+            volume: Attested::Unknown,
+            issue: Attested::Unknown,
+            first_page: Attested::Unknown,
+            last_page: Attested::Unknown,
+        }
+    }
 }
 
 impl Reference {
@@ -1289,6 +1357,7 @@ impl Reference {
             publisher: Attested::Unknown,
             locator: Attested::Unknown,
             stability,
+            container: None,
         }
     }
 
@@ -1701,6 +1770,13 @@ mod tests {
         // inside the name is touched.
         assert_eq!(given_name("  Mary  ").as_str(), "Mary");
         assert!(GivenName::new("Jean - Paul").is_err());
+        // U+2010 HYPHEN and U+2011 NON-BREAKING HYPHEN are hyphens: refusing
+        // them refused five real authors in one corpus (#819). An en dash is not.
+        for typed in ["Wouter\u{2010}Jan", "Wouter\u{2011}Jan"] {
+            assert_eq!(given_name(typed).initial(), "W.-J.", "{typed:?}");
+        }
+        assert!(GivenName::new("Wouter\u{2013}Jan").is_err());
+        assert!(GivenName::new("Wouter\u{2010}\u{2010}Jan").is_err());
         // And a file cannot smuggle one past construction either.
         assert!(serde_json::from_str::<GivenName>("\"Jean--Paul\"").is_err());
         assert!(serde_json::from_str::<GivenName>("\"\"").is_err());
@@ -1882,11 +1958,11 @@ mod tests {
             // One initial per part, always. A separator that slipped through
             // the allowlist would show up here as a name with more words than
             // the rendering has initials — which is the drop, stated as a count.
-            // The hyphen itself is in the sweep and legitimately makes two
+            // The three hyphens are in the sweep and each legitimately makes two
             // parts, so the rule is a ratio rather than a constant.
             assert_eq!(
                 name.initial().matches('.').count(),
-                candidate.split('-').count(),
+                candidate.split(['-', '\u{2010}', '\u{2011}']).count(),
                 "U+{:04X}: {candidate:?} rendered {:?}, losing a part",
                 c as u32,
                 name.initial()
@@ -1902,7 +1978,7 @@ mod tests {
             let hyphenated = GivenName::new(&joined).expect("a valid given name");
             assert_eq!(
                 hyphenated.initial().matches('.').count(),
-                joined.split('-').count(),
+                joined.split(['-', '\u{2010}', '\u{2011}']).count(),
                 "U+{:04X}: {joined:?} rendered {:?}, losing a part",
                 c as u32,
                 hyphenated.initial()

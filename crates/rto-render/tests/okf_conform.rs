@@ -463,6 +463,37 @@ fn staleness_is_never_judged_against_the_clock() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A finding quotes at most [`conform::QUOTE_MAX_BYTES`] of a bundle-chosen
+/// value, cut on a char boundary and marked as cut (#877).
+///
+/// The heading is `H` then 3-byte U+202E, so the byte limit falls *inside* a
+/// character: a naive slice would panic, and an unmarked cut would read as a
+/// mangled heading rather than a long one.
+#[test]
+fn a_huge_heading_is_quoted_bounded_and_marked() {
+    let heading = format!("H{}", "\u{202e}".repeat(20_000));
+    let concept = format!("---\ntype: Metric\ntitle: Long\n---\n\n# Long\n\n## {heading}\n");
+    let root = bundle(
+        "huge-heading",
+        &[("index.md", ROOT_INDEX), ("metrics/long.md", &concept)],
+    );
+    let report = conform::lint_report(&root).expect("load");
+    let empty = messages(&report, Some("L4"));
+    assert_eq!(empty.len(), 1, "{empty:?}");
+    let message = &empty[0];
+    assert!(
+        message.len() < conform::QUOTE_MAX_BYTES + 100,
+        "message must not grow with the heading: {} bytes",
+        message.len()
+    );
+    assert!(
+        message.contains(&format!("(truncated, {} bytes)", heading.len())),
+        "a cut quote says so, with the original size: {message}"
+    );
+    assert!(message.starts_with("heading `H\u{202e}"), "{message}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// A bundle with no concepts reports that, rather than reporting nothing wrong.
 #[test]
 fn an_empty_bundle_says_it_examined_nothing() {
