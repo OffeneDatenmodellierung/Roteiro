@@ -79,11 +79,10 @@ pub enum Verdict {
     /// A genuine defect: accepted by the maintainer.
     ///
     /// Usually fixed by a commit, which [`CorpusRow::fix_commit`] names — but
-    /// acceptance is what the verdict records, and the two can come apart: row
-    /// `3789014471` is accepted and carried as an open decision of its own, with a
-    /// blank `fix_commit` (the marker for that decision lives at the code it is
-    /// about, in `findings.rs`, which is where the debt scan should find one). Reading `real` as "there is a fix commit" is what this
-    /// sentence used to invite, and it is not what the field means.
+    /// acceptance is what the verdict records, and the two can come apart: a row
+    /// can be accepted while its fix is still an open decision (as `3789014471`
+    /// was until #798), with a blank `fix_commit`. Reading `real` as "there is a
+    /// fix commit" is not what the field means.
     Real,
     /// The claim was wrong: refuted in a maintainer reply.
     False,
@@ -262,12 +261,10 @@ pub struct CorpusRow {
     /// attributable commit — a blank is honest where a plausible-looking guess would
     /// corrupt every future score.
     ///
-    /// **Nine rows are blank, and five of them trivially so**: a `false` claim has
-    /// nothing to fix. Among the **four accepted-real** blanks the fixture README
-    /// names the rows in each of two cases: three where the fix landed inside a
-    /// branch rework rather than one commit, and one (`3789014471`) where the
-    /// finding is accepted but **not yet repaired**, carried as an open decision. A
-    /// reader must not take a blank as "not a real defect" — [`Verdict`] is the
+    /// **Eight rows are blank, and five of them trivially so**: a `false` claim has
+    /// nothing to fix. The **three accepted-real** blanks are rows whose fix landed
+    /// inside a branch rework rather than one commit; the fixture README names
+    /// them. A reader must not take a blank as "not a real defect" — [`Verdict`] is the
     /// field that says that, and it is the one to read first.
     pub fix_commit: String,
     /// One line stating the defect, or stating why the claim is wrong.
@@ -648,9 +645,9 @@ mod tests {
 
     #[test]
     fn a_fix_commit_that_is_not_a_sha_is_refused_but_blank_is_allowed() {
-        // Blank is legitimate and load-bearing: nine rows in the shipped corpus
+        // Blank is legitimate and load-bearing: eight rows in the shipped corpus
         // carry no fix commit — the five `false` ones, which have nothing to fix,
-        // and four accepted-real ones the README accounts for individually.
+        // and three accepted-real ones the README accounts for individually.
         let ok = Corpus::parse(&row_json(&[("fix_commit", "\"\"")])).expect("blank is allowed");
         assert!(ok.rows()[0].fix_commit.is_empty());
         let err = Corpus::parse(&row_json(&[("fix_commit", "\"landed in a rework\"")]))

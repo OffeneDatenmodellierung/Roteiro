@@ -144,27 +144,17 @@ decisive — but only one that actually compiled the code in question, which is
 narrower than "CI is green" and is spelled out there. Follow that file, not this
 paragraph, when adding rows.
 
-Nine rows carry an **empty `fix_commit`**, and five of those are the `false`
-claims, which have nothing to fix by definition. The **four accepted-real** ones
-are the interesting case, and they are blank for two different reasons, neither of
-which is "we could not be bothered to look".
-
-Three are the PR #299 `vacuous-test` findings (ids `3789173576`, `3789173583`,
+Eight rows carry an **empty `fix_commit`**, and five of those are the `false`
+claims, which have nothing to fix by definition. The **three accepted-real** ones
+are the PR #299 `vacuous-test` findings (ids `3789173576`, `3789173583`,
 `3789173587`). All three were accepted and fixed, with failure-injection evidence
 in the thread replies, but the fixes landed inside a branch rework rather than as
 one attributable commit. The field is left blank rather than filled with a
 plausible-looking guess: a corpus whose provenance is partly invented is worse
 than one that admits a gap.
 
-The fourth is `3789014471`, the `split_escaped` row, and it is blank because the
-defect is **accepted and not yet fixed**: `split_escaped` at `HEAD` is
-byte-identical to the function the comment was made on, and the decision to
-tighten it is carried as its own open issue, #798 (`findings.rs` cites the row
-from the test that records the current behaviour). Its previous value pointed at
-the reviewed commit itself, which cannot be a fix for a defect reviewed there.
-`real` stays the verdict — the finding is true and was accepted — so read the
-adjudication rule's "a real defect has a commit fixing it" as satisfied by
-acceptance plus a tracked decision here, and follow #798 rather than this field.
+`3789014471`, the `split_escaped` row, was a fourth until #798 decided to tighten
+the parser; its `fix_commit` is now `8d2b238`.
 
 ## Classes
 
@@ -190,11 +180,8 @@ acceptance plus a tracked decision here, and follow #798 rather than this field.
 **Every false positive is a compile-failure claim, and every compile-failure
 claim is a false positive.** Read that off the table above: the
 `false-compile-claim` row is the only one with a non-zero `false` column, and its
-`real` column is zero. Every other row is real and was accepted — all but one of
-them fixed, the exception being `3789014471`, which is accepted and carried as an
-open decision — #798 — rather than repaired (see the `fix_commit` note above). The
-suppression rule rests on the *false* column, so an unrepaired real row does not
-touch it.
+`real` column is zero. Every other row is real and was accepted and fixed. The
+suppression rule rests on the *false* column.
 
 That is not a curiosity; it is a suppression rule with a measured cost of zero.
 CI already computes the refutation: the `msrv` job is
