@@ -14062,17 +14062,30 @@ fn run_security_status(analyzer: Option<&str>, json: bool) -> anyhow::Result<()>
                 &record.digest[..12.min(record.digest.len())],
                 record.fetched_at,
                 asset.age_days.unwrap_or_default(),
-                if asset.verified == Some(false) {
-                    "  ** ON-DISK BYTES NO LONGER MATCH — re-run prefetch **"
-                } else {
-                    ""
+                // The cause and its remedy, not a bare "no longer matches" (#900).
+                match &asset.integrity {
+                    rto_exec::Integrity::DigestMismatch { actual, remedy, .. } => format!(
+                        "  ** DIGEST MISMATCH: on disk {} — {remedy} **",
+                        &actual[..12.min(actual.len())]
+                    ),
+                    rto_exec::Integrity::BytesMissing { remedy, .. } => {
+                        format!("  ** BYTES MISSING — {remedy} **")
+                    }
+                    _ => String::new(),
                 }
             ),
-            None => println!(
-                "  {:<22} {:<12} not provisioned — run `roteiro security prefetch`",
-                asset.id,
-                asset.kind.as_str()
-            ),
+            None => match &asset.integrity {
+                rto_exec::Integrity::RecordMissing { remedy } => println!(
+                    "  {:<22} {:<12} ** UNRECORDED: bytes present, no record — {remedy} **",
+                    asset.id,
+                    asset.kind.as_str()
+                ),
+                _ => println!(
+                    "  {:<22} {:<12} not provisioned — run `roteiro security prefetch`",
+                    asset.id,
+                    asset.kind.as_str()
+                ),
+            },
         }
     }
 
@@ -14565,10 +14578,19 @@ fn resolve_mcp_surface(cfg: &config::Loaded, flag: &[String]) -> anyhow::Result<
             // ADR-0007's feature-availability rule, applied to a name: the
             // setting is valid and this binary cannot act on it, so it warns.
             // Silence here would be indistinguishable from a name that worked.
-            eprintln!(
-                "warning: {where_} names `{name}`, which this build does not \
-                 compile in — it restricts nothing here"
-            );
+            // A removed tool says so: "not compiled in" would point at a
+            // rebuild that cannot bring it back (ADR-0007 v1.11).
+            if rto_render::mcp::REMOVED_TOOLS.contains(&name.as_str()) {
+                eprintln!(
+                    "warning: {where_} names `{name}`, which a release removed \
+                     (ADR-0030) — it restricts nothing; drop it from the list"
+                );
+            } else {
+                eprintln!(
+                    "warning: {where_} names `{name}`, which this build does not \
+                     compile in — it restricts nothing here"
+                );
+            }
         }
         surface = meet(&surface, &restriction.advertised);
     }

@@ -127,7 +127,8 @@ pub const SECURITY_STATUS: &str = "Report SECURITY READINESS in TWO SEPARATELY S
     INSTALLS ANALYZERS — ask the user to install it or to `roteiro security ingest` a report \
     from elsewhere). `assets_provisioned` and `missing_programs` are ALWAYS present, so when \
     the state is not `ready` read both: a host can lack both, and `host_readiness` names only \
-    the first remedy. `repository` describes ONE PROJECT: which findings layers are live, how \
+    the first remedy. `integrity_failures` names assets FAILING verification; each asset's \
+    `integrity` gives the cause and its `remedy`. `repository` describes ONE PROJECT: which findings layers are live, how \
     many findings each holds, how old the advisory data behind each is. \
     `possibly_stale: true` whenever advisory data is involved and NEVER means current; `false` \
     means only that there is no advisory axis. Read `repository.coverage` first: \
@@ -336,8 +337,11 @@ mod tests {
     /// watching it fail. ADR-0030 removed the two `sandbox_*` descriptions and
     /// the sandbox sentences from `security_status` and `list_tool_classes`, so
     /// the ceiling came down by what they cost: 8,446 bytes measured, 8,500 set,
-    /// keeping the same slack.
-    const DESCRIPTION_BYTE_BUDGET: usize = 8_500;
+    /// keeping the same slack. #900 then added one sentence to `security_status`
+    /// pointing at `integrity_failures` and each asset's `integrity` cause and
+    /// remedy — the acceptance bar was that a caller reading only the tool output
+    /// can find them — and the ceiling went up by what it cost.
+    const DESCRIPTION_BYTE_BUDGET: usize = 8_600;
 
     /// No advertised description may still carry a `{…}` placeholder.
     ///
