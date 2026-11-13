@@ -399,18 +399,18 @@ pub struct Mount {
 
 /// `path` with the home directory written as `~`, so a disambiguating path does
 /// not also publish whose machine it is on.
+///
+/// By path *components*, not string prefix, so a `HOME` with a trailing
+/// separator, or written with `/` on Windows, still matches, and `/home/al`
+/// never matches `/home/alice`.
 fn home_relative(path: &str, home: Option<&std::path::Path>) -> String {
-    let Some(home) = home
-        .map(|h| h.display().to_string())
-        .filter(|h| !h.is_empty())
-    else {
+    let Some(home) = home.filter(|h| !h.as_os_str().is_empty()) else {
         return path.to_owned();
     };
-    match path.strip_prefix(&home) {
-        Some(rest) if rest.is_empty() || rest.starts_with(std::path::MAIN_SEPARATOR) => {
-            format!("~{rest}")
-        }
-        _ => path.to_owned(),
+    match std::path::Path::new(path).strip_prefix(home) {
+        Ok(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => path.to_owned(),
     }
 }
 
@@ -3553,6 +3553,9 @@ mod tests {
         );
         assert_eq!(home_relative("/srv/okf", Some(home)), "/srv/okf");
         assert_eq!(home_relative("/srv/okf", None), "/srv/okf");
+        let trailing = std::path::Path::new("/Users/someone/");
+        assert_eq!(home_relative("/Users/someone/okf", Some(trailing)), "~/okf");
+        assert_eq!(home_relative("/Users/someone", Some(home)), "~");
     }
 
     /// The mounted header wears the explorer shell's chrome rather than a second
