@@ -694,6 +694,9 @@ pub struct Score {
     pub found: usize,
     /// Real rows in scope.
     pub real_in_scope: usize,
+    /// Rows on attempted commits left out of every denominator because no
+    /// finding can match them — their anchor lies outside their own diff (#910).
+    pub unreachable_excluded: usize,
     /// Of the corpus's known-false rows in scope, how many the candidate repeated.
     /// The only measured precision signal the corpus licenses.
     pub known_false_reproduced: usize,
@@ -817,6 +820,14 @@ impl Score {
     #[must_use]
     pub fn caveats(&self) -> Vec<String> {
         let mut out = Vec::new();
+        if self.unreachable_excluded > 0 {
+            out.push(format!(
+                "{} row(s) anchor outside their own diff, so no finding can match \
+                 them; they are excluded from every denominator rather than counted \
+                 as misses",
+                self.unreachable_excluded
+            ));
+        }
         if self.attempted_shas < self.corpus_shas {
             out.push(format!(
                 "partial run: {} of {} corpus commits attempted, so rows on the \
@@ -1002,11 +1013,15 @@ pub fn score(corpus: &Corpus, run: &CandidateRun) -> Result<Score, ScoreError> {
     let known: BTreeSet<&str> = corpus.reviewed_shas();
     check_shas(&known, run)?;
 
-    let in_scope: Vec<&CorpusRow> = corpus
+    let attempted: Vec<&CorpusRow> = corpus
         .rows()
         .iter()
         .filter(|r| run.attempted_shas.contains(&r.reviewed_sha))
         .collect();
+    // A row no finding can match is out of every denominator, as a row on an
+    // unattempted commit is — counted, and said, in `unreachable_excluded` (#910).
+    let unreachable_excluded = attempted.iter().filter(|r| !r.reachable).count();
+    let in_scope: Vec<&CorpusRow> = attempted.into_iter().filter(|r| r.reachable).collect();
 
     let emitted = match_findings(&in_scope, &run.findings);
     let withheld = match_findings(&in_scope, &run.suppressed);
@@ -1079,6 +1094,7 @@ pub fn score(corpus: &Corpus, run: &CandidateRun) -> Result<Score, ScoreError> {
         per_class,
         found: count_by_verdict(&emitted, Verdict::Real),
         real_in_scope,
+        unreachable_excluded,
         known_false_reproduced: count_by_verdict(&emitted, Verdict::False),
         known_false_in_scope,
         unadjudicated: run.findings.len() - emitted.by_row.len(),
@@ -1204,7 +1220,7 @@ mod tests {
         format!(
             "{{\"id\": {id}, \"pr\": 300, \"reviewer\": \"github-copilot\", \
              \"reviewed_sha\": {sha:?}, \"path\": {path:?}, \"line\": {line}, \
-             \"verdict\": {verdict:?}, \"defect_class\": {class:?}, \
+             \"reachable\": true, \"verdict\": {verdict:?}, \"defect_class\": {class:?}, \
              \"fix_commit\": \"\", \"description\": \"d\", \
              \"comment_url\": \"https://example.invalid/{id}\"}}"
         )

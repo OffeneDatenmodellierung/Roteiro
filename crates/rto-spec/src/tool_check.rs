@@ -207,9 +207,23 @@ pub fn tool_check(
             ));
         }
     }
-    // Only when the recorded identity disagrees — `None` is left alone, because a
-    // store predating the stamp is the ordinary upgrade case and its tree match
-    // still means what it always did.
+    // An absent identity is a store written before the stamp existed. That is
+    // the ordinary upgrade case for the `[ingest]` toggles, which change content
+    // — but `[paths]` **removes nodes**, so an unstamped store in a project that
+    // now declares `exclude`/`opaque` may hold exactly the nodes the policy says
+    // must not exist, and a verdict over them answers from data the user asked
+    // to be absent (#863). So: absent + no declared policy is left alone (an
+    // empty policy removes nothing, so the old store cannot disagree with it);
+    // absent + a declared policy refuses, naming the remedy. Refusing every
+    // unstamped store instead would make every upgrade's first check `not-run`.
+    if store.sync_env()?.is_none() && !ingest.paths.is_empty() {
+        return Ok(ToolCheck::not_run(
+            "the graph predates the extraction stamp, and this project declares a \
+             `[paths]` policy, so it may still hold nodes the policy removes — run \
+             `roteiro sync` and ask again"
+                .to_owned(),
+        ));
+    }
     if let Some(env) = store.sync_env()?
         && env != want_env
     {
@@ -344,6 +358,53 @@ mod tests {
         assert_eq!(against.tree, tree);
         assert!(out.not_run_reason.is_none());
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #863: an unstamped store (written before the extraction stamp existed)
+    /// is still checked when the project declares no `[paths]` policy — the
+    /// ordinary upgrade case — but refused when it declares one, because the old
+    /// store may hold nodes that policy removes.
+    #[test]
+    fn an_unstamped_graph_is_refused_only_under_a_declared_path_policy() {
+        let dir = tmp("unstamped");
+        let tree = repo_with(
+            &dir,
+            &[
+                ("src/store.rs", "pub struct Store;\n"),
+                ("docs/adr/0001.md", ADR_OK),
+            ],
+        );
+        let store = synced(&derived(), &tree);
+        assert_eq!(
+            store.sync_env().expect("env"),
+            None,
+            "the fixture is unstamped"
+        );
+
+        let plain =
+            tool_check(&store, Some(&dir), rto_graph::IngestConfig::default()).expect("check");
+        assert_eq!(
+            plain.gate,
+            Gate::Pass,
+            "no policy: the upgrade case still runs"
+        );
+
+        let policy = rto_graph::PathPolicy::new(vec!["manifest/**".to_owned()], Vec::new());
+        let declared = tool_check(
+            &store,
+            Some(&dir),
+            rto_graph::IngestConfig::default().with_paths(&policy),
+        )
+        .expect("check");
+        assert_eq!(declared.gate, Gate::NotRun, "{declared:?}");
+        assert!(
+            declared
+                .not_run_reason
+                .as_deref()
+                .is_some_and(|r| r.contains("[paths]")),
+            "{declared:?}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

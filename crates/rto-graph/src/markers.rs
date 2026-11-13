@@ -211,6 +211,26 @@ const SEMI: CommentSyntax = CommentSyntax {
     block: None,
 };
 
+/// Whether `path` is a **data** file by extension — records, not prose or code.
+///
+/// The third case the marker scan lacked (#838). Not-code used to imply prose, so
+/// a corpus manifest's `.jsonl` was scanned line by line with every phrase rule
+/// armed, and a cardiology paper titled "… Long-Term Follow-Up …" became a
+/// `deferred` intent-debt finding. A data file carries values somebody else
+/// chose; it cannot carry the author's intent, so it is not scanned at all. A
+/// repository that wants a prose-shaped file treated the same way declares it
+/// `[paths] opaque` (ADR-0007).
+fn is_data_file(path: &str) -> bool {
+    let ext = path
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    matches!(
+        ext.as_str(),
+        "json" | "jsonl" | "ndjson" | "geojson" | "csv" | "tsv" | "parquet" | "avro" | "arrow"
+    )
+}
+
 /// The comment syntax for a path's language, keyed by extension, or `None` for a
 /// prose or unknown file — where every line is treated as comment context, so
 /// the prose phrases are scanned in full (the previous behaviour). Restricting
@@ -331,7 +351,8 @@ pub fn is_scan_exempt(bytes: &[u8]) -> bool {
 #[must_use]
 pub fn scan_markers(path: &str, bytes: &[u8]) -> Vec<Marker> {
     // Whole-file opt-out: a blob carrying the file directive is skipped entirely.
-    if is_scan_exempt(bytes) {
+    // And a data file is never scanned: it is neither code nor prose (#838).
+    if is_scan_exempt(bytes) || is_data_file(path) {
         return Vec::new();
     }
     let syntax = comment_syntax(path);
@@ -669,6 +690,24 @@ plain line, nothing here
             categories_in("PLAN.md", "We will defer the audit; deferred to v2.\n")[0].1,
             MarkerCategory::Deferred
         );
+    }
+
+    /// #838: a data file is records, not prose — its values cannot carry the
+    /// author's intent, so neither the phrase rules nor the bare `TODO` family
+    /// fire in it. The same line in Markdown still does.
+    #[test]
+    fn data_files_are_not_scanned_for_markers() {
+        let line = "{\"title\": \"Long-Term Follow-Up of Arrhythmias\", \"note\": \"TODO\"}\n";
+        for path in [
+            "manifest/papers.jsonl",
+            "counts.json",
+            "rows.CSV",
+            "x.ndjson",
+            "t.tsv",
+        ] {
+            assert!(categories_in(path, line).is_empty(), "{path}");
+        }
+        assert!(!categories_in("notes.md", line).is_empty());
     }
 
     #[test]

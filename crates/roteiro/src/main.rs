@@ -1136,8 +1136,12 @@ enum Command {
         /// 64 MiB. **Loopback only** — there is no authentication, so a
         /// non-loopback `--addr` with this flag is refused rather than warned
         /// about. A flag and not a config key, on purpose.
-        #[cfg(feature = "upload")]
-        #[arg(long)]
+        ///
+        /// Declared in every build, hidden and refused where the `upload` feature
+        /// is off, rather than `#[cfg]`-gated: a `#[cfg]` on a match-pattern
+        /// field is a construct tree-sitter-rust cannot parse, and it put all of
+        /// `main.rs` under error recovery (#833).
+        #[arg(long, hide = !cfg!(feature = "upload"))]
         allow_upload: bool,
         /// Restrict what this server advertises **and dispatches** — over `/mcp`
         /// and to the served model alike — to these tools (comma-separated,
@@ -2530,7 +2534,6 @@ fn main() -> anyhow::Result<()> {
             workspace_name,
             sync_on_access,
             mcp,
-            #[cfg(feature = "upload")]
             allow_upload,
             tools,
         } => run_serve(
@@ -2539,15 +2542,7 @@ fn main() -> anyhow::Result<()> {
             &ServeOptions {
                 // Resolved before anything is built or bound, so a refused bind
                 // or a missing `raw/` fails at startup (issue #814).
-                #[cfg(feature = "upload")]
-                upload: if allow_upload {
-                    Some(upload::resolve_raw_root(serve_socket(
-                        &cfg.effective,
-                        addr.as_deref(),
-                    )?)?)
-                } else {
-                    None
-                },
+                upload: resolve_upload(allow_upload, &cfg.effective, addr.as_deref())?,
                 models,
                 http,
                 addr,
@@ -3850,6 +3845,9 @@ fn run_sync(
         report_foreign_worktree(&report);
         report_content_failures(&report);
         report_pdf_screening(&report);
+        if let Some(warning) = repo.workdir().and_then(symlinked_raw_warning) {
+            eprintln!("{warning}");
+        }
         let tree = &report.tree[..report.tree.len().min(12)];
         let dirty = if report.blobs_dirty > 0 {
             format!(" +{} uncommitted", report.blobs_dirty)
@@ -3873,6 +3871,25 @@ fn run_sync(
         }
     }
     Ok(())
+}
+
+/// A warning when `<root>/raw` is a symlink, which the scan never follows (#815).
+///
+/// Following it would reverse a stated rule — `collect_markdown` and the bundle
+/// walk refuse symlinks so out-of-repo content cannot arrive behind a
+/// repo-relative key — and doing so is a decision for ADR-0026, not a detail. So
+/// until then the skip is **said**: a green sync over a `raw/` it never entered
+/// is the empty-corpus success this project keeps paying to avoid. The remedy
+/// that works today is a mount, which the walker sees as a directory.
+fn symlinked_raw_warning(root: &std::path::Path) -> Option<String> {
+    let raw = root.join("raw");
+    let target = std::fs::read_link(&raw).ok()?;
+    Some(format!(
+        "warning: `raw/` is a symlink (→ {}), and the scan does not follow symlinks, \
+         so nothing under it was extracted. Mount the shared storage AT `raw/` \
+         instead — a mount point is a directory to the walker (ADR-0026, #815)",
+        target.display()
+    ))
 }
 
 /// Open the repository and its per-worktree store and shared object cache.
@@ -4168,6 +4185,11 @@ fn run_check(
             "{}",
             debt_summary(&rto_graph::debt(&store, &[], debt_ignore)?)
         );
+        // And name any file extracted under parse-error recovery, so a broken-link
+        // failure points back at its cause instead of only at its symptom (#833).
+        for line in parse_recovery_lines(&store)? {
+            println!("{line}");
+        }
     }
 
     if report.has_violations() {
@@ -10771,6 +10793,59 @@ fn warn_dead_ignore_patterns(debt_ignore: &[String]) {
 
 /// A one-line summary of a [`rto_graph::DebtReport`], e.g.
 /// `intent debt: 12 marker(s) (deferred 5, stub 4, todo 3)`.
+/// `raw/`'s resolved path for `--allow-upload`, or `None` without the flag.
+///
+/// A build without the `upload` feature still accepts the (hidden) flag, so it
+/// refuses it here, naming the feature, rather than ignoring it (#833).
+#[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+fn resolve_upload(
+    allow_upload: bool,
+    cfg: &config::Config,
+    addr: Option<&str>,
+) -> anyhow::Result<Option<std::path::PathBuf>> {
+    if !allow_upload {
+        return Ok(None);
+    }
+    #[cfg(feature = "upload")]
+    {
+        Ok(Some(upload::resolve_raw_root(serve_socket(cfg, addr)?)?))
+    }
+    #[cfg(not(feature = "upload"))]
+    {
+        let _ = (cfg, addr);
+        anyhow::bail!(
+            "`--allow-upload` needs a build with the `upload` feature \
+             (`cargo install roteiro --features upload`)"
+        )
+    }
+}
+
+/// One warning per file the extractor could only parse under error recovery
+/// (#833), naming the file and the line of the first error. Such a file is
+/// in the graph with whatever recovery salvaged, and the visible failure is
+/// usually somewhere else entirely — broken ADR links to symbols it lost.
+fn parse_recovery_lines(store: &rto_graph::Store) -> anyhow::Result<Vec<String>> {
+    let mut lines: Vec<String> = store
+        .nodes_by_kind(&rto_graph::NodeKind::File)?
+        .into_iter()
+        .filter_map(|node| {
+            let at = node.meta.get("parse_error")?;
+            let line = at
+                .get("line")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            Some(format!(
+                "warning: {}:{line} parsed only under error recovery, so symbols after \
+                 that line may be missing from the graph — and an ADR link to one of \
+                 them reads as broken",
+                node.path.as_deref().unwrap_or(&node.name)
+            ))
+        })
+        .collect();
+    lines.sort();
+    Ok(lines)
+}
+
 fn debt_summary(report: &rto_graph::DebtReport) -> String {
     if report.total == 0 {
         return "intent debt: none".to_owned();
@@ -14779,7 +14854,14 @@ struct ServeOptions {
     /// resolved once in the command dispatch and carried — see [`McpSurface`].
     mcp_surface: McpSurface,
     /// `raw/`'s resolved real path when `--allow-upload` was given (issue #814).
-    #[cfg(feature = "upload")]
+    /// Always `None` in a build without the `upload` feature.
+    #[cfg_attr(
+        not(feature = "upload"),
+        allow(
+            dead_code,
+            reason = "read only by the `upload` mount, which this build lacks"
+        )
+    )]
     upload: Option<std::path::PathBuf>,
 }
 
@@ -16989,20 +17071,33 @@ fn sync_project_graph(
     // failure issue #837's amendment names, at a path the amendment did not reach.
     //
     // `build_registry` already recorded `repo.workdir()` beside the db path it
-    // built from `repo.git_dir()`, so the answer is known and is now passed in;
-    // the walk remains only for a source that records no root
-    // (`Workspace::from_named_dbs`).
-    let repo_dir = if let Some(root) = root {
-        root.to_path_buf()
-    } else {
-        graph_db
-            .parent()
-            .and_then(std::path::Path::parent)
-            .and_then(std::path::Path::parent)
-            .ok_or_else(|| anyhow::anyhow!("unexpected graph.db path: {}", graph_db.display()))?
-            .to_path_buf()
-    };
+    // built from `repo.git_dir()`, so the answer is known and is now passed in.
+    //
+    // With no recorded root — a **bare** repository has no working tree, and
+    // `Workspace::from_named_dbs` records none — discovery starts from the git
+    // dir itself, `graph.db → roteiro → <git dir>`: two parents, which is the git
+    // dir for every repository shape. Three parents assumed `<root>/.git` and, for
+    // a bare repository, landed *above* it, where discovery found an enclosing
+    // repository instead (#876). And the result is checked, because resolving the
+    // wrong repository succeeds quietly: the repository found must own the git
+    // dir the store sits in.
+    let git_dir = graph_db
+        .parent()
+        .and_then(std::path::Path::parent)
+        .ok_or_else(|| anyhow::anyhow!("unexpected graph.db path: {}", graph_db.display()))?;
+    let repo_dir = root.map_or_else(|| git_dir.to_path_buf(), std::path::Path::to_path_buf);
     let repo = Repo::discover(&repo_dir)?;
+    if root.is_none() {
+        let canon =
+            |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        anyhow::ensure!(
+            canon(repo.git_dir()) == canon(git_dir),
+            "`{}` resolved to the repository at `{}`, not the one that owns `{}`",
+            repo_dir.display(),
+            repo.git_dir().display(),
+            graph_db.display()
+        );
+    }
     let store_dir = repo.git_dir().join("roteiro");
     std::fs::create_dir_all(&store_dir)?;
     let mut store = Store::open(&store_dir.join("graph.db"))?;
@@ -25678,6 +25773,87 @@ mod worktree_discovery_tests {
     ///
     /// So the fixture diverges the two branches and the assertions are about
     /// *which* tree arrived, never that one did.
+    /// #815: a symlinked `raw/` is named, not skipped silently; a real
+    /// directory, or none at all, says nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_raw_is_warned_about() {
+        let base = std::env::temp_dir().join(format!("rto-rawlink-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::create_dir_all(base.join("share")).expect("mkdir");
+        std::fs::create_dir_all(base.join("repo")).expect("mkdir");
+        let root = base.join("repo");
+        assert!(
+            super::symlinked_raw_warning(&root).is_none(),
+            "no raw/: nothing to say"
+        );
+        std::os::unix::fs::symlink(base.join("share"), root.join("raw")).expect("link");
+        let warning = super::symlinked_raw_warning(&root).expect("a symlinked raw/ is named");
+        assert!(warning.contains("does not follow symlinks"), "{warning}");
+        std::fs::remove_file(root.join("raw")).expect("unlink");
+        std::fs::create_dir(root.join("raw")).expect("mkdir raw");
+        assert!(
+            super::symlinked_raw_warning(&root).is_none(),
+            "a real raw/ is walked"
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// #876: a **bare** repository records no working tree, so the hook derives
+    /// the repository from the store's path. The fixture nests the bare repo
+    /// inside an ordinary one, so resolving the wrong repository — the old
+    /// three-parent walk landed above the bare repo and discovered the enclosing
+    /// one — is a different, checkable answer rather than a quiet success.
+    #[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
+    #[test]
+    fn sync_on_access_builds_a_bare_repository_not_its_enclosing_one() {
+        let base = std::env::temp_dir().join(format!("rto-baresync-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        let outer = repo(&base.join("outer"));
+        std::fs::write(outer.join("only_outer.rs"), "pub fn only_outer() {}\n").expect("write");
+        git(&outer, &["add", "-A"]);
+        git(&outer, &["commit", "-qm", "outer"]);
+        let source = repo(&base.join("source"));
+        std::fs::write(source.join("only_bare.rs"), "pub fn only_bare() {}\n").expect("write");
+        git(&source, &["add", "-A"]);
+        git(&source, &["commit", "-qm", "bare-side"]);
+        let bare_git = outer.join("vendor").join("bare.git");
+        git(
+            &base,
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                source.to_str().expect("utf-8"),
+                bare_git.to_str().expect("utf-8"),
+            ],
+        );
+        let db = bare_git.join("roteiro").join("graph.db");
+
+        sync_project_graph(&db, None, rto_graph::IngestConfig::default()).expect("sync on access");
+
+        let store = rto_graph::Store::open(&db).expect("the bare repo's own store");
+        let has = |name: &str| {
+            store
+                .get_node(&format!("file:{name}"))
+                .expect("get")
+                .is_some()
+        };
+        assert!(
+            has("only_bare.rs"),
+            "the bare repository's own file is missing"
+        );
+        assert!(
+            !has("only_outer.rs"),
+            "the ENCLOSING repository was built instead"
+        );
+        assert!(
+            !outer.join(".git").join("roteiro").join("graph.db").exists(),
+            "a store was written into the enclosing repository"
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     #[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
     #[test]
     fn sync_on_access_builds_the_worktrees_own_graph_not_its_main_checkouts() {
