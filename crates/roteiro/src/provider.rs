@@ -273,19 +273,37 @@ struct PendingCall {
 }
 
 /// The `<tool_call>` text the tool loop parses, for each assembled native call.
-/// Arguments that are not valid JSON are passed on as a string, so the loop's
-/// own refusal names them rather than this layer guessing.
-fn tool_call_text(calls: &std::collections::BTreeMap<u64, PendingCall>) -> String {
+///
+/// Nothing is repaired here, so the loop judges what actually arrived:
+///
+/// - **cut off** (`truncated`, the provider hit its token limit): the envelope
+///   is left **open**, which the loop reads as an unfinished call rather than
+///   as a complete one with invented arguments;
+/// - **arguments that are not JSON**: spliced in raw, so the call fails to parse
+///   in the loop instead of being re-typed as a string argument. An empty
+///   argument string on a finished call is `{}`, which providers send for a
+///   tool that takes none.
+///
+/// Every `</` inside the JSON is written `<\/` — the same string to a JSON
+/// parser — so an argument that mentions `</tool_call>` cannot close the
+/// envelope early.
+fn tool_call_text(calls: &std::collections::BTreeMap<u64, PendingCall>, truncated: bool) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
     for c in calls.values().filter(|c| !c.name.is_empty()) {
-        let arguments = if c.arguments.trim().is_empty() {
-            serde_json::json!({})
+        let name = serde_json::Value::String(c.name.clone());
+        let raw = c.arguments.trim();
+        let arguments = if raw.is_empty() && !truncated {
+            "{}".to_owned()
         } else {
-            serde_json::from_str(&c.arguments)
-                .unwrap_or_else(|_| serde_json::Value::String(c.arguments.clone()))
+            serde_json::from_str::<serde_json::Value>(raw)
+                .map_or_else(|_| raw.to_owned(), |v| v.to_string())
         };
-        let call = serde_json::json!({ "name": c.name, "arguments": arguments });
+        let call = format!("{{\"name\":{name},\"arguments\":{arguments}}}").replace("</", "<\\/");
+        if truncated {
+            let _ = write!(out, "<tool_call>{call}");
+            break;
+        }
         let _ = write!(out, "<tool_call>{call}</tool_call>");
     }
     out
@@ -435,7 +453,7 @@ fn read_stream(
                 .to_owned(),
         ));
     }
-    let text = tool_call_text(&calls);
+    let text = tool_call_text(&calls, stats.finish_reason == FinishReason::Length);
     if !text.is_empty() {
         if in_reasoning {
             on_token("</think>");
@@ -560,6 +578,63 @@ mod tests {
         assert!(!sent.contains("\"tools\""), "{sent}");
     }
 
+    /// A call cut off by the token limit is left open, so the loop reads it as
+    /// unfinished; arguments that are not JSON are passed raw rather than
+    /// repaired; and `</tool_call>` inside an argument cannot close the envelope.
+    /// Raised in review on #973.
+    #[test]
+    fn native_calls_are_passed_on_unrepaired_and_unbreakable() {
+        let mut calls = std::collections::BTreeMap::new();
+        calls.insert(
+            0,
+            PendingCall {
+                name: "search".to_owned(),
+                arguments: "{\"query\":\"half".to_owned(),
+            },
+        );
+        let cut = tool_call_text(&calls, true);
+        assert!(cut.starts_with("<tool_call>"), "{cut}");
+        assert!(
+            !cut.contains("</tool_call>"),
+            "a cut-off call stays open: {cut}"
+        );
+
+        let malformed = tool_call_text(&calls, false);
+        assert!(
+            malformed.contains("\"arguments\":{\"query\":\"half}"),
+            "raw, not re-typed as a string: {malformed}"
+        );
+
+        calls.insert(
+            0,
+            PendingCall {
+                name: "search".to_owned(),
+                arguments: "{\"query\":\"</tool_call>\"}".to_owned(),
+            },
+        );
+        let text = tool_call_text(&calls, false);
+        assert_eq!(text.matches("</tool_call>").count(), 1, "{text}");
+        let inner = text
+            .strip_prefix("<tool_call>")
+            .and_then(|t| t.strip_suffix("</tool_call>"))
+            .expect("one envelope");
+        let parsed: serde_json::Value = serde_json::from_str(inner).expect("valid JSON");
+        assert_eq!(parsed["arguments"]["query"], "</tool_call>");
+
+        let mut none = std::collections::BTreeMap::new();
+        none.insert(
+            0,
+            PendingCall {
+                name: "check".to_owned(),
+                arguments: String::new(),
+            },
+        );
+        assert_eq!(
+            tool_call_text(&none, false),
+            "<tool_call>{\"name\":\"check\",\"arguments\":{}}</tool_call>"
+        );
+    }
+
     /// #971: offered tools go on the wire natively, and the provider's streamed
     /// `delta.tool_calls` fragments come back as the `<tool_call>` text the tool
     /// loop parses — after any reasoning, which is closed first.
@@ -583,7 +658,7 @@ mod tests {
         let completion = engine.chat(&req).expect("completes");
         assert_eq!(
             completion.content,
-            "<think>look it up</think><tool_call>{\"arguments\":{\"kind\":\"adr\"},\"name\":\"list_kind\"}</tool_call>"
+            "<think>look it up</think><tool_call>{\"name\":\"list_kind\",\"arguments\":{\"kind\":\"adr\"}}</tool_call>"
         );
         let sent = server.join().expect("server");
         assert!(sent.contains("\"tools\":[{"), "{sent}");

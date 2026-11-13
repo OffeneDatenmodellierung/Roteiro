@@ -13,11 +13,19 @@ use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_roteiro");
 
+/// Whether `pid` is still *running*. `kill -0` also succeeds for a zombie — an
+/// exited process its new parent has not reaped yet, which a container's PID 1
+/// may leave for a while — so the process state is read instead, and `Z` counts
+/// as gone.
 fn alive(pid: &str) -> bool {
-    Command::new("kill")
-        .args(["-0", pid])
-        .status()
-        .is_ok_and(|s| s.success())
+    Command::new("ps")
+        .args(["-o", "stat=", "-p", pid])
+        .output()
+        .is_ok_and(|out| {
+            let state = String::from_utf8_lossy(&out.stdout);
+            let state = state.trim();
+            !state.is_empty() && !state.starts_with('Z')
+        })
 }
 
 /// Start `roteiro explorer` orphaned — `sh` backgrounds it, prints its pid, and
