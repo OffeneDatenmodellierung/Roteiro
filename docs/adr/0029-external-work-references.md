@@ -11,8 +11,8 @@ architectural-significance: MEDIUM  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Knowledge Graph
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "0.3"
-last-modified: 2026-11-11
+version: "0.4"
+last-modified: 2026-11-13
 confluence-url:
 ---
 
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | For Review |
 | **Architectural Significance** | MEDIUM |
 | **Domain** | Knowledge Graph |
-| **Document version** | 0.3 |
+| **Document version** | 0.4 |
 
 ## Reference
 
@@ -137,10 +137,10 @@ Populated with what this repository's documents state:
 
 - **The OKF specification** — ADR-0021 gives the URL, v0.2, "published 12 June
   2026", and Google Cloud as publisher. It renders.
-- **`okf-core` and `okf-validator` 0.2.6** — present, and **refused**:
-  `docs/OKF_BUNDLE.md` gives "0.2.6 (2026-08-27)" without saying whether that is
-  a publication or an access date, so `published` is `unknown`. Settling it will
-  surface the `2026a`/`2026b` collision, which is reported rather than resolved.
+- **`okf-core` and `okf-validator` 0.2.6** — present, and dated: 2026-08-27 is
+  the **publication** date, as the crates.io index records for both (it had been
+  read both ways). Settling it surfaces the `2026a`/`2026b` collision, which is
+  reported rather than resolved.
 - **llama.cpp** — absent. Its only date is a commit timestamp (#799).
 
 ### 6. The OKF bundle carries the works as `sources[]`, with footnotes
@@ -250,3 +250,4 @@ proposes values for a human to commit.
 | 0.1 | 2026-11-11 | Initial. Register, `work` nodes, authored citation edges, `roteiro refs`, and `references` on `explain`/`context`. |
 | 0.2 | 2026-11-11 | §6: works projected into OKF `sources[]` with `id`/`title`/`author` and a `[^id]` footnote; import keeps a peer's attribution keys. |
 | 0.3 | 2026-11-11 | §7: `roteiro refs fetch --allow-download` writes fetched values as `[[proposal]]`s below a tool-owned marker, with an access date and explicit `not-stated`; never a graph fact. |
+| 0.4 | 2026-11-13 | Issue #819: the record gains `WorkKind::JournalArticle` and `WorkKind::Chapter` with an optional `container` (title, volume, issue, first and last page; publisher stays on the record) — additive, so every existing entry reads unchanged. **Editors are not modelled**: the research corpus that measured the gap carries none, so a required editor list would refuse all 719 works; a chapter renders APA's no-editor form. Given names accept U+2010/U+2011 hyphens. §5: the `okf-core` / `okf-validator` 0.2.6 date is settled as the crates.io publication date. |
