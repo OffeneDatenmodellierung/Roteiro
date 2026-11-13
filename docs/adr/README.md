@@ -36,6 +36,7 @@
 | [0028](0028-one-engine-local-or-hosted.md) | One engine, local or hosted — the provider may be off this machine, and the remote tier is removed | Accepted |
 | [0029](0029-external-work-references.md) | External works are cited from an authored reference register, rendered APA 7, and refused when incomplete | For Review |
 | [0030](0030-remove-the-microvm-sandbox.md) | Remove the microVM sandbox — analyzers and linters run on the host, behind the consent gate, or not at all | Accepted |
+| [0031](0031-measured-prose-for-model-output.md) | Model prose is measured on three separate axes — faithfulness, coverage and style — each deterministic | Accepted |
 
 > **ADR 0018** is the third of the analyzer trio: 0012 decides how findings are
 > stored, 0014 how analyzers are executed and provisioned (its microVM backend

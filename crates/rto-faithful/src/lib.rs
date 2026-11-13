@@ -56,7 +56,7 @@
 //!   pairs every real claim with a real but unrelated key passes.
 //! - **Omission.** A rendering that silently drops half the findings is faithful
 //!   by this definition. Coverage is a different property with a different
-//!   check.
+//!   check — ADR-0031 §1, `rto_spec::draft_coverage` for `spec draft`.
 //!
 //! # The larger limit: this bounds fabrication, not distortion
 //!
