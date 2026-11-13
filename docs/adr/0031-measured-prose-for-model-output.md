@@ -11,7 +11,7 @@ architectural-significance: MEDIUM  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Inference
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.0"
+version: "1.1"
 last-modified: 2026-11-12
 confluence-url:
 ---
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | Accepted |
 | **Architectural Significance** | MEDIUM |
 | **Domain** | Inference |
-| **Document version** | 1.0 |
+| **Document version** | 1.1 |
 
 ## Reference
 
@@ -31,6 +31,9 @@ confluence-url:
 - The one engine every model call goes through: [[docs/adr/0028-one-engine-local-or-hosted.md]].
 - Coverage for `spec draft`: [[crates/rto-spec/src/spec.rs#draft_coverage]].
 - The prompt `spec draft` sends: [[crates/rto-spec/src/spec.rs#draft_prompt]].
+- The style lint: [[crates/rto-graph/src/prose.rs#lint]].
+- The verdict and Ask prompts: [[crates/rto-graph/src/reviewer.rs#build_verdict_prompt]],
+  [[crates/rto-serve/src/tools.rs#system_prompt]].
 - Prior art: V. Mysore, *webSTE100* (MIT), a deterministic linter for
   ASD-STE100 Simplified Technical English with a model repair loop, written up
   after A. Karpathy suggested asking models to write in that standard.
@@ -132,19 +135,20 @@ that is wrong sometimes must not block a merge.
 
 ## Consequences
 
-- `spec draft` prints a coverage line on stderr. Its stdout document is
-  unchanged.
+- `spec draft` prints a coverage line and a style line on stderr. Its stdout
+  document is unchanged.
 - The style lint is English-only and regex-shaped; it will misread some
   sentences. That is acceptable for a report and is why nothing gates on it.
 - A repair pass multiplies model calls. It is off unless asked for.
 
 ## Status
 
-**Accepted** (2026-11-12). §1 is implemented; §2–§5 land in follow-up changes,
-each recorded in the version history below.
+**Accepted** (2026-11-12). §1, §2 and §4 are implemented; §3 and §5 land in
+follow-up changes, each recorded in the version history below.
 
 ## Version history
 
 | Version | Date | Change |
 |---|---|---|
 | 1.0 | 2026-11-12 | Initial. Accepted with the coverage report for `spec draft` (§1). |
+| 1.1 | 2026-11-12 | §2 and §4 implemented: `rto_graph::prose::lint`, a `style:` line from `spec draft` beside the coverage line, and the partial controlled-English rules in the `spec draft`, verdict and Ask prompts. The prompt rules are not yet measured against a model. |

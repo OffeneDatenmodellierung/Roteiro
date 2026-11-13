@@ -413,8 +413,9 @@ pub fn draft_prompt(topic: &str, ctx: &SpecContext, heading: &str, hint: &str) -
     }
     p.push_str(
         "Write 2–4 precise, technical sentences. Reference the real symbols above \
-         where relevant; do not invent symbols, files, or facts. Output only the \
-         prose, no heading.",
+         where relevant; do not invent symbols, files, or facts. Keep each sentence \
+         under 25 words, use one name for each concept, and prefer plain words \
+         (\"use\", not \"utilize\"). Output only the prose, no heading.",
     );
     p
 }

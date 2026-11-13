@@ -511,6 +511,11 @@ fn spec_draft_reports_what_the_draft_never_mentions() {
         .unwrap_or_else(|| panic!("a coverage line: {err}"));
     assert!(line.contains("never mentioned: fixture_parser"), "{line}");
     assert!(
+        err.lines()
+            .any(|l| l.starts_with("style: ") && l.contains("not correctness")),
+        "a style line (ADR-0031 §2): {err}"
+    );
+    assert!(
         !stdout(&out).contains("coverage:"),
         "stdout stays the document"
     );

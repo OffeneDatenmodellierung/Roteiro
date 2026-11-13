@@ -1072,7 +1072,8 @@ fn system_prompt(tools: &[&ToolDef], list: bool, graph: bool) -> String {
         "{opening} When a tool would help, {protocol}.\n\
          After you receive a <tool_response>, use it to answer. {grounding} If \
          the tools do not contain the answer, say you could not find it rather than \
-         making one up. If no tool is needed, just answer directly.\n"
+         making one up. If no tool is needed, just answer directly. Write the answer \
+         in short, plain sentences, with one name for each concept.\n"
     );
     if !list {
         return out;
