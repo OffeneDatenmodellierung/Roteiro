@@ -86,6 +86,10 @@ struct Upload {
     // shortcut: one process only; two servers over one raw/ can still race the
     // count by one file each — move the count into a lock file if that is ever supported.
     gate: Arc<std::sync::Mutex<()>>,
+    /// One request body buffered at a time. Taken *before* the body is read, so
+    /// waiting uploads hold neither memory (their bytes stay in the socket) nor
+    /// a blocking-pool thread; at most one [`Limits::max_bytes`] is in memory.
+    inflight: Arc<tokio::sync::Semaphore>,
 }
 
 /// `(device, inode)` on Unix; `None` elsewhere, where only the path check runs.
@@ -114,6 +118,11 @@ fn file_id(meta: &std::fs::Metadata) -> Option<FileId> {
 /// The upload router over `raw`, which must already be the resolved real path
 /// (see [`resolve_raw_root`]).
 pub fn router(raw: PathBuf, limits: Limits) -> Router {
+    router_with(raw, limits, Arc::new(tokio::sync::Semaphore::new(1)))
+}
+
+/// [`router`] with the in-flight semaphore supplied, so a test can hold it.
+fn router_with(raw: PathBuf, limits: Limits, inflight: Arc<tokio::sync::Semaphore>) -> Router {
     Router::new()
         .route(ROUTE, put(store))
         .layer(DefaultBodyLimit::max(limits.max_bytes))
@@ -122,6 +131,7 @@ pub fn router(raw: PathBuf, limits: Limits) -> Router {
             raw: Arc::new(raw),
             limits,
             gate: Arc::default(),
+            inflight,
         })
 }
 
@@ -169,8 +179,26 @@ async fn store(
     State(up): State<Upload>,
     UrlPath(name): UrlPath<String>,
     headers: HeaderMap,
-    body: Bytes,
+    body: axum::body::Body,
 ) -> (StatusCode, String) {
+    let Ok(_permit) = up.inflight.clone().acquire_owned().await else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "upload surface closed\n".to_owned(),
+        );
+    };
+    let body: Bytes = match axum::body::to_bytes(body, up.limits.max_bytes).await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!(
+                    "refused: the body exceeds {} bytes ({e})\n",
+                    up.limits.max_bytes
+                ),
+            );
+        }
+    };
     let declared = headers
         .get(CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -453,6 +481,8 @@ mod tests {
     /// The window `contained` cannot close: the path check passed, then the
     /// directory the name lands in is not the one identified at startup. Driven
     /// directly with a startup identity that does not match, so it needs no race.
+    /// Unix only: elsewhere there is no `(device, inode)` to compare.
+    #[cfg(unix)]
     #[test]
     fn a_write_that_lands_outside_the_startup_raw_is_undone() {
         let (raw, outside) = fixture("landed");
@@ -465,6 +495,35 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
         assert_eq!(entries(&outside), 0, "the stray empty file is removed");
         super::write_new(&raw.join("x.md"), raw_id, b"ok").expect("inside raw/ is fine");
+    }
+
+    /// A request waits for the in-flight permit before its body is read, so
+    /// queued uploads are not each buffering up to `max_bytes`. Raised in
+    /// review on #970.
+    #[tokio::test]
+    async fn an_upload_waits_for_the_in_flight_permit() {
+        let (raw, _) = fixture("inflight");
+        let inflight = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let held = inflight.clone().acquire_owned().await.expect("permit");
+        let app = super::router_with(raw.clone(), Limits::DEFAULT, inflight);
+        let call = tokio::spawn(
+            app.oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/v1/raw/w.txt")
+                    .header("content-type", "text/plain")
+                    .body(Body::from("x"))
+                    .expect("request"),
+            ),
+        );
+        tokio::task::yield_now().await;
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        tokio::task::yield_now().await;
+        assert!(!call.is_finished(), "it must wait while the permit is held");
+        assert_eq!(entries(&raw), 0);
+        drop(held);
+        let status = call.await.expect("join").expect("response").status();
+        assert_eq!(status, StatusCode::CREATED);
     }
 
     /// One slot left and sixteen uploads under different names released at
@@ -490,6 +549,7 @@ mod tests {
                 ..Limits::DEFAULT
             },
             gate: std::sync::Arc::default(),
+            inflight: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
         };
         let start = std::sync::Barrier::new(THREADS);
         let created = std::thread::scope(|s| {

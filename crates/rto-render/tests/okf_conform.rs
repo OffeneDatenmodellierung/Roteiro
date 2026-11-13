@@ -525,6 +525,12 @@ fn no_finding_message_grows_with_the_bundle() {
         found.iter().filter(|m| m.contains("(truncated, ")).count() >= 5,
         "the fixture must actually reach the quoting sites: {found:?}"
     );
+    // Quoted once, so the reported size is the value's own, not a quotation's.
+    assert!(
+        found.iter().any(|m| m.starts_with("source `")
+            && m.contains(&format!("(truncated, {} bytes)", big.len() + 1))),
+        "the uncited-source finding reports the id's real length: {found:?}"
+    );
     for message in &found {
         assert!(
             message.len() < 4 * conform::QUOTE_MAX_BYTES + 400,

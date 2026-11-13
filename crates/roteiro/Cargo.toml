@@ -37,7 +37,7 @@ serde_json = { workspace = true }
 # support; `net` pulls tokio's I/O driver, which both the signal handling and the
 # TCP listener require. Declared here so this crate is self-contained, not reliant
 # on another crate's features. Pure Rust — no C/C++ toolchain.
-tokio = { version = "1", features = ["rt", "signal", "net", "time"], optional = true }
+tokio = { version = "1", features = ["rt", "signal", "net", "sync", "time"], optional = true }
 # `explorer` only: the read-only `/v1/graph/*` JSON API router (axum 0.8). Pure
 # Rust — no llama.cpp, no `rto-serve` — so the explorer builds and tests without a
 # C/C++ toolchain.

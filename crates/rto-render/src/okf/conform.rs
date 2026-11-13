@@ -896,8 +896,7 @@ fn lint_unused_sources(cx: &mut Cx<'_>, concept: &Concept, doc: &Document) {
                 "warning",
                 "L5",
                 format!(
-                    "source `{0}` is declared in frontmatter but never cited with footnote `[^{0}]`",
-                    quote(&id)
+                    "source `{id}` is declared in frontmatter but never cited with footnote `[^{id}]`"
                 ),
             );
         }
