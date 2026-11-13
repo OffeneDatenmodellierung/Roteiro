@@ -11,7 +11,7 @@ architectural-significance: MEDIUM  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Inference
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.1"
+version: "1.2"
 last-modified: 2026-11-12
 confluence-url:
 ---
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | Accepted |
 | **Architectural Significance** | MEDIUM |
 | **Domain** | Inference |
-| **Document version** | 1.1 |
+| **Document version** | 1.2 |
 
 ## Reference
 
@@ -143,8 +143,8 @@ that is wrong sometimes must not block a merge.
 
 ## Status
 
-**Accepted** (2026-11-12). §1, §2 and §4 are implemented; §3 and §5 land in
-follow-up changes, each recorded in the version history below.
+**Accepted** (2026-11-12). §1, §2, §4 and §5 are implemented; §3 lands in a
+follow-up change, recorded in the version history below.
 
 ## Version history
 
@@ -152,3 +152,4 @@ follow-up changes, each recorded in the version history below.
 |---|---|---|
 | 1.0 | 2026-11-12 | Initial. Accepted with the coverage report for `spec draft` (§1). |
 | 1.1 | 2026-11-12 | §2 and §4 implemented: `rto_graph::prose::lint`, a `style:` line from `spec draft` beside the coverage line, and the partial controlled-English rules in the `spec draft`, verdict and Ask prompts. The prompt rules are not yet measured against a model. |
+| 1.2 | 2026-11-12 | §5 implemented: `roteiro docs prose [PATH…]` lints authored Markdown (default `docs/`), skipping frontmatter, and prints `path:line: rule — message` and a score per file. It always exits 0 and is not part of `roteiro check`. Issues now carry the line their sentence starts on, and an `un-` participle after *be* (`is unchanged`) is no longer read as passive. |

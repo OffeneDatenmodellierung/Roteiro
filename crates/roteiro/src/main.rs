@@ -1522,6 +1522,17 @@ enum DocsAction {
         #[arg(long)]
         write: bool,
     },
+    /// Lint the prose of authored documents for controlled English (ADR-0031
+    /// §5): sentence length, one instruction per sentence, plain words, filler,
+    /// passive voice, one name per concept.
+    ///
+    /// **A report, never a gate.** It always exits 0 and is not part of
+    /// `roteiro check`: the lint is a heuristic, and authored prose is a
+    /// person's. Code spans, fences, links, keys and paths are skipped.
+    Prose {
+        /// Files or directories to lint. Defaults to `docs/`.
+        paths: Vec<std::path::PathBuf>,
+    },
 }
 
 /// `roteiro spec` actions (ADR-0004).
@@ -8658,26 +8669,58 @@ mod okf_diagnostic_tests {
 fn run_docs(action: DocsAction) -> anyhow::Result<()> {
     match action {
         DocsAction::Fmt { paths, write } => run_docs_fmt(&paths, write),
+        DocsAction::Prose { paths } => run_docs_prose(&paths),
     }
 }
 
-/// `roteiro docs fmt` — the canonical form, as a diff or as a rewrite.
-///
-/// # Why this takes paths rather than the authored layer
-///
-/// ADR-0023 says these verbs act through `rto_spec::layer::authored_docs`, and
-/// for `mv`, `rm` and `index` that is right: they need the link graph. `fmt`
-/// does not. It is a syntactic rewrite of one file at a time, and requiring a
-/// repository and a built graph to reformat a table would make the cheapest
-/// verb in the family the one with the heaviest precondition — and would make
-/// it unusable on the document you are drafting before it is committed.
-///
-/// # Exit code
-///
-/// Without `--write`, a document that is not canonical is a **failure**, so
-/// `roteiro docs fmt` is usable as a check in the way `cargo fmt --check` is.
-/// With `--write` it rewrites and succeeds.
-fn run_docs_fmt(paths: &[std::path::PathBuf], write: bool) -> anyhow::Result<()> {
+/// `roteiro docs prose` — the style lint over authored documents (ADR-0031 §5).
+/// One line per issue as `path:line: rule — message`, then one score line per
+/// file. Always succeeds: nothing gates on it.
+fn run_docs_prose(paths: &[std::path::PathBuf]) -> anyhow::Result<()> {
+    let files = docs_markdown_files(paths)?;
+    let (mut total, mut scored) = (0_usize, 0_usize);
+    for file in &files {
+        let text = std::fs::read_to_string(file)
+            .map_err(|e| anyhow::anyhow!("reading {}: {e}", file.display()))?;
+        // Frontmatter is metadata, not prose. Blank it rather than drop it so
+        // reported line numbers stay the file's own.
+        let (_, body) = rto_graph::split_frontmatter(&text);
+        let skipped = text[..text.len() - body.len()].lines().count();
+        let body = format!("{}{body}", "\n".repeat(skipped));
+        let report = rto_graph::prose::lint(&body);
+        if report.sentences == 0 {
+            continue;
+        }
+        for issue in &report.issues {
+            println!(
+                "{}:{}: {} — {}",
+                file.display(),
+                issue.line,
+                issue.rule.as_str(),
+                issue.message
+            );
+        }
+        println!(
+            "{}: {}/100 over {} sentence(s)",
+            file.display(),
+            report.score,
+            report.sentences
+        );
+        total += usize::from(report.score);
+        scored += 1;
+    }
+    if let Some(mean) = total.checked_div(scored) {
+        println!(
+            "{scored} document(s), mean style score {mean}/100 — style only, not correctness; \
+             nothing gates on it (ADR-0031)"
+        );
+    }
+    Ok(())
+}
+
+/// The Markdown files under `paths` (default `docs/`), deduplicated by resolved
+/// path and sorted.
+fn docs_markdown_files(paths: &[std::path::PathBuf]) -> anyhow::Result<Vec<std::path::PathBuf>> {
     let roots: Vec<std::path::PathBuf> = if paths.is_empty() {
         vec![std::path::PathBuf::from("docs")]
     } else {
@@ -8701,6 +8744,27 @@ fn run_docs_fmt(paths: &[std::path::PathBuf], write: bool) -> anyhow::Result<()>
         seen.insert(key)
     });
     files.sort();
+    Ok(files)
+}
+
+/// `roteiro docs fmt` — the canonical form, as a diff or as a rewrite.
+///
+/// # Why this takes paths rather than the authored layer
+///
+/// ADR-0023 says these verbs act through `rto_spec::layer::authored_docs`, and
+/// for `mv`, `rm` and `index` that is right: they need the link graph. `fmt`
+/// does not. It is a syntactic rewrite of one file at a time, and requiring a
+/// repository and a built graph to reformat a table would make the cheapest
+/// verb in the family the one with the heaviest precondition — and would make
+/// it unusable on the document you are drafting before it is committed.
+///
+/// # Exit code
+///
+/// Without `--write`, a document that is not canonical is a **failure**, so
+/// `roteiro docs fmt` is usable as a check in the way `cargo fmt --check` is.
+/// With `--write` it rewrites and succeeds.
+fn run_docs_fmt(paths: &[std::path::PathBuf], write: bool) -> anyhow::Result<()> {
+    let files = docs_markdown_files(paths)?;
 
     let (mut changed, mut written) = (0_usize, 0_usize);
     for file in &files {
