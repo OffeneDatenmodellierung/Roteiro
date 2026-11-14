@@ -3839,7 +3839,10 @@ fn run_sync(
         sync_worktree(&mut store, &repo, &cache, &registry)?
     };
 
-    let raw_warning = repo.workdir().and_then(symlinked_raw_warning);
+    let follows = !committed_only && ingest.paths.follows_raw_symlink();
+    let raw_warning = repo
+        .workdir()
+        .and_then(|root| raw_symlink_note(root, follows));
     if json {
         let mut value = sync_json(&report)?;
         // The same diagnostic a human gets, so `--json` is not the one route
@@ -3878,24 +3881,32 @@ fn run_sync(
     Ok(())
 }
 
-/// A warning when `<root>/raw` is a symlink, which the scan never follows (#815).
+/// What `sync` says when `<root>/raw` is a symlink (#815), so a link is never
+/// skipped — or followed — without a word.
 ///
-/// Following it would reverse a stated rule — `collect_markdown` and the bundle
-/// walk refuse symlinks so out-of-repo content cannot arrive behind a
-/// repo-relative key — and doing so is a decision for ADR-0026, not a detail. So
-/// until then the skip is **said**: a green sync over a `raw/` it never entered
-/// is the empty-corpus success this project keeps paying to avoid. The remedy
-/// that works today is a mount, which the walker sees as a directory.
-fn symlinked_raw_warning(root: &std::path::Path) -> Option<String> {
+/// A worktree sync follows it unless `[paths] follow_raw_symlink = false`
+/// (ADR-0026): the note names the target, because out-of-tree bytes are entering
+/// the graph. A committed-only sync reads git objects, which hold no bytes behind
+/// a link, and a disabled one reads nothing behind it; both warn, since a green
+/// sync over a `raw/` it never entered is the empty-corpus success this project
+/// keeps paying to avoid.
+fn raw_symlink_note(root: &std::path::Path, follows: bool) -> Option<String> {
     let raw = root.join("raw");
     let target = std::fs::read_link(&raw).ok()?;
-    Some(format!(
-        "warning: `raw/` in the working tree is a symlink (→ {}), and the scan does \
-         not follow symlinks, so files that exist only behind it are not extracted \
-         (anything committed under `raw/` still is). Mount the shared storage AT \
-         `raw/` instead — a mount point is a directory to the walker (ADR-0026, #815)",
-        target.display()
-    ))
+    let target = target.display();
+    Some(if follows {
+        format!(
+            "note: `raw/` is a symlink (→ {target}); following it, so files behind it are \
+             graphed as `raw/…`. Set `[paths] follow_raw_symlink = false` to stop (ADR-0026)"
+        )
+    } else {
+        format!(
+            "warning: `raw/` is a symlink (→ {target}) and this sync does not follow it, \
+             so files that exist only behind it are not extracted (anything committed \
+             under `raw/` still is). It is followed by a worktree sync unless \
+             `[paths] follow_raw_symlink = false` (ADR-0026, #815)"
+        )
+    })
 }
 
 /// Open the repository and its per-worktree store and shared object cache.
@@ -25809,43 +25820,29 @@ mod worktree_discovery_tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
-    /// **`--sync-on-access` inside a hosted worktree builds THAT worktree's graph**
-    /// (issue #837).
-    ///
-    /// The hook used to receive only the `graph.db` path and walk three parents to
-    /// find the repository — true of `<repo>/.git/roteiro/graph.db`, and false of a
-    /// linked worktree, whose store is
-    /// `<main>/.git/worktrees/<name>/roteiro/graph.db`. Three parents up is
-    /// `<main>/.git/worktrees`, which is not a repository at all, so `Repo::discover`
-    /// walked up out of it and found the **main** checkout: the hook extracted the
-    /// wrong repository at the wrong revision and wrote it into the worktree's
-    /// store. That is the amendment's "serves the wrong tree" failure at a path the
-    /// amendment did not reach, and it is invisible from outside — a graph is
-    /// produced, under the right name, with plausible contents.
-    ///
-    /// So the fixture diverges the two branches and the assertions are about
-    /// *which* tree arrived, never that one did.
-    /// #815: a symlinked `raw/` is named, not skipped silently; a real
+    /// #815: a symlinked `raw/` is named whether or not it is followed; a real
     /// directory, or none at all, says nothing.
     #[cfg(unix)]
     #[test]
-    fn a_symlinked_raw_is_warned_about() {
+    fn a_symlinked_raw_is_announced() {
         let base = std::env::temp_dir().join(format!("rto-rawlink-{}", std::process::id()));
         std::fs::remove_dir_all(&base).ok();
         std::fs::create_dir_all(base.join("share")).expect("mkdir");
         std::fs::create_dir_all(base.join("repo")).expect("mkdir");
         let root = base.join("repo");
         assert!(
-            super::symlinked_raw_warning(&root).is_none(),
+            super::raw_symlink_note(&root, true).is_none(),
             "no raw/: nothing to say"
         );
         std::os::unix::fs::symlink(base.join("share"), root.join("raw")).expect("link");
-        let warning = super::symlinked_raw_warning(&root).expect("a symlinked raw/ is named");
-        assert!(warning.contains("does not follow symlinks"), "{warning}");
+        let followed = super::raw_symlink_note(&root, true).expect("a followed link is named");
+        assert!(followed.contains("following it"), "{followed}");
+        let skipped = super::raw_symlink_note(&root, false).expect("a skipped link is named");
+        assert!(skipped.contains("does not follow it"), "{skipped}");
         std::fs::remove_file(root.join("raw")).expect("unlink");
         std::fs::create_dir(root.join("raw")).expect("mkdir raw");
         assert!(
-            super::symlinked_raw_warning(&root).is_none(),
+            super::raw_symlink_note(&root, true).is_none(),
             "a real raw/ is walked"
         );
         std::fs::remove_dir_all(&base).ok();
@@ -25906,6 +25903,22 @@ mod worktree_discovery_tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
+    /// **`--sync-on-access` inside a hosted worktree builds THAT worktree's graph**
+    /// (issue #837).
+    ///
+    /// The hook used to receive only the `graph.db` path and walk three parents to
+    /// find the repository — true of `<repo>/.git/roteiro/graph.db`, and false of a
+    /// linked worktree, whose store is
+    /// `<main>/.git/worktrees/<name>/roteiro/graph.db`. Three parents up is
+    /// `<main>/.git/worktrees`, which is not a repository at all, so `Repo::discover`
+    /// walked up out of it and found the **main** checkout: the hook extracted the
+    /// wrong repository at the wrong revision and wrote it into the worktree's
+    /// store. That is the amendment's "serves the wrong tree" failure at a path the
+    /// amendment did not reach, and it is invisible from outside — a graph is
+    /// produced, under the right name, with plausible contents.
+    ///
+    /// So the fixture diverges the two branches and the assertions are about
+    /// *which* tree arrived, never that one did.
     #[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
     #[test]
     fn sync_on_access_builds_the_worktrees_own_graph_not_its_main_checkouts() {

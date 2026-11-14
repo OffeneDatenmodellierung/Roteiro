@@ -700,6 +700,17 @@ pub struct PathsConfig {
     /// lists is **excluded**: between two declarations about the same bytes, the
     /// narrower one wins.
     pub opaque: Option<Vec<String>>,
+    /// Whether `roteiro sync` walks the directory a symlinked top-level `raw/`
+    /// points at (ADR-0026, #812/#815). Unset means **yes**: shared storage is
+    /// symlinked in, and a symlink the scan silently skipped was an empty corpus
+    /// reported as success. Files behind the link are keyed `raw/…`, through the
+    /// link, and symlinks inside the target are not followed.
+    ///
+    /// Set it `false` to keep out-of-tree bytes out of the graph. Any layer may
+    /// switch it off and none can switch another layer's `false` back on: like
+    /// `exclude`, only the narrowing direction composes, so a committed project
+    /// file cannot widen what a user's machine reads.
+    pub follow_raw_symlink: Option<bool>,
 }
 
 impl PathsConfig {
@@ -707,10 +718,14 @@ impl PathsConfig {
     /// repository bytes consults.
     #[must_use]
     pub fn policy(&self) -> rto_graph::PathPolicy {
-        rto_graph::PathPolicy::new(
+        let policy = rto_graph::PathPolicy::new(
             self.exclude.clone().unwrap_or_default(),
             self.opaque.clone().unwrap_or_default(),
-        )
+        );
+        match self.follow_raw_symlink {
+            Some(follow) => policy.with_raw_symlink(follow),
+            None => policy,
+        }
     }
 }
 
@@ -1713,6 +1728,14 @@ impl Config {
                     over.paths.exclude.as_deref(),
                 ),
                 opaque: merge_patterns(self.paths.opaque.as_deref(), over.paths.opaque.as_deref()),
+                // `false` from either layer wins; `true` cannot undo a `false`.
+                follow_raw_symlink: match (
+                    self.paths.follow_raw_symlink,
+                    over.paths.follow_raw_symlink,
+                ) {
+                    (Some(false), _) | (_, Some(false)) => Some(false),
+                    (a, b) => b.or(a),
+                },
             },
             telemetry: self.telemetry.overlaid_with(&over.telemetry),
             workspace: self.workspace.overlaid_with(&over.workspace),

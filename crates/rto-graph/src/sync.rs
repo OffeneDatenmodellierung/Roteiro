@@ -498,6 +498,24 @@ pub fn sync_worktree(
                 Err(e) => return Err(e.into()),
             }
         }
+
+        // A symlinked `raw/` (#815): the dirwalk above never descends into a
+        // symlinked directory, so walk its target here when the policy allows,
+        // keying each file by its path through the link.
+        if extractor.paths().follows_raw_symlink() {
+            for path in raw_symlink_files(workdir)? {
+                if head_paths.contains(path.as_str())
+                    || by_path.contains_key(&path)
+                    || !extractor.reads(&path)
+                {
+                    continue;
+                }
+                let bytes = std::fs::read(workdir.join(&path))?;
+                let woid = repo.blob_oid(&bytes)?;
+                by_path.insert(path.clone(), extractor.extract(&path, &woid, &bytes));
+                dirty.insert((path, woid));
+            }
+        }
     }
 
     // The blob total is the file count of the *overlaid* graph — committed files,
@@ -1179,6 +1197,39 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     hash
+}
+
+/// The regular files behind a symlinked top-level `raw/`, as repo-relative
+/// `raw/…` paths, sorted. Empty when `raw/` is absent, a real directory (the
+/// dirwalk already covers it), or a link to something other than a directory.
+///
+/// Symlinks *inside* the target are skipped, not followed: only the one link at
+/// `raw/` is honoured, so the walk cannot loop or be led further out of the tree.
+fn raw_symlink_files(workdir: &std::path::Path) -> std::io::Result<Vec<String>> {
+    let raw = workdir.join("raw");
+    let is_link = std::fs::symlink_metadata(&raw).is_ok_and(|m| m.file_type().is_symlink());
+    if !is_link || !raw.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    let mut stack = vec![(raw, String::from("raw"))];
+    while let Some((dir, rel)) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue; // a non-UTF-8 name cannot be a repo-relative key
+            };
+            let kind = entry.file_type()?;
+            let child = format!("{rel}/{name}");
+            if kind.is_dir() {
+                stack.push((entry.path(), child));
+            } else if kind.is_file() {
+                out.push(child);
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
 }
 
 #[cfg(test)]
