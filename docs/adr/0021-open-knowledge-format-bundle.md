@@ -11,8 +11,8 @@ architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.4"
-last-modified: 2026-11-13
+version: "1.5"
+last-modified: 2026-11-14
 confluence-url:
 ---
 
@@ -20,7 +20,7 @@ confluence-url:
 
 |  |  |
 |---|---|
-| **Document version** | 1.4 |
+| **Document version** | 1.5 |
 | **State** | Accepted |
 | **Decision makers** | The Roteiro Project Team |
 | **Related** | [[docs/adr/0009-cross-repo-workspace-links.md]] · [[docs/adr/0012-analyzer-findings-artifact-model.md]] · [[docs/adr/0019-remote-model-tier.md]] · [[docs/adr/0008-multi-repo-workspace-serve.md]] |
@@ -340,6 +340,41 @@ upstream bumps it**. It has already not: the datetime change of 2026-08-21 kept
 the upstream commit in the Reference section is what this project's conformance
 claims are made against.
 
+**When upstream diverges again (v1.5, #818).** The policy is the pin, stated so
+nothing else has to remember it: the test fixtures pin one upstream commit
+(`crates/rto-render/tests/fixtures/okf-upstream/PROVENANCE.md`), and every
+conformance claim this project makes — here, in `okf validate` output, in the
+docs — is against that commit, not against a version string. Moving the pin is a
+deliberate change with a row in this table, made after reading the upstream diff;
+an upstream change under an unchanged version string is never followed by
+default. A divergence found is reported upstream as well as recorded here; this
+one is [open-knowledge-format#24](https://github.com/GoogleCloudPlatform/open-knowledge-format/issues/24).
+
+**`generated` and `verified` can now disagree, as §5.2 intends (v1.5, #799, #820
+§3).** The mapping above made `verified` a copy of `generated`, so the trust
+panel's coverage figure could not fall. For authored prose the two are now
+separate actors when the commit that last changed the file names a
+`Co-Authored-By`: `generated` is the co-author — a `noreply@` signer as a tool,
+`claude-opus/5`, anyone else as `human:` — and `verified` stays the committer, the
+person who stands behind it ([[crates/rto-render/src/okf.rs#drafter]]). Derived
+and inferred concepts keep the mapping as decided: a derived concept's
+`verified` still means *re-derivable from this commit*, not an observed
+re-derivation event. A peer bundle's distinct `generated` actor, its
+`description`, `status` and `tags` now survive a round trip instead of being
+rebuilt from the graph (§4.1).
+
+**`description` is the first sentence of the concept's own prose (v1.5, #820
+§2)** — a symbol's doc comment, a section's text, a document's body — and is
+omitted when there is none ([[crates/rto-render/src/okf.rs#first_sentence]]). It
+is never synthesised: a code file's facts summary is generated text, so it yields
+no description.
+
+**`stale_after` is not emitted, by decision (v1.5, #820 §6).** A bundle is
+re-rendered from one commit, so every concept in it is exactly as fresh as that
+commit; a per-concept expiry date would be a guess about when the code changes.
+`log.md` stays as Q3 of [[docs/adr/0026-research-knowledge-layer.md]] settled it:
+derived, and absent until it has a feed.
+
 ## Alternatives considered
 
 **Keep both targets.** Rejected: two document serializations of one graph must be
@@ -363,3 +398,4 @@ renderer nobody maintains.
 | 1.2 | 2026-09-01 | **Discovery became automatic, consent became a prompt, and a peer's prose is now screened before it becomes node content** (issue #706, phase 2). Completes the two things v1.1 recorded as deliberately absent. **A member's bundle at its conventional `okf/` path is found during the workspace scan**, scoped to peers this graph already holds an `extref:` placeholder for — an *n*-member workspace would otherwise ask *n×(n−1)* questions on first run, most about bundles that would fill nothing. **First contact asks trust / acknowledge / ignore once and records the answer** in the consuming repo's `graph.db` (migration 15) rather than in any committed file, on [[docs/adr/0019-remote-model-tier.md]]'s own reasoning that a shared `roteiro.toml` would make it consent by pull request. This **departs from ADR-0019 on persistence**, which stores no grant at all: the questions differ in how often they recur, and a scan that ran on every `links` and every server start would produce the habituated `y` that ADR's §3 refuses to create. The grant lapses when the bundle **moves** and when it starts carrying a **class of screening finding it did not carry when the question was answered**; it does *not* lapse on an ordinary edit, because a grant is over a source rather than over bytes — a real gap, since a peer can rewrite visible prose and the grant stands. **Unprompted means `ignore`, said once, recorded never:** a server, a CI job and a pipe all lack a human, and the three answers are asymmetric — `ignore` costs a feature that did not happen, `acknowledge` costs a payload delivered to a model. Refusing to start would let any member wedge another person's server with a directory. **A peer's prose is screened** before it reaches `meta.content`, which `content_snippet` returns to the model-facing `search`/`explain`/`context` tools: pass / quarantine / block, where quarantine keeps the concept and neutralises or withholds its text, and **block requires concealment *and* direction together** — visible instruction-shaped prose is usually a document *about* prompt injection, and hidden text alone is usually an HTML comment. Deterministic throughout, because using a model to judge text aimed at a model is circular and would make a scan depend on inference. Learned from `okf-guard` (Apache-2.0) and re-aimed: that tool screens *your* sources *before* generation, and closing the consuming side is the inversion — its zero-width set is widened here to cover bidi controls and matched position-independently, and its count-driven score is replaced by a structural rule. What the screen does **not** attempt is stated in `crates/rto-graph/src/screen.rs`: no homoglyphs, no decoding of encoded payloads, English patterns only, no CSS cascade, nothing retroactive. Also fixed: `--from okf <repo>/okf` derived the peer name `okf`, so a hand-run import and automatic discovery named the same bundle differently and produced two layers and two consent records. Ten defects were found in review and are recorded because each was a silent one: **a recorded answer skipped the peer entirely on later scans**, so the layer went stale and phase 1's removal propagation was quietly opted out of on the very path meant to inherit it — a grant is now standing, and refreshes without rewriting the record; **the boolean `hidden` attribute was not detected**, so `<div hidden>` concealing a directive quarantined where it should have blocked; and **the bundle probe did not require a closing frontmatter fence**, so any `index.md` opening with `---` and carrying an `okf_version:` line in its body read as a bundle, against this row's own argument that the probe should be the stricter test. Then: **close tags survived into the visible text**, so a tag's own name became a word and split a phrase — `ignore <span>all</span> previous instructions` matched nothing, making ordinary markup a working evasion of the directive scan; **an unreadable bundle fingerprinted identically to a clean one**, resolved by never deciding about one at all rather than by inventing a sentinel; **the note blamed a missing terminal at a terminal**, on `links` without `--write`; and **a peer's broken bundle failed the consumer's scan**, because a standing grant survives the bundle breaking, so the refresh path reached the reader and exited through `?` — one repository's syntax error failing everybody else's command. That last one also settles a question worth stating: a bundle that stopped parsing is **not** a peer withdrawing their concepts, so the already-imported layer is left alone rather than cleared. Last, **`--json` disabled discovery entirely**, so a flag selecting an output format decided whether the graph got updated and automation reading machine output never refreshed a standing grant — fixed by moving every line discovery prints to stderr, which is where a diagnostic about a *peer* belonged anyway, rather than by keeping the behavioural gate. And the sharpest false positive of the set: **a presentation-hidden void element swallowed the rest of the document**, because `<img style="display:none">` has no close tag to find — which does not merely strip prose that should have survived, it marks the remainder *concealed*, turning a visible directive into a concealed one and so a quarantine into a **block**. A document discussing prompt injection with a hidden image above the discussion would have been refused outright, which is precisely the false positive the concealment-and-direction rule exists to prevent.; and **a quoted `>` truncated a tag's attributes**, so `<span title="a > b" style="display:none">` never showed as hiding anything and the directive inside it downgraded from block to quarantine — the concealment half of the rule defeated by one piece of punctuation. |
 | 1.3 | 2026-09-08 | Amended (issue #778). **A link is broken when the bundle does not contain its target — not when the target is not a concept.** `okf links --check` gated on `okf-core`'s `exists`, which means "resolves to a concept" and is the right question for a *link graph* and the wrong one for a *gate*: a bundle of any size links to its own diagrams and data files, and to the reserved `index.md` / `log.md`. Every such link failed the gate, so `--check` was unusable as CI on any bundle that illustrates itself — on one real bundle, 17 reported breakages of which **all 17 existed on disk**, with the single genuinely dead link indistinguishable among them. That is the failure worth naming: a gate that cries wolf gets switched off, and takes the real dead link with it. The three commands also disagreed about the same four links — `info` listed them as bundle contents, `validate` rated them *info*, `links` called them broken and exited non-zero — against this document's own promise that `info` "cannot disagree with the command that reports a number in detail". Now `links` reports two classes and gates on one: `broken` (the bundle contains no such file) fails `--check`; `non_concept` (an asset, or a reserved file) is reported with where it resolved and does not. `validate` asks the filesystem too, as its own `check_resources` already did for frontmatter paths — so it no longer says a bundle "does not contain" a file it demonstrably does. Resolution reuses `okf-core`'s `resolve_path_field` rather than reimplementing it, which is what keeps a `..` that walks off the top of the bundle from claiming an outside file as evidence that a link resolves. |
 | 1.4 | 2026-11-13 | Amended (issue #818). **The specification is cited by commit, not only by version string.** Upstream PR #6 (merged 2026-08-21) rewrote `stale_after`, `last_modified` and `usage_window` from dates to datetimes — values legal before are illegal after — and left `SPEC.md` at "Version 0.2", so this document cited the 12 June text while the fixtures pin `ad30107c` (2026-08-21): two documents under one version string. The Reference section now names that commit as the text conformance is claimed against, and the consequences paragraph no longer says `okf_version` alone makes a change legible. Exposure stays low — the writer emits none of the three keys — but a conformance verdict against "0.2" was not a well-defined claim. No architectural decision changes. |
+| 1.5 | 2026-11-14 | Amended (issues #799, #820, #818). **Authored prose records its drafter**: a `Co-Authored-By` on the commit that last changed it becomes `generated` (a `noreply@` signer as `<producer>/<version>`, anyone else as `human:`), with the committer as `verified`, so the two stop being one actor by construction. **`description`** is the first sentence of the concept's own prose, never synthesised. A peer's distinct `generated`, `description`, `status` and `tags` survive the round trip. **Divergence policy**: conformance is claimed against the pinned upstream commit, and moving the pin is a recorded decision. |

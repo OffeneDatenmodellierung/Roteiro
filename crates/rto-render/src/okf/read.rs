@@ -505,10 +505,19 @@ impl ParsedFrontmatter {
             self.verified.first()
         }
         .or(self.generated.as_ref())?;
+        // A peer that wrote `generated` and `verified` with different actors
+        // keeps both on the way back out (#799, #820 §5): collapsing them onto
+        // the verifier would credit the confirmer with writing it.
+        let generated_by = self
+            .generated
+            .as_ref()
+            .map(|(g, _)| parse_actor(g))
+            .filter(|g| *g != parse_actor(by));
         Some(Origin {
             by: parse_actor(by),
             at: at.clone(),
             confirms,
+            generated_by,
         })
     }
 }
@@ -563,6 +572,10 @@ pub fn peer_origin(meta: &serde_json::Value) -> Option<Origin> {
             .get("confirms")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false),
+        generated_by: origin
+            .get("generated_by")
+            .and_then(serde_json::Value::as_str)
+            .map(parse_actor),
     })
 }
 
@@ -1350,6 +1363,9 @@ fn concept_meta(
             "at": origin.at,
             "confirms": origin.confirms,
         });
+        if let Some(generated) = &origin.generated_by {
+            meta["okf"]["origin"]["generated_by"] = serde_json::Value::from(generated.as_token());
+        }
     }
     if let Some(desc) = &c.fm.description {
         meta["okf"]["description"] = serde_json::Value::from(desc.clone());
@@ -1777,6 +1793,7 @@ mod tests {
                 by: Actor::Human("alice".to_owned()),
                 at: at.to_owned(),
                 confirms: true,
+                generated_by: None,
             }),
             "Alice's confirmation is re-emitted naming Alice, not re-tiered"
         );

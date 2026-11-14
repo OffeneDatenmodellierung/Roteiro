@@ -19773,6 +19773,18 @@ fn okf_concept<'a>(
     if let Some(lang) = &ex.node.lang {
         tags.push(format!("roteiro/lang/{lang}"));
     }
+    // A peer's own tags survive the round trip after ours (§4.1, #820 §5).
+    if let Some(peer) = ex
+        .meta
+        .pointer("/okf/tags")
+        .and_then(serde_json::Value::as_array)
+    {
+        for tag in peer.iter().filter_map(serde_json::Value::as_str) {
+            if !tags.iter().any(|t| t == tag) {
+                tags.push(tag.to_owned());
+            }
+        }
+    }
     // Who last changed *this* document, and when they did it. A concept with no
     // path, or one whose history could not be read, gets no human and the
     // bundle's own timestamp — which `okf::origin_for` turns into no
@@ -19796,7 +19808,38 @@ fn okf_concept<'a>(
         frontmatter: okf::Frontmatter {
             type_: ex.node.kind.clone(),
             title: Some(ex.node.name.clone()),
-            description: None,
+            // A peer's own description survives the round trip (§4.1); ours is
+            // the first sentence of the concept's own prose (#820 §2): the doc
+            // comment or section text in `meta.content`, or a document's body.
+            // A code file's `meta.content` is a facts summary we generated, not
+            // prose, so it yields none.
+            description: ex
+                .meta
+                .pointer("/okf/description")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| {
+                    let prose = if ex.node.kind == "file" {
+                        ex.node
+                            .path
+                            .as_deref()
+                            .filter(|p| rto_graph::is_prose(p))
+                            .and_then(|p| r.bodies.get(p))
+                            .map(String::as_str)
+                    } else if matches!(
+                        ex.node.kind.as_str(),
+                        "adr" | "blueprint" | "doc" | "site_page"
+                    ) {
+                        ex.node
+                            .path
+                            .as_deref()
+                            .and_then(|p| r.bodies.get(p))
+                            .map(String::as_str)
+                    } else {
+                        ex.meta.get("content").and_then(serde_json::Value::as_str)
+                    };
+                    prose.and_then(okf::first_sentence)
+                }),
             resource: blob_url.clone(),
             tags,
             // Read from the source's own `status:`, not invented here — an ADR
@@ -19818,7 +19861,14 @@ fn okf_concept<'a>(
                             .map(String::as_str),
                     )
                 })
-                .flatten(),
+                .flatten()
+                // A peer's own `status` survives the round trip (§4.1, #820 §5).
+                .or_else(|| {
+                    ex.meta
+                        .pointer("/okf/status")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                }),
             // An imported concept re-emits **the peer's own** `generated` /
             // `verified` block, recovered from the meta the reader wrote. That
             // is what keeps the round trip honest: their `verified: [{ by:
@@ -19826,8 +19876,19 @@ fn okf_concept<'a>(
             // consumer learns who confirmed it. Falling through to `origin_for`
             // would re-tier every external fact to *unverified* on the way out —
             // the laundering the carried tier exists to prevent, one step later.
-            origin: okf::read::peer_origin(&ex.meta)
-                .or_else(|| Some(okf::origin_for(provenance, &at, r.tool, human.as_ref()))),
+            //
+            // Authored prose confirmed by its committer records who *drafted* it
+            // separately when the commit names a co-author (#799): `generated`
+            // is the model, `verified` the person who committed and stands
+            // behind it. ADR-0021's mapping is otherwise unchanged.
+            origin: okf::read::peer_origin(&ex.meta).or_else(|| {
+                let mut origin = okf::origin_for(provenance, &at, r.tool, human.as_ref());
+                if origin.confirms && provenance == rto_graph::Provenance::Authored {
+                    origin.generated_by =
+                        attribution.and_then(|a| okf::drafter(&a.name, &a.co_authors));
+                }
+                Some(origin)
+            }),
             // The concept's own file, then each external work it cites from the
             // reference register (ADR-0029), with `id`/`title`/`author` and a
             // `[^id]` footnote carrying its APA 7 entry or refusal.
