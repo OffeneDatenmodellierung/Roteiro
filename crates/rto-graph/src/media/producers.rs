@@ -10,7 +10,7 @@
 //! # The engine is injected
 //!
 //! The provider engine lives in the `roteiro` crate, which depends on this one,
-//! so it cannot be built here. `roteiro` hands one over with [`provide`] before
+//! so it cannot be built here. `roteiro` hands one over with `provide` before
 //! `media status` or `media build`, together with the model each modality uses
 //! (`[models] audio` / `[models] vision`). Without that, no producer is offered,
 //! and `media build` says what to configure.

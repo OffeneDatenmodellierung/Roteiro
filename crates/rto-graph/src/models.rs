@@ -1948,15 +1948,12 @@ mod tests {
     fn every_section_has_a_low_tier_floor() {
         // Since ADR-0033 the registry is the OCR section alone, and it must
         // still offer a runs-anywhere pick.
-        for kind in [ModelKind::Ocr] {
-            assert!(
-                REGISTRY
-                    .iter()
-                    .any(|s| s.kind == kind && s.tier == ResourceTier::Low),
-                "section {} needs a Low-tier entry",
-                kind.as_str(),
-            );
-        }
+        assert!(
+            REGISTRY
+                .iter()
+                .any(|s| s.kind == ModelKind::Ocr && s.tier == ResourceTier::Low),
+            "the OCR section needs a Low-tier entry"
+        );
     }
 
     #[test]

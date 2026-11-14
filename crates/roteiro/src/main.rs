@@ -3045,7 +3045,9 @@ fn print_model_resolution(loaded: &config::Loaded) {
             Ok(choice) => {
                 // Where a pin came from, on the same `project`/`user` terms as
                 // every other value in this report.
-                let layer = if choice.source != rto_graph::ModelSource::Default {
+                let layer = if choice.source == rto_graph::ModelSource::Default {
+                    String::new()
+                } else {
                     format!(
                         " in {} config",
                         provenance(
@@ -3053,8 +3055,6 @@ fn print_model_resolution(loaded: &config::Loaded) {
                             loaded.user.models.get(key).is_some(),
                         )
                     )
-                } else {
-                    String::new()
                 };
                 // `Some(false)` only: `installed: None` means the question does
                 // not apply (a remote resolution has no weights on any disk), and
