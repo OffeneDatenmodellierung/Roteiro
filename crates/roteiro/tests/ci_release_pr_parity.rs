@@ -198,7 +198,8 @@ fn every_ci_job_is_classified_as_required_or_not() {
 
 /// Every required-check job does the cheap manifest verification on a release PR.
 ///
-/// The `== 'true'` arm. Without it the job runs, skips everything, and reports a
+/// Unguarded since #871, so it runs on every event; the `== 'true'` arm also
+/// counts. Without it the job runs, skips everything, and reports a
 /// `success` that verified nothing — which is worse than the 595 seconds,
 /// because a version bump is not a no-op: it can desynchronise `Cargo.lock` from
 /// the manifests, and it can move a `version =` constraint on a workspace path
@@ -215,17 +216,19 @@ fn every_required_job_verifies_the_manifests_on_a_release_pr() {
             continue; // reported by the classification test
         };
         let verified = steps(job).iter().any(|step| {
-            let guarded = condition(step).is_some_and(|c| c.contains(CHEAP_ARM));
+            // Guarded by the cheap arm, or unguarded so it runs everywhere (#871).
+            // Either way it runs on a release PR; the expensive arm would not.
+            let runs_on_release_pr = condition(step).is_none_or(|c| c.contains(CHEAP_ARM));
             let run = field_str(step, "run").unwrap_or_default();
-            guarded && run.contains("cargo metadata") && run.contains("--locked")
+            runs_on_release_pr && run.contains("cargo metadata") && run.contains("--locked")
         });
         assert!(
             verified,
             "the `{context}` job is a required status check but has no step \
-             guarded by `if: {CHEAP_ARM}` that runs `cargo metadata --locked`. On \
+             that runs `cargo metadata --locked` on a release PR (unguarded, or guarded by \
+             `if: {CHEAP_ARM}`). On \
              a release-plz PR it would report `success` having verified nothing. \
-             Copy the `Manifests and lockfile agree (release PR)` step from the \
-             `checks` job."
+             Copy the `Manifests and lockfile agree` step from the `checks` job."
         );
     }
 }

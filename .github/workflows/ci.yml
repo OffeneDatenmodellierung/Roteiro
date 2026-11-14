@@ -79,6 +79,12 @@ env:
   # well under a second without compiling anything, and it can only run if the
   # job runs.
   #
+  # That check is not guarded by `RELEASE_PR`: it runs on every PR and on every
+  # push to `main` too (#871). Guarded, it never ran where #849's inconsistent
+  # lock actually landed. It catches the window between an inconsistent merge
+  # and the next lock regeneration; a duplicate that resolves consistently is
+  # `deny.toml`'s `multiple-versions` baseline's job, not this one.
+  #
   # WHICH jobs those are is deliberately not written down here. That is a fact
   # about branch protection rather than about this file, and a count in prose
   # beside a set the file itself defines goes stale in silence: this sentence
@@ -325,8 +331,7 @@ jobs:
       # `RELEASE_PR` comment at the top of this file for what it catches, what
       # it deliberately does not, and why the job runs at all rather than being
       # skipped outright.
-      - name: Manifests and lockfile agree (release PR)
-        if: env.RELEASE_PR == 'true'
+      - name: Manifests and lockfile agree
         run: cargo metadata --locked --format-version 1 > /dev/null
       - name: Format
         if: env.RELEASE_PR != 'true'
@@ -509,8 +514,7 @@ jobs:
           cache-on-failure: true
       # The whole of a release PR's verification in this job — see the
       # `RELEASE_PR` comment at the top of this file.
-      - name: Manifests and lockfile agree (release PR)
-        if: env.RELEASE_PR == 'true'
+      - name: Manifests and lockfile agree
         run: cargo metadata --locked --format-version 1 > /dev/null
       # rustfmt does not evaluate `cfg`, so this cannot differ from the `checks`
       # job's formatting step. Kept anyway: it costs seconds, and it makes this
@@ -667,8 +671,7 @@ jobs:
       # well. This job is a required check on `main`, so it must still RUN and
       # report — see the `checks` job for why a skipped job would be safe and is
       # still not what this file does.
-      - name: Manifests and lockfile agree (release PR)
-        if: env.RELEASE_PR == 'true'
+      - name: Manifests and lockfile agree
         run: cargo metadata --locked --format-version 1 > /dev/null
       # The floor: no feature on anywhere. First, because a failure here is the
       # one a reader should see before any of the richer sets — every other cell
@@ -942,8 +945,7 @@ jobs:
       # parseable by MSRV cargo. A lockfile regenerated in a newer format is a
       # real way for a version bump to break the MSRV build, and it is exactly
       # what this job exists to notice.
-      - name: Manifests and lockfile agree, on MSRV cargo (release PR)
-        if: env.RELEASE_PR == 'true'
+      - name: Manifests and lockfile agree, on MSRV cargo
         run: cargo metadata --locked --format-version 1 > /dev/null
       - name: Build on MSRV
         if: env.RELEASE_PR != 'true'
