@@ -1,22 +1,49 @@
-//! The concrete generators behind [`MediaProducer`], and
-//! the process-wide llama.cpp engines they load.
+//! The concrete generators behind [`MediaProducer`]: a vision-language model and
+//! an audio-capable model, both reached through the provider engine (ADR-0033).
 //!
 //! Everything here is feature-gated: the default build has no generator at all,
 //! and [`installed`] then returns a **named, actionable** error rather than
-//! quietly producing nothing (ADR-0015; `BUILD_PLAN_V2` principle 10 —
-//! "offline-capable, not offline"). That matters more than it sounds: before
-//! ADR-0015 an absent model and a blob with nothing to say were indistinguishable,
-//! because both produced no content.
+//! quietly producing nothing (ADR-0015). That matters more than it sounds:
+//! before ADR-0015 an absent model and a blob with nothing to say were
+//! indistinguishable, because both produced no content.
 //!
-//! The engines moved here from `crate::extract` with the generative content
-//! itself: after ADR-0015 nothing on the extraction path loads a GGUF model, so
-//! `sync` never touches llama.cpp. Their **release** is still driven from
-//! `extract` ([`crate::release_media_engines`]), which is the public entry point
-//! `roteiro`'s `main` holds for the whole process (issues #291, #296).
+//! # The engine is injected
+//!
+//! The provider engine lives in the `roteiro` crate, which depends on this one,
+//! so it cannot be built here. `roteiro` hands one over with [`provide`] before
+//! `media status` or `media build`, together with the model each modality uses
+//! (`[models] audio` / `[models] vision`). Without that, no producer is offered,
+//! and `media build` says what to configure.
 
 #[cfg(any(feature = "audio-transcribe", feature = "image-vision"))]
 use super::GeneratedContent;
 use super::{MediaBuildOptions, MediaError, MediaKind, MediaProducer, Producer};
+
+#[cfg(any(feature = "audio-transcribe", feature = "image-vision"))]
+/// What `roteiro` supplies so a modality can run: the engine, the host it talks
+/// to (recorded in the producer identity) and the provider model per modality.
+pub struct MediaEngine {
+    /// The provider engine every generation call goes through.
+    pub engine: std::sync::Arc<dyn rto_llama::Engine>,
+    /// The provider's host, e.g. `localhost:8080` — part of the identity, so the
+    /// same model name on two servers writes two sets of records.
+    pub host: String,
+    /// The provider model id for transcription, from `[models] audio`.
+    pub audio_model: Option<String>,
+    /// The provider model id for image description, from `[models] vision`.
+    pub vision_model: Option<String>,
+}
+
+#[cfg(any(feature = "audio-transcribe", feature = "image-vision"))]
+/// The engine `roteiro` provided for this process, if any.
+static ENGINE: std::sync::OnceLock<MediaEngine> = std::sync::OnceLock::new();
+
+#[cfg(any(feature = "audio-transcribe", feature = "image-vision"))]
+/// Supply the engine and models for this process. The first call wins; later
+/// calls are ignored, since one process serves one configuration.
+pub fn provide(engine: MediaEngine) {
+    let _ = ENGINE.set(engine);
+}
 
 /// The prompt the ASR model is given. Part of the producer identity, so editing
 /// it makes the next `media build` write new records beside the old ones rather
@@ -29,7 +56,7 @@ const ASR_PROMPT: &str = "Transcribe this audio recording. Output only the spoke
 const VLM_PROMPT: &str = "Describe this image in one or two sentences.";
 
 /// Sampling temperature for both generators: greedy, so a re-run with the same
-/// producer is as reproducible as llama.cpp allows.
+/// producer is as reproducible as the provider allows.
 #[cfg(any(feature = "audio-transcribe", feature = "image-vision"))]
 const TEMPERATURE: f64 = 0.0;
 
@@ -41,38 +68,8 @@ const ASR_MAX_TOKENS: u32 = 512;
 #[cfg(feature = "image-vision")]
 const VLM_MAX_TOKENS: u32 = 128;
 
-/// The GGUF model backing `kind` **as this repository resolves it**: the
-/// `[models] audio` / `[models] vision` pin when one is set, else the modality's
-/// built-in default ([`MediaKind::model`]).
-///
-/// This replaced a pair of `const &str`s, and that pair was the whole of Stage
-/// 33's user-facing gap: with the model a compiled-in constant, no amount of
-/// configuration could change which model transcribed a project's audio.
-///
-/// A pin that cannot be honoured comes back as the resolver's error, never as a
-/// fallback to the default. Silence would be worse here than anywhere else in the
-/// resolver: a model of the wrong architecture reaching llama.cpp's `mtmd` path
-/// aborts the process on a `GGML_ASSERT` rather than returning something a caller
-/// could catch.
-#[cfg(any(feature = "audio-transcribe", feature = "image-vision"))]
-fn resolved(kind: MediaKind) -> Result<crate::model_choice::ModelChoice, MediaError> {
-    Ok(crate::model_choice::resolve(kind.task())?)
-}
-
-/// The audio model used when nothing pins one. Kept as a constant **for the
-/// model-loading tests only**, which need a name to check installation against
-/// before deciding whether to skip; production code asks [`resolved`], and those
-/// tests set no pins, so the two agree there by construction.
-#[cfg(all(test, feature = "audio-transcribe"))]
-pub(crate) const ASR_MODEL: &str = MediaKind::Audio.model();
-
-/// The vision model used when nothing pins one — on the same terms as
-/// [`ASR_MODEL`].
-#[cfg(all(test, feature = "image-vision"))]
-pub(crate) const VLM_MODEL: &str = MediaKind::Vision.model();
-
 /// The producers this binary can run right now: one per modality that is both
-/// compiled in and installed, ordered `audio` then `vision`.
+/// compiled in and configured, ordered `audio` then `vision`.
 ///
 /// Never errors — an empty result is the honest answer for a default build, and
 /// `media status` reports it as such so "0 records" reads as *cannot generate*
@@ -80,20 +77,13 @@ pub(crate) const VLM_MODEL: &str = MediaKind::Vision.model();
 /// `media build`, which was asked to do something specific.
 #[must_use]
 pub fn available() -> Vec<Producer> {
-    // `mut` only where a modality is compiled in; a default build has nothing to
-    // push and would otherwise warn.
-    #[cfg_attr(
-        not(any(feature = "audio-transcribe", feature = "image-vision")),
-        allow(unused_mut)
-    )]
     let mut out = Vec::new();
-    #[cfg(feature = "audio-transcribe")]
-    if let Some(p) = asr_producer() {
-        out.push(p);
-    }
-    #[cfg(feature = "image-vision")]
-    if let Some(p) = vlm_producer() {
-        out.push(p);
+    for kind in [MediaKind::Audio, MediaKind::Vision] {
+        if kind.compiled_in()
+            && let Some(p) = producer_for(kind)
+        {
+            out.push(p);
+        }
     }
     out
 }
@@ -102,221 +92,170 @@ pub fn available() -> Vec<Producer> {
 ///
 /// # Errors
 /// Returns [`MediaError::NoProducer`] when the modality was not compiled in
-/// (naming the cargo feature that provides it), or [`MediaError::ModelMissing`]
-/// when it was but the model is not on disk (naming the `roteiro model pull`
-/// command that installs it).
-#[cfg_attr(
-    feature = "models",
-    doc = "With `models` there is a third, [`MediaError::ModelConfig`], for when"
-)]
-#[cfg_attr(
-    feature = "models",
-    doc = "the modality's `[models]` key names a model that cannot be used at all."
-)]
-/// Every one of them is actionable; none degrades to silence.
-///
-/// The `models` half is gated with the variant rather than delinked, because a
-/// build without the registry cannot return it: an `# Errors` section that
-/// listed it there would be describing a failure that cannot happen.
+/// (naming the cargo feature that provides it), or [`MediaError::NoModel`] when
+/// it was but no provider model is configured for it (naming the key to set).
 pub fn installed(opts: MediaBuildOptions) -> Result<Vec<Box<dyn MediaProducer>>, MediaError> {
     let mut out: Vec<Box<dyn MediaProducer>> = Vec::new();
     if opts.audio {
-        out.push(audio_producer()?);
+        out.push(producer_box(MediaKind::Audio, "audio-transcribe")?);
     }
     if opts.vision {
-        out.push(vision_producer()?);
+        out.push(producer_box(MediaKind::Vision, "image-vision")?);
     }
     Ok(out)
 }
 
-/// The audio generator, or why there isn't one.
-///
-/// Availability is decided from the **installed files** ([`asr_producer`] returns
-/// `None` when a pinned file is missing), not by building the engine: the engine
-/// is loaded lazily on the first [`MediaProducer::generate`] that actually needs
-/// it. That is what lets the [pre-generation gate](super::gate) save the load —
-/// a build over nothing but silent clips never reaches `generate`, so the 715 MB
-/// projector is never touched (issue #301).
-#[cfg(feature = "audio-transcribe")]
-fn audio_producer() -> Result<Box<dyn MediaProducer>, MediaError> {
-    let model = resolved(MediaKind::Audio)?.require_installed()?;
-    let producer = registry_producer(MediaKind::Audio, model, ASR_PROMPT, ASR_MAX_TOKENS)
-        .ok_or_else(|| MediaError::ModelMissing {
-            model: model.to_owned(),
-        })?;
-    Ok(Box::new(LlamaProducer {
-        producer,
-        engine: asr_engine,
-    }))
-}
-
-#[cfg(not(feature = "audio-transcribe"))]
-fn audio_producer() -> Result<Box<dyn MediaProducer>, MediaError> {
-    Err(MediaError::NoProducer {
-        kind: MediaKind::Audio.as_str(),
-        feature: "audio-transcribe",
-    })
-}
-
-/// The vision generator, or why there isn't one. Lazy, for the same reason as
-/// [`audio_producer`].
-#[cfg(feature = "image-vision")]
-fn vision_producer() -> Result<Box<dyn MediaProducer>, MediaError> {
-    let model = resolved(MediaKind::Vision)?.require_installed()?;
-    let producer = registry_producer(MediaKind::Vision, model, VLM_PROMPT, VLM_MAX_TOKENS)
-        .ok_or_else(|| MediaError::ModelMissing {
-            model: model.to_owned(),
-        })?;
-    Ok(Box::new(LlamaProducer {
-        producer,
-        engine: vlm_engine,
-    }))
-}
-
-#[cfg(not(feature = "image-vision"))]
-fn vision_producer() -> Result<Box<dyn MediaProducer>, MediaError> {
-    Err(MediaError::NoProducer {
-        kind: MediaKind::Vision.as_str(),
-        feature: "image-vision",
-    })
-}
-
-/// The identity the installed ASR model would write under, or `None` when it is
-/// not installed — **or when the `[models] audio` pin cannot be honoured**, which
-/// is the same answer for the same reason: [`available`] must never error, and a
-/// modality that cannot run is one this binary cannot offer. `media build` calls
-/// [`audio_producer`], which reports the pin's error in full.
-#[cfg(feature = "audio-transcribe")]
-fn asr_producer() -> Option<Producer> {
-    let model = resolved(MediaKind::Audio).ok()?.model?;
-    registry_producer(MediaKind::Audio, model, ASR_PROMPT, ASR_MAX_TOKENS)
-}
-
-/// The identity the installed vision model would write under, or `None` — on the
-/// same terms as [`asr_producer`].
-#[cfg(feature = "image-vision")]
-fn vlm_producer() -> Option<Producer> {
-    let model = resolved(MediaKind::Vision).ok()?.model?;
-    registry_producer(MediaKind::Vision, model, VLM_PROMPT, VLM_MAX_TOKENS)
-}
-
-/// Build a [`Producer`] from the **registry's pinned digests** for `model`,
-/// provided every one of its files is on disk.
-///
-/// The digests come from the registry rather than from hashing the installed
-/// files: the registry pin *is* the identity of what was installed (a file whose
-/// bytes differ from the pin never gets written — see
-/// [`crate::download_verified`]), and re-hashing three gigabytes on every
-/// `media status` would make the command unusable.
-#[cfg(any(feature = "audio-transcribe", feature = "image-vision"))]
-fn registry_producer(
+/// The generator for `kind`, or why there isn't one.
+fn producer_box(
     kind: MediaKind,
-    model: &str,
-    prompt: &str,
-    max_tokens: u32,
-) -> Option<Producer> {
-    let spec = crate::models::find(model)?;
-    let variant = spec.variant_for(crate::models::Platform::host())?;
-    let dir = crate::models::model_dir(model);
-    if !variant.files.iter().all(|f| dir.join(f.name).exists()) {
-        return None;
+    feature: &'static str,
+) -> Result<Box<dyn MediaProducer>, MediaError> {
+    if !kind.compiled_in() {
+        return Err(MediaError::NoProducer {
+            kind: kind.as_str(),
+            feature,
+        });
     }
-    let file = |name: &str| variant.files.iter().find(|f| f.name == name);
-    let weights = file("model.gguf")?;
-    let mmproj = file("mmproj.gguf")?;
+    let producer = producer_for(kind).ok_or(MediaError::NoModel {
+        kind: kind.as_str(),
+    })?;
+    Ok(engine_producer(producer))
+}
+
+#[cfg(any(feature = "audio-transcribe", feature = "image-vision"))]
+fn engine_producer(producer: Producer) -> Box<dyn MediaProducer> {
+    Box::new(EngineProducer { producer })
+}
+
+#[cfg(not(any(feature = "audio-transcribe", feature = "image-vision")))]
+fn engine_producer(_producer: Producer) -> Box<dyn MediaProducer> {
+    unreachable!("no modality is compiled in, so producer_box refused first")
+}
+
+/// The identity `kind` would write under, or `None` when no engine was provided
+/// or no model is configured for it.
+///
+/// A provider exposes no weights digest, quantisation or projector, so those
+/// three fields carry the sentinel `provider:<host>/<model>` (owner decision,
+/// ADR-0033): the exact provider model and the server it ran on are what
+/// identify the output. The record's `model` is the provider id folded into the
+/// `[a-z0-9._-]` alphabet a [`super::ProducerId`] component allows; the digest
+/// keeps it verbatim, so folding cannot merge two models.
+#[cfg(any(feature = "audio-transcribe", feature = "image-vision"))]
+fn producer_for(kind: MediaKind) -> Option<Producer> {
+    let provided = ENGINE.get()?;
+    let model = match kind {
+        MediaKind::Audio => provided.audio_model.as_deref(),
+        MediaKind::Vision => provided.vision_model.as_deref(),
+    }?;
+    let (prompt, max_tokens) = prompt_for(kind)?;
+    let sentinel = format!("provider:{}/{model}", provided.host);
     Some(Producer {
         kind,
-        model: model.to_owned(),
-        model_digest: weights.sha256.to_owned(),
-        quantisation: quantisation_of(weights.url),
-        mmproj_digest: mmproj.sha256.to_owned(),
+        model: fold_model_id(model),
+        model_digest: sentinel.clone(),
+        quantisation: "provider".to_owned(),
+        mmproj_digest: sentinel,
         prompt: prompt.to_owned(),
-        temperature: TEMPERATURE,
+        temperature: prompt_temperature(),
         max_tokens,
     })
 }
 
-/// The GGUF quantisation named in a pinned model URL's file name
-/// (`…-Q4_K_M.gguf` → `Q4_K_M`), or `unknown` when the name carries no
-/// recognisable token.
-///
-/// Reading it from the pin keeps the registry the single source of truth: change
-/// the pinned file and the recorded quantisation follows, which moves the
-/// producer id, which makes the next build write new records. A hand-maintained
-/// second copy of the same fact could drift from it silently.
 #[cfg(any(feature = "audio-transcribe", feature = "image-vision"))]
-fn quantisation_of(url: &str) -> String {
-    let name = url.rsplit('/').next().unwrap_or(url);
-    let stem = name.strip_suffix(".gguf").unwrap_or(name);
-    // GGUF quantisation tokens are whole `-`-separated segments. Scan from the
-    // end, because the model name itself may contain digits and dashes.
-    for segment in stem.rsplit('-') {
-        let upper = segment.to_ascii_uppercase();
-        let quantised = (upper.starts_with('Q') || upper.starts_with("IQ"))
-            && upper.chars().any(|c| c.is_ascii_digit())
-            || matches!(upper.as_str(), "F16" | "F32" | "BF16");
-        if quantised {
-            return upper;
-        }
+const fn prompt_temperature() -> f64 {
+    TEMPERATURE
+}
+
+#[cfg(any(feature = "audio-transcribe", feature = "image-vision"))]
+/// The prompt and token budget for `kind`, when its feature is compiled in.
+fn prompt_for(kind: MediaKind) -> Option<(&'static str, u32)> {
+    match kind {
+        #[cfg(feature = "audio-transcribe")]
+        MediaKind::Audio => Some((ASR_PROMPT, ASR_MAX_TOKENS)),
+        #[cfg(feature = "image-vision")]
+        MediaKind::Vision => Some((VLM_PROMPT, VLM_MAX_TOKENS)),
+        #[allow(
+            unreachable_patterns,
+            reason = "reachable exactly when a modality's feature is off"
+        )]
+        _ => None,
     }
-    "unknown".to_owned()
 }
 
-/// A generator backed by the shared llama.cpp engine — the same `mtmd`
-/// multimodal path for both modalities, differing only in whether the blob is
-/// handed over as audio or as an image.
-///
-/// `engine` is a **function, not an engine**. Holding the `Arc` here would load
-/// the model when the producer was assembled, which is before `build_media` has
-/// looked at a single blob — so a repository of silent clips would pay the 715 MB
-/// projector load to then skip everything. Resolving it inside `generate` means
-/// the load happens on the first blob that actually reaches the model, and never
-/// at all if none does. The slot behind it is process-wide and idempotent
-/// ([`asr_engine`] / [`vlm_engine`]), so this costs one atomic read per blob.
+/// No modality is compiled in, so nothing can be offered.
+#[cfg(not(any(feature = "audio-transcribe", feature = "image-vision")))]
+fn producer_for(_kind: MediaKind) -> Option<Producer> {
+    None
+}
+
+/// A provider model id folded into the [`super::MAX_MODEL_ID`]-bounded
+/// `[a-z0-9._-]` alphabet: lowercased, every other character replaced by `-`.
 #[cfg(any(feature = "audio-transcribe", feature = "image-vision"))]
-struct LlamaProducer {
+fn fold_model_id(model: &str) -> String {
+    let folded: String = model
+        .chars()
+        .map(|c| {
+            let c = c.to_ascii_lowercase();
+            if c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .take(super::MAX_MODEL_ID)
+        .collect();
+    if folded.is_empty() {
+        "provider".to_owned()
+    } else {
+        folded
+    }
+}
+
+/// A generator that sends the blob to the provider as an image or an
+/// `input_audio` chat part (ADR-0033) and records the reply.
+#[cfg(any(feature = "audio-transcribe", feature = "image-vision"))]
+struct EngineProducer {
     producer: Producer,
-    engine: fn() -> Option<std::sync::Arc<rto_llama::llama::LlamaEngine>>,
 }
 
 #[cfg(any(feature = "audio-transcribe", feature = "image-vision"))]
-impl MediaProducer for LlamaProducer {
+impl MediaProducer for EngineProducer {
     fn producer(&self) -> &Producer {
         &self.producer
     }
 
     fn generate(&self, _path: &str, bytes: &[u8]) -> Option<GeneratedContent> {
-        use rto_llama::Engine as _;
-
         // An image whose header does not parse, or whose pixel count is over the
-        // cap, is refused before the projector is loaded — the same guard the OCR
-        // path applies, for the same decompression-bomb reason.
+        // cap, is refused before it is sent — the same guard the OCR path
+        // applies, for the same decompression-bomb reason.
         #[cfg(feature = "image-vision")]
         if self.producer.kind == MediaKind::Vision && !crate::extract::image_dimensions_ok(bytes) {
             return None;
         }
+        let provided = ENGINE.get()?;
+        let model = match self.producer.kind {
+            MediaKind::Audio => provided.audio_model.clone(),
+            MediaKind::Vision => provided.vision_model.clone(),
+        }?;
         let (images, audio) = match self.producer.kind {
             MediaKind::Vision => (vec![bytes.to_vec()], Vec::new()),
             MediaKind::Audio => (Vec::new(), vec![bytes.to_vec()]),
         };
-        // The model load, at the last possible moment.
-        let engine = (self.engine)()?;
-        let completion = engine
+        let completion = provided
+            .engine
             .chat(&rto_llama::ChatRequest {
                 tools: None,
-                model: self.producer.model.clone(),
+                model,
                 messages: vec![rto_llama::Message {
                     role: "user".to_owned(),
                     content: self.producer.prompt.clone(),
                 }],
                 images,
                 audio,
-                // The identity stores the temperature as `f64` (it is a `REAL`
-                // column and a JSON number); the engine takes `f32`. The narrowing
-                // is deliberate and cannot affect identity: the *stored* value
-                // stays the wide one, so `Producer::id` never depends on this
-                // conversion, and every temperature a producer actually uses is a
-                // short decimal literal that survives it exactly.
+                // The identity stores the temperature as `f64` (a `REAL` column
+                // and a JSON number); the engine takes `f32`. The stored value
+                // stays the wide one, so `Producer::id` never depends on this.
                 #[allow(
                     clippy::cast_possible_truncation,
                     reason = "engine API is f32; the stored identity keeps the f64"
@@ -328,120 +267,11 @@ impl MediaProducer for LlamaProducer {
         let text = completion.content.trim();
         (!text.is_empty()).then(|| GeneratedContent {
             text: text.to_owned(),
-            // Neither runtime exposes a calibrated confidence. Recording `None`
-            // is the honest answer; inventing one would be exactly the kind of
-            // fabricated certainty ADR-0015 exists to stop.
+            // A provider exposes no calibrated confidence; recording `None` is
+            // the honest answer (ADR-0015).
             confidence: None,
         })
     }
-}
-
-/// The process-wide audio engine's slot; see [`asr_engine`].
-#[cfg(feature = "audio-transcribe")]
-static ASR_ENGINE: rto_llama::EngineSlot<rto_llama::llama::LlamaEngine> =
-    rto_llama::EngineSlot::new();
-
-/// The process-wide vision engine's slot; see [`vlm_engine`].
-#[cfg(feature = "image-vision")]
-static VLM_ENGINE: rto_llama::EngineSlot<rto_llama::llama::LlamaEngine> =
-    rto_llama::EngineSlot::new();
-
-/// The process-wide audio engine, built lazily from the **resolved** audio model
-/// (`model.gguf` + audio `mmproj.gguf`). `None` when the model is not installed,
-/// or when the `[models] audio` pin cannot be honoured — the caller has already
-/// been told why by [`audio_producer`], which resolves before any blob is read.
-///
-/// Lives in an [`EngineSlot`](rto_llama::EngineSlot) rather than a
-/// `static OnceLock` so [`crate::release_media_engines`] can destroy it *before*
-/// the process exits — a `static` engine is never dropped, which aborts the
-/// process on Metal (issue #291).
-///
-/// It shares the process's one llama.cpp backend with [`vlm_engine`]
-/// (`rto_llama::backend`), so which of the two modalities a run happens to touch
-/// first no longer decides whether the other works at all (issue #296).
-#[cfg(feature = "audio-transcribe")]
-pub(crate) fn asr_engine() -> Option<std::sync::Arc<rto_llama::llama::LlamaEngine>> {
-    ASR_ENGINE.get_or_init(|| build_engine(resolved(MediaKind::Audio).ok()?.model?))
-}
-
-/// Transcribe one clip through the real engine, returning just the text.
-///
-/// Test-only, and a thin wrapper over the production path: `media build` goes
-/// through [`MediaProducer::generate`]. It exists so the engine-teardown tests in
-/// `crate::extract` — which are about the process-global engines and the
-/// backend they share (issues #291, #296, #301), not about the artifact store —
-/// keep driving a real load without each of them assembling a producer.
-#[cfg(all(test, feature = "audio-transcribe"))]
-pub(crate) fn asr_content(bytes: &[u8]) -> Option<String> {
-    let producer = asr_producer()?;
-    LlamaProducer {
-        producer,
-        engine: asr_engine,
-    }
-    .generate("fixture.wav", bytes)
-    .map(|c| c.text)
-}
-
-/// The process-wide vision engine, built lazily from the **resolved** vision
-/// model. Same slot mechanism and the same shared backend as [`asr_engine`], and
-/// `None` on the same terms.
-#[cfg(feature = "image-vision")]
-pub(crate) fn vlm_engine() -> Option<std::sync::Arc<rto_llama::llama::LlamaEngine>> {
-    VLM_ENGINE.get_or_init(|| build_engine(resolved(MediaKind::Vision).ok()?.model?))
-}
-
-/// Describe one image through the real engine, returning just the text. Test-only
-/// sibling of [`asr_content`], and for the same reason.
-#[cfg(all(test, feature = "image-vision"))]
-pub(crate) fn vlm_content(bytes: &[u8]) -> Option<String> {
-    let producer = vlm_producer()?;
-    LlamaProducer {
-        producer,
-        engine: vlm_engine,
-    }
-    .generate("fixture.png", bytes)
-    .map(|c| c.text)
-}
-
-/// Build a `mtmd` engine over an installed model's `model.gguf` + `mmproj.gguf`.
-#[cfg(any(feature = "audio-transcribe", feature = "image-vision"))]
-fn build_engine(model: &str) -> Option<rto_llama::llama::LlamaEngine> {
-    let dir = crate::models::model_dir(model);
-    let (gguf, mmproj) = (dir.join("model.gguf"), dir.join("mmproj.gguf"));
-    if !gguf.exists() || !mmproj.exists() {
-        return None;
-    }
-    rto_llama::llama::LlamaEngine::new(
-        vec![rto_llama::llama::Served {
-            name: model.to_owned(),
-            path: gguf,
-            mmproj: Some(mmproj),
-        }],
-        0,
-    )
-    .ok()
-}
-
-/// Release the vision engine, or nothing in a build without `image-vision`.
-#[cfg(feature = "image-vision")]
-pub(crate) fn release_vlm_engine() -> bool {
-    VLM_ENGINE.release()
-}
-
-#[cfg(not(feature = "image-vision"))]
-pub(crate) fn release_vlm_engine() -> bool {
-    false
-}
-
-/// Release the ASR engine, or nothing in a build without `audio-transcribe`.
-#[cfg(feature = "audio-transcribe")]
-pub(crate) fn release_asr_engine() -> bool {
-    ASR_ENGINE.release()
-}
-
-#[cfg(not(feature = "audio-transcribe"))]
-pub(crate) fn release_asr_engine() -> bool {
-    false
 }
 
 #[cfg(test)]
@@ -451,12 +281,7 @@ mod tests {
     use super::{MediaBuildOptions, available, installed};
 
     /// The refusal, as a value. `Box<dyn MediaProducer>` is not `Debug`, so
-    /// `expect_err` is not available; this says the same thing and reports an
-    /// unexpected success just as clearly.
-    ///
-    /// Only the "this build cannot do that" tests need it, and those exist only
-    /// where a modality is compiled *out* — so in an `--all-features` build there
-    /// is nothing to refuse and the helper would be dead code.
+    /// `expect_err` is not available.
     #[cfg(not(all(feature = "audio-transcribe", feature = "image-vision")))]
     fn refusal(opts: MediaBuildOptions) -> MediaError {
         match installed(opts) {
@@ -500,9 +325,7 @@ mod tests {
         );
     }
 
-    /// Asking for nothing is not an error in any build — `media build --audio` in
-    /// a vision-only binary must not be refused for the modality it did not ask
-    /// for.
+    /// Asking for nothing is not an error in any build.
     #[test]
     fn requesting_no_modality_needs_no_producer() {
         let none = installed(MediaBuildOptions {
@@ -514,53 +337,22 @@ mod tests {
         assert!(none.is_empty());
     }
 
-    /// `available` never errors: a default build simply has nothing to offer.
+    /// With no engine provided, nothing is offered, in any build.
     #[test]
-    #[cfg(not(any(feature = "audio-transcribe", feature = "image-vision")))]
-    fn a_default_build_offers_no_producer() {
+    fn no_engine_offers_no_producer() {
         assert!(available().is_empty());
     }
 
+    /// A provider id with characters a producer id cannot carry is folded, never
+    /// refused: `qwen3:8b` and `hf.co/x/Y` still name a valid record.
     #[test]
     #[cfg(any(feature = "audio-transcribe", feature = "image-vision"))]
-    fn quantisation_is_read_from_the_pinned_file_name() {
-        use super::quantisation_of;
-        assert_eq!(
-            quantisation_of(
-                "https://huggingface.co/x/resolve/main/Voxtral-Mini-3B-2507-Q4_K_M.gguf"
-            ),
-            "Q4_K_M"
-        );
-        assert_eq!(
-            quantisation_of(
-                "https://huggingface.co/x/resolve/main/mmproj-SmolVLM-500M-Instruct-Q8_0.gguf"
-            ),
-            "Q8_0"
-        );
-        assert_eq!(quantisation_of("https://x/model-F16.gguf"), "F16");
-        // A name with no quantisation token is reported as unknown rather than
-        // guessed at — and `3B` must not be mistaken for one.
-        assert_eq!(quantisation_of("https://x/SmolVLM-500M-3B.gguf"), "unknown");
-    }
-
-    /// The producers this binary can offer must be exactly the modalities it was
-    /// compiled with (when installed). Anything else means a producer leaked
-    /// across a feature gate.
-    #[test]
-    fn available_producers_match_the_compiled_modalities() {
-        use super::MediaKind;
-        for producer in available() {
-            let compiled_in = match producer.kind {
-                MediaKind::Audio => cfg!(feature = "audio-transcribe"),
-                MediaKind::Vision => cfg!(feature = "image-vision"),
-            };
-            assert!(
-                compiled_in,
-                "a {} producer was offered by a build without its feature",
-                producer.kind
-            );
-            // Whatever this build offers must be a well-formed identity.
-            producer.validate().expect("an offered producer is valid");
-        }
+    fn provider_ids_fold_into_the_model_id_alphabet() {
+        use super::fold_model_id;
+        assert_eq!(fold_model_id("qwen3:8b"), "qwen3-8b");
+        assert_eq!(fold_model_id("hf.co/x/Voxtral"), "hf.co-x-voxtral");
+        assert!(crate::media::is_valid_model_id(&fold_model_id(
+            &"x".repeat(200)
+        )));
     }
 }

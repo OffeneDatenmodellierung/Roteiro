@@ -13,9 +13,10 @@ than discovered on the wire. Since #809 there is a second OpenAI path,
 below](#responses-api) and everything else on this page
 applies to it unchanged.
 
-Roteiro serves your installed GGUF models over an OpenAI-compatible `/v1`
-endpoint, bound to loopback (ADR-0006). It is enabled by building with the
-`serve` feature and started with `roteiro serve`.
+`roteiro serve` puts an OpenAI-compatible `/v1` endpoint, bound to loopback, in
+front of the model provider you configure (`[provider] base_url`): it runs the
+graph tools and forwards each generation to the provider (ADR-0033, superseding
+ADR-0006). `serve` is in the default build.
 
 ## It has two modes, and the request chooses
 

@@ -29,13 +29,6 @@ pub use rto_llama::engine;
 // Re-exported on the same terms as `engine` above, so this crate's modules name
 // it the way they name every other shared inference type.
 pub use rto_llama::thinking;
-// The process-wide llama.cpp backend the served engine shares with every other
-// engine in the process (issue #296) — re-exported so an embedder depending on
-// `rto-serve` alone can still give it a deterministic end of life.
-#[cfg(feature = "llama")]
-pub use rto_llama::backend;
-#[cfg(feature = "llama")]
-pub use rto_llama::llama;
 
 pub use budget::{
     REQUEST_CONTEXT_BUDGET_MIB, REQUEST_CONTEXT_BUDGET_TOKENS, WORST_CASE_REQUEST_TOKENS,

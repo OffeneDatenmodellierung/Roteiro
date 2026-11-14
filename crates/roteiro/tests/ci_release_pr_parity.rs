@@ -304,6 +304,15 @@ fn no_required_job_pays_for_expensive_work_on_a_release_pr() {
             if is_always_run_setup(step) {
                 continue;
             }
+            // The manifest check compiles nothing and runs on every event since
+            // #871, release PRs included; it is the cheap arm's work, unguarded.
+            let run = field_str(step, "run").unwrap_or_default();
+            if condition(step).is_none()
+                && run.contains("cargo metadata")
+                && run.contains("--locked")
+            {
+                continue;
+            }
             let condition = condition(step);
             let armed = condition
                 .as_deref()

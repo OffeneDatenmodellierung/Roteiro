@@ -479,43 +479,14 @@ pub fn sync_worktree(
         // They count as dirty (so the preview re-runs when they change) and add to
         // the blob total (they are genuinely new blobs, not edits of existing ones).
         let head_paths: BTreeSet<&str> = committed.blobs.iter().map(|b| b.path.as_str()).collect();
-        for path in repo.added_since_head(&head_paths)? {
-            // A new file under an excluded path is excluded too — otherwise
-            // dropping a corpus into `raw/` would put it in the graph until the
-            // moment it was committed, which is the inverse of what the
-            // declaration says.
-            if !extractor.reads(&path) {
-                continue;
-            }
-            match std::fs::read(workdir.join(&path)) {
-                Ok(bytes) => {
-                    let woid = repo.blob_oid(&bytes)?;
-                    by_path.insert(path.clone(), extractor.extract(&path, &woid, &bytes));
-                    dirty.insert((path, woid));
-                }
-                // Raced away between the walk and the read — nothing to add.
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e.into()),
-            }
-        }
-
-        // A symlinked `raw/` (#815): the dirwalk above never descends into a
-        // symlinked directory, so walk its target here when the policy allows,
-        // keying each file by its path through the link.
-        if extractor.paths().follows_raw_symlink() {
-            for path in raw_symlink_files(workdir)? {
-                if head_paths.contains(path.as_str())
-                    || by_path.contains_key(&path)
-                    || !extractor.reads(&path)
-                {
-                    continue;
-                }
-                let bytes = std::fs::read(workdir.join(&path))?;
-                let woid = repo.blob_oid(&bytes)?;
-                by_path.insert(path.clone(), extractor.extract(&path, &woid, &bytes));
-                dirty.insert((path, woid));
-            }
-        }
+        overlay_additions(
+            repo,
+            workdir,
+            extractor,
+            &head_paths,
+            &mut by_path,
+            &mut dirty,
+        )?;
     }
 
     // The blob total is the file count of the *overlaid* graph — committed files,
@@ -1197,6 +1168,56 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     hash
+}
+
+/// Overlay the files `HEAD` lacks: those the dirwalk and the index report (see
+/// the call site in [`sync_worktree`]), then the files behind a symlinked
+/// top-level `raw/` (#815) — the dirwalk never descends into a symlinked
+/// directory, so its target is walked here when the policy allows, keying each
+/// file by its path through the link.
+fn overlay_additions(
+    repo: &Repo,
+    workdir: &std::path::Path,
+    extractor: &dyn Extractor,
+    head_paths: &BTreeSet<&str>,
+    by_path: &mut BTreeMap<String, FactSet>,
+    dirty: &mut BTreeSet<(String, String)>,
+) -> Result<(), SyncError> {
+    for path in repo.added_since_head(head_paths)? {
+        // A new file under an excluded path is excluded too — otherwise
+        // dropping a corpus into `raw/` would put it in the graph until the
+        // moment it was committed, which is the inverse of what the
+        // declaration says.
+        if !extractor.reads(&path) {
+            continue;
+        }
+        match std::fs::read(workdir.join(&path)) {
+            Ok(bytes) => {
+                let woid = repo.blob_oid(&bytes)?;
+                by_path.insert(path.clone(), extractor.extract(&path, &woid, &bytes));
+                dirty.insert((path, woid));
+            }
+            // Raced away between the walk and the read — nothing to add.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    if !extractor.paths().follows_raw_symlink() {
+        return Ok(());
+    }
+    for path in raw_symlink_files(workdir)? {
+        if head_paths.contains(path.as_str())
+            || by_path.contains_key(&path)
+            || !extractor.reads(&path)
+        {
+            continue;
+        }
+        let bytes = std::fs::read(workdir.join(&path))?;
+        let woid = repo.blob_oid(&bytes)?;
+        by_path.insert(path.clone(), extractor.extract(&path, &woid, &bytes));
+        dirty.insert((path, woid));
+    }
+    Ok(())
 }
 
 /// The regular files behind a symlinked top-level `raw/`, as repo-relative

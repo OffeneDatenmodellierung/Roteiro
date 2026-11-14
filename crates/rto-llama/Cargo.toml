@@ -1,6 +1,6 @@
 [package]
 name = "rto-llama"
-description = "Roteiro's llama.cpp inference core: the Engine trait + a llama.cpp-backed engine (generation, embeddings, vision), shared by serving and internal uses (ADR-0003/0006). Implementation detail of the roteiro CLI; no API stability guarantee."
+description = "Roteiro's inference interface: the Engine trait and its request/response types, implemented over HTTP by the provider engine (ADR-0028, ADR-0033). Implementation detail of the roteiro CLI; no API stability guarantee."
 readme = "README.md"
 version.workspace = true
 edition.workspace = true
@@ -13,69 +13,7 @@ authors.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 thiserror = { workspace = true }
-# The event facade for the one warning this crate raises itself: a
-# configured context-window ceiling above what a model was trained for
-# (issue #486). No new crate enters the build — `llama-cpp-2` already
-# routes llama.cpp's native logs through `tracing`, and the binary
-# installs the subscriber (ADR-0011); this only makes the facade a
-# direct edge so the warning lands in the same place every other log does.
-tracing = "0.1"
-# Chat templating, in Rust (issue #492). `LlamaModel::apply_chat_template` wraps
-# `llama_chat_apply_template`, which llama.h states plainly "does not use a jinja
-# parser — it only support a pre-defined list of template": it substring-matches
-# for `<|im_start|>` and renders eight lines of C++ instead. qwen3-32b's own
-# 4,100-byte template comes back as 153 bytes. It also takes **no `tools`
-# argument at all**, so a tool definition cannot reach a model's template through
-# it however the Jinja is handled.
-#
-# Upstream declined a binding to llama.cpp's real templating engine as out of
-# scope (utilityai/llama-cpp-rs#1048), and argued their own case: chat templating
-# and tool-call parsing belong in Rust, above the token level. This is that.
-#
-# `json` supplies the `tojson` filter and `pycompat` the Python string methods
-# (`startswith`) these templates use — both established by rendering every
-# template in this repository's registry before either was added.
-minijinja = { version = "2", default-features = false, features = ["builtins", "loop_controls", "macros", "json", "serde"] }
-minijinja-contrib = { version = "2", default-features = false, features = ["pycompat"] }
 serde_json = { workspace = true }
-# The llama.cpp engine. Opt-in: pulls a C/C++ toolchain (cmake, clang, libclang)
-# to build vendored llama.cpp. The pure-Rust `Engine` trait + request/result
-# types build and are usable without it (e.g. mock engines, wire mappers).
-#
-# This entry serves the integration tests too, and that is the reason there is no
-# `[dev-dependencies]` copy of it. Cargo passes a package's *normal* dependencies
-# to its test targets as well as its dev-dependencies, so the four files in
-# `tests/` that reach past `LlamaEngine`'s API to llama.cpp itself —
-# `batch_numerics`, `batch_capacity`, `context_window`, `speculative` — can
-# `use llama_cpp_2::…` whenever `llama` is on, and cannot when it is off. That is
-# exactly right: every file in `tests/` is `#![cfg(feature = "llama")]`, so with
-# the feature off there is nothing left to compile against it.
-#
-# A `[dev-dependencies]` entry did not have that property, because
-# dev-dependencies are never feature-gated — Cargo rejects `optional` on one — so
-# `--all-targets` built vendored llama.cpp at *every* feature set,
-# `--no-default-features` included, and four CI jobs installed cmake/clang to
-# compile a C++ tree none of their test targets could name (issue #483). The
-# comment that stood here called it "inert unless a test that uses it is
-# compiled": true of linking, false of building, and it misled two workers and an
-# orchestrator before it was measured. `cargo build`/`cargo install` never paid
-# it either way.
-# **Exact pins, on both halves** (the boxlite lesson, #888). Upstream ships API
-# breaks in patch releases: `llama-cpp-2` 0.1.161 removed `AddBos` and moved the
-# tokenizer methods, so a fresh resolution — which is what `cargo install` without
-# `--locked` does — stopped compiling `rto-llama` while CI, building from the
-# committed lock, stayed green. And `llama-cpp-2` takes its `-sys` sibling with a
-# caret (`^0.1.157`), so pinning the wrapper alone would still float the C++
-# bindings underneath it; `llama-cpp-sys-2` is named here only to pin it. Bump the
-# pair together, to versions CI has built.
-llama-cpp-2 = { version = "=0.1.157", optional = true }
-llama-cpp-sys-2 = { version = "=0.1.160", optional = true }
-encoding_rs = { version = "0.8", optional = true }
-
-[features]
-# The real llama.cpp-backed engine. Off by default so downstream default builds
-# stay pure-Rust; callers turn it on when they need local inference.
-llama = ["dep:llama-cpp-2", "llama-cpp-2/mtmd", "dep:llama-cpp-sys-2", "dep:encoding_rs"]
 
 [lints]
 workspace = true

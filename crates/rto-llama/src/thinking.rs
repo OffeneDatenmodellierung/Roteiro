@@ -22,9 +22,8 @@
 //! does every `roteiro` build that can reach a generation. It is also where
 //! [`FinishReason`] already lives, which the rule below needs.
 //!
-//! Nothing here needs llama.cpp, so this module is compiled unconditionally and
-//! its tests run in a build with no C/C++ toolchain — the same property
-//! [`crate::slot`] has and for the same reason.
+//! Nothing here needs a model, so this module is compiled unconditionally and
+//! its tests run in every build.
 //!
 //! # An unterminated block is not an answer
 //!

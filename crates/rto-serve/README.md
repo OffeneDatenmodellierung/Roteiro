@@ -1,8 +1,8 @@
 # rto-serve
 
-Local **model serving** for [**Roteiro**](https://roteiro.dev) (ADR-0006): an
-opt-in, loopback, **OpenAI-compatible `/v1` endpoint** over your installed GGUF
-models, backed by llama.cpp.
+The **OpenAI-compatible `/v1` endpoint** of [**Roteiro**](https://roteiro.dev)'s
+`roteiro serve`: it runs Roteiro's graph tools in front of the model provider
+you configure — Ollama, `llama-server`, or a hosted API (ADR-0033).
 
 Serve `chat/completions` (streaming), `models`, and `embeddings` over the same
 models Roteiro uses internally, and optionally auto-register Roteiro's **graph

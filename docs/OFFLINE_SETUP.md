@@ -18,7 +18,6 @@ hosts**, from exactly **two** call sites in the whole workspace:
 
 | Host | What | Reached by |
 |---|---|---|
-| `huggingface.co` | GGUF models | `roteiro model pull` |
 | `ocrs-models.s3-accelerate.amazonaws.com` | the OCR model only | `roteiro model pull ocrs-text` |
 | `osv-vulnerabilities.storage.googleapis.com` | OSV databases | `roteiro security prefetch --allow-download` |
 
@@ -46,17 +45,13 @@ extra one — no C++, no cmake, no libclang.
 ```sh
 # macOS
 xcode-select --install          # linker, C/C++, and libclang
-brew install cmake              # ONLY if you are building with `serve`
 
 # Debian / Ubuntu
 sudo apt install build-essential        # needed for the DEFAULT build
-sudo apt install cmake libclang-dev     # ONLY if you are building with `serve`
 ```
 
-`serve` compiles llama.cpp from source. Budget for it: on an 18-core machine
-that stage alone is ~45 s; **on 2–4 cores expect 3–12 minutes.** Without `cmake`
-or `libclang` it does not degrade — the build script panics and `cargo install`
-fails outright. `protoc` is *not* required by any feature.
+No feature needs cmake or libclang since the in-process llama.cpp engine was
+retired (ADR-0033), and `protoc` is not required by any feature.
 
 ## Step 1 — install with the features you intend to use offline
 
@@ -71,7 +66,7 @@ build.
 
 ```sh
 cargo install roteiro                       # everything in this guide
-cargo install roteiro --features serve      # + local model serving and inference
+cargo install roteiro --features image-ocr  # + OCR during sync
 ```
 
 Neither default changes when bytes move. `model pull` is still consent-gated;
@@ -99,34 +94,20 @@ cargo install roteiro --no-default-features --features execution
 That build keeps `security ingest|list|prefetch|status` and refuses `security
 run` with a message naming the feature it would need.
 
-## Step 2 — warm the model store
+## Step 2 — warm the model store and your provider
 
-Pull only the sections you will actually use. Every file is SHA-256 pinned in
-the binary, consent-gated, and **resumable** — if a pull is interrupted, re-run
-the same command and it continues over an HTTP range request.
+Roteiro runs one model itself: the OCR weights, SHA-256 pinned, consent-gated and
+resumable.
 
 ```sh
-roteiro model list                                    # store path + what is available
-
-roteiro model pull bge-small-en-v1.5-gguf --yes       #   65 MiB  embeddings: infer, /v1/embeddings
-roteiro model pull qwen3-0.6b             --yes       #  380 MiB  spec draft, serve chat + Ask
-roteiro model pull ocrs-text              --yes       #   12 MiB  image-ocr only
-roteiro model pull smolvlm-500m-gguf      --yes       #  520 MiB  image-vision only
-roteiro model pull voxtral-mini-3b        --yes       # 3041 MiB  audio-transcribe only
+roteiro model pull ocrs-text --yes       # 12 MiB  image-ocr only
 ```
 
-Sizes to plan around: **445 MiB** for a text-only core (embeddings + a small
-generative model), **~3.9 GiB** for the smallest useful pick across every
-section, **~65.6 GiB** for the entire registry. Audio has no low tier —
-`voxtral-mini-3b` at 3.0 GiB is the floor, and it is most of that 3.9 GiB.
-
-A missing model **degrades rather than fails**:
-
-```
-$ roteiro spec draft "a test topic"
-note: generative model `qwen3-0.6b` is not installed — emitting the scaffold.
-      Draft prose with: roteiro model pull qwen3-0.6b
-```
+Every other model runs in your provider (ADR-0033), so pull those *there* while
+you still have a network — for Ollama, `ollama pull qwen3:8b` and
+`ollama pull nomic-embed-text` — and set `[provider] base_url` to its loopback
+address. A command that needs a model with none configured refuses and names the
+key to set.
 
 ## Step 3 — warm the analyzer assets
 
@@ -385,11 +366,11 @@ them **without opening a socket**.
 **Models.** Declining the consent prompt prints the exact URL and destination:
 
 ```
-roteiro would download model `qwen3-0.6b` (~380 MiB, Apache-2.0) from:
-  https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_K_M.gguf
-
+roteiro would download model `ocrs-text` (~12 MiB, CC-BY-SA-4.0) from:
+  https://ocrs-models.s3-accelerate.amazonaws.com/text-detection.rten
+  …
 non-interactive: not downloading. Re-run with `--yes`, or fetch manually into
-  <store>/qwen3-0.6b
+  <store>/ocrs-text
 ```
 
 Fetch it elsewhere, copy it to that path, and `roteiro model list` will see it.

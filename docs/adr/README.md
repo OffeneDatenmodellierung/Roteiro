@@ -11,7 +11,7 @@
 | [0003](0003-pluggable-embedding-models.md) | Pluggable embedding models — tiny static default, opt-in local models | Accepted |
 | [0004](0004-spec-blueprint-authoring-pillar.md) | Spec/Blueprint authoring pillar — tiered, graph-grounded, check-gated | Accepted |
 | [0005](0005-image-ocr-vision-ingestion.md) | Image ingestion — tiered OCR (pure-Rust) + optional vision understanding | Accepted |
-| [0006](0006-local-model-serving.md) | Local model serving — reuse pulled models over an OpenAI-compatible endpoint | Accepted |
+| [0006](0006-local-model-serving.md) | Local model serving — reuse pulled models over an OpenAI-compatible endpoint | Superseded by 0033 |
 | [0007](0007-configuration-file.md) | Configuration file — a single project-level TOML with layered precedence | Accepted |
 | [0008](0008-multi-repo-workspace-serve.md) | Multi-repo workspace serve — one instance, many project graphs, one model | Accepted |
 | [0009](0009-cross-repo-workspace-links.md) | Cross-repo workspace links — interlink a hub app with its deployment repos | Accepted |
@@ -38,6 +38,7 @@
 | [0030](0030-remove-the-microvm-sandbox.md) | Remove the microVM sandbox — analyzers and linters run on the host, behind the consent gate, or not at all | Accepted |
 | [0031](0031-measured-prose-for-model-output.md) | Model prose is measured on three separate axes — faithfulness, coverage and style — each deterministic | Accepted |
 | [0032](0032-provider-credentials-token-command.md) | Provider credentials — a token command from the user's own config, and extra headers from any layer | Accepted |
+| [0033](0033-retire-in-process-llama-cpp.md) | Retire the in-process llama.cpp engine and the GGUF model store — every model call goes through the provider | Accepted |
 
 > **ADR 0018** is the third of the analyzer trio: 0012 decides how findings are
 > stored, 0014 how analyzers are executed and provisioned (its microVM backend

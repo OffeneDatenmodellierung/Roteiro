@@ -13,11 +13,10 @@ download or run those models itself
 ([ADR-0027](adr/0027-external-model-provider.md),
 [ADR-0028](adr/0028-one-engine-local-or-hosted.md)).
 
-> **Migration status.** `roteiro serve` (the `/v1` endpoint and the explorer's
-> Ask panel) and `roteiro spec draft` use the provider today. `review --llm`,
-> `infer --model` and `media build` still use the in-process engine and
-> `roteiro model pull` until they are moved over; this page grows as each one
-> does.
+> **Every model surface uses the provider** — `serve`/Ask, `spec draft`,
+> `review --llm`, `infer --model` and `media build` (ADR-0033). The in-process
+> llama.cpp engine and the GGUF model store are gone; `roteiro model pull`
+> installs the OCR weights only.
 
 ## 1. Run a provider
 

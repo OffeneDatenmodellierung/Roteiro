@@ -64,33 +64,32 @@ not-yet-reimplemented in
 <a href="https://github.com/OffeneDatenmodellierung/Roteiro/blob/main/docs/adr/0021-open-knowledge-format-bundle.md">ADR-0021</a>
 rather than left to be noticed.
 
-## 2 · Online mode — richer inference with local models {#online}
+## 2 · Model mode — richer inference through a provider {#online}
 
-Pull a real embedding or generative model *once* (with consent), then run
-everything locally — the “online” is a one-time, explicit download, after which
-inference is offline again. Requires `--features inference-local-models`.
+Point Roteiro at a model provider — Ollama or `llama-server` on this machine, or
+a hosted API — and the model-backed commands light up. Roteiro runs no model in
+its own process except OCR (ADR-0033).
 
-<pre><code><span class="c"># See models curated for THIS machine's resources, then pull one</span>
-roteiro model list
-roteiro model pull bge-small-en-v1.5-gguf
-<span class="c">#   Download bge-small-en-v1.5-gguf (~65 MB, MIT) from …? [y/N]</span>
+<pre><code><span class="c"># ~/.roteiro/config.toml or roteiro.toml</span>
+[provider]
+base_url = "http://127.0.0.1:11434/v1"   <span class="c"># Ollama</span>
+[models]
+generative = "qwen3:8b"
+embedding  = "nomic-embed-text"
 
-<span class="c"># Suggest inferred similarity edges using the pulled embedding model</span>
-roteiro infer --model bge-small-en-v1.5-gguf --min-confidence 0.5
+<span class="c"># Suggest inferred similarity edges with the provider's embedding model</span>
+roteiro infer --min-confidence 0.5
 
 <span class="c"># Report likely-duplicate content (same blob, or near-identical embeddings)</span>
 roteiro duplicates --min-similarity 0.9
 
-<span class="c"># Draft a house-style, graph-grounded ADR/blueprint with a generative model</span>
+<span class="c"># Draft a house-style, graph-grounded ADR/blueprint with the generative model</span>
 roteiro spec scaffold "rate limiting" --kind adr
 roteiro spec draft draft-adr.md         <span class="c"># fills placeholder sections</span></code></pre>
 
-<div class="note"><strong>“Online mode” means the download, not the inference.</strong>
-The one-time <code>model pull</code> is the only thing that touches the network here; after
-it, every model above runs on this machine and nothing you ask is sent anywhere. The
-way a hosted model is called at use time is a <code>[provider] base_url</code> naming one —
-<a href="./#remote-tier">a configuration choice, announced on every run</a>, not a build
-feature. If you enabled <code>inference-local-models</code>, you did not enable that.</div>
+<div class="note"><strong>A loopback provider keeps everything on this machine.</strong>
+A hosted <code>base_url</code> sends repository content to that host —
+<a href="./#remote-tier">a configuration choice, announced on every run</a>.</div>
 
 ## 3 · Serving mode — the network HTTP server {#serving}
 

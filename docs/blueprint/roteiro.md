@@ -99,11 +99,11 @@ design and the implementation honest (ADR-0004).
 ## 6. Inference, content ingestion & local models
 
 The default embedder is a dependency-free hashing embedding
-[[crates/rto-graph/src/infer.rs]]; the `inference-local-models` tier swaps in a
-llama.cpp-backed GGUF embedder. Content ingestion enriches `meta.content` for
+[[crates/rto-graph/src/infer.rs]]; naming a provider embedding model swaps in
+the provider's embeddings (ADR-0033). Content ingestion enriches `meta.content` for
 embedding: prose and PDF text, OCR/vision for images (ADR-0005), and speech
 transcription for audio — all through the shared engine
-[[crates/rto-llama/src/llama.rs#LlamaEngine]], which implements the
+`crates/rto-llama/src/llama.rs#LlamaEngine` (removed by ADR-0033), which implements the
 [[crates/rto-llama/src/engine.rs#Engine]] trait. The curated model matrix and the
 consent-gated, checksum-verified downloader live in the registry
 [[crates/rto-graph/src/models.rs]] (candle has been retired; llama.cpp is the sole

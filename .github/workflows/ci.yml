@@ -395,21 +395,21 @@ jobs:
       # each cell that already compiles a feature set also documents it:
       #
       #   checks               --all-features         (here)
-      #   default-features     the default set        (`provider` on, local models off)
+      #   default-features     the default set        (`provider` and `serve` on)
       #   no-default-features  none, mcp, execution, okf-viewer, explorer
       #
       # Why those: the floor documents every ungated doc that cites a gated item
       # (#792's class); each single-feature cell documents that feature's docs
       # with every other feature off (#797's `explorer`-without-`mcp`); and the
-      # default set is where `provider` is on and `inference-local-models` off,
-      # which is what `review_llm` straddles (#854). They are
+      # default set is where `provider` and `serve` are on with the media
+      # features off, which is what `review_llm` straddles (#854). They are
       # also the configurations this file already compiles, so the dependency
       # metadata rustdoc needs is already built — each step costs the rustdoc
       # pass over the workspace crates, not a build.
       #
       # **Not documented**, so a reader knows the gate's shape rather than
       # assuming it is total: the other single-feature points (`models`,
-      # `provider` alone, `inference`, `inference-local-models`, `serve`,
+      # `provider` alone, `inference`, `serve`,
       # `exec-subprocess`, `refs-fetch`, `pdf-text`, the `image-*` and `audio-*`
       # media features) and every combination of two or more features other
       # than the default set. A link from a doc behind one of those to an item
@@ -644,8 +644,8 @@ jobs:
         with:
           # Full history; see the `checks` job. This job runs `cargo test` five
           # times over five feature sets, and the corpus tests are in all five:
-          # `review_llm` is declared `#[cfg(any(feature = "serve", feature =
-          # "inference-local-models", test))]`, so `--no-default-features` does not
+          # `review_llm` is declared `#[cfg(any(feature = "provider", test))]`,
+          # so `--no-default-features` does not
           # take it out of the build — turning features off does not turn this
           # requirement off with them.
           fetch-depth: 0

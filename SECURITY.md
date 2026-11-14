@@ -22,9 +22,8 @@ Either way, do not post the details publicly first.
 
 Useful things to include, to the extent you have them: what you did, what
 happened, which version or commit, and which feature flags were enabled. Roteiro
-keeps its heavier surface behind opt-in features (`serve`,
-`inference-local-models`, `pdf-text`, `image-ocr`, `image-vision`,
-`audio-transcribe`), so knowing whether a build was affected
+keeps its heavier surface behind opt-in features (`mcp`, `pdf-text`,
+`image-ocr`, `image-vision`, `audio-transcribe`; `serve` is default), so knowing whether a build was affected
 usually depends on knowing which of those were on.
 
 `execution`, `models` and `exec-subprocess` are **on by default** — assume all

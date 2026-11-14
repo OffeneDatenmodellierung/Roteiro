@@ -506,11 +506,15 @@ impl ParsedFrontmatter {
         }
         .or(self.generated.as_ref())?;
         // A peer that wrote `generated` and `verified` with different actors
-        // keeps both on the way back out (#799, #820 §5): collapsing them onto
-        // the verifier would credit the confirmer with writing it.
+        // keeps both on the way back out when the confirmation is re-emitted
+        // (#799, #820 §5): collapsing them would credit the confirmer with
+        // writing it. Without a confirmation there is no `verified` block, so
+        // `generated` carries the attribution alone, as before — splitting it
+        // there would drop the verifier's name entirely.
         let generated_by = self
             .generated
             .as_ref()
+            .filter(|_| confirms)
             .map(|(g, _)| parse_actor(g))
             .filter(|g| *g != parse_actor(by));
         Some(Origin {
