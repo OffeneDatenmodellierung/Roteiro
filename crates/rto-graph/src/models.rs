@@ -431,6 +431,8 @@ pub const REGISTRY: &[ModelSpec] = &[
     // recognition, `.rten` format). Weights trace to open datasets (HierText,
     // CC-BY-SA-4.0); the `ocrs` engine crate is MIT/Apache-2.0. Checksums are
     // pinned so a model change invalidates cached image facts (see extract.rs).
+    // It reads horizontal text only: a run rotated 90° (an arXiv margin stamp,
+    // on 237 of 310 first pages measured in #908) yields nothing, silently.
     ModelSpec {
         name: "ocrs-text",
         kind: ModelKind::Ocr,
@@ -438,7 +440,7 @@ pub const REGISTRY: &[ModelSpec] = &[
         tier: ResourceTier::Low,
         dim: 0,
         licence: "CC-BY-SA-4.0",
-        description: "ocrs text detection + recognition (pure-Rust OCR for `image-ocr`)",
+        description: "ocrs text detection + recognition (pure-Rust OCR for `image-ocr`); horizontal text only — rotated text is not read",
         size_mib: 12,
         variants: &[ModelVariant {
             platform: Platform::Standard,

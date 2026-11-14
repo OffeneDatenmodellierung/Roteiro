@@ -1405,6 +1405,13 @@ fn pdf_text(path: &str, _bytes: &[u8], ingest: IngestConfig) -> Option<Result<St
 /// can correct against the image. The VLM now runs from `roteiro media build`
 /// into [`crate::media`], where its output is labelled and opt-in.
 ///
+/// **Rotated text is omitted, not misread** (#908). The pinned `ocrs-text`
+/// weights read horizontal runs only; a run rotated 90° — a margin stamp, a
+/// vertical axis label, a sideways table header — contributes nothing, and the
+/// node's content looks complete without it. That is an omission rather than a
+/// correctable misreading, so absence of a phrase from OCR content is not
+/// evidence it is absent from the image.
+///
 /// This reads the *installed* OCR models — that runtime dependency is reflected
 /// in the cache key via [`media_env_tag`], so installing/upgrading a model
 /// re-extracts affected images instead of serving stale (content-free) facts.

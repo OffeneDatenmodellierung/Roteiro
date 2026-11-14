@@ -195,7 +195,7 @@ tokens (it is documented for its native API). If the first question fails with
 | `/v1/embeddings` | `embedding` | `bge-m3` or `nomic-embed-text` | optional |
 | Image description | `vision` | `qwen2.5vl:3b` | optional |
 | Audio transcription | `audio` | Voxtral Mini 3B via `llama-server` | optional |
-| OCR | `ocr` | `ocrs-text` via `roteiro model pull` — runs inside Roteiro, not on the provider | optional |
+| OCR | `ocr` | `ocrs-text` via `roteiro model pull` — runs inside Roteiro, not on the provider; reads horizontal text only, rotated text is silently omitted (#908) | optional |
 
 Tags change upstream; check `ollama list` or the provider's model library for
 the current names.

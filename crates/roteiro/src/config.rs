@@ -1094,7 +1094,8 @@ pub struct IngestConfig {
     pub prose: Option<bool>,
     /// Extract text from PDF documents.
     pub pdf: Option<bool>,
-    /// OCR literal text from images.
+    /// OCR literal text from images. Horizontal text only: rotated text is not
+    /// read, and nothing in the node says it was skipped (#908).
     pub ocr: Option<bool>,
     /// Describe images with a vision model.
     pub vision: Option<bool>,

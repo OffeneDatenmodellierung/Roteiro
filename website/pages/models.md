@@ -35,6 +35,6 @@ GGUF, run through the shared llama.cpp engine. A rough guide:
 
 <table>
 <tr><th>Model</th><th>Size</th><th>Best for</th></tr>
-<tr><td><code>ocrs-text</code></td><td>~12 MB</td><td>Pure-Rust OCR — literal text in screenshots (<code>image-ocr</code>).</td></tr>
+<tr><td><code>ocrs-text</code></td><td>~12 MB</td><td>Pure-Rust OCR — literal text in screenshots (<code>image-ocr</code>). Horizontal text only: rotated text (margin stamps, vertical labels) is silently not read.</td></tr>
 <tr><td><code>smolvlm-500m-gguf</code></td><td>~520 MB</td><td>Describing diagrams &amp; photos (<code>image-vision</code>).</td></tr>
 </table>
