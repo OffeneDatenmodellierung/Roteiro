@@ -48,16 +48,22 @@ jobs:
 
       # Deliberately no rust-cache: a restored target dir is built from the old
       # lock's versions, and the point is to compile the new ones.
+      # A resolution failure is the same finding as a build failure — `cargo
+      # install` stops at it — so it is reported, not left to skip the reporter.
       - name: Resolve from the manifests
+        id: resolve
+        continue-on-error: true
         run: |
           set -euo pipefail
           cp Cargo.lock Cargo.lock.committed
+          : > lock.diff
           rm Cargo.lock
-          cargo generate-lockfile
+          cargo generate-lockfile 2>&1 | tee check.log
           diff <(grep -A1 '^name = ' Cargo.lock.committed) <(grep -A1 '^name = ' Cargo.lock) > lock.diff || true
 
       - name: Check every feature against the fresh lock
         id: check
+        if: steps.resolve.outcome == 'success'
         continue-on-error: true
         run: |
           set -o pipefail
@@ -67,7 +73,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-          OUTCOME: ${{ steps.check.outcome }}
+          OUTCOME: ${{ steps.resolve.outcome == 'failure' && 'failure' || steps.check.outcome }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -87,7 +93,7 @@ jobs:
           fi
 
           {
-            echo "\`cargo check --workspace --all-targets --all-features\` fails against a lock resolved fresh from the manifests, which is what \`cargo install roteiro\` without \`--locked\` does. CI is unaffected: it builds from the committed lock."
+            echo "Resolving from the manifests (\`cargo generate-lockfile\`), or \`cargo check --workspace --all-targets --all-features\` against the result, fails. A fresh resolution is what \`cargo install roteiro\` without \`--locked\` does. CI is unaffected: it builds from the committed lock."
             echo
             echo "Run: ${RUN_URL}"
             echo
@@ -113,7 +119,7 @@ jobs:
           fi
 
       - name: Fail the run if the check failed
-        if: steps.check.outcome == 'failure'
+        if: steps.resolve.outcome == 'failure' || steps.check.outcome == 'failure'
         run: |
           echo "::error::the workspace does not build from a fresh resolution; see the fresh-resolution issue"
           exit 1

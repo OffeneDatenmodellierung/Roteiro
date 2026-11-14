@@ -432,8 +432,16 @@ pub fn sync_worktree(
     // one; identical content hashes identically, so clean files are skipped.
     let mut dirty: BTreeSet<(String, String)> = BTreeSet::new();
     if let Some(workdir) = repo.workdir() {
+        // With `follow_raw_symlink = false`, a tracked `raw/` swapped for a link
+        // must not be read through it: its files are gone from the tree.
+        let raw_blocked = !extractor.paths().follows_raw_symlink() && raw_is_symlink(workdir);
         for blob in &committed.blobs {
-            match std::fs::read(workdir.join(&blob.path)) {
+            let read = if raw_blocked && blob.path.starts_with("raw/") {
+                Err(std::io::ErrorKind::NotFound.into())
+            } else {
+                std::fs::read(workdir.join(&blob.path))
+            };
+            match read {
                 Ok(bytes) => {
                     let woid = repo.blob_oid(&bytes)?;
                     if woid != blob.oid {
@@ -1205,7 +1213,7 @@ fn overlay_additions(
     if !extractor.paths().follows_raw_symlink() {
         return Ok(());
     }
-    for path in raw_symlink_files(workdir)? {
+    for path in raw_symlink_files(workdir, extractor.paths())? {
         if head_paths.contains(path.as_str())
             || by_path.contains_key(&path)
             || !extractor.reads(&path)
@@ -1226,15 +1234,29 @@ fn overlay_additions(
 ///
 /// Symlinks *inside* the target are skipped, not followed: only the one link at
 /// `raw/` is honoured, so the walk cannot loop or be led further out of the tree.
-fn raw_symlink_files(workdir: &std::path::Path) -> std::io::Result<Vec<String>> {
+///
+/// A directory an exclude pattern covers whole (`raw/**`, `raw/big/**`) is not
+/// opened, so an unreadable excluded subtree cannot fail the sync.
+fn raw_symlink_files(
+    workdir: &std::path::Path,
+    policy: &crate::PathPolicy,
+) -> std::io::Result<Vec<String>> {
     let raw = workdir.join("raw");
-    let is_link = std::fs::symlink_metadata(&raw).is_ok_and(|m| m.file_type().is_symlink());
-    if !is_link || !raw.is_dir() {
+    if !raw_is_symlink(workdir) || !raw.is_dir() {
         return Ok(Vec::new());
     }
+    let wholly_excluded = |rel: &str| {
+        policy.exclude_patterns().iter().any(|p| {
+            p.strip_suffix("/**")
+                .is_some_and(|prefix| crate::paths::glob_match(prefix, rel))
+        })
+    };
     let mut out = Vec::new();
     let mut stack = vec![(raw, String::from("raw"))];
     while let Some((dir, rel)) = stack.pop() {
+        if wholly_excluded(&rel) {
+            continue;
+        }
         for entry in std::fs::read_dir(&dir)? {
             let entry = entry?;
             let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
@@ -1251,6 +1273,11 @@ fn raw_symlink_files(workdir: &std::path::Path) -> std::io::Result<Vec<String>> 
     }
     out.sort();
     Ok(out)
+}
+
+/// Whether the top-level `raw/` is itself a symlink.
+fn raw_is_symlink(workdir: &std::path::Path) -> bool {
+    std::fs::symlink_metadata(workdir.join("raw")).is_ok_and(|m| m.file_type().is_symlink())
 }
 
 #[cfg(test)]

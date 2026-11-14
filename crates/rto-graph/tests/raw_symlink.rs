@@ -124,3 +124,57 @@ fn an_excluded_raw_stays_excluded_behind_a_link() {
     assert!(file_keys(&store).is_empty());
     std::fs::remove_dir_all(&base).ok();
 }
+
+#[test]
+fn the_opt_out_also_refuses_a_tracked_raw_swapped_for_a_link() {
+    let base = fresh_dir("tracked");
+    let share = base.join("share");
+    std::fs::create_dir_all(share.join("papers")).expect("mkdir");
+    std::fs::write(share.join("papers/a.md"), "# from outside\n").expect("write");
+    let repo_dir = base.join("repo");
+    std::fs::create_dir_all(repo_dir.join("raw/papers")).expect("mkdir");
+    git(&repo_dir, &["init", "-q"]);
+    std::fs::write(repo_dir.join("raw/papers/a.md"), "# tracked\n").expect("write");
+    git(&repo_dir, &["add", "."]);
+    git(&repo_dir, &["commit", "-q", "-m", "init"]);
+    std::fs::remove_dir_all(repo_dir.join("raw")).expect("rm raw");
+    std::os::unix::fs::symlink(&share, repo_dir.join("raw")).expect("raw link");
+
+    let repo = Repo::discover(&repo_dir).expect("discover");
+    let cache = ObjectCache::open(repo.common_dir().join("roteiro/objects")).expect("cache");
+    let mut store = Store::open_in_memory().expect("store");
+    let off = PathPolicy::new(Vec::new(), Vec::new()).with_raw_symlink(false);
+    sync_worktree(
+        &mut store,
+        &repo,
+        &cache,
+        &Registry::new(IngestConfig::default().with_paths(&off)),
+    )
+    .expect("sync");
+    assert!(
+        file_keys(&store).is_empty(),
+        "read through the link despite the opt-out: {:?}",
+        file_keys(&store)
+    );
+    std::fs::remove_dir_all(&base).ok();
+}
+
+#[test]
+fn an_unreadable_excluded_subtree_is_never_opened() {
+    use std::os::unix::fs::PermissionsExt;
+    let (base, repo, cache) = fixture("unreadable");
+    let locked = base.join("share/papers");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    let policy = PathPolicy::new(vec!["raw/papers/**".to_owned()], Vec::new());
+    let mut store = Store::open_in_memory().expect("store");
+    let result = sync_worktree(
+        &mut store,
+        &repo,
+        &cache,
+        &Registry::new(IngestConfig::default().with_paths(&policy)),
+    );
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    result.expect("an excluded directory must not be read");
+    assert!(file_keys(&store).is_empty());
+    std::fs::remove_dir_all(&base).ok();
+}

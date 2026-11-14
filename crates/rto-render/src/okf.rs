@@ -159,6 +159,11 @@ pub struct Origin {
     /// co-author — the model that drafted it, with the committer as the human
     /// who verified it.
     pub generated_by: Option<Actor>,
+    /// When the content was written, when that is not [`Self::at`].
+    ///
+    /// Carried through a round trip so a peer's `generated.at` is not replaced
+    /// by its verifier's time. `None` writes `at` into both.
+    pub generated_at: Option<String>,
 }
 
 /// A concept document's frontmatter.
@@ -341,7 +346,7 @@ impl Frontmatter {
                         .unwrap_or(&origin.by)
                         .as_token()
                 ),
-                yaml_scalar(&origin.at)
+                yaml_scalar(origin.generated_at.as_ref().unwrap_or(&origin.at))
             );
             // `verified` only when the origin confirms. Its **absence** is the
             // unverified tier, so writing an empty list here would claim a
@@ -497,12 +502,14 @@ pub fn origin_for(prov: Provenance, at: &str, tool: &Actor, human: Option<&Actor
                     at: at.to_owned(),
                     confirms: true,
                     generated_by: None,
+                    generated_at: None,
                 },
                 None => Origin {
                     by: tool.clone(),
                     at: at.to_owned(),
                     confirms: false,
                     generated_by: None,
+                    generated_at: None,
                 },
             }
         }
@@ -513,6 +520,7 @@ pub fn origin_for(prov: Provenance, at: &str, tool: &Actor, human: Option<&Actor
             at: at.to_owned(),
             confirms: true,
             generated_by: None,
+            generated_at: None,
         },
         // A similarity judgement carrying a confidence. Unverified, and honestly
         // so — and a peer's guess, or anything taken at *acknowledge* rather than
@@ -522,6 +530,7 @@ pub fn origin_for(prov: Provenance, at: &str, tool: &Actor, human: Option<&Actor
             at: at.to_owned(),
             confirms: false,
             generated_by: None,
+            generated_at: None,
         },
     }
 }
@@ -1887,6 +1896,19 @@ mod tests {
         );
         assert!(
             rendered.contains("verified:\n  - by: \"human:Mark Olliver\""),
+            "{rendered}"
+        );
+
+        // A generation time distinct from the verification stays on `generated`.
+        let mut fm = fm;
+        fm.origin.as_mut().unwrap().generated_at = Some("2026-06-30T14:00:00Z".to_owned());
+        let rendered = fm.render();
+        assert!(
+            rendered.contains("  at: \"2026-06-30T14:00:00Z\"\nverified:"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("    at: \"2026-11-14T00:00:00Z\""),
             "{rendered}"
         );
     }
