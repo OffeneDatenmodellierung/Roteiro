@@ -19,7 +19,7 @@ or runs an analyzer without your consent, exactly as in the default build.
 
 <table>
 <tr><th>Platform</th><th>File</th></tr>
-<tr><td>macOS 11+, Apple silicon and Intel</td><td><code>roteiro-&lt;version&gt;-macos-universal.tar.gz</code></td></tr>
+<tr><td>macOS 11+, Apple silicon (Intel Macs are not supported)</td><td><code>roteiro-&lt;version&gt;-macos-arm64.tar.gz</code></td></tr>
 <tr><td>Windows 10+, x86_64</td><td><code>roteiro-&lt;version&gt;-windows-x86_64.zip</code></td></tr>
 </table>
 
@@ -27,7 +27,7 @@ Each has a `.sha256` beside it. The binaries are **not signed**, so the first
 run needs one step:
 
 <pre><code><span class="c"># macOS: unpack, clear the download quarantine, put it on your PATH</span>
-tar -xzf roteiro-*-macos-universal.tar.gz
+tar -xzf roteiro-*-macos-arm64.tar.gz
 xattr -d com.apple.quarantine roteiro-*/roteiro
 sudo mv roteiro-*/roteiro /usr/local/bin/
 

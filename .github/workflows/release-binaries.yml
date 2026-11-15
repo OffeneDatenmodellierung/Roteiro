@@ -9,7 +9,7 @@ name: Release binaries
 # for (AGENTS.md, "Offline by default"). Since ADR-0033 no feature needs a C++
 # toolchain, so this is a plain `cargo build`.
 #
-#   roteiro-<version>-macos-universal.tar.gz   arm64 + x86_64, one binary (lipo)
+#   roteiro-<version>-macos-arm64.tar.gz       Apple silicon only; Intel Macs are not supported
 #   roteiro-<version>-windows-x86_64.zip
 #   …each with a `.sha256` beside it
 #
@@ -61,12 +61,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: macos-universal
+          - name: macos-arm64
             os: macos-15
-            targets: aarch64-apple-darwin,x86_64-apple-darwin
+            target: aarch64-apple-darwin
           - name: windows-x86_64
             os: windows-2025
-            targets: x86_64-pc-windows-msvc
+            target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     defaults:
@@ -90,17 +90,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: "1.98"
-          targets: ${{ matrix.targets }}
+          targets: ${{ matrix.target }}
 
       # Deliberately no rust-cache: a release binary is built cold, from the
       # committed lock and nothing else.
       - name: Build
-        run: |
-          set -euo pipefail
-          IFS=, read -ra targets <<< "${{ matrix.targets }}"
-          for t in "${targets[@]}"; do
-            cargo build --release --locked --all-features -p roteiro --target "$t"
-          done
+        run: cargo build --release --locked --all-features -p roteiro --target ${{ matrix.target }}
 
       - name: Package
         id: package
@@ -115,11 +110,8 @@ jobs:
           mkdir -p "dist/$stem"
           cp README.md LICENSE-MIT LICENSE-APACHE "dist/$stem/"
           case "${{ matrix.name }}" in
-            macos-universal)
-              lipo -create -output "dist/$stem/roteiro" \
-                target/aarch64-apple-darwin/release/roteiro \
-                target/x86_64-apple-darwin/release/roteiro
-              for arch in arm64 x86_64; do lipo "dist/$stem/roteiro" -verify_arch "$arch"; done
+            macos-arm64)
+              cp target/aarch64-apple-darwin/release/roteiro "dist/$stem/"
               "dist/$stem/roteiro" --version
               archive="$stem.tar.gz"
               tar -C dist -czf "dist/$archive" "$stem"
