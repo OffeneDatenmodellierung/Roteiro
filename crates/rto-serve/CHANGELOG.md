@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [8.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v7.2.2...rto-serve-v8.0.0) - 2026-11-15
+
+### Added
+
+- [**breaking**] retire the in-process llama.cpp engine; every model call goes through the provider
+
 ## [7.2.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-serve-v7.1.0...rto-serve-v7.2.0) - 2026-11-13
 
 ### Added
