@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [8.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v7.2.2...rto-graph-v8.0.0) - 2026-11-15
+
+### Added
+
+- [**breaking**] retire the in-process llama.cpp engine; every model call goes through the provider
+- *(okf)* record who drafted authored prose, emit descriptions, keep peer metadata
+- *(sync)* follow a symlinked raw/, switchable with [paths] follow_raw_symlink
+
+### Fixed
+
+- close the raw-symlink opt-out gaps, keep OKF generation times, report lock failures
+- clear the clippy and rustdoc failures from the first CI run
+- *(findings)* accept only the escapes render emits, so a finding key parses injectively
+
+### Other
+
+- *(ocr)* say that rotated text is not read, wherever OCR content is met
+- *(review-corpus)* record 8d2b238 as the fix for the split_escaped row
+
 ## [7.2.2](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-graph-v7.2.1...rto-graph-v7.2.2) - 2026-11-13
 
 ### Fixed
