@@ -11,8 +11,8 @@ architectural-significance: MEDIUM  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "1.12"
-last-modified: 2026-11-13
+version: "1.13"
+last-modified: 2026-11-14
 confluence-url:
 ---
 
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | Accepted |
 | **Architectural Significance** | MEDIUM |
 | **Domain** | Developer Tooling |
-| **Document version** | 1.12 |
+| **Document version** | 1.13 |
 
 ## Reference
 
@@ -68,6 +68,7 @@ Everything else is a **value**, and values follow the ordinary order above. Most
 | `[ingest] prose`/`pdf` | value | no model and no repository-supplied code: parsing, which is what the rest of extraction already does |
 | `[paths] model_store`, `[telemetry] file` | value | test 3 as sharpened above. These change **where** Roteiro writes, not **whether** — it writes to `~/.roteiro` by default regardless |
 | `[paths] exclude`, `[paths] opaque` | value | **no clause of the test can fire on a key that only subtracts.** Setting either causes strictly *less* to happen — fewer nodes, fewer bytes read — so it fails clause 1 of the capability test (*"causes something to happen that otherwise would not"*) before any of 1–5 is reached. The built-in default is *nothing declared*, which is the permissive end, so the capability rule's own corollary applies in reverse: the key can only deny. It is nonetheless the **second** key whose every setting is a denial, after `[mcp] tools`, and it takes the same additive layering for the same reason — see below (v1.9) |
+| `[paths] follow_raw_symlink` | value | **the default is the permissive end, so the key can only deny** — the same corollary as `exclude`. Unset, a worktree sync follows a symlinked top-level `raw/` (the maintainer's decision, ADR-0026 v0.5); setting `false` causes strictly less to be read. So no setting can make something happen that otherwise would not, and it layers in the narrowing direction only: a `false` from any layer wins, and `true` cannot undo one, so a committed project file cannot widen what a user's machine reads (v1.13) |
 | `[models]`, `[debt]`, `[serve]`, `[infer]`, `[duplicates]`, `[workspace]`, `[[links]]`, `[pins]`, `[telemetry] rotation`/`format`, `[media] silence_rms`/`image_variance` | value | settings, not permissions |
 | `[mcp] tools` | value — but see below | test 1. The default already advertises every tool, so a project file setting it causes nothing that would not otherwise happen. It is nonetheless the **first key whose every setting is a denial**, and its layers therefore intersect rather than override (v1.5) |
 
@@ -304,3 +305,4 @@ Project direction incorporated: add a config file, but keep it **optional and fu
 | 1.10 | 2026-11-11 | Amended by [[docs/adr/0028-one-engine-local-or-hosted.md]]. `[remote] enabled` is removed with the remote tier (the v1.2 inversion no longer applies to any key), and `[provider] base_url` is recorded as a **value by decision**: it would meet test 1 when it names another machine, and is kept a value so a committed file can point a team at one endpoint, with a per-run notice in place of precedence. |
 | 1.11 | 2026-11-13 | Amended to match [[docs/adr/0030-remove-the-microvm-sandbox.md]] §3. v1.5 had two kinds of name — a typo, which refuses to start, and a tool this build lacks, which warns — and ADR-0030 made `[mcp] tools`/`--tools` accept a third, a tool a **release removed**, without saying so here. Records that third kind under the warn-and-restrict-nothing path, since the setting was correct when written; that its warning names it as removed rather than as an absent feature; and that the empty-intersection refusal is unchanged, so a list of only removed names still refuses to start. Also replaces v1.5's illustrative `sandbox_clear`, a tool that no longer exists, with `security_status`. No key changes class and no precedence moves. |
 | 1.12 | 2026-11-13 | Two `[provider]` keys from [[docs/adr/0032-provider-credentials-token-command.md]]: `token_command` is **user layer only** (test 2, and no project layer may grant it — a project file setting it is warned about and ignored), and `headers` is a value whose credential-bearing names are refused. |
+| 1.13 | 2026-11-14 | `[paths] follow_raw_symlink` classed **value**: its default (follow a symlinked `raw/`, ADR-0026 v0.5) is the permissive end, so every setting is a denial, and it composes in the narrowing direction only — `false` from any layer wins. |

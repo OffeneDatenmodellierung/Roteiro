@@ -151,6 +151,19 @@ pub struct Origin {
     /// `Authored` and `Derived` do; `Inferred` does not. See the module doc — a
     /// heuristic that claimed confirmation would launder a guess.
     pub confirms: bool,
+    /// Who *wrote* the content, when that is not [`Self::by`] (#799).
+    ///
+    /// §5.2 keeps `generated` and `verified` distinct because who wrote a
+    /// concept need not be who confirmed it. `None` writes `by` into both, as
+    /// before; `Some` is set for authored prose whose last commit names a
+    /// co-author — the model that drafted it, with the committer as the human
+    /// who verified it.
+    pub generated_by: Option<Actor>,
+    /// When the content was written, when that is not [`Self::at`].
+    ///
+    /// Carried through a round trip so a peer's `generated.at` is not replaced
+    /// by its verifier's time. `None` writes `at` into both.
+    pub generated_at: Option<String>,
 }
 
 /// A concept document's frontmatter.
@@ -326,8 +339,14 @@ impl Frontmatter {
             let _ = writeln!(
                 out,
                 "generated:\n  by: {}\n  at: {}",
-                yaml_scalar(&origin.by.as_token()),
-                yaml_scalar(&origin.at)
+                yaml_scalar(
+                    &origin
+                        .generated_by
+                        .as_ref()
+                        .unwrap_or(&origin.by)
+                        .as_token()
+                ),
+                yaml_scalar(origin.generated_at.as_ref().unwrap_or(&origin.at))
             );
             // `verified` only when the origin confirms. Its **absence** is the
             // unverified tier, so writing an empty list here would claim a
@@ -482,11 +501,15 @@ pub fn origin_for(prov: Provenance, at: &str, tool: &Actor, human: Option<&Actor
                     by: actor.clone(),
                     at: at.to_owned(),
                     confirms: true,
+                    generated_by: None,
+                    generated_at: None,
                 },
                 None => Origin {
                     by: tool.clone(),
                     at: at.to_owned(),
                     confirms: false,
+                    generated_by: None,
+                    generated_at: None,
                 },
             }
         }
@@ -496,6 +519,8 @@ pub fn origin_for(prov: Provenance, at: &str, tool: &Actor, human: Option<&Actor
             by: tool.clone(),
             at: at.to_owned(),
             confirms: true,
+            generated_by: None,
+            generated_at: None,
         },
         // A similarity judgement carrying a confidence. Unverified, and honestly
         // so — and a peer's guess, or anything taken at *acknowledge* rather than
@@ -504,8 +529,118 @@ pub fn origin_for(prov: Provenance, at: &str, tool: &Actor, human: Option<&Actor
             by: tool.clone(),
             at: at.to_owned(),
             confirms: false,
+            generated_by: None,
+            generated_at: None,
         },
     }
+}
+
+/// The first sentence of a concept's own prose, for `description` (#820 §2).
+///
+/// Taken from the first paragraph that is prose — headings, frontmatter fences,
+/// tables, code fences, HTML comments and blockquotes are skipped — and cut at
+/// the first sentence end. Whitespace is collapsed. `None` when there is no
+/// prose, or when the sentence runs past 400 characters (a run-on that long is
+/// not a one-sentence summary, and truncating it would write one nobody did).
+/// Never synthesised: absent prose yields no `description`, as §11 allows.
+#[must_use]
+pub fn first_sentence(text: &str) -> Option<String> {
+    let mut in_fence = false;
+    let mut in_frontmatter = text.starts_with("---");
+    let mut para: Vec<&str> = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let t = line.trim();
+        if in_frontmatter {
+            if i > 0 && t == "---" {
+                in_frontmatter = false;
+            }
+            continue;
+        }
+        if t.starts_with("```") || t.starts_with("~~~") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        let skip = t.starts_with('#')
+            || t.starts_with('|')
+            || t.starts_with("<!--")
+            || t.starts_with('>')
+            || t.starts_with('<');
+        if t.is_empty() || skip {
+            if !para.is_empty() {
+                break;
+            }
+            continue;
+        }
+        para.push(t);
+    }
+    let joined = para.join(" ");
+    let joined = joined.split_whitespace().collect::<Vec<_>>().join(" ");
+    if joined.is_empty() {
+        return None;
+    }
+    let end = joined
+        .char_indices()
+        .find(|&(i, c)| {
+            matches!(c, '.' | '!' | '?')
+                && joined[i + c.len_utf8()..]
+                    .chars()
+                    .next()
+                    .is_none_or(char::is_whitespace)
+        })
+        .map_or(joined.len(), |(i, c)| i + c.len_utf8());
+    let sentence = joined[..end].trim();
+    (sentence.chars().count() <= 400).then(|| sentence.to_owned())
+}
+
+/// Who drafted a commit's content, from its `Co-Authored-By` trailers (#799):
+/// the first co-author who is not the committer, or `None` when there is none.
+///
+/// The actor form is decided here because §7 needs one and a trailer carries a
+/// display name. A co-author at a `noreply@` / `no-reply@` address is a tool —
+/// that is how agent harnesses sign (`Claude Opus 5 (1M context)
+/// <noreply@anthropic.com>`) — and becomes `<producer>/<version>`: the name with
+/// any bracketed qualifier dropped, its last word as the version when it starts
+/// with a digit (`claude-opus/5`), else `unknown`. Any other co-author is a
+/// person, `human:<name>`, so pair-programmed prose is credited to the person
+/// who co-wrote it, with the committer still the verifier.
+#[must_use]
+pub fn drafter(committer: &str, co_authors: &[rto_graph::authorship::CoAuthor]) -> Option<Actor> {
+    let co = co_authors
+        .iter()
+        .find(|c| !c.name.is_empty() && c.name != committer)?;
+    let local = co
+        .email
+        .split('@')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if local != "noreply" && local != "no-reply" {
+        return Some(Actor::Human(co.name.clone()));
+    }
+    let mut bare = String::new();
+    let mut depth = 0_u32;
+    for ch in co.name.chars() {
+        match ch {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => bare.push(ch),
+            _ => {}
+        }
+    }
+    let mut words: Vec<String> = bare
+        .split_whitespace()
+        .map(str::to_ascii_lowercase)
+        .collect();
+    let version = match words.last() {
+        Some(last) if words.len() > 1 && last.starts_with(|c: char| c.is_ascii_digit()) => {
+            words.pop().unwrap_or_default()
+        }
+        _ => "unknown".to_owned(),
+    };
+    Some(Actor::Tool(words.join("-"), version))
 }
 
 /// Render one node as an OKF concept document.
@@ -1707,5 +1842,99 @@ mod tests {
         }
         // Stable across calls: the disambiguation must not move between renders.
         assert_eq!(short_digest("adr:0001"), short_digest("adr:0001"));
+    }
+
+    /// #799: authored prose drafted by a model and committed by a person
+    /// renders the model as `generated` and the person as `verified`.
+    #[test]
+    fn a_co_authored_commit_splits_generated_from_verified() {
+        use rto_graph::authorship::CoAuthor;
+        let trailer = |name: &str, email: &str| CoAuthor {
+            name: name.to_owned(),
+            email: email.to_owned(),
+        };
+        let model = drafter(
+            "Mark Olliver",
+            &[trailer(
+                "Claude Opus 5 (1M context)",
+                "noreply@anthropic.com",
+            )],
+        );
+        assert_eq!(
+            model,
+            Some(Actor::Tool("claude-opus".to_owned(), "5".to_owned()))
+        );
+        assert_eq!(
+            drafter(
+                "Mark Olliver",
+                &[trailer("Ada Lovelace", "ada@example.org")]
+            ),
+            Some(Actor::Human("Ada Lovelace".to_owned()))
+        );
+        assert_eq!(
+            drafter("Mark Olliver", &[trailer("Mark Olliver", "m@x")]),
+            None
+        );
+        assert_eq!(drafter("Mark Olliver", &[]), None);
+
+        let mut origin = origin_for(
+            Provenance::Authored,
+            "2026-11-14T00:00:00Z",
+            &tool(),
+            Some(&Actor::Human("Mark Olliver".to_owned())),
+        );
+        origin.generated_by = model;
+        let fm = Frontmatter {
+            type_: "adr".to_owned(),
+            origin: Some(origin),
+            ..Frontmatter::default()
+        };
+        let rendered = fm.render();
+        assert!(
+            rendered.contains("generated:\n  by: \"claude-opus/5\""),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("verified:\n  - by: \"human:Mark Olliver\""),
+            "{rendered}"
+        );
+
+        // A generation time distinct from the verification stays on `generated`.
+        let mut fm = fm;
+        fm.origin.as_mut().unwrap().generated_at = Some("2026-06-30T14:00:00Z".to_owned());
+        let rendered = fm.render();
+        assert!(
+            rendered.contains("  at: \"2026-06-30T14:00:00Z\"\nverified:"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("    at: \"2026-11-14T00:00:00Z\""),
+            "{rendered}"
+        );
+    }
+
+    /// #820 §2: a description is the first sentence of real prose, never
+    /// synthesised from a heading, a table or a fence.
+    #[test]
+    fn first_sentence_takes_prose_and_skips_structure() {
+        let doc = "---\ntitle: x\n---\n# Heading\n\n| a | b |\n\n```rust\nfn x() {}\n```\n\nThe graph is\nprovenance-tagged. More here.\n";
+        assert_eq!(
+            first_sentence(doc).as_deref(),
+            Some("The graph is provenance-tagged.")
+        );
+        assert_eq!(
+            first_sentence("v1.2 ships. Then more").as_deref(),
+            Some("v1.2 ships.")
+        );
+        assert_eq!(
+            first_sentence("No terminator").as_deref(),
+            Some("No terminator")
+        );
+        assert_eq!(first_sentence("# Only a heading\n"), None);
+        assert_eq!(
+            first_sentence(&"word ".repeat(120)),
+            None,
+            "a run-on is not a summary"
+        );
     }
 }

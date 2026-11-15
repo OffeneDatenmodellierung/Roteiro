@@ -45,7 +45,7 @@ use rto_graph::reviewer::FileUnderReview;
 /// The half of this module that needs a generation backend. Everything outside
 /// it — the diff reconstruction and the parent-module lookup — is useful and
 /// tested in a build with no generation backend at all (`--no-default-features`).
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+#[cfg(feature = "provider")]
 use {
     rto_graph::compile_claim::{CheckRun, suppression},
     rto_graph::review_score::{CandidateFinding, CandidateRun},
@@ -73,47 +73,15 @@ use std::collections::BTreeSet;
 /// [`rto_graph::reviewer::Parsed::reasoning_truncated`] is how that is now caught
 /// rather than believed, and a truncated file is reported as unreviewed rather
 /// than counted as clean.
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+#[cfg(feature = "provider")]
 const REVIEW_MAX_TOKENS: u32 = 4_096;
-
-/// The context window this reviewer asks llama.cpp for.
-///
-/// **Passed explicitly, and the first version of this code did not.**
-/// [`rto_llama::llama::LlamaEngine::new`] takes `n_ctx` and reads `0` as its
-/// default of **4,096** — which `spec draft` passes, because a drafted section is
-/// small. A reviewer handed a whole file's diff is not: the first replay run died
-/// on file two with *"prompt is 4111 tokens, over the 4096-token limit"*. The
-/// model itself has a very large window; 4,096 was Roteiro's number, not Qwen's.
-///
-/// So the budget analysis and the engine have to agree by construction rather
-/// than by coincidence, and this is sized from the other two constants with slack
-/// for the estimate being an estimate:
-/// [`rto_graph::reviewer::estimate_tokens`] is `len / 4`, deliberately not a
-/// tokeniser's count, and code tokenises **denser** than the prose that ratio
-/// comes from — so the true count of a prompt this module believes is 30k can be
-/// materially higher. The slack absorbs that; `the_context_window_holds_the_whole_budget`
-/// holds the arithmetic.
-#[cfg(feature = "inference-local-models")]
-const REVIEW_N_CTX: u32 = 49_152;
 
 /// The estimated-token budget for one file's prompt.
 ///
-/// 35a's measured single-call figure. Kept as the budget rather than lowered to
-/// hide the estimate's imprecision: the slack belongs in `REVIEW_N_CTX` (local
-/// models only, so not linked from this ungated item), where
-/// it is visible, not in a quietly smaller budget that would truncate files the
-/// measurement says fit.
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+/// 35a's measured single-call figure. The provider owns the context window, so
+/// a prompt over it is the provider's refusal, reported per file.
+#[cfg(feature = "provider")]
 const REVIEW_PROMPT_BUDGET: usize = SINGLE_CALL_BUDGET_TOKENS;
-
-/// The window must hold the prompt *and* what is generated into it, with room for
-/// `len / 4` to have understated the prompt. A build that broke this relationship
-/// would fail per file at run time, on whichever file happened to be largest.
-#[cfg(feature = "inference-local-models")]
-const _: () = assert!(
-    REVIEW_N_CTX as usize >= (REVIEW_PROMPT_BUDGET * 13 / 10) + REVIEW_MAX_TOKENS as usize,
-    "REVIEW_N_CTX must hold a 30%-underestimated prompt plus the generation"
-);
 
 /// Which context the reviewer is given — **the one variable Stage 35b PR 2
 /// varies**.
@@ -180,7 +148,7 @@ impl ReviewArm {
 /// things that read it are the per-file review and the classification pass, both
 /// of which need a generation backend. In a build without one there is no
 /// mechanism to choose between.
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+#[cfg(feature = "provider")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum ClassSource {
@@ -189,13 +157,17 @@ pub enum ClassSource {
     #[default]
     ReplyText,
     /// From a typed question over the closed class set, read off the model's
-    /// label-token distribution (`rto_llama::typed`). Carries a sharpness, an
-    /// option mass and a margin; see `classify_findings` (local models only, so
-    /// a code span rather than a link).
+    /// label-token distribution (`rto_llama::typed`). Only the retired
+    /// in-process engine could answer it, so nothing produces it any more
+    /// (ADR-0033, `--typed-class` removed); kept so recorded runs still parse.
+    #[allow(
+        dead_code,
+        reason = "recorded runs carry it; nothing produces it since ADR-0033"
+    )]
     TypedRead,
 }
 
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+#[cfg(feature = "provider")]
 impl ClassSource {
     /// The tag written into [`rto_graph::review_score::RunArm::class_source`].
     ///
@@ -213,7 +185,7 @@ impl ClassSource {
 }
 
 /// One file's review, before scoring.
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+#[cfg(feature = "provider")]
 pub struct FileOutcome {
     /// Findings the reviewer stands behind.
     pub findings: Vec<CandidateFinding>,
@@ -265,7 +237,7 @@ pub struct FileOutcome {
 ///
 /// # Errors
 /// If the engine fails to generate.
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+#[cfg(feature = "provider")]
 pub fn verdict_on(
     engine: &dyn rto_llama::Engine,
     model: &str,
@@ -299,7 +271,7 @@ pub fn verdict_on(
 
 /// A whole-change verdict, checked against the findings and files its prompt
 /// listed.
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+#[cfg(feature = "provider")]
 pub struct CheckedVerdict {
     /// What the model said.
     pub verdict: rto_graph::review_score::CandidateVerdict,
@@ -312,7 +284,7 @@ pub struct CheckedVerdict {
     pub faithfulness: rto_faithful::Verdict,
 }
 
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+#[cfg(feature = "provider")]
 impl CheckedVerdict {
     /// Whether the verdict may be shown as one.
     #[must_use]
@@ -330,7 +302,7 @@ impl CheckedVerdict {
 /// that happens to be called `P99`. An id `FindingKey` rejects — too long, a
 /// control character — becomes a key no listed entry can have, so it is reported
 /// as dangling rather than panicking or vanishing.
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+#[cfg(feature = "provider")]
 fn cite_key(id: &str) -> rto_graph::FindingKey {
     let analyzer = if id.starts_with(rto_graph::reviewer::FILE_CITE) {
         "review-file"
@@ -362,7 +334,7 @@ fn cite_key(id: &str) -> rto_graph::FindingKey {
 /// on" here would be widening that list by the back door. It costs a clean
 /// verdict nothing it cannot pay: a verdict is only asked for over at least one
 /// reviewable file, so there is always a `P1` to cite, and the prompt says so.
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+#[cfg(feature = "provider")]
 #[must_use]
 pub fn check_verdict(
     parsed: rto_graph::reviewer::ParsedVerdict,
@@ -409,7 +381,7 @@ pub fn check_verdict(
 
 /// # Errors
 /// If the engine fails to generate.
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+#[cfg(feature = "provider")]
 pub(crate) fn review_file(
     backend: &Backend,
     model: &str,
@@ -417,7 +389,6 @@ pub(crate) fn review_file(
     context: &GraphContext,
     checks: &[CheckRun],
     sources: &dyn Fn(&str) -> Option<String>,
-    class_source: ClassSource,
 ) -> anyhow::Result<FileOutcome> {
     let prompt = build_prompt(file, context, REVIEW_PROMPT_BUDGET);
     let completion = backend
@@ -502,17 +473,6 @@ pub(crate) fn review_file(
         }
     }
 
-    if class_source == ClassSource::TypedRead {
-        // Both lists, and for the same reason the suppression loop keeps them
-        // both: a withheld finding is still recorded in the run document, and a
-        // score over it would otherwise compare a typed class against a parsed
-        // one depending on whether CI happened to refute it.
-        backend.classify(model, &mut findings)?;
-        for (finding, _) in &mut withheld {
-            backend.classify(model, std::slice::from_mut(finding))?;
-        }
-    }
-
     Ok(FileOutcome {
         findings,
         suppressed: withheld,
@@ -521,126 +481,6 @@ pub(crate) fn review_file(
         reasoning_truncated: parsed.reasoning_truncated,
         dropped_tokens: prompt.dropped_tokens,
     })
-}
-
-/// Ask the model, as a **typed question**, which of the fourteen classes each
-/// finding belongs to, and overwrite its class and all **three** shape numbers —
-/// sharpness, option mass and margin — with what the distribution says
-/// (issue #897).
-///
-/// # What the model is shown, and what it is not
-///
-/// The state is the finding's **own text** — its path, its line and its
-/// description — and not the diff it came from. That is deliberate and it is the
-/// reason this is cheap: the question is *which class does this claim belong to*,
-/// which is a property of the claim, and the review prompt already requires each
-/// finding to be self-contained (*"Quote the specific words that conflict, so a
-/// reader can check you without opening the file"*). Re-sending the diff would
-/// cost a second full prefill per finding to re-derive something already stated.
-///
-/// It is a real limitation and not only an economy: a description too vague to
-/// classify is classified anyway, from too little — and **nothing here reports
-/// that it happened.**
-///
-/// An earlier version of this paragraph claimed such a case produces a flat
-/// distribution, so the limitation would be visible in the sharpness. The
-/// measurement in `typed_class_calibration` disproves it: of the five corpus rows
-/// this classifier got wrong, four came back at a sharpness of *exactly*
-/// `1_000_000` ppm. A model can be sharply wrong on an under-specified
-/// description, and on this model it usually is. The limitation is therefore
-/// **not** self-reporting, and a caller must not read a high sharpness as
-/// evidence that the description carried enough to classify.
-///
-/// # No fallback to the parsed class
-///
-/// A finding this read touches has its class replaced outright, including when
-/// the text had already parsed to a class. Keeping the parsed one "when it looks
-/// right" would make the recorded class a function of two mechanisms and of which
-/// agreed, and nothing downstream could then say which instrument it was scoring.
-///
-/// # Three numbers, and none of them ranks what this function produces
-///
-/// The reading records its sharpness, its option mass and its **margin**, and the
-/// measured scope of each is on
-/// `CandidateFinding::class_margin_micronats` and
-/// `CandidateFinding::class_sharpness_ppm` in full. In short, on
-/// `qwen3-coder-30b-a3b`:
-///
-/// * the **sharpness** is saturated — exactly `1_000_000` on 26 of the 27
-///   adjudicated corpus rows, four of the five wrong answers included — so there
-///   is nothing in it to order two findings by;
-/// * the **margin** ordered a correct class above a wrong one on those same
-///   human-written corpus descriptions at 0.81. Over 446 of **the findings this
-///   function classifies**, ordering by it put the six credited to a real corpus
-///   row at ranks 16, 32, 129, 327, 359 and 431 — **none in the top ten**, one in
-///   the top twenty — at a separation of 0.5178 against a null of 0.4999,
-///   `P = 0.4411`.
-///
-/// So a caller who triaged the head of that list would have found nothing there.
-/// That is what the ordering produced; the statistic beside it says the separation
-/// was not distinguishable from random on this sample, which is a failure to find
-/// a signal rather than proof there is none. The advice rests on the first.
-///
-/// **Two** things separate those two margin figures rather than one — who wrote
-/// the prose, and whether what is being separated is a correct class from a wrong
-/// one or a real finding from noise — so neither alone accounts for the drop, and
-/// neither is offered here as the explanation.
-///
-/// The **0.98** recorded against this same corpus belongs to `REALITY_QUESTION`, a
-/// two-option yes/no that this function never asks and that nothing ships. It is
-/// not a reading of the margin recorded here, and quoting it for this number would
-/// credit a binary instrument's result to a fourteen-way one.
-///
-/// All three numbers are kept because a different model may behave differently,
-/// and a run that records only one cannot show it.
-///
-/// # Errors
-/// If the engine fails on a question. One failure aborts the file rather than
-/// leaving a mixture: a `FileOutcome` whose findings came from two different
-/// class mechanisms is not a measurement of either.
-#[cfg(feature = "inference-local-models")]
-pub fn classify_findings(
-    engine: &rto_llama::llama::LlamaEngine,
-    model: &str,
-    findings: &mut [CandidateFinding],
-) -> anyhow::Result<()> {
-    use rto_graph::review_score::{fraction_ppm, margin_micronats};
-
-    if findings.is_empty() {
-        return Ok(());
-    }
-    // One question, asked of every finding: built once because it is a pure
-    // function of the class set, and because `Choice::new`'s validation of that
-    // set should be paid once per file rather than once per finding.
-    let question = rto_llama::typed::Choice::new(rto_graph::reviewer::class_options())
-        .map_err(|e| anyhow::anyhow!("building the class question: {e}"))?;
-
-    for finding in findings {
-        let state = format!(
-            "A code reviewer reported this finding about `{}` at line {}:\n\n{}",
-            finding.path, finding.line, finding.description,
-        );
-        let answer = engine
-            .ask_choice(
-                model,
-                &state,
-                rto_graph::reviewer::CLASS_QUESTION,
-                &question,
-            )
-            .map_err(|e| anyhow::anyhow!("classifying {}:{}: {e}", finding.path, finding.line))?;
-        // `value()` is a `DefectClass` the question was built from, so there is no
-        // token to validate and no `None` arm to take — which is the whole of what
-        // this replaces.
-        finding.defect_class = Some(*answer.value());
-        finding.class_sharpness_ppm = Some(fraction_ppm(answer.sharpness()));
-        finding.class_option_mass_ppm = Some(fraction_ppm(answer.option_mass()));
-        // Nats, so a **different** quantiser: `fraction_ppm` clamps at one and
-        // every margin measured on this corpus was between 8 and 33, so reusing it
-        // would record them all as the same number. `review_score` holds the two
-        // apart with a test.
-        finding.class_margin_micronats = Some(margin_micronats(answer.margin()));
-    }
-    Ok(())
 }
 
 /// The graph as it was at `sha`, for the graph arm — or `None` for the diff-only
@@ -652,7 +492,7 @@ pub fn classify_findings(
 ///
 /// # Errors
 /// If the graph at `sha` cannot be assembled.
-#[cfg(any(feature = "provider", feature = "inference-local-models", test))]
+#[cfg(any(feature = "provider", test))]
 fn graph_at(
     repo: &rto_graph::Repo,
     cache: &rto_graph::ObjectCache,
@@ -675,7 +515,7 @@ fn graph_at(
 /// baseline is the absence of a store rather than a store that happened to answer
 /// nothing. The two are indistinguishable in the prompt and very distinguishable
 /// in what they mean about a run.
-#[cfg(any(feature = "provider", feature = "inference-local-models", test))]
+#[cfg(any(feature = "provider", test))]
 fn context_for(
     graph: Option<&rto_graph::Store>,
     file: &FileUnderReview,
@@ -701,7 +541,7 @@ fn context_for(
 ///
 /// # Errors
 /// If the repository or the graph cannot be assembled.
-#[cfg(any(feature = "provider", feature = "inference-local-models", test))]
+#[cfg(any(feature = "provider", test))]
 fn worktree_graph(
     repo: &Path,
     ingest: rto_graph::IngestConfig,
@@ -776,7 +616,7 @@ fn worktree_graph(
 ///
 /// # Errors
 /// If the store cannot be queried.
-#[cfg(any(feature = "provider", feature = "inference-local-models", test))]
+#[cfg(any(feature = "provider", test))]
 pub fn graph_context_for(
     store: &rto_graph::Store,
     file: &FileUnderReview,
@@ -1062,7 +902,7 @@ pub fn files_at(
     }))
 }
 
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+#[cfg(feature = "provider")]
 /// A file's contents at a commit.
 fn blob_at(repo: &Path, sha: &str, path: &str) -> Option<String> {
     git(repo, &["show", &format!("{sha}:{path}")])
@@ -1082,7 +922,7 @@ fn main_ref(repo: &Path) -> anyhow::Result<String> {
         })
 }
 
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+#[cfg(feature = "provider")]
 /// What a replay produced, beyond the run document itself.
 #[derive(Debug, Default)]
 pub struct ReplayReport {
@@ -1153,7 +993,7 @@ pub struct ReplayReport {
 ///
 /// # Errors
 /// If the repository, the model or the output file cannot be used.
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+#[cfg(feature = "provider")]
 #[expect(
     clippy::too_many_arguments,
     reason = "each is one independent input to the replay; a struct holding them would be built at one call site and read at one"
@@ -1175,7 +1015,6 @@ pub fn run_replay(
     let (backend, model, why) = start_backend(cfg)?;
     let model = model.as_str();
     eprintln!("reviewing with {model} — {why}");
-    let class_source = backend.class_source(class_source);
 
     // Anchored (sha, path) pairs, so the report can say how much of what it
     // reviewed the corpus can judge at all.
@@ -1242,15 +1081,7 @@ pub fn run_replay(
             // A three-hour pass that dies on file 140 has measured nothing, and the
             // refusals are themselves a result: they say which files this budget
             // cannot actually review.
-            let outcome = match review_file(
-                &backend,
-                model,
-                file,
-                &context,
-                &checks,
-                &sources,
-                class_source,
-            ) {
+            let outcome = match review_file(&backend, model, file, &context, &checks, &sources) {
                 Ok(outcome) => outcome,
                 Err(e) => {
                     eprintln!("      refused {}: {e}", file.path);
@@ -1294,7 +1125,7 @@ pub fn run_replay(
 ///
 /// # Errors
 /// If `checks_path` names a file that cannot be read or parsed.
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+#[cfg(feature = "provider")]
 fn checks_with_notice(checks_path: Option<&str>) -> anyhow::Result<Vec<CheckRun>> {
     let checks = match checks_path {
         Some(p) => read_checks(p)?,
@@ -1321,7 +1152,7 @@ fn checks_with_notice(checks_path: Option<&str>) -> anyhow::Result<Vec<CheckRun>
 /// `rto-graph` constructed `None` by hand and so never touched the path that was
 /// wrong. `the_default_arm_records_no_class_source` is the guard; the `rto-graph`
 /// tests document the wire shape.
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+#[cfg(feature = "provider")]
 fn run_arm(
     arm: ReviewArm,
     model: &str,
@@ -1337,119 +1168,35 @@ fn run_arm(
     }
 }
 
-/// Start llama.cpp on `model` with this reviewer's context window.
-///
-/// One definition rather than the two identical copies [`run_llm`] and
-/// [`run_replay`] carried: [`REVIEW_N_CTX`] is load-bearing — the first replay
-/// died on file two because the engine defaulted to 4,096 — and a second copy is
-/// a second place for it to be passed wrongly.
-///
-/// # Errors
-/// If the engine cannot be started.
-#[cfg(feature = "inference-local-models")]
-fn start_engine(model: &str) -> anyhow::Result<rto_llama::llama::LlamaEngine> {
-    rto_llama::llama::LlamaEngine::new(
-        vec![rto_llama::llama::Served {
-            name: model.to_owned(),
-            path: rto_graph::model_dir(model).join("model.gguf"),
-            mmproj: None,
-        }],
-        REVIEW_N_CTX,
-    )
-    .map_err(|e| anyhow::anyhow!("starting llama.cpp: {e}"))
-}
-
-/// The engine a review runs on (ADR-0027): the external provider when
-/// `[provider] base_url` is set, else the in-process llama.cpp engine in a build
-/// that has one.
-///
-/// An enum rather than a bare `&dyn Engine` because the two are not
-/// interchangeable for one job: `--typed-class` reads the label-token
-/// distribution through `rto_llama::llama::LlamaEngine::ask_choice` (behind the
-/// `llama` feature, so named rather than linked), which an
-/// HTTP provider cannot answer. Everything else only chats, through
-/// [`Backend::engine`].
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+/// The engine a review runs on: the provider (ADR-0027, ADR-0033). An enum of
+/// one so call sites keep naming the backend rather than the transport.
+#[cfg(feature = "provider")]
 pub(crate) enum Backend {
-    /// llama.cpp in this process, on a registry model.
-    #[cfg(feature = "inference-local-models")]
-    Local(rto_llama::llama::LlamaEngine),
-    /// An OpenAI-compatible server on this machine.
-    #[cfg(feature = "provider")]
+    /// An OpenAI-compatible server, local or hosted.
     Provider(crate::provider::ProviderEngine),
 }
 
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+#[cfg(feature = "provider")]
 impl Backend {
     /// The chat seam every per-file review and verdict goes through.
     #[must_use]
     pub(crate) fn engine(&self) -> &dyn rto_llama::Engine {
         match self {
-            #[cfg(feature = "inference-local-models")]
-            Self::Local(engine) => engine,
-            #[cfg(feature = "provider")]
             Self::Provider(engine) => engine,
-        }
-    }
-
-    /// The class source this backend can actually serve for `requested`, saying
-    /// on stderr when it is not the one asked for.
-    ///
-    /// A provider cannot answer a typed read, so `--typed-class` falls back to
-    /// [`ClassSource::ReplyText`] there — announced rather than silent, because a
-    /// run recorded under the wrong class source is a run measuring something
-    /// else. The returned value is what the run document records, so the
-    /// document says what happened, not what was asked.
-    #[must_use]
-    pub(crate) fn class_source(&self, requested: ClassSource) -> ClassSource {
-        match self {
-            #[cfg(feature = "inference-local-models")]
-            Self::Local(_) => requested,
-            #[cfg(feature = "provider")]
-            Self::Provider(_) => {
-                if requested == ClassSource::TypedRead {
-                    eprintln!(
-                        "note: `--typed-class` reads the model's label-token distribution, \
-                         which only the in-process engine exposes; under `[provider]` each \
-                         finding's class comes from the reply's `class=` field instead \
-                         (`reply-text`), and the run records that."
-                    );
-                }
-                ClassSource::ReplyText
-            }
-        }
-    }
-
-    /// Overwrite each finding's class with a typed read — see
-    /// `classify_findings`.
-    ///
-    /// # Errors
-    /// If the engine fails on a question, or this backend has no typed read
-    /// (which [`Backend::class_source`] prevents a caller from asking for).
-    fn classify(&self, model: &str, findings: &mut [CandidateFinding]) -> anyhow::Result<()> {
-        match self {
-            #[cfg(feature = "inference-local-models")]
-            Self::Local(engine) => classify_findings(engine, model, findings),
-            #[cfg(feature = "provider")]
-            Self::Provider(_) => {
-                let _ = (model, findings);
-                anyhow::bail!("a provider cannot answer a typed class question")
-            }
         }
     }
 }
 
 /// Choose and start the engine a review runs on, the way `spec draft` chooses:
 /// `[provider] base_url` set → the provider with `[models] generative` as its
-/// model id (no registry resolution — the provider owns its list); otherwise
-/// the in-process engine where this build has one; otherwise a refusal naming
-/// what to configure.
+/// model id (the provider owns its list); otherwise a refusal naming what to
+/// configure.
 ///
 /// Returns the backend, the model id and why that model was chosen.
 ///
 /// # Errors
 /// If the configuration names no usable model, or the engine cannot start.
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+#[cfg(feature = "provider")]
 pub(crate) fn start_backend(
     cfg: &crate::config::Config,
 ) -> anyhow::Result<(Backend, String, String)> {
@@ -1468,24 +1215,6 @@ pub(crate) fn start_backend(
             format!("served by the provider at {base_url}"),
         ));
     }
-    #[cfg(feature = "inference-local-models")]
-    {
-        let _ = cfg;
-        let choice = rto_graph::resolve_model(rto_graph::ModelTask::Review)?;
-        let model = choice.require_installed()?;
-        if cfg!(debug_assertions) {
-            eprintln!(
-                "note: unoptimized build — local generation is very slow; use a \
-                 release build (`cargo build --release`) for usable speed."
-            );
-        }
-        Ok((
-            Backend::Local(start_engine(model)?),
-            model.to_owned(),
-            choice.why(),
-        ))
-    }
-    #[cfg(not(feature = "inference-local-models"))]
     anyhow::bail!(
         "no model to review with: set `[provider] base_url` to a local model server such \
          as Ollama and `[models] generative` to one of its models (see \
@@ -1500,7 +1229,7 @@ pub(crate) fn start_backend(
 /// were withheld from the reader under [`rto_graph::compile_claim`], and a
 /// verdict asked to synthesise a claim nobody was shown would be summarising
 /// evidence the reader cannot check.
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+#[cfg(feature = "provider")]
 fn record_outcome(
     outcome: FileOutcome,
     path: &str,
@@ -1546,7 +1275,7 @@ fn record_outcome(
 /// to keep from being read as the verdict. A faithful one is printed with each
 /// citation resolved to the finding or file it names, so the reader can check
 /// it without counting down a list.
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+#[cfg(feature = "provider")]
 fn print_verdict(verdict: Option<&CheckedVerdict>, never_reviewed: usize) {
     let Some(verdict) = verdict else {
         // Deliberately does **not** name a cause. `None` arrives from a reply that
@@ -1621,7 +1350,7 @@ fn print_verdict(verdict: Option<&CheckedVerdict>, never_reviewed: usize) {
 /// for the reason a reader is not shown it: the document records the verdicts a
 /// reader would have read. So the document's schema is unchanged and every run
 /// written before this loads as it did.
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+#[cfg(feature = "provider")]
 fn record_verdict(
     engine: &dyn rto_llama::Engine,
     model: &str,
@@ -1650,7 +1379,7 @@ fn record_verdict(
     }
 }
 
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+#[cfg(feature = "provider")]
 /// Print what a replay covered — **unadjudicated volume first**.
 ///
 /// The order is the argument. Recall is what a score reports, but 22 adjudicated
@@ -1741,7 +1470,7 @@ fn print_replay(report: &ReplayReport, out: &str) {
     println!("\nwrote {out} — score it with: roteiro review --score {out}");
 }
 
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+#[cfg(feature = "provider")]
 /// Read a `CheckRun` array.
 fn read_checks(path: &str) -> anyhow::Result<Vec<CheckRun>> {
     let text =
@@ -1771,7 +1500,7 @@ fn read_checks(path: &str) -> anyhow::Result<Vec<CheckRun>> {
 ///
 /// # Errors
 /// If the repository cannot be opened or the spec names no single commit.
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+#[cfg(feature = "provider")]
 fn resolve_llm_base(repo: &Path, base: Option<&str>) -> anyhow::Result<Option<String>> {
     let Some(spec) = base else {
         return Ok(None);
@@ -1805,7 +1534,7 @@ fn resolve_llm_base(repo: &Path, base: Option<&str>) -> anyhow::Result<Option<St
 /// Uncommitted work carries no commit message, so there is nothing to read and
 /// nothing is printed. That is the same silence a human-authored commit
 /// produces, arrived at by the same route: no trailer, no match, no warning.
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+#[cfg(feature = "provider")]
 fn warn_if_reviewing_own_work(repo: &Path, base: Option<&str>, model: &str) {
     let Some(base) = base else {
         return;
@@ -1856,7 +1585,7 @@ fn warn_if_reviewing_own_work(repo: &Path, base: Option<&str>, model: &str) {
 ///
 /// It refuses `opaque` as well as `excluded`: an opaque path's bytes may be
 /// measured, never mined, and handing them to a model is mining by any reading.
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+#[cfg(feature = "provider")]
 fn worktree_sources<'a>(
     repo: &'a Path,
     paths: &'a rto_graph::PathPolicy,
@@ -1869,7 +1598,7 @@ fn worktree_sources<'a>(
     }
 }
 
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+#[cfg(feature = "provider")]
 fn changed_files(repo: &Path, base: Option<&str>, paths: &rto_graph::PathPolicy) -> ReviewSet {
     let head = git(repo, &["rev-parse", "HEAD"]).unwrap_or_else(|| "HEAD".to_owned());
     let range: Vec<String> = match base {
@@ -1903,7 +1632,7 @@ fn changed_files(repo: &Path, base: Option<&str>, paths: &rto_graph::PathPolicy)
 /// and is the same distinction `reasoning_truncated` carries for a reply that
 /// stopped early. A change that is *entirely* unreviewable would otherwise print
 /// `0 finding(s)` and look like a clean review.
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+#[cfg(feature = "provider")]
 fn announce_unreviewable(skipped: &[String]) {
     if skipped.is_empty() {
         return;
@@ -1943,7 +1672,7 @@ fn announce_unreviewable(skipped: &[String]) {
 /// cannot check. That is the same rule [`record_outcome`] follows for the replay,
 /// and it is stated in both places because the two paths build `reported`
 /// independently.
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+#[cfg(feature = "provider")]
 fn print_file_findings(
     path: &str,
     outcome: &FileOutcome,
@@ -1987,13 +1716,12 @@ fn print_file_findings(
 ///
 /// # Errors
 /// If the repository, the model or git cannot be used.
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+#[cfg(feature = "provider")]
 pub fn run_llm(
     repo: &Path,
     base: Option<&str>,
     checks_path: Option<&str>,
     arm: ReviewArm,
-    class_source: ClassSource,
     ingest: rto_graph::IngestConfig,
     cfg: &crate::config::Config,
 ) -> anyhow::Result<()> {
@@ -2020,7 +1748,6 @@ pub fn run_llm(
     let (backend, model, why) = start_backend(cfg)?;
     let model = model.as_str();
     eprintln!("reviewing {} file(s) with {model} — {why}", files.len());
-    let class_source = backend.class_source(class_source);
     // Before the review rather than after it: the reader needs to know how to
     // weigh the result while they are reading it, not once they have already
     // formed a view of a clean one.
@@ -2046,15 +1773,7 @@ pub fn run_llm(
     for file in &files {
         let sources = worktree_sources(repo, ingest.paths);
         let context = context_for(graph.as_ref(), file, &sources)?;
-        let outcome = review_file(
-            &backend,
-            model,
-            file,
-            &context,
-            &checks,
-            &sources,
-            class_source,
-        )?;
+        let outcome = review_file(&backend, model, file, &context, &checks, &sources)?;
         if outcome.reasoning_truncated {
             never_reviewed.push(file.path.as_str());
         }
@@ -2144,7 +1863,7 @@ mod tests {
     /// no production path for this to guard. Left ungated it compiled at
     /// `--all-features` and at `--features serve`, and broke **every other CI
     /// cell** — neither of those is the default build.
-    #[cfg(any(feature = "provider", feature = "inference-local-models"))]
+    #[cfg(feature = "provider")]
     #[test]
     fn the_default_arm_records_no_class_source() {
         let arm = super::run_arm(ReviewArm::DiffOnly, "m", super::ClassSource::ReplyText);
@@ -3049,34 +2768,6 @@ mod tests {
         );
     }
 
-    /// **The engine's window must hold the budget the analysis was done against.**
-    /// The first replay run died on its second file because `LlamaEngine::new`
-    /// reads `n_ctx: 0` as 4,096 — Roteiro's default, not the model's limit — and
-    /// `spec draft` passes `0` because a drafted section is small. The `const`
-    /// assertion beside the constants catches the arithmetic at compile time; this
-    /// records what it is for, and that the slack is for `len / 4` understating a
-    /// prompt of code rather than a margin someone liked the look of.
-    #[cfg(feature = "inference-local-models")]
-    #[test]
-    fn the_context_window_holds_the_whole_budget() {
-        use super::{REVIEW_MAX_TOKENS, REVIEW_N_CTX, REVIEW_PROMPT_BUDGET};
-        // `LlamaEngine`'s own default, which `n_ctx: 0` selects and which killed
-        // the first replay run on its second file. Compared at compile time —
-        // these are all constants, so a runtime assertion over them is one that
-        // can never fail at test time, which clippy rightly objects to.
-        const ENGINE_DEFAULT_N_CTX: u32 = 4_096;
-        const _: () = assert!(
-            REVIEW_N_CTX > ENGINE_DEFAULT_N_CTX,
-            "the engine default is what broke this"
-        );
-        let worst_case = REVIEW_PROMPT_BUDGET * 13 / 10 + REVIEW_MAX_TOKENS as usize;
-        assert!(
-            REVIEW_N_CTX as usize >= worst_case,
-            "a prompt `len / 4` understated by 30% plus its generation is \
-             {worst_case} tokens, over the {REVIEW_N_CTX}-token window"
-        );
-    }
-
     /// **One reviewability rule, and both paths reach it by construction.**
     ///
     /// The replay path filtered on `contains("@@")` and the live `--llm` path on
@@ -3183,7 +2874,7 @@ mod tests {
     /// The check behind the verdict, in the three cases the CLI test drives end
     /// to end: a verdict citing what it was shown is faithful and its ids
     /// resolve; an uncited one and one citing `F99` are not.
-    #[cfg(any(feature = "provider", feature = "inference-local-models"))]
+    #[cfg(feature = "provider")]
     #[test]
     fn a_verdict_is_faithful_only_when_it_cites_what_it_was_shown() {
         use rto_graph::reviewer::parse_verdict;
@@ -3240,1511 +2931,5 @@ mod tests {
             ["dangling-citation"]
         );
         assert_eq!(dangling.cites[0], ("F99".to_owned(), None));
-    }
-}
-
-/// **Does the typed class read's `sharpness` know when it is wrong?** (Issue
-/// #897.)
-///
-/// The cheap half of the #897 measurement, and the one that has to come first.
-/// Ranking a reviewer's 1,995 findings by sharpness costs a full replay pass; a
-/// ranking is only worth that if the number carries information at all, and there
-/// is exactly one labelled set on which to ask — the adjudicated corpus, whose
-/// every row carries a human-assigned `defect_class`. So this asks the shipped
-/// question, in the shipped prompt shape, about each row's own description, and
-/// prints how the answers land against the labels.
-///
-/// # It prints and does not threshold
-///
-/// Written to the shape of `rto_llama`'s `tests/batch_numerics.rs`: the answer is
-/// a property of a model, a prompt and a corpus, and a tolerance asserted here
-/// would be a claim about all three that this module is not in a position to
-/// make. What it *does* assert is that the pass happened — every row classified,
-/// every row carrying both shape numbers — so that a silent no-op cannot be read
-/// as a result. That is the same rule `reasoning_truncated` exists for one level
-/// up: a number whose null is not stated is not yet a result, and a run that did
-/// not happen is not a zero.
-///
-/// # What it reports, and why each number is there
-///
-/// * **Accuracy** against the labels, with three nulls beside it. The
-///   label-permutation expectation is the honest one: hold the classifier's own
-///   predicted distribution fixed and assign its predictions to rows at random,
-///   which is `Σ_c n_pred(c)·n_true(c) / N` exactly and needs no trials. It is
-///   the null that catches the failure this reviewer has already been measured
-///   making — 71% of 1,995 findings under one label of fourteen — because a
-///   classifier that answers one thing scores its base rate and no more.
-/// * **Separation**, as the probability that a correct answer's sharpness
-///   exceeds a wrong answer's over every correct/incorrect pair, ties at a half.
-///   `0.5` is no separation. A single number, no threshold, and it is the whole
-///   question: if sharpness cannot order right from wrong on 27 labelled rows, it
-///   will not order real from noise on 1,995 unlabelled ones, and the expensive
-///   half of the experiment should not be run.
-/// * **Option mass**, min and mean. Sharpness over fourteen options is a
-///   distribution whatever the model was thinking about, so this is what says
-///   whether it engaged with the question. A near-zero mass makes every other
-///   number here a statement about renormalised noise, and reading them without
-///   it is the mistake `CandidateFinding::class_option_mass_ppm` exists to
-///   prevent.
-///
-/// ```text
-/// cargo test -p roteiro --features serve --bin roteiro \
-///     review_llm::typed_class_calibration -- --ignored --nocapture
-/// ```
-#[cfg(all(test, feature = "inference-local-models"))]
-mod typed_class_calibration {
-    // Every cast below turns a count into a rate. The counts are a corpus row
-    // count (27) and a class count (14); `f64` represents every integer to 2^53
-    // exactly, so nothing here can lose a digit. Stated once at the module rather
-    // than at fifteen call sites, because it is one fact about all of them.
-    #![expect(
-        clippy::cast_precision_loss,
-        reason = "every cast is a small count (<= 27) becoming a rate; f64 is exact there"
-    )]
-
-    use std::io::Write;
-
-    use rto_graph::review_corpus::{CLASSES, CorpusRow, DefectClass};
-    use rto_graph::review_score::{CandidateFinding, PPM_SCALE};
-
-    /// What one row's reading came to, in the two numbers and the one comparison
-    /// the summary is built from.
-    struct Reading {
-        /// Sharpness values on the rows the classifier got right.
-        correct: Vec<u32>,
-        /// Sharpness values on the rows it got wrong.
-        wrong: Vec<u32>,
-        /// Option mass on every row, right or wrong.
-        masses: Vec<u32>,
-    }
-
-    /// A row's own text, in exactly the shape `classify_findings` builds for a
-    /// real finding — so this measures the shipped instrument and not a variant
-    /// of it.
-    fn as_finding(row: &CorpusRow) -> CandidateFinding {
-        CandidateFinding {
-            reviewed_sha: row.reviewed_sha.clone(),
-            path: row.path.clone(),
-            line: row.line,
-            description: row.description.clone(),
-            claims_compile_failure: false,
-            defect_class: None,
-            class_sharpness_ppm: None,
-            class_option_mass_ppm: None,
-            class_margin_micronats: None,
-        }
-    }
-
-    /// A ppm integer back as the `0.0..=1.0` fraction it quantised.
-    fn fraction(ppm: u32) -> f64 {
-        f64::from(ppm) / f64::from(PPM_SCALE)
-    }
-
-    /// The mean of some ppm values as a fraction, or `NaN` for none — which
-    /// prints as `NaN` and so cannot be mistaken for a measured zero.
-    fn mean(values: &[u32]) -> f64 {
-        if values.is_empty() {
-            return f64::NAN;
-        }
-        values.iter().map(|v| fraction(*v)).sum::<f64>() / values.len() as f64
-    }
-
-    /// A margin in nats onto a `u32` at 1e-6-nat resolution, so it can reach
-    /// [`separation`]'s integer comparison.
-    ///
-    /// Integers for the reason `p_yes` uses them: `separation` counts ties, and a
-    /// tie between two `f32`s off two different softmaxes is a statement about the
-    /// last bits rather than about the model. A margin of tens of nats scaled by
-    /// 1e6 stays far inside `u32`; a pathological one saturates rather than
-    /// wrapping.
-    fn margin_ppm(nats: f32) -> u32 {
-        let scaled = (f64::from(nats) * 1e6).clamp(0.0, f64::from(u32::MAX));
-        #[expect(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "clamped to 0..=u32::MAX on the line above"
-        )]
-        let q = scaled as u32;
-        q
-    }
-
-    /// `P(sharpness of a correct answer > sharpness of a wrong one)` over every
-    /// correct/incorrect pair, ties counted as a half.
-    ///
-    /// The Mann-Whitney statistic, normalised. `0.5` is no separation and `1.0` is
-    /// perfect ordering. Chosen over a threshold-and-count because a threshold is
-    /// the thing this measurement must not quietly pick: any cut would be fitted
-    /// to 27 rows and would then be the result.
-    ///
-    /// `None` when one of the two groups is empty — perfect or zero accuracy has
-    /// no pairs to order, and reporting `0.5` for it would read as "measured, no
-    /// separation" rather than "not measurable".
-    pub(super) fn separation(correct: &[u32], wrong: &[u32]) -> Option<f64> {
-        if correct.is_empty() || wrong.is_empty() {
-            return None;
-        }
-        let mut wins = 0.0f64;
-        for c in correct {
-            for w in wrong {
-                wins += match c.cmp(w) {
-                    std::cmp::Ordering::Greater => 1.0,
-                    std::cmp::Ordering::Equal => 0.5,
-                    std::cmp::Ordering::Less => 0.0,
-                };
-            }
-        }
-        Some(wins / (correct.len() as f64 * wrong.len() as f64))
-    }
-
-    /// Expected correct answers if the classifier's **own** predicted
-    /// distribution were assigned to rows at random: `Σ_c n_pred(c)·n_true(c)/N`.
-    ///
-    /// Exact rather than sampled, so it costs nothing and cannot be quietly
-    /// under-trialled. This is the null that a one-answer classifier fails: it
-    /// scores its base rate, and so does the null.
-    fn permutation_expectation(predicted: &[DefectClass], truth: &[DefectClass]) -> f64 {
-        let n = truth.len();
-        if n == 0 {
-            return 0.0;
-        }
-        let mut expected = 0.0f64;
-        for class in CLASSES {
-            let p = predicted.iter().filter(|c| **c == class).count() as f64;
-            let t = truth.iter().filter(|c| **c == class).count() as f64;
-            expected += p * t / n as f64;
-        }
-        expected
-    }
-
-    /// How many distinct classes the classifier actually used.
-    ///
-    /// The one number that catches the failure already on record: 71% of 1,995
-    /// findings under one label of fourteen. A classifier using two of fourteen
-    /// can still look accurate on a corpus whose labels are skewed the same way,
-    /// and the permutation null beside it is what prices that.
-    fn distinct_used(predicted: &[DefectClass]) -> usize {
-        CLASSES
-            .into_iter()
-            .filter(|c| predicted.contains(c))
-            .count()
-    }
-
-    /// Print one line per row and collect the three vectors the summary needs.
-    fn print_rows(
-        out: &mut impl Write,
-        findings: &[CandidateFinding],
-        truth: &[DefectClass],
-        predicted: &[DefectClass],
-    ) -> Reading {
-        let mut reading = Reading {
-            correct: Vec::new(),
-            wrong: Vec::new(),
-            masses: Vec::new(),
-        };
-        for ((f, want), got) in findings.iter().zip(truth).zip(predicted) {
-            let sharp = f.class_sharpness_ppm.expect("asserted present");
-            let mass = f.class_option_mass_ppm.expect("asserted present");
-            reading.masses.push(mass);
-            if got == want {
-                reading.correct.push(sharp);
-            } else {
-                reading.wrong.push(sharp);
-            }
-            let _ = writeln!(
-                out,
-                // **Printed as the ppm integers, not as rounded fractions.**
-                // `separation` below consumes these exact integers, and at four
-                // decimal places every sharpness on this model prints as `1.0000`
-                // while differing in the last few ppm — so a rounded table cannot
-                // reproduce the statistic computed from it, and a reader checking
-                // one against the other would find a number with no visible
-                // support. The scale is `PPM_SCALE`; `1000000` is all the mass on
-                // one option.
-                "  {:<34} {:>5}  want {:<21} got {:<21} sharp {sharp:>7}  mass {mass:>7}{}",
-                f.path.rsplit('/').next().unwrap_or(&f.path),
-                f.line,
-                want.as_str(),
-                got.as_str(),
-                if got == want { "" } else { "  <- wrong" },
-            );
-        }
-        reading
-    }
-
-    /// The same separation statistic over the **margins** the same readings
-    /// already recorded — no second pass, because `classify_findings` persists
-    /// them.
-    ///
-    /// Printed beside the sharpness separation rather than instead of it: the two
-    /// lines are the same statistic over the same rows by two different numbers,
-    /// and the comparison is the result. A margin separation near `0.5` as well
-    /// would say the reading carries no orderable signal at all and that no
-    /// rescaling of it would help.
-    fn print_margin_summary(
-        out: &mut impl Write,
-        findings: &[CandidateFinding],
-        truth: &[DefectClass],
-        predicted: &[DefectClass],
-    ) {
-        let mut correct: Vec<u32> = Vec::new();
-        let mut wrong: Vec<u32> = Vec::new();
-        let mut raw: Vec<u32> = Vec::new();
-        for ((f, want), got) in findings.iter().zip(truth).zip(predicted) {
-            let m = f.class_margin_micronats.expect("asserted present");
-            raw.push(m);
-            if got == want {
-                correct.push(m);
-            } else {
-                wrong.push(m);
-            }
-        }
-        let nats = |m: u32| f64::from(m) / f64::from(PPM_SCALE);
-        let _ = writeln!(
-            out,
-            "  --- the same readings, ordered by MARGIN instead ---\
-             \n  margin (nats) min / max     {:.3} / {:.3}\
-             \n  separation P(correct>wrong) {}\
-             \n\n  Compare with the sharpness separation above. If this one is \
-             also ~0.5 the reading carries no orderable signal at all, and no \
-             rescaling of it would.\n",
-            raw.iter().copied().min().map_or(f64::NAN, nats),
-            raw.iter().copied().max().map_or(f64::NAN, nats),
-            separation(&correct, &wrong)
-                .map_or_else(|| "n/a (one group empty)".to_owned(), |s| format!("{s:.4}")),
-        );
-    }
-
-    /// Print the summary: accuracy with three nulls beside it, the separation
-    /// statistic, and the option mass that says whether to believe any of them.
-    fn print_summary(
-        out: &mut impl Write,
-        reading: &Reading,
-        truth: &[DefectClass],
-        predicted: &[DefectClass],
-    ) {
-        let n = truth.len();
-        let hits = reading.correct.len();
-        let null = permutation_expectation(predicted, truth);
-        let majority = CLASSES
-            .into_iter()
-            .map(|c| truth.iter().filter(|t| **t == c).count())
-            .max()
-            .unwrap_or(0);
-        let classes = CLASSES.len();
-        let _ = writeln!(
-            out,
-            "\n  accuracy                    {hits}/{n} = {:.3}\
-             \n  permutation null (exact)    {null:.2}/{n} = {:.3}\
-             \n  majority-class baseline     {majority}/{n} = {:.3}\
-             \n  uniform baseline            1/{classes} = {:.3}\
-             \n  distinct classes used       {} of {classes}\
-             \n  mean sharpness (correct)    {:.4}\
-             \n  mean sharpness (wrong)      {:.4}\
-             \n  separation P(correct>wrong) {}\
-             \n  option mass min / mean      {:.4} / {:.4}",
-            hits as f64 / n as f64,
-            null / n as f64,
-            majority as f64 / n as f64,
-            1.0 / classes as f64,
-            distinct_used(predicted),
-            mean(&reading.correct),
-            mean(&reading.wrong),
-            separation(&reading.correct, &reading.wrong)
-                .map_or_else(|| "n/a (one group empty)".to_owned(), |s| format!("{s:.4}")),
-            reading
-                .masses
-                .iter()
-                .copied()
-                .min()
-                .map_or(f64::NAN, fraction),
-            mean(&reading.masses),
-        );
-        let _ = writeln!(
-            out,
-            "\n  No threshold is asserted above. `separation` at 0.5 is no ordering, \
-             and `option mass` decides whether the rest is about anything.\n"
-        );
-    }
-
-    /// Resolve the pinned review model and start llama.cpp on it, or print why
-    /// this measurement is being skipped.
-    ///
-    /// Written to `stderr` directly rather than through `eprintln!` because libtest
-    /// discards a *passing* test's captured output, and a skip that printed to
-    /// nobody would read as a run that found nothing.
-    ///
-    /// The name comes back owned rather than borrowed: it is read through the
-    /// model choice, which does not outlive this function, and a measurement that
-    /// does not say which model produced it is not comparable with the next one —
-    /// so it is carried rather than dropped.
-    pub(super) fn engine_or_skip(
-        out: &mut impl Write,
-    ) -> Option<(rto_llama::llama::LlamaEngine, String)> {
-        // **`resolve_model` reads a process-global slot that only `main` fills.**
-        //
-        // A test binary is not `main`, so without this the pins are all unset and
-        // every task resolves to its *default* — `qwen3-0.6b` for `Review`, which
-        // is not installed here, so the measurement self-skipped while reporting a
-        // pass. The skip printed its reason, which is the only thing that made it
-        // visible; a silent one would have read as a measurement that found
-        // nothing.
-        //
-        // So it is done here exactly as `main` does it, from the same two layers,
-        // and the model name is printed beside every number: this repository pins
-        // `[models] generative` to the model the Stage 35b baseline was recorded
-        // on, and a measurement against a different one is not comparable with it.
-        #[cfg(feature = "models")]
-        match crate::config::load(&std::env::current_dir().unwrap_or_default()) {
-            Ok(cfg) => rto_graph::set_model_pins(cfg.effective.models.resolve()),
-            Err(e) => {
-                let _ = writeln!(out, "SKIP: config would not load ({e})");
-                return None;
-            }
-        }
-        let choice = match rto_graph::resolve_model(rto_graph::ModelTask::Review) {
-            Ok(c) => c,
-            Err(e) => {
-                let _ = writeln!(out, "SKIP: no review model resolved ({e})");
-                return None;
-            }
-        };
-        let model = match choice.require_installed() {
-            Ok(m) => m.to_owned(),
-            Err(e) => {
-                let _ = writeln!(out, "SKIP: review model not installed ({e})");
-                return None;
-            }
-        };
-        match super::start_engine(&model) {
-            Ok(engine) => Some((engine, model)),
-            Err(e) => {
-                let _ = writeln!(out, "SKIP: llama.cpp would not start ({e})");
-                None
-            }
-        }
-    }
-
-    #[test]
-    #[ignore = "needs the pinned generative model under ~/.roteiro/models; prints a measurement"]
-    fn sharpness_against_the_adjudicated_class_set() {
-        let mut out = std::io::stderr();
-        let corpus = rto_graph::review_corpus::builtin().expect("the builtin corpus parses");
-        let Some((engine, model)) = engine_or_skip(&mut out) else {
-            return;
-        };
-
-        let truth: Vec<DefectClass> = corpus.rows().iter().map(|r| r.defect_class).collect();
-        let mut findings: Vec<CandidateFinding> = corpus.rows().iter().map(as_finding).collect();
-        let n = findings.len();
-        let _ = writeln!(
-            out,
-            "\n=== typed class read vs the adjudicated corpus — {model}, {n} rows, \
-             {} classes ===",
-            CLASSES.len()
-        );
-
-        super::classify_findings(&engine, &model, &mut findings)
-            .expect("the typed class read completes over every row");
-
-        // **The pass happened**, asserted before a single number is read off it, so
-        // that a no-op cannot be reported as a measurement.
-        assert_eq!(findings.len(), n, "a row was lost");
-        for f in &findings {
-            assert!(
-                f.defect_class.is_some(),
-                "{}:{} came back with no class",
-                f.path,
-                f.line
-            );
-            assert!(
-                f.class_sharpness_ppm.is_some()
-                    && f.class_option_mass_ppm.is_some()
-                    && f.class_margin_micronats.is_some(),
-                "{}:{} came back with no shape numbers",
-                f.path,
-                f.line
-            );
-        }
-
-        let predicted: Vec<DefectClass> = findings
-            .iter()
-            .map(|f| f.defect_class.expect("just asserted present"))
-            .collect();
-        let reading = print_rows(&mut out, &findings, &truth, &predicted);
-        print_summary(&mut out, &reading, &truth, &predicted);
-        print_margin_summary(&mut out, &findings, &truth, &predicted);
-    }
-    /// The yes/no question this measurement asks, and the reason it lives here
-    /// rather than beside `rto_graph::reviewer::CLASS_QUESTION`.
-    ///
-    /// `CLASS_QUESTION` is part of the shipped instrument: `--typed-class` asks
-    /// it, so it belongs with the option list it is asked over. This one is not
-    /// shipped — nothing in `review --llm` asks whether a finding is real, and
-    /// #897's own note says a model judging its own findings is a separate claim
-    /// from a model classifying them. So it is a question the *measurement* asks,
-    /// and it is written where the measurement is.
-    const REALITY_QUESTION: &str = "Does that finding describe a real defect — something a maintainer would \
-         actually fix — rather than a false alarm?";
-
-    /// **Can `P(yes)` tell an adjudicated real row from a known-false one?**
-    ///
-    /// The half of #897's Phase 3 that the corpus can answer without a replay
-    /// pass. The expensive question — does ranking a reviewer's own 1,995 findings
-    /// by sharpness beat the permutation null — needs the reviewer re-run; this
-    /// asks the *same* instrument about 27 rows a human already adjudicated, and
-    /// costs 27 prefills.
-    ///
-    /// It is a weaker question than Phase 3's in one specific way that must not be
-    /// glossed: these descriptions are a **human reviewer's** prose, not the
-    /// model's own findings, so a separation here does not establish that the
-    /// number would order the model's output. It is nonetheless the strictly
-    /// easier task — the rows are well-written and half of them were written by a
-    /// tool that got them right — so **a failure here is decisive** and a success
-    /// is only encouraging.
-    ///
-    /// # The base rate is the whole difficulty
-    ///
-    /// 22 of 27 rows are `real`, so answering "yes" to everything scores 0.815 and
-    /// accuracy is close to useless. The number that is not fooled by that is the
-    /// separation over every real/false pair, which is invariant to the base rate:
-    /// `0.5` is no ordering whatever the mix. Accuracy is printed beside it only so
-    /// the base rate is visible rather than implied.
-    ///
-    /// Uses `ask_choice` over `Noul::as_choice` rather than `ask_noul`, because
-    /// `ask_noul` returns the probability alone and this needs the option mass —
-    /// which is exactly the choice that method's own docs tell a caller to make.
-    ///
-    /// ```text
-    /// cargo test -p roteiro --features serve --bin roteiro \
-    ///     review_llm::typed_class_calibration::the_noul -- --ignored --nocapture
-    /// ```
-    #[test]
-    #[ignore = "needs the pinned generative model under ~/.roteiro/models; prints a measurement"]
-    fn the_noul_separates_real_rows_from_known_false_ones() {
-        use rto_graph::review_corpus::Verdict;
-        use rto_graph::review_score::fraction_ppm;
-
-        let mut out = std::io::stderr();
-        let corpus = rto_graph::review_corpus::builtin().expect("the builtin corpus parses");
-        let Some((engine, model)) = engine_or_skip(&mut out) else {
-            return;
-        };
-        let noul = rto_llama::typed::Noul::new();
-
-        let _ = writeln!(
-            out,
-            "\n=== noul: real vs known-false — {model}, {} rows ===",
-            corpus.rows().len()
-        );
-
-        let mut real: Vec<u32> = Vec::new();
-        let mut known_false: Vec<u32> = Vec::new();
-        let mut masses: Vec<u32> = Vec::new();
-        let mut margins: Vec<f32> = Vec::new();
-        let mut real_margins: Vec<u32> = Vec::new();
-        let mut false_margins: Vec<u32> = Vec::new();
-        for row in corpus.rows() {
-            let state = format!(
-                "A code reviewer reported this finding about `{}` at line {}:\n\n{}",
-                row.path, row.line, row.description,
-            );
-            let answer = engine
-                .ask_choice(&model, &state, REALITY_QUESTION, noul.as_choice())
-                .expect("the noul completes over every row");
-            // Through the ppm quantiser and not kept as an `f32`: `separation`
-            // counts ties, and a tie between two floats off two different
-            // softmaxes is a statement about the last bits rather than about the
-            // model. Integers make "the same reading" mean something.
-            let p_yes = fraction_ppm(rto_llama::typed::Noul::p_yes(&answer));
-            let mass = fraction_ppm(answer.option_mass());
-            masses.push(mass);
-            // Margins go into their own two groups as well as the printed list:
-            // eyeballing which rows sit low is not a statistic, and the whole
-            // point of `separation` is that it is one.
-            let margin_q = margin_ppm(answer.margin());
-            match row.verdict {
-                Verdict::Real => real_margins.push(margin_q),
-                Verdict::False => false_margins.push(margin_q),
-            }
-            margins.push(answer.margin());
-            match row.verdict {
-                Verdict::Real => real.push(p_yes),
-                Verdict::False => known_false.push(p_yes),
-            }
-            let _ = writeln!(
-                out,
-                // ppm integers, for the reason `print_rows` states: these are
-                // what `separation` reads, and four decimal places round every
-                // one of them to `1.0000`.
-                "  {:<34} {:>5}  {:<5}  P(yes) {p_yes:>7}  mass {mass:>7}  margin {:>7.3}",
-                row.path.rsplit('/').next().unwrap_or(&row.path),
-                row.line,
-                match row.verdict {
-                    Verdict::Real => "real",
-                    Verdict::False => "false",
-                },
-                answer.margin(),
-            );
-        }
-
-        // **The pass happened.** Both groups non-empty, because the separation
-        // statistic below is `None` for an empty one and a printed `n/a` must mean
-        // "the corpus has no such rows", never "the loop did nothing".
-        assert_eq!(real.len() + known_false.len(), corpus.rows().len());
-        assert!(
-            !real.is_empty() && !known_false.is_empty(),
-            "one group is empty"
-        );
-
-        let said_yes = real.iter().filter(|p| **p > PPM_SCALE / 2).count()
-            + known_false.iter().filter(|p| **p > PPM_SCALE / 2).count();
-        let _ = writeln!(
-            out,
-            "\n  rows                        {} real, {} known-false\
-             \n  base rate (answer yes)      {:.3}\
-             \n  said yes at P > 0.5         {said_yes}/{}\
-             \n  mean P(yes) on real         {:.4}\
-             \n  mean P(yes) on known-false  {:.4}\
-             \n  separation P(real>false)    {}\
-             \n  option mass min / mean      {:.4} / {:.4}\
-             \n  margin (nats) min / max     {:.3} / {:.3}\
-             \n  separation by MARGIN        {}\
-             \n\n  A separation of 0.5 is no ordering, and it is the only number \
-             here the 22:5 base rate cannot flatter.\n",
-            real.len(),
-            known_false.len(),
-            real.len() as f64 / (real.len() + known_false.len()) as f64,
-            real.len() + known_false.len(),
-            mean(&real),
-            mean(&known_false),
-            separation(&real, &known_false)
-                .map_or_else(|| "n/a (one group empty)".to_owned(), |s| format!("{s:.4}")),
-            masses.iter().copied().min().map_or(f64::NAN, fraction),
-            mean(&masses),
-            margins.iter().copied().fold(f32::INFINITY, f32::min),
-            margins.iter().copied().fold(f32::NEG_INFINITY, f32::max),
-            separation(&real_margins, &false_margins)
-                .map_or_else(|| "n/a (one group empty)".to_owned(), |s| format!("{s:.4}")),
-        );
-    }
-}
-
-/// **Does ordering the reviewer's own findings by logit margin put the real ones
-/// near the top?** (Issue #897, the expensive half.)
-///
-/// # This measures RANKING, and ranking is not recall
-///
-/// The recorded failure is a **recall** failure: observed 4 real rows matched
-/// against a permutation null mean of 4.19, `P(≥observed) = 0.72`, and the
-/// project's own verdict that *"the reviewer scored below chance"*
-/// (`docs/history/BUILD_PLAN_V2.md`). A per-finding number cannot fix that. It
-/// cannot make the reviewer see a defect it did not see, and nothing in this
-/// module claims otherwise.
-///
-/// What it can fix is **ranking**: given the findings the reviewer does emit, does
-/// ordering by margin put the real ones first? Those are different questions and
-/// the second is the useful one. A reviewer emitting 10.9 findings per file of
-/// which two are real is unusable as a list and usable as a *ranked* list, if the
-/// ranking works. So the headline here is the ranking statistic against a
-/// random-ordering null, and recall is reported beside it as the thing that did
-/// not change.
-///
-/// # On the margin, not on the sharpness
-///
-/// `sharpness` was measured saturated — exactly `1_000_000` ppm on 26 of the 27
-/// corpus rows (`typed_class_calibration`). Ranking by a number that is constant
-/// cannot separate from chance, and that is arithmetic rather than a measurement.
-/// So this ranks by `CandidateFinding::class_margin_micronats`.
-///
-/// # The population is 23 files, and that is not the recorded baseline's
-///
-/// `review_score`'s matcher credits a finding to a row on
-/// `(commit, path, line ±LINE_WINDOW)`, and the permutation null relocates a row
-/// **inside its own reconstructed diff** — so a row never leaves its own
-/// `(sha, path)`. Only findings on a corpus anchor can therefore match, in either
-/// arm. There are **23 distinct anchors** over 15 commits, so 23 file reviews
-/// answer the same statistic as 183 would, at an eighth of the inference.
-///
-/// It also means this run's finding population is **not** the recorded run's
-/// 1,995 over 183 files. Density differs, so the null differs, so
-/// `4 vs 4.19` is **not** a like-for-like comparison and this module does not make
-/// one. It computes its own observed and its own null, from one command over one
-/// file set at one commit, and says so.
-///
-/// # Checkpointed, and it proves it ran
-///
-/// Each file's findings are appended to a JSONL checkpoint as they are produced,
-/// so a fault costs one file rather than the run; a re-run skips what is already
-/// there. Because a resumed run performs no inference, the "it really ran" proof
-/// is reported per-file and asserted only over the files reviewed *this* time —
-/// the session that wrote this module had a calibration run report `ok` having
-/// done no inference at all, and the only thing that made it visible was a
-/// printed reason.
-///
-/// ```text
-/// ROTEIRO_RANK_MAX_FILES=1 cargo test -p roteiro --features serve --bin roteiro \
-///     review_llm::margin_ranking -- --ignored --nocapture      # time one file
-/// cargo test -p roteiro --features serve --bin roteiro \
-///     review_llm::margin_ranking -- --ignored --nocapture      # the whole run
-/// ```
-#[cfg(all(test, feature = "inference-local-models"))]
-mod margin_ranking {
-    #![expect(
-        clippy::cast_precision_loss,
-        reason = "every cast is a small count (corpus rows, findings, trials) \
-                  becoming a rate; f64 is exact well past any of them"
-    )]
-
-    use std::collections::{BTreeMap, BTreeSet};
-    use std::io::Write;
-    use std::path::PathBuf;
-    use std::time::Instant;
-
-    use rto_graph::review_corpus::{Corpus, CorpusRow, Verdict};
-    use rto_graph::review_score::{CandidateFinding, CandidateRun, LINE_WINDOW};
-    use rto_graph::reviewer::FileUnderReview;
-
-    use super::typed_class_calibration::{engine_or_skip, separation};
-    use super::{ClassSource, ReviewArm};
-
-    /// Permutation trials for both nulls.
-    ///
-    /// The recorded baseline used 2,000 for the recall null and this matches it so
-    /// the two are the same experiment; the ranking null gets more because it is
-    /// cheaper (a label shuffle, no diff parsing) and its statistic is finer.
-    /// Neither is sampled adaptively and neither is re-run: the count is fixed
-    /// here, before any number is seen.
-    const RECALL_TRIALS: usize = 2_000;
-    /// See [`RECALL_TRIALS`].
-    const RANKING_TRIALS: usize = 100_000;
-
-    /// The seed both nulls draw from.
-    ///
-    /// Fixed and stated so the p-values reproduce. A seed chosen after seeing a
-    /// result is the tuning this measurement must not do, so it is a constant in
-    /// the source rather than an input.
-    const SEED: u64 = 0x5197_8974_2026_0929;
-
-    /// `k` values `precision@k` is reported at.
-    const KS: [usize; 5] = [1, 3, 5, 10, 20];
-
-    /// A deterministic `xorshift64*` — enough for a label shuffle, and it avoids
-    /// taking a dependency for one.
-    struct Rng(u64);
-
-    impl Rng {
-        fn next_u64(&mut self) -> u64 {
-            self.0 ^= self.0 >> 12;
-            self.0 ^= self.0 << 25;
-            self.0 ^= self.0 >> 27;
-            self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
-        }
-
-        /// A uniform value in `0..n`, by rejection so that the modulo bias which
-        /// would quietly skew a null is not present.
-        fn below(&mut self, n: usize) -> usize {
-            assert!(n > 0, "no range to draw from");
-            let n64 = n as u64;
-            let limit = u64::MAX - (u64::MAX % n64);
-            loop {
-                let v = self.next_u64();
-                if v < limit {
-                    // `n` came in as a `usize`, so `v % n` is inside `usize` by
-                    // construction on every target.
-                    return usize::try_from(v % n64).expect("v % n < n <= usize::MAX");
-                }
-            }
-        }
-
-        fn shuffle<T>(&mut self, items: &mut [T]) {
-            for i in (1..items.len()).rev() {
-                items.swap(i, self.below(i + 1));
-            }
-        }
-    }
-
-    /// One reviewed file, as the checkpoint records it.
-    struct Reviewed {
-        sha: String,
-        path: String,
-        findings: Vec<CandidateFinding>,
-        seconds: f64,
-        /// Whether the model said `NO FINDINGS` in the required form.
-        declared_clean: bool,
-        /// Lines that looked like findings but carried no usable anchor.
-        unparsed: usize,
-        /// The generation stopped inside a reasoning block, so the file was never
-        /// actually reviewed.
-        reasoning_truncated: bool,
-        /// What produced these findings — the model plus this harness's own
-        /// revision. A resumed run refuses a record from a different one.
-        instrument: String,
-    }
-
-    /// Bumped whenever a change would make old findings incomparable with new
-    /// ones — the prompt, the class question, the arm, or what
-    /// `classify_findings` records.
-    ///
-    /// It is deliberately **not** derived from anything: a hash of the source
-    /// would invalidate the checkpoint on a comment change, and a version that
-    /// moves for free gets ignored. This is a judgement, made when the change is
-    /// made.
-    const INSTRUMENT: &str = "diff-only/typed-read/v1";
-
-    /// Where the checkpoint lives. Outside the repository, and overridable so two
-    /// runs need not share one.
-    fn checkpoint_path() -> PathBuf {
-        std::env::var_os("ROTEIRO_RANK_CHECKPOINT").map_or_else(
-            || std::env::temp_dir().join("roteiro-margin-ranking.jsonl"),
-            PathBuf::from,
-        )
-    }
-
-    /// Read whatever the checkpoint already holds, keyed by `(sha, path)`.
-    ///
-    /// A malformed line is **fatal**, not skipped: a half-written record from a
-    /// killed process would otherwise silently reduce the population and move
-    /// every number here.
-    fn read_checkpoint(path: &std::path::Path) -> BTreeMap<(String, String), Reviewed> {
-        let mut out = BTreeMap::new();
-        let Ok(text) = std::fs::read_to_string(path) else {
-            return out;
-        };
-        for (n, line) in text.lines().enumerate() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let v: serde_json::Value = serde_json::from_str(line)
-                .unwrap_or_else(|e| panic!("checkpoint line {} is not JSON: {e}", n + 1));
-            let sha = v["sha"].as_str().expect("sha").to_owned();
-            let p = v["path"].as_str().expect("path").to_owned();
-            let findings: Vec<CandidateFinding> =
-                serde_json::from_value(v["findings"].clone()).expect("findings");
-            let seconds = v["seconds"].as_f64().unwrap_or(0.0);
-            let instrument = v["instrument"].as_str().unwrap_or("unrecorded").to_owned();
-            out.insert(
-                (sha.clone(), p.clone()),
-                Reviewed {
-                    sha,
-                    path: p,
-                    findings,
-                    seconds,
-                    // Absent in a checkpoint written before these were recorded.
-                    // `false`/`0` is the reading that claims the least: it says
-                    // "not recorded as clean" rather than "recorded as clean",
-                    // and the summary counts them separately so an older
-                    // checkpoint cannot be read as having answered the question.
-                    declared_clean: v["declared_clean"].as_bool().unwrap_or(false),
-                    unparsed: usize::try_from(v["unparsed"].as_u64().unwrap_or(0)).unwrap_or(0),
-                    reasoning_truncated: v["reasoning_truncated"].as_bool().unwrap_or(false),
-                    instrument,
-                },
-            );
-        }
-        out
-    }
-
-    /// Append one file's outcome to the checkpoint, flushed before returning.
-    fn append_checkpoint(path: &std::path::Path, r: &Reviewed) {
-        let record = serde_json::json!({
-            "sha": r.sha,
-            "path": r.path,
-            // **What produced these findings, so a resumed run cannot mix
-            // instruments.** Keyed only by `(sha, path)`, the checkpoint silently
-            // reused findings from a different model, a different prompt or a
-            // different classifier — the resumed run would then report a
-            // measurement over two instruments and say nothing about either.
-            "instrument": r.instrument,
-            "seconds": r.seconds,
-            // The three fields that tell "found nothing" from "never answered".
-            // A file with zero findings is uninterpretable without them, and 11 of
-            // this run's 23 files had zero.
-            "declared_clean": r.declared_clean,
-            "unparsed": r.unparsed,
-            "reasoning_truncated": r.reasoning_truncated,
-            "findings": serde_json::to_value(&r.findings).expect("findings serialise"),
-        });
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .expect("checkpoint opens");
-        writeln!(f, "{record}").expect("checkpoint writes");
-        f.flush().expect("checkpoint flushes");
-    }
-
-    /// The new-side line numbers a unified diff shows, in order.
-    ///
-    /// The permutation null relocates each corpus row to a line **its own diff
-    /// actually shows**, which is the recorded baseline's recipe; this is that set.
-    /// Context lines count as well as added ones, because a reviewer can anchor a
-    /// finding to either and the tighter added-only variant is reported separately
-    /// by the baseline.
-    fn diff_new_lines(diff: &str) -> Vec<u32> {
-        let mut out = Vec::new();
-        let mut next = 0u32;
-        for line in diff.lines() {
-            if let Some(rest) = line.strip_prefix("@@") {
-                // `@@ -a,b +c,d @@` — take `c`.
-                if let Some(plus) = rest.split('+').nth(1) {
-                    let digits: String = plus.chars().take_while(char::is_ascii_digit).collect();
-                    if let Ok(start) = digits.parse::<u32>() {
-                        next = start;
-                    }
-                }
-                continue;
-            }
-            match line.as_bytes().first() {
-                Some(b'+') => {
-                    out.push(next);
-                    next += 1;
-                }
-                Some(b'-') => {}
-                // A context line, and the `\ No newline` marker which is neither.
-                _ if line.starts_with('\\') => {}
-                _ => {
-                    out.push(next);
-                    next += 1;
-                }
-            }
-        }
-        out
-    }
-
-    /// Which findings the scorer's rule credits to a row, as indices into
-    /// `findings`, keyed by row id.
-    ///
-    /// **A reimplementation of `review_score`'s private `match_findings`, and it is
-    /// cross-checked rather than trusted.** The shipped matcher returns finding
-    /// *references* keyed by row and the ranking needs indices, so this repeats
-    /// the rule: greedy one-to-one over `(sha, path, |Δline| ≤ LINE_WINDOW)`,
-    /// nearest first, ties broken by row id then by line so the result does not
-    /// depend on finding order. The test then asserts its real-row count equals
-    /// the shipped `score()`'s `found`, which is what licenses using it — the same
-    /// step the recorded baseline took before believing its own null.
-    fn credited(rows: &[&CorpusRow], findings: &[CandidateFinding]) -> BTreeMap<u64, usize> {
-        let mut pairs: Vec<(u32, u64, u32, usize)> = Vec::new();
-        for (idx, f) in findings.iter().enumerate() {
-            for row in rows {
-                if row.reviewed_sha != f.reviewed_sha || row.path != f.path {
-                    continue;
-                }
-                let distance = row.line.abs_diff(f.line);
-                if distance <= LINE_WINDOW {
-                    pairs.push((distance, row.id, f.line, idx));
-                }
-            }
-        }
-        pairs.sort_unstable();
-        let mut by_row: BTreeMap<u64, usize> = BTreeMap::new();
-        let mut used: BTreeSet<usize> = BTreeSet::new();
-        for (_, row_id, _, idx) in pairs {
-            if by_row.contains_key(&row_id) || used.contains(&idx) {
-                continue;
-            }
-            by_row.insert(row_id, idx);
-            used.insert(idx);
-        }
-        by_row
-    }
-
-    /// Refuse a checkpoint record that a **different instrument** produced.
-    ///
-    /// The checkpoint is keyed by `(sha, path)`, which says nothing about what
-    /// made the findings. Resuming after a `[models] generative` change, a prompt
-    /// change or a classifier change would silently mix two instruments, and a
-    /// measurement over two instruments measures neither — the sort of quiet
-    /// population change this module's own comparability block exists to refuse.
-    ///
-    /// # Errors
-    /// If the record names a different model or a different [`INSTRUMENT`].
-    fn same_instrument(prev: &Reviewed, model: &str, ckpt: &std::path::Path) -> anyhow::Result<()> {
-        let want = format!("{model}|{INSTRUMENT}");
-        anyhow::ensure!(
-            prev.instrument == want,
-            "checkpoint record for {}:{} was produced by `{}`, but this run is `{want}`. \
-             Delete {} or point ROTEIRO_RANK_CHECKPOINT elsewhere; mixing them would \
-             measure neither instrument.",
-            prev.sha,
-            prev.path,
-            prev.instrument,
-            ckpt.display(),
-        );
-        Ok(())
-    }
-
-    /// Review every corpus anchor file with the typed class read on, timing each
-    /// and checkpointing as it goes.
-    ///
-    /// Returns `(reviewed files, files reviewed *this run*, seconds spent this
-    /// run, stopped early)`. The middle two are what the "it really ran"
-    /// assertions are made over, because a fully resumed run performs no inference
-    /// and must not be able to report one; the last says the population is a
-    /// deliberate fragment and must not be measured.
-    fn review_anchors(
-        out: &mut impl Write,
-        corpus: &Corpus,
-        repo: &std::path::Path,
-    ) -> anyhow::Result<(Vec<Reviewed>, usize, f64, bool)> {
-        let anchors: BTreeSet<(&str, &str)> = corpus
-            .rows()
-            .iter()
-            .map(|r| (r.reviewed_sha.as_str(), r.path.as_str()))
-            .collect();
-        let cap = std::env::var("ROTEIRO_RANK_MAX_FILES")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(usize::MAX);
-
-        let ckpt = checkpoint_path();
-        let mut done = read_checkpoint(&ckpt);
-        let _ = writeln!(
-            out,
-            "checkpoint {} — {} file(s) already recorded",
-            ckpt.display(),
-            done.len()
-        );
-
-        let (engine, model) = engine_or_skip(out).ok_or_else(|| anyhow::anyhow!("no engine"))?;
-        let backend = super::Backend::Local(engine);
-        let main = super::main_ref(repo)?;
-        let shas: Vec<&str> = corpus.reviewed_shas().into_iter().collect();
-
-        let mut reviewed: Vec<Reviewed> = Vec::new();
-        let mut fresh = 0usize;
-        let mut spent = 0.0f64;
-        // The full anchor count, deliberately **not** capped: this number prices
-        // the whole run, and a projection that shrank with `ROTEIRO_RANK_MAX_FILES`
-        // would make a one-file timing run report the cost of a one-file run.
-        let total_anchors = anchors.len();
-
-        for sha in &shas {
-            let set = super::files_at(repo, sha, &main, rto_graph::PathPolicy::empty())?;
-            for file in set.files {
-                if !anchors.contains(&(*sha, file.path.as_str())) {
-                    continue;
-                }
-                let key = ((*sha).to_owned(), file.path.clone());
-                if let Some(prev) = done.remove(&key) {
-                    same_instrument(&prev, &model, &ckpt)?;
-                    reviewed.push(prev);
-                    continue;
-                }
-                if reviewed.len() >= cap {
-                    let _ = writeln!(
-                        out,
-                        "stopping at ROTEIRO_RANK_MAX_FILES={cap} — this is a timing \
-                         run, not a measurement"
-                    );
-                    return Ok((reviewed, fresh, spent, true));
-                }
-                let started = Instant::now();
-                let outcome = super::review_file(
-                    &backend,
-                    &model,
-                    &file,
-                    &rto_graph::reviewer::GraphContext::none(),
-                    &[],
-                    &|_p: &str| None,
-                    ClassSource::TypedRead,
-                )?;
-                let seconds = started.elapsed().as_secs_f64();
-                spent += seconds;
-                fresh += 1;
-                let n = outcome.findings.len();
-                let why = if outcome.reasoning_truncated {
-                    " NEVER REVIEWED (reasoning truncated)"
-                } else if n == 0 && outcome.declared_clean {
-                    " declared clean"
-                } else if n == 0 {
-                    " zero findings and NO clean declaration"
-                } else {
-                    ""
-                };
-                // Progress with a live projection, so the cost of the whole run is
-                // visible from its first file rather than extrapolated from prose.
-                let per_file = spent / fresh as f64;
-                let _ = writeln!(
-                    out,
-                    "  [{}/{total_anchors}] {} — {n} finding(s){why} in {seconds:.1}s \
-                     (mean {per_file:.1}s, projected total {:.1} min)",
-                    reviewed.len() + 1,
-                    file.path,
-                    per_file * total_anchors as f64 / 60.0,
-                );
-                let r = Reviewed {
-                    sha: (*sha).to_owned(),
-                    path: file.path.clone(),
-                    declared_clean: outcome.declared_clean,
-                    unparsed: outcome.unparsed,
-                    reasoning_truncated: outcome.reasoning_truncated,
-                    findings: outcome.findings,
-                    seconds,
-                    instrument: format!("{model}|{INSTRUMENT}"),
-                };
-                append_checkpoint(&ckpt, &r);
-                reviewed.push(r);
-            }
-        }
-        assert!(
-            done.is_empty(),
-            "the checkpoint holds {} record(s) for files this run did not visit, so it \
-             is from a different corpus or a different path policy: {:?}",
-            done.len(),
-            done.keys().collect::<Vec<_>>()
-        );
-        Ok((reviewed, fresh, spent, false))
-    }
-
-    /// The observed real-row count and the recall permutation null.
-    ///
-    /// Relocate every corpus row to a uniformly random line its own reconstructed
-    /// diff shows, leave the findings byte-for-byte as emitted, and rescore. The
-    /// recorded baseline's recipe exactly, so the *method* is comparable even
-    /// though the population is not.
-    fn recall_null(
-        out: &mut impl Write,
-        corpus: &Corpus,
-        findings: &[CandidateFinding],
-        lines_by_anchor: &BTreeMap<(String, String), Vec<u32>>,
-        observed: usize,
-    ) {
-        let real: Vec<&CorpusRow> = corpus
-            .rows()
-            .iter()
-            .filter(|r| r.verdict == Verdict::Real)
-            .collect();
-        // Two supports, because two rows anchor outside their own diff. The
-        // baseline's recipe relocates every row into the diff, which for those two
-        // *raises* their matchability above the position they were observed at and
-        // so biases the null upward — conservative, but not like-for-like. The
-        // second arm keeps only rows whose own line is inside, so relocation stays
-        // within the support the observation came from. Both are reported; neither
-        // is chosen after the fact.
-        let inside_only: Vec<&CorpusRow> = real
-            .iter()
-            .copied()
-            .filter(|r| {
-                lines_by_anchor
-                    .get(&(r.reviewed_sha.clone(), r.path.clone()))
-                    .is_some_and(|l| l.contains(&r.line))
-            })
-            .collect();
-        let observed_inside = credited(&inside_only, findings).len();
-
-        let trial = |rows: &[&CorpusRow], target: usize| -> (f64, f64) {
-            let mut rng = Rng(SEED);
-            let mut at_or_above = 0usize;
-            let mut total = 0usize;
-            for _ in 0..RECALL_TRIALS {
-                let moved: Vec<CorpusRow> = rows
-                    .iter()
-                    .map(|r| {
-                        let mut c = (*r).clone();
-                        let key = (r.reviewed_sha.clone(), r.path.clone());
-                        if let Some(lines) = lines_by_anchor.get(&key)
-                            && !lines.is_empty()
-                        {
-                            c.line = lines[rng.below(lines.len())];
-                        }
-                        c
-                    })
-                    .collect();
-                let refs: Vec<&CorpusRow> = moved.iter().collect();
-                let hits = credited(&refs, findings).len();
-                total += hits;
-                if hits >= target {
-                    at_or_above += 1;
-                }
-            }
-            (
-                total as f64 / RECALL_TRIALS as f64,
-                at_or_above as f64 / RECALL_TRIALS as f64,
-            )
-        };
-        let (mean_all, p_all) = trial(&real, observed);
-        let (mean_in, p_in) = trial(&inside_only, observed_inside);
-        let _ = writeln!(
-            out,
-            "\n  == RECALL (not what a per-finding number can change) ==\
-             \n  {RECALL_TRIALS} trials, seed fixed, rows relocated inside their own diff\
-             \n  all real rows ({:>2})          observed {observed}, null mean {mean_all:.2}, \
-             P(null>=obs) {p_all:.3}\
-             \n  rows inside their diff ({:>2}) observed {observed_inside}, null mean \
-             {mean_in:.2}, P(null>=obs) {p_in:.3}",
-            real.len(),
-            inside_only.len(),
-        );
-    }
-
-    /// The ranking statistic and its random-ordering null — **the headline**.
-    fn ranking_null(
-        out: &mut impl Write,
-        findings: &[CandidateFinding],
-        hit_indices: &BTreeSet<usize>,
-    ) {
-        // The `precision@k` line is assembled into a `String`, which needs the
-        // `fmt` trait beside this module's `io` one.
-        use std::fmt::Write as _;
-
-        let n = findings.len();
-        let margins: Vec<u32> = findings
-            .iter()
-            .map(|f| {
-                f.class_margin_micronats
-                    .expect("typed read recorded a margin")
-            })
-            .collect();
-        let hits: Vec<u32> = (0..n)
-            .filter(|i| hit_indices.contains(i))
-            .map(|i| margins[i])
-            .collect();
-        let misses: Vec<u32> = (0..n)
-            .filter(|i| !hit_indices.contains(i))
-            .map(|i| margins[i])
-            .collect();
-
-        let Some(observed) = separation(&hits, &misses) else {
-            let _ = writeln!(
-                out,
-                "\n  == RANKING ==\n  not measurable: {} credited of {n} finding(s), so one \
-                 group is empty. That is a statement about this run's recall, not about \
-                 the margin.",
-                hits.len()
-            );
-            return;
-        };
-
-        // Order by margin, highest first; ties by index so the order is total and
-        // does not depend on sort stability.
-        let mut order: Vec<usize> = (0..n).collect();
-        order.sort_by_key(|&i| (std::cmp::Reverse(margins[i]), i));
-        let ranks: Vec<usize> = order
-            .iter()
-            .enumerate()
-            .filter(|(_, i)| hit_indices.contains(i))
-            .map(|(rank, _)| rank + 1)
-            .collect();
-        let mean_rank = ranks.iter().sum::<usize>() as f64 / ranks.len() as f64;
-
-        // The random-ordering null for `separation` is exactly 0.5, so the p-value
-        // is what is worth computing: shuffle which findings are credited, keeping
-        // the count, and recompute.
-        let mut rng = Rng(SEED);
-        let mut labels: Vec<bool> = (0..n).map(|i| hit_indices.contains(&i)).collect();
-        let mut at_or_above = 0usize;
-        let mut null_total = 0.0f64;
-        for _ in 0..RANKING_TRIALS {
-            rng.shuffle(&mut labels);
-            let mut h: Vec<u32> = Vec::with_capacity(hits.len());
-            let mut m: Vec<u32> = Vec::with_capacity(n - hits.len());
-            for (&g, &is_hit) in margins.iter().zip(&labels) {
-                if is_hit {
-                    h.push(g);
-                } else {
-                    m.push(g);
-                }
-            }
-            let s = separation(&h, &m).unwrap_or(0.5);
-            null_total += s;
-            if s >= observed {
-                at_or_above += 1;
-            }
-        }
-        let p = at_or_above as f64 / RANKING_TRIALS as f64;
-
-        let _ = writeln!(
-            out,
-            "\n  == RANKING BY MARGIN — the question this run exists to answer ==\
-             \n  findings ranked             {n}\
-             \n  credited to a real row      {}\
-             \n  separation P(hit>miss)      {observed:.4}   (0.5 = no ordering)\
-             \n  null mean over {RANKING_TRIALS} shuffles  {:.4}\
-             \n  P(null >= observed)         {p:.4}\
-             \n  ranks of credited findings  {ranks:?} of {n}\
-             \n  mean rank                   {mean_rank:.1}  (random: {:.1})",
-            hits.len(),
-            null_total / RANKING_TRIALS as f64,
-            (n + 1) as f64 / 2.0,
-        );
-
-        let base = hits.len() as f64 / n as f64;
-        let mut line = String::from("  precision@k                 ");
-        for k in KS {
-            if k > n {
-                continue;
-            }
-            let got = order[..k]
-                .iter()
-                .filter(|i| hit_indices.contains(i))
-                .count();
-            let _ = write!(line, "k={k}: {got}/{k}  ");
-        }
-        let _ = writeln!(out, "{line}\n  random expectation at any k {base:.4} of k");
-    }
-
-    /// **The harness is real, asserted before a single number is read off it.**
-    ///
-    /// A run that performed no inference must not be able to report a measurement,
-    /// and in this session one already has: the first `typed_class_calibration`
-    /// run reported `ok` having resolved a model nobody configured and called it
-    /// zero times. So four things that a do-nothing run cannot produce are checked
-    /// here — wall-clock over the files reviewed *this* time, a non-empty finding
-    /// set, a margin on every finding, and **more than one distinct margin** — and
-    /// the model id and per-file seconds are printed beside them.
-    ///
-    /// A fully resumed run legitimately performs no inference. That is reported
-    /// loudly rather than asserted against, because the checkpoint is the whole
-    /// point of being resumable; what must not happen is a *fresh* run passing
-    /// these checks without having worked.
-    fn prove_it_ran(
-        out: &mut impl Write,
-        reviewed: &[Reviewed],
-        fresh: usize,
-        spent: f64,
-    ) -> Vec<CandidateFinding> {
-        if fresh == 0 {
-            let _ = writeln!(
-                out,
-                "\nNOTE: every file came from the checkpoint, so THIS run performed no \
-                 inference. The numbers below are the recorded run's."
-            );
-        } else {
-            assert!(
-                spent > 1.0,
-                "{fresh} file(s) reportedly reviewed in {spent:.3}s — a 30B model cannot \
-                 do that, so no inference happened"
-            );
-            let _ = writeln!(
-                out,
-                "\n  inference: {fresh} file(s) reviewed in {spent:.1}s ({:.1}s/file)",
-                spent / fresh as f64,
-            );
-        }
-
-        let findings: Vec<CandidateFinding> =
-            reviewed.iter().flat_map(|r| r.findings.clone()).collect();
-        assert!(
-            !findings.is_empty(),
-            "no findings at all over {} file(s) — nothing to rank",
-            reviewed.len()
-        );
-        for f in &findings {
-            assert!(
-                f.class_margin_micronats.is_some(),
-                "{}:{} carries no margin, so --typed-class did not run",
-                f.path,
-                f.line
-            );
-        }
-        let distinct: BTreeSet<u32> = findings
-            .iter()
-            .map(|f| f.class_margin_micronats.expect("just asserted"))
-            .collect();
-        assert!(
-            distinct.len() > 1,
-            "all {} findings share one margin ({distinct:?}) — there is nothing to rank, \
-             and that is the read being degenerate rather than the ranking failing",
-            findings.len(),
-        );
-        // **A zero-finding file is uninterpretable on its own.** The repository's
-        // own record names three ways a clean-looking zero means nothing — an
-        // empty diff, a PR head, a truncated reasoning reply — so the breakdown is
-        // printed rather than left for a reader to assume "clean".
-        let empty: Vec<&Reviewed> = reviewed.iter().filter(|r| r.findings.is_empty()).collect();
-        let truncated = empty.iter().filter(|r| r.reasoning_truncated).count();
-        let declared = empty.iter().filter(|r| r.declared_clean).count();
-        let unexplained = empty.len() - truncated - declared;
-        let _ = writeln!(
-            out,
-            "\n=== margin ranking — {} file(s), {} finding(s), {} distinct margin(s) ===\
-             \n  files with zero findings    {} of {} — {declared} declared clean, \
-             {truncated} never reviewed, {unexplained} neither recorded\
-             \n  unparsed finding-like lines {}",
-            reviewed.len(),
-            findings.len(),
-            distinct.len(),
-            empty.len(),
-            reviewed.len(),
-            reviewed.iter().map(|r| r.unparsed).sum::<usize>(),
-        );
-        findings
-    }
-
-    /// The new-side line set per anchor, and how many corpus rows actually sit
-    /// inside their own.
-    ///
-    /// # The check, and what measuring it found
-    ///
-    /// If [`diff_new_lines`] were wrong the relocation set would be wrong and so
-    /// would the null, silently and in an unknown direction. The corpus's own
-    /// anchors are the only known-good coordinates to check it against — so this
-    /// counts how many rows land on a line their own diff shows.
-    ///
-    /// It was first written to **assert** that all of them do, and that assertion
-    /// fired: `25 of 27`. Two rows anchor outside their own reconstructed diff —
-    /// `add397f2 main.rs:2070`, whose nearest shown line is 2064, and
-    /// `413f73cc config.rs:634`, whose nearest is 575. The parser is right and the
-    /// assumption was wrong; the repository's own guarantee is that a row's diff
-    /// *touches its anchor file*, not its anchor line. So the count is reported
-    /// and the assertion is now the weaker one a broken parser would still fail:
-    /// a non-empty line set per anchor, and a clear majority of rows inside.
-    ///
-    /// The second of those two rows matters on its own: at 59 lines from the
-    /// nearest line its diff shows, **no finding can ever match it** within
-    /// `LINE_WINDOW`. It is a real row outside the reachable set, and it caps
-    /// recall independently of anything a reviewer does.
-    fn relocation_lines(
-        corpus: &Corpus,
-        repo: &std::path::Path,
-        out: &mut impl Write,
-    ) -> BTreeMap<(String, String), Vec<u32>> {
-        let main = super::main_ref(repo).expect("a main ref");
-        let mut lines: BTreeMap<(String, String), Vec<u32>> = BTreeMap::new();
-        for sha in corpus.reviewed_shas() {
-            let set = super::files_at(repo, sha, &main, rto_graph::PathPolicy::empty())
-                .expect("reconstructs");
-            for FileUnderReview { path, diff, .. } in set.files {
-                lines.insert((sha.to_owned(), path), diff_new_lines(&diff));
-            }
-        }
-        let mut inside = 0usize;
-        for row in corpus.rows() {
-            let key = (row.reviewed_sha.clone(), row.path.clone());
-            let shown = lines
-                .get(&key)
-                .unwrap_or_else(|| panic!("no reconstructed diff for {key:?}"));
-            assert!(
-                !shown.is_empty(),
-                "the diff for {key:?} parsed to no new-side lines at all, so the parser \
-                 is broken rather than the corpus being unusual"
-            );
-            if shown.contains(&row.line) {
-                inside += 1;
-            } else {
-                let nearest = shown
-                    .iter()
-                    .min_by_key(|l| l.abs_diff(row.line))
-                    .copied()
-                    .unwrap_or(0);
-                let _ = writeln!(
-                    out,
-                    "  row {} at {}:{} is OUTSIDE its own diff (nearest shown line {nearest}, \
-                     {} away{})",
-                    row.id,
-                    row.path,
-                    row.line,
-                    nearest.abs_diff(row.line),
-                    if nearest.abs_diff(row.line) > LINE_WINDOW {
-                        "; unreachable, so it caps recall"
-                    } else {
-                        ""
-                    },
-                );
-            }
-        }
-        let _ = writeln!(
-            out,
-            "  rows inside their own diff  {inside}/{}",
-            corpus.rows().len()
-        );
-        assert!(
-            inside * 3 >= corpus.rows().len() * 2,
-            "only {inside} of {} rows land on a line their own diff shows — a working \
-             parser puts nearly all of them there, so this is the parser",
-            corpus.rows().len()
-        );
-        lines
-    }
-
-    #[test]
-    #[ignore = "reviews 23 files with a 30B model; prints a measurement"]
-    fn margin_ranks_the_reviewers_own_findings() {
-        let mut out = std::io::stderr();
-        let corpus = rto_graph::review_corpus::builtin().expect("the builtin corpus parses");
-        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(std::path::Path::parent)
-            .expect("the workspace root is two levels above this crate")
-            .to_path_buf();
-
-        let (reviewed, fresh, spent, capped) = match review_anchors(&mut out, &corpus, &repo) {
-            Ok(v) => v,
-            Err(e) => {
-                let _ = writeln!(out, "SKIP: {e}");
-                return;
-            }
-        };
-        if capped {
-            // A capped run priced the inference and stopped. It has no population
-            // to measure, and running the assertions over a deliberate fragment
-            // would fail for the one reason that is not interesting.
-            let _ = writeln!(
-                out,
-                "\n  TIMING ONLY — {fresh} file(s) in {spent:.1}s ({:.1}s/file). \
-                 Unset ROTEIRO_RANK_MAX_FILES for the measurement.\n",
-                spent / fresh.max(1) as f64,
-            );
-            return;
-        }
-
-        let findings = prove_it_ran(&mut out, &reviewed, fresh, spent);
-
-        // The observed real-row count, from the **shipped** scorer, and the
-        // reimplemented matcher cross-checked against it.
-        let run = CandidateRun {
-            schema: rto_graph::review_score::RUN_SCHEMA.to_owned(),
-            attempted_shas: reviewed.iter().map(|r| r.sha.clone()).collect(),
-            findings: findings.clone(),
-            verdicts: Vec::new(),
-            suppressed: Vec::new(),
-            arm: Some(super::run_arm(
-                ReviewArm::DiffOnly,
-                "qwen3-coder-30b-a3b",
-                ClassSource::TypedRead,
-            )),
-        };
-        let scored = rto_graph::review_score::score(&corpus, &run).expect("the run scores");
-
-        let real: Vec<&CorpusRow> = corpus
-            .rows()
-            .iter()
-            .filter(|r| r.verdict == Verdict::Real)
-            .collect();
-        let by_row = credited(&real, &findings);
-        assert_eq!(
-            by_row.len(),
-            scored.found,
-            "the reimplemented matcher credits {} real row(s) and the shipped scorer {} — \
-             they must agree before either is believed",
-            by_row.len(),
-            scored.found
-        );
-        let _ = writeln!(
-            out,
-            "  matcher cross-check         {} real row(s), same as the shipped scorer",
-            by_row.len()
-        );
-
-        let hit_indices: BTreeSet<usize> = by_row.values().copied().collect();
-        ranking_null(&mut out, &findings, &hit_indices);
-
-        let lines_by_anchor = relocation_lines(&corpus, &repo, &mut out);
-        recall_null(&mut out, &corpus, &findings, &lines_by_anchor, scored.found);
-
-        let _ = writeln!(
-            out,
-            "\n  == COMPARABILITY ==\
-             \n  This is {} file(s) / {} commit(s) / {} findings, one command, one commit.\
-             \n  The recorded baseline is 183 files / 15 commits / 1,995 findings, so its\
-             \n  4-vs-4.19 is a DIFFERENT POPULATION and nothing above is an improvement\
-             \n  on it. Only the numbers in this block's own run are compared with each\
-             \n  other.\
-             \n  Sample-size limit: the corpus holds 22 real and 5 known-false rows. Five\
-             \n  is five, whatever any statistic over it reads.\n",
-            reviewed.len(),
-            corpus.reviewed_shas().len(),
-            findings.len(),
-        );
     }
 }

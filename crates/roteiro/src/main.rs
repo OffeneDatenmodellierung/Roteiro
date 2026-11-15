@@ -54,7 +54,7 @@ mod review;
 // reconstruction and the parent-module lookup are pure git and string work, and
 // their tests are the ones that matter in CI — which has no model store, so the
 // backend-gated half of the module never runs there.
-#[cfg(any(feature = "provider", feature = "inference-local-models", test))]
+#[cfg(any(feature = "provider", test))]
 mod review_llm;
 // Structured logging / telemetry init (ADR-0011): the single place the tracing
 // subscriber is built — the unchanged human-text stdout layer plus an opt-in
@@ -409,57 +409,6 @@ enum Command {
         /// audited from the artifacts rather than from their filenames.
         #[arg(long)]
         graph_context: bool,
-        /// Ask the model which **defect class** each finding belongs to as a
-        /// *typed question* — read off its own label-token distribution over the
-        /// closed fourteen — instead of parsing the `class=` token out of its
-        /// reply (issue #897).
-        ///
-        /// This removes an off-schema failure rather than mitigating one: a class
-        /// the model invents, abbreviates or translates currently parses to
-        /// nothing and the finding is recorded with no class at all. A typed read
-        /// cannot produce a non-member, because the answer is an index into the
-        /// class list and never a string.
-        ///
-        /// Opt-in for two reasons. It costs **one extra model call per finding**
-        /// rather than per file, and the recorded baseline emits 10.9 findings
-        /// per file. And it changes what the reviewer emits, so a run made with
-        /// it is not comparable with the recorded 1,995-finding baseline, whose
-        /// classes came out of the reply text.
-        ///
-        /// Each classified finding also carries three numbers off the same
-        /// distribution: the winning class's **logit margin** over the runner-up
-        /// in nats, the **sharpness** `1 - H(p)/ln K`, and how much of the model's
-        /// whole-vocabulary **mass** was on any legal answer at all.
-        ///
-        /// None of the three is a confidence — nothing is fitted against a
-        /// labelled set — and none of them ranks this reviewer's output. Read the
-        /// mass first: it says whether the model engaged with the question at all.
-        ///
-        /// What each was measured to do, on `qwen3-coder-30b-a3b`:
-        ///
-        /// - sharpness is **saturated**: exactly 1.0 on 26 of 27 adjudicated
-        ///   corpus rows, four of the five wrong answers included. A 1.0 is what
-        ///   this model almost always returns, not evidence it was right.
-        /// - the margin ordered a correct class above a wrong one on those same
-        ///   human-written corpus descriptions at 0.81. Ranking the reviewer's
-        ///   **own** 446 findings by it put the six real ones at ranks 16, 32,
-        ///   129, 327, 359 and 431 — none in the top ten, one in the top twenty —
-        ///   at a separation of 0.5178 against a null of 0.4999, P = 0.44.
-        ///
-        /// So triaging the head of that list by margin would have surfaced none of
-        /// them. That is what the ordering produced; the P-value beside it reports
-        /// a failure to find a signal on this sample, not proof there is none. Two
-        /// things differ between the 0.81 and the 446-finding figure rather than
-        /// one — who wrote the prose, and whether a correct class is being told
-        /// from a wrong one or a real finding from noise — so neither alone
-        /// explains the drop. Do not build a triage order or a gate on any of the
-        /// three.
-        ///
-        /// A separation of 0.98 appears in the same calibration output and is a
-        /// **different question**: a two-option yes/no asking whether a finding is
-        /// real, which this flag never asks and which nothing ships.
-        #[arg(long, conflicts_with = "score")]
-        typed_class: bool,
     },
     /// Verify authored links against code and ADR states; non-zero on drift.
     ///
@@ -933,10 +882,8 @@ enum Command {
         /// Maximum suggestions per node. Overrides `[infer] top_k`; default 5.
         #[arg(long)]
         top_k: Option<usize>,
-        /// Use a pulled local model by name instead of the offline default
-        /// (requires `--features inference-local-models`; falls back to the
-        /// hashing embedder if the model is not installed). Overrides
-        /// `[models] embedding`.
+        /// Use a provider embedding model by id instead of the offline hashing
+        /// embedder (ADR-0033). Overrides `[models] embedding`.
         #[arg(long, value_name = "NAME")]
         model: Option<String>,
         /// Emit the report as JSON.
@@ -2036,24 +1983,11 @@ enum SecurityAction {
 /// long-standing contract for `check`/`review`/`path`/`links`, which report the
 /// failure on stdout/stderr and then set a non-zero status without an `Err`.
 ///
-/// `std::process::exit` never runs destructors, so `main`'s
-/// [`rto_graph::MediaEngineGuard`] would not fire here: release the media engines
-/// first, or a gate failure on a run that described an image would abort in
-/// ggml-metal's exit-time teardown and report 134 instead of 1 (issue #291).
-///
-/// The shared llama.cpp backend goes the same way, and in the same order —
-/// engines, then backend (issue #296). It is released *after* the call above and
-/// cannot be released out of turn: while any engine still holds a handle,
-/// `release_shared_backend` declines.
-///
 /// This is the **only** sanctioned exit-without-`Err` in the CLI. A subcommand
 /// that wants a non-zero status returns an error and lets `main` unwind, which is
 /// what `security ingest` does — nothing in the findings path calls
 /// `std::process::exit` directly, so nothing there can skip the guard.
 fn exit_gate_failure() -> ! {
-    let _released = rto_graph::release_media_engines();
-    #[cfg(feature = "inference-local-models")]
-    let _backend = rto_llama::backend::release_shared_backend();
     std::process::exit(1)
 }
 
@@ -2254,26 +2188,6 @@ fn main() -> anyhow::Result<()> {
     // one command a bad pin stops you from running.
     #[cfg(feature = "models")]
     rto_graph::set_model_pins(cfg.effective.models.resolve());
-    // Own the process's single llama.cpp backend for the rest of `main` (issue
-    // #296). Declared **before** the media guard below precisely so that it drops
-    // *after* it: Rust drops locals in reverse declaration order, and llama.cpp
-    // requires every model be freed before the backend. This covers the engines
-    // `rto-graph` never sees — `serve`'s resident model, `infer --model`, `spec
-    // draft` — while `release_media_engines` covers the extractors'; both call the
-    // same idempotent release, and neither can free the backend out of turn,
-    // because an engine that still holds a handle makes the release decline.
-    #[cfg(feature = "inference-local-models")]
-    let _backend = rto_llama::backend::SharedBackendGuard::hold();
-    // Own the media extractors' native engines for the rest of `main`. Extraction
-    // loads a llama.cpp vision/ASR engine once and reuses it across blobs; on the
-    // Metal backend that engine must be *dropped* before libc's C++ finalizers run,
-    // or ggml-metal's device teardown finds a non-empty residency set and aborts a
-    // successful run with SIGABRT (exit 134, issue #291). Dropping this guard at the
-    // end of `main` releases them while Rust destructors still run — on the normal
-    // path, on a `?` error out of a subcommand, and on an unwinding panic alike.
-    // The `std::process::exit` gate failures below skip destructors, so they call
-    // `exit_gate_failure`, which releases first.
-    let _engines = rto_graph::MediaEngineGuard::hold();
     match cli.command {
         Command::Sync { json, committed } => run_sync(ingest, json, committed),
         Command::Check { json, source } => run_check(ingest, json, source, debt_ignore),
@@ -2288,7 +2202,6 @@ fn main() -> anyhow::Result<()> {
             limit,
             graph_context,
             no_diff,
-            typed_class,
         } => match (score, replay, llm) {
             (Some(run), _, _) => review::run_score(&run, corpus.as_deref(), json),
             (None, Some(out), _) => run_replay(
@@ -2296,7 +2209,6 @@ fn main() -> anyhow::Result<()> {
                 checks.as_deref(),
                 limit,
                 graph_context,
-                typed_class,
                 ingest,
                 &cfg.effective,
             ),
@@ -2304,24 +2216,10 @@ fn main() -> anyhow::Result<()> {
                 base.as_deref(),
                 checks.as_deref(),
                 graph_context,
-                typed_class,
                 ingest,
                 &cfg.effective,
             ),
-            (None, None, false) => {
-                // `--typed-class` is a property of the model reviewer, and
-                // `review` without `--llm` runs no model. Refused by name rather
-                // than ignored: a flag silently dropped reads, from the outside,
-                // exactly like a flag that did nothing — which is how a whole run
-                // gets recorded under the wrong arm.
-                anyhow::ensure!(
-                    !typed_class,
-                    "`--typed-class` asks the model a typed question about each finding, \
-                     so it needs `--llm` or `--replay`. `roteiro review` on its own runs \
-                     no model at all."
-                );
-                run_review(ingest, json, base.as_deref(), debt_ignore, no_diff)
-            }
+            (None, None, false) => run_review(ingest, json, base.as_deref(), debt_ignore, no_diff),
         },
         Command::Query {
             key,
@@ -2346,7 +2244,7 @@ fn main() -> anyhow::Result<()> {
             json,
             source,
         ),
-        Command::Media { action } => run_media(ingest, gate, action),
+        Command::Media { action } => run_media(&cfg.effective, ingest, gate, action),
         Command::Memory { action } => run_memory(action),
         Command::Context {
             key,
@@ -2998,38 +2896,31 @@ fn print_models_section(loaded: &config::Loaded) {
     print_model_resolution(loaded);
 }
 
-/// What `[provider]` makes of `task` (ADR-0027): `None` when no provider is set
-/// or `task`'s surface still uses the in-process engine, else the provider id it
-/// uses and why — or why it has none.
-///
-/// Ask, `spec draft` and `review --llm` have moved to the provider; they read
-/// `[models] generative` as a provider id the registry does not list, so the
-/// registry resolution would report a working pin as unresolved.
+/// What `[provider]` makes of `task` (ADR-0027, ADR-0033): `None` for OCR, which
+/// runs in-process, or when no provider is set; else the provider id the task's
+/// key names and where it is served — or, for a generative surface with no
+/// `[models] generative`, why it has none. An unset embedding, vision or audio
+/// key falls through to the resolver, which says what the default is.
 #[cfg(feature = "provider")]
 fn provider_resolution(
     cfg: &config::Config,
     task: rto_graph::ModelTask,
 ) -> Option<Result<(String, String), String>> {
     let base_url = cfg.provider.base_url.as_deref()?;
-    if !matches!(
-        task,
-        rto_graph::ModelTask::Chat | rto_graph::ModelTask::Draft | rto_graph::ModelTask::Review
-    ) {
+    if task == rto_graph::ModelTask::Ocr {
         return None;
     }
-    Some(
-        cfg.models
-            .get("generative")
-            .map(|id| {
-                (
-                    id.to_owned(),
-                    format!("served by the provider at {base_url}"),
-                )
-            })
-            .ok_or_else(|| {
-                "`[provider] base_url` is set but `[models] generative` is not".to_owned()
-            }),
-    )
+    let key = task.config_key();
+    match cfg.models.get(key) {
+        Some(id) => Some(Ok((
+            id.to_owned(),
+            format!("served by the provider at {base_url}"),
+        ))),
+        None if key == "generative" => Some(Err(
+            "`[provider] base_url` is set but `[models] generative` is not".to_owned(),
+        )),
+        None => None,
+    }
 }
 
 /// Without the `provider` feature `[provider]` is read and never used.
@@ -3078,9 +2969,9 @@ fn model_resolution_json(loaded: &config::Loaded) -> serde_json::Value {
                     "task": task.as_str(),
                     "surface": task.surface(),
                     "config_key": task.config_key(),
-                    "model": choice.model,
+                    "model": choice.provider_id.as_deref().or(choice.model),
                     "source": choice.source.as_str(),
-                    "layer": (choice.source == rto_graph::ModelSource::Pinned).then(|| provenance(
+                    "layer": (choice.source != rto_graph::ModelSource::Default).then(|| provenance(
                         loaded.project.models.get(task.config_key()).is_some(),
                         loaded.user.models.get(task.config_key()).is_some(),
                     )),
@@ -3154,7 +3045,9 @@ fn print_model_resolution(loaded: &config::Loaded) {
             Ok(choice) => {
                 // Where a pin came from, on the same `project`/`user` terms as
                 // every other value in this report.
-                let layer = if choice.source == rto_graph::ModelSource::Pinned {
+                let layer = if choice.source == rto_graph::ModelSource::Default {
+                    String::new()
+                } else {
                     format!(
                         " in {} config",
                         provenance(
@@ -3162,8 +3055,6 @@ fn print_model_resolution(loaded: &config::Loaded) {
                             loaded.user.models.get(key).is_some(),
                         )
                     )
-                } else {
-                    String::new()
                 };
                 // `Some(false)` only: `installed: None` means the question does
                 // not apply (a remote resolution has no weights on any disk), and
@@ -3839,7 +3730,10 @@ fn run_sync(
         sync_worktree(&mut store, &repo, &cache, &registry)?
     };
 
-    let raw_warning = repo.workdir().and_then(symlinked_raw_warning);
+    let follows = !committed_only && ingest.paths.follows_raw_symlink();
+    let raw_warning = repo
+        .workdir()
+        .and_then(|root| raw_symlink_note(root, follows));
     if json {
         let mut value = sync_json(&report)?;
         // The same diagnostic a human gets, so `--json` is not the one route
@@ -3878,24 +3772,32 @@ fn run_sync(
     Ok(())
 }
 
-/// A warning when `<root>/raw` is a symlink, which the scan never follows (#815).
+/// What `sync` says when `<root>/raw` is a symlink (#815), so a link is never
+/// skipped — or followed — without a word.
 ///
-/// Following it would reverse a stated rule — `collect_markdown` and the bundle
-/// walk refuse symlinks so out-of-repo content cannot arrive behind a
-/// repo-relative key — and doing so is a decision for ADR-0026, not a detail. So
-/// until then the skip is **said**: a green sync over a `raw/` it never entered
-/// is the empty-corpus success this project keeps paying to avoid. The remedy
-/// that works today is a mount, which the walker sees as a directory.
-fn symlinked_raw_warning(root: &std::path::Path) -> Option<String> {
+/// A worktree sync follows it unless `[paths] follow_raw_symlink = false`
+/// (ADR-0026): the note names the target, because out-of-tree bytes are entering
+/// the graph. A committed-only sync reads git objects, which hold no bytes behind
+/// a link, and a disabled one reads nothing behind it; both warn, since a green
+/// sync over a `raw/` it never entered is the empty-corpus success this project
+/// keeps paying to avoid.
+fn raw_symlink_note(root: &std::path::Path, follows: bool) -> Option<String> {
     let raw = root.join("raw");
     let target = std::fs::read_link(&raw).ok()?;
-    Some(format!(
-        "warning: `raw/` in the working tree is a symlink (→ {}), and the scan does \
-         not follow symlinks, so files that exist only behind it are not extracted \
-         (anything committed under `raw/` still is). Mount the shared storage AT \
-         `raw/` instead — a mount point is a directory to the walker (ADR-0026, #815)",
-        target.display()
-    ))
+    let target = target.display();
+    Some(if follows {
+        format!(
+            "note: `raw/` is a symlink (→ {target}); following it, so files behind it are \
+             graphed as `raw/…`. Set `[paths] follow_raw_symlink = false` to stop (ADR-0026)"
+        )
+    } else {
+        format!(
+            "warning: `raw/` is a symlink (→ {target}) and this sync does not follow it, \
+             so files that exist only behind it are not extracted (anything committed \
+             under `raw/` still is). It is followed by a worktree sync unless \
+             `[paths] follow_raw_symlink = false` (ADR-0026, #815)"
+        )
+    })
 }
 
 /// Open the repository and its per-worktree store and shared object cache.
@@ -4073,7 +3975,7 @@ fn apply_authored_layer(
 /// be a silent wrong answer of the same family as scoring against a PR head: the
 /// numbers would come out clean and would describe a repository that did not
 /// exist when the code was written.
-#[cfg(any(feature = "provider", feature = "inference-local-models", test))]
+#[cfg(any(feature = "provider", test))]
 fn build_graph_at_rev(
     repo: &rto_graph::Repo,
     store: &mut rto_graph::Store,
@@ -4208,14 +4110,14 @@ fn run_check(
     Ok(())
 }
 
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+#[cfg(feature = "provider")]
 /// The repository root a git-backed review works from.
 fn review_repo_root() -> std::path::PathBuf {
     std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
 }
 
 /// The arm a `--graph-context` flag selects.
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+#[cfg(feature = "provider")]
 fn review_arm(graph_context: bool) -> review_llm::ReviewArm {
     if graph_context {
         review_llm::ReviewArm::Graph
@@ -4224,30 +4126,11 @@ fn review_arm(graph_context: bool) -> review_llm::ReviewArm {
     }
 }
 
-/// Where the reviewer's defect classes come from, from `--typed-class`.
-///
-/// Beside [`review_arm`] and in the same shape, so that the two experiment
-/// variables `review --llm` has are read from the flags in one place rather than
-/// each at its own call site — including its feature gate, because `review_llm`
-/// is itself behind one and a build with no backend has no `ClassSource` to
-/// return.
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
-fn review_class_source(typed_class: bool) -> review_llm::ClassSource {
-    if typed_class {
-        review_llm::ClassSource::TypedRead
-    } else {
-        review_llm::ClassSource::ReplyText
-    }
-}
-
-/// `roteiro review --llm` — review the change with a model: the configured
-/// provider, else the in-process engine where this build has one.
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+#[cfg(feature = "provider")]
 fn run_llm_review(
     base: Option<&str>,
     checks: Option<&str>,
     graph_context: bool,
-    typed_class: bool,
     ingest: rto_graph::IngestConfig,
     cfg: &config::Config,
 ) -> anyhow::Result<()> {
@@ -4256,20 +4139,18 @@ fn run_llm_review(
         base,
         checks,
         review_arm(graph_context),
-        review_class_source(typed_class),
         ingest,
         cfg,
     )
 }
 
 /// `roteiro review --replay` — measure the reviewer against the corpus.
-#[cfg(any(feature = "provider", feature = "inference-local-models"))]
+#[cfg(feature = "provider")]
 fn run_replay(
     out: &str,
     checks: Option<&str>,
     limit: Option<usize>,
     graph_context: bool,
-    typed_class: bool,
     ingest: rto_graph::IngestConfig,
     cfg: &config::Config,
 ) -> anyhow::Result<()> {
@@ -4279,7 +4160,7 @@ fn run_replay(
         checks,
         limit,
         review_arm(graph_context),
-        review_class_source(typed_class),
+        review_llm::ClassSource::ReplyText,
         ingest,
         cfg,
     )
@@ -4291,38 +4172,34 @@ fn run_replay(
 /// `--help` whatever the build, so a stock install that answered
 /// `unrecognized argument` would send someone to check their spelling instead of
 /// their features. This is the shape `models` was moved into `default` for.
-#[cfg(not(any(feature = "provider", feature = "inference-local-models")))]
+#[cfg(not(feature = "provider"))]
 fn run_llm_review(
     _base: Option<&str>,
     _checks: Option<&str>,
     _graph_context: bool,
-    _typed_class: bool,
     _ingest: rto_graph::IngestConfig,
     _cfg: &config::Config,
 ) -> anyhow::Result<()> {
     anyhow::bail!(
         "`review --llm` needs a model backend, which this build does not have. Rebuild \
-         with the default `provider` feature and set `[provider] base_url` (or build \
-         with `inference-local-models`). \
+         with the default `provider` feature and set `[provider] base_url`. \
          `roteiro review` without `--llm` needs no model and still works."
     )
 }
 
 /// See [`run_llm_review`]'s backend-less twin.
-#[cfg(not(any(feature = "provider", feature = "inference-local-models")))]
+#[cfg(not(feature = "provider"))]
 fn run_replay(
     _out: &str,
     _checks: Option<&str>,
     _limit: Option<usize>,
     _graph_context: bool,
-    _typed_class: bool,
     _ingest: rto_graph::IngestConfig,
     _cfg: &config::Config,
 ) -> anyhow::Result<()> {
     anyhow::bail!(
         "`review --replay` needs a model backend, which this build does not have. \
-         Rebuild with the default `provider` feature and set `[provider] base_url` \
-         (or build with `inference-local-models`). \
+         Rebuild with the default `provider` feature and set `[provider] base_url`. \
          `roteiro review --score <run.json>` scores an existing run with no model."
     )
 }
@@ -4718,54 +4595,12 @@ fn run_init(
     Ok(())
 }
 
-/// The embedding model `[models] embedding` names, **resolved** rather than read
-/// straight out of the config (Stage 33).
-///
-/// The difference is what happens to a wrong value. Read straight, an unknown
-/// name or a generative model reached the embedder and failed there, several
-/// layers from the key that caused it; resolved, it is a named error quoting the
-/// key. An explicit `--model` flag still wins over this and is validated by the
-/// embedder, which is where a flag belongs.
-///
-/// # Errors
-/// The resolver's error when `[models] embedding` names no known model, or names
-/// one that is not an embedding model.
-#[cfg(all(feature = "inference", feature = "models"))]
-fn configured_embedding_model(_cfg: &config::Config) -> anyhow::Result<Option<&'static str>> {
-    Ok(rto_graph::resolve_model(rto_graph::ModelTask::Embed)?.model)
-}
-
-/// Without the registry there is nothing to resolve a name *against*, so the
-/// configured name passes through unvalidated to [`config_embedding_model`],
-/// which warns that this build cannot honour it either way.
-#[cfg(all(feature = "inference", not(feature = "models")))]
-fn configured_embedding_model(cfg: &config::Config) -> anyhow::Result<Option<&str>> {
-    Ok(cfg.models.embedding.as_deref())
-}
-
-/// Resolve a config-sourced embedding model name against this binary's feature
-/// set. When built with `inference-local-models`, the name is honoured; when
-/// built without it, a config-set model can't be loaded, so — per ADR-0007's
-/// "missing-feature keys warn" rule — emit a warning and fall back to the
-/// offline default (returning `None`) rather than hard-failing. An explicit
-/// `--model` flag bypasses this and is validated directly by the embedder.
-#[cfg(feature = "inference-local-models")]
-fn config_embedding_model(name: Option<&str>) -> Option<String> {
-    name.map(str::to_owned)
-}
-
-/// See the `inference-local-models` variant: without local models a
-/// config-sourced embedding model is warned about and ignored.
-#[cfg(all(feature = "inference", not(feature = "inference-local-models")))]
-fn config_embedding_model(name: Option<&str>) -> Option<String> {
-    if let Some(name) = name {
-        eprintln!(
-            "warning: config `[models] embedding = {name:?}` needs the \
-             `inference-local-models` feature; this build ignores it and uses \
-             the offline default (pass `--model` to force an error instead)"
-        );
-    }
-    None
+/// The embedding model `[models] embedding` names: a provider model id, passed
+/// through as written (ADR-0033). The provider owns its model list, so a wrong
+/// name is the provider's named refusal on the first call, not a registry check.
+#[cfg(feature = "inference")]
+fn configured_embedding_model(cfg: &config::Config) -> Option<String> {
+    cfg.models.embedding.clone()
 }
 
 /// Suggest `inferred` similarity edges over the graph and apply them. Builds the
@@ -4790,7 +4625,7 @@ fn run_infer(
     // rather than hard-failing a build that can't use it.
     let model = match model {
         Some(flag) => Some(flag),
-        None => config_embedding_model(configured_embedding_model(cfg)?),
+        None => configured_embedding_model(cfg),
     };
 
     if !(0.0..=1.0).contains(&min_confidence) {
@@ -4814,7 +4649,7 @@ fn run_infer(
 
     // Choose the embedder: a pulled local model if requested and installed,
     // otherwise the offline hashing default.
-    let (edges, embedder_label) = infer_with_embedder(&store, config, model.as_deref())?;
+    let (edges, embedder_label) = infer_with_embedder(cfg, &store, config, model.as_deref())?;
     let count = edges.len();
     // Inferred edges are additive suggestions; applying them never alters the
     // derived/authored facts already in the store.
@@ -4895,36 +4730,16 @@ fn run_duplicates(
 }
 
 /// Run inference with the requested embedder, returning the edges and a label
-/// describing which embedder was used. Without the `inference-local-models`
-/// feature, only the hashing embedder exists.
-#[cfg(all(feature = "inference", not(feature = "inference-local-models")))]
+/// describing which embedder was used: the offline hashing embedder, or a
+/// provider embedding model when one is named (ADR-0033).
+#[cfg(feature = "inference")]
 fn infer_with_embedder(
+    cfg: &config::Config,
     store: &rto_graph::Store,
     config: rto_graph::InferenceConfig,
     model: Option<&str>,
 ) -> anyhow::Result<(Vec<rto_graph::Edge>, String)> {
-    use rto_graph::infer_edges_with;
-    if model.is_some() {
-        anyhow::bail!(
-            "--model requires the `inference-local-models` feature; \
-             rebuild with `--features inference-local-models`"
-        );
-    }
-    Ok((
-        infer_edges_with(store, config, &rto_graph::HashEmbedder)?,
-        "hashing embedder (offline default)".to_owned(),
-    ))
-}
-
-/// Feature-rich variant: honour `--model` by loading a local **GGUF** embedding
-/// model through the shared llama.cpp engine (ADR-0003 v1.2) — no candle.
-#[cfg(feature = "inference-local-models")]
-fn infer_with_embedder(
-    store: &rto_graph::Store,
-    config: rto_graph::InferenceConfig,
-    model: Option<&str>,
-) -> anyhow::Result<(Vec<rto_graph::Edge>, String)> {
-    use rto_graph::{HashEmbedder, Platform, infer_edges_with};
+    use rto_graph::{HashEmbedder, infer_edges_with};
 
     let Some(name) = model else {
         return Ok((
@@ -4932,67 +4747,43 @@ fn infer_with_embedder(
             "hashing embedder (offline default)".to_owned(),
         ));
     };
-    // Only accept a known registry model whose host-variant files are all
-    // present — never an arbitrary directory under the store root.
-    let spec = rto_graph::find_model(name)
-        .ok_or_else(|| anyhow::anyhow!("unknown model `{name}` (see `roteiro model list`)"))?;
-    // Reject non-embedding models upfront: a generative/OCR/vision model would
-    // otherwise be "accepted", then fail every embed call — and because embed
-    // errors degrade to empty vectors (see `LlamaEmbedder`), that would surface
-    // silently as "no suggestions" rather than a clear error.
-    if spec.kind != rto_graph::ModelKind::Embedding {
+    let Some(base_url) = cfg.provider.base_url.as_deref() else {
         anyhow::bail!(
-            "model `{name}` is a {} model, not an embedding model — \
-             `infer --model` needs an embedding model (see `roteiro model list`)",
-            spec.kind.as_str()
+            "`--model`/`[models] embedding` names a provider model, but `[provider] base_url` \
+             is not set — point it at a server such as Ollama (see docs/MODEL_SETUP.md), \
+             or omit the model to use the offline hashing embedder"
         );
+    };
+    let engine = provider_engine(cfg, base_url, vec![name.to_owned()])?;
+    // Probe once so a wrong name or an unreachable server is a named error here,
+    // not a run of empty vectors that reads as "no suggestions".
+    {
+        use rto_llama::Engine as _;
+        engine
+            .embed(name, &["probe".to_owned()])
+            .map_err(|e| anyhow::anyhow!("embedding model `{name}` at {base_url}: {e}"))?;
     }
-    let variant = spec
-        .variant_for(Platform::host())
-        .ok_or_else(|| anyhow::anyhow!("no variant of `{name}` for this platform"))?;
-    if !rto_graph::is_installed(name, variant) {
-        anyhow::bail!(
-            "model `{name}` is not installed — run `roteiro model pull {name}` \
-             (or omit --model to use the offline default)"
-        );
-    }
-    let embedder = LlamaEmbedder::new(name)?;
+    let embedder = ProviderEmbedder {
+        engine,
+        model: name.to_owned(),
+    };
     let edges = infer_edges_with(store, config, &embedder)?;
-    Ok((edges, format!("local model `{name}` (llama.cpp)")))
+    Ok((edges, format!("provider model `{name}` at {base_url}")))
 }
 
-/// A GGUF embedding model behind the [`rto_graph::Embedder`] trait, backed by the
-/// shared llama.cpp engine. On an embedding failure it returns an **empty**
-/// vector rather than aborting the run — an empty vector shares no length with a
-/// real embedding, so [`rto_graph::similarity`] scores it `0.0` against every
-/// node (that node simply receives no suggestions).
-#[cfg(feature = "inference-local-models")]
-struct LlamaEmbedder {
-    engine: rto_llama::llama::LlamaEngine,
+/// A provider embedding model behind the [`rto_graph::Embedder`] trait. On an
+/// embedding failure it returns an **empty** vector rather than aborting the run
+/// — an empty vector shares no length with a real embedding, so
+/// [`rto_graph::similarity`] scores it `0.0` against every node (that node
+/// simply receives no suggestions).
+#[cfg(feature = "inference")]
+struct ProviderEmbedder {
+    engine: provider::ProviderEngine,
     model: String,
 }
 
-#[cfg(feature = "inference-local-models")]
-impl LlamaEmbedder {
-    fn new(name: &str) -> anyhow::Result<Self> {
-        let engine = rto_llama::llama::LlamaEngine::new(
-            vec![rto_llama::llama::Served {
-                name: name.to_owned(),
-                path: rto_graph::model_dir(name).join("model.gguf"),
-                mmproj: None,
-            }],
-            0,
-        )
-        .map_err(|e| anyhow::anyhow!("loading model `{name}`: {e}"))?;
-        Ok(Self {
-            engine,
-            model: name.to_owned(),
-        })
-    }
-}
-
-#[cfg(feature = "inference-local-models")]
-impl rto_graph::Embedder for LlamaEmbedder {
+#[cfg(feature = "inference")]
+impl rto_graph::Embedder for ProviderEmbedder {
     fn embed(&self, text: &str) -> Vec<f32> {
         use rto_llama::Engine as _;
         self.engine
@@ -5119,6 +4910,10 @@ fn run_model_list() {
         rto_graph::store_root().display()
     );
     println!("(the built-in hashing embedder is always available with no model)");
+    println!(
+        "(chat, embeddings, vision and audio are served by your provider — `[provider] \
+         base_url` and `[models]`; see docs/MODEL_SETUP.md)"
+    );
 
     // Group the opinionated picks by section, then by resource tier, so the
     // "which should I pull?" answer reads off a machine's resources.
@@ -5152,6 +4947,11 @@ fn run_model_list() {
     let desc_indent = 4 + MARK_AVAILABLE.len() + 1;
 
     for (kind, heading) in sections {
+        // A section the registry has nothing for is not printed (ADR-0033 left
+        // only OCR).
+        if !REGISTRY.iter().any(|s| s.kind == kind) {
+            continue;
+        }
         println!("\n{heading}:");
         for (tier, tier_label) in tiers {
             let mut specs = REGISTRY
@@ -5288,153 +5088,8 @@ fn run_model_pull(name: &str, yes: bool) -> anyhow::Result<()> {
         "installed `{name}` → {}  (use it with `{use_hint}`)",
         dir.display()
     );
-    warn_if_chat_template_unrenderable(name, &dir);
     Ok(())
 }
-
-/// Say now, at install, if this model's chat template is one Roteiro cannot
-/// render — rather than at the first chat that uses it.
-///
-/// Roteiro renders a model's **own** Jinja template (issue #492), because
-/// llama.cpp's `apply_chat_template` runs no Jinja and would answer with a prompt
-/// the model was never trained on. The cost of doing it properly is that a
-/// template using a Jinja feature this renderer lacks fails — and the two the
-/// registry has already produced (`tojson`, `startswith`) were both closed by
-/// adding the feature.
-///
-/// A failure mid-conversation is the worst place to learn that. Here it is
-/// actionable: the model is installed, nothing is lost, and the user knows before
-/// they depend on it.
-///
-/// **Warns, never fails.** A model may be installed for embeddings, OCR or audio
-/// and never see a chat turn, and a pull that succeeded must not exit non-zero
-/// because a capability the user may not want is unavailable. Silence means one
-/// of: no embedded template (normal for non-chat models), or one that renders.
-#[cfg(all(feature = "models", feature = "inference-local-models"))]
-fn warn_if_chat_template_unrenderable(name: &str, dir: &std::path::Path) {
-    let gguf = dir.join("model.gguf");
-    let Some(template) = rto_llama::gguf::chat_template(&gguf) else {
-        return;
-    };
-    if !rto_llama::chat_template::is_jinja(&template) {
-        return;
-    }
-    // One representative turn. A template that renders this renders a
-    // conversation; one that fails here fails every time.
-    let probe = [serde_json::json!({"role": "user", "content": "hello"})];
-    if let Err(e) = rto_llama::chat_template::render(&template, &probe, None, true) {
-        eprintln!("{}", unrenderable_template_warning(name, &e));
-    }
-}
-
-/// The warning [`warn_if_chat_template_unrenderable`] prints for a failing probe.
-///
-/// Split out to be tested: the choice between these two messages is the whole
-/// behaviour, and it is a choice that got its first wrong answer the moment
-/// `TemplateError::Rejected` existed (#848).
-#[cfg(all(feature = "models", feature = "inference-local-models"))]
-fn unrenderable_template_warning(
-    name: &str,
-    e: &rto_llama::chat_template::TemplateError,
-) -> String {
-    // A refusal is **not** a renderer gap, and reporting it as one would be a new
-    // false message. `raise_exception` reaching here means the template rendered
-    // perfectly and then declined this particular conversation — so "a Jinja
-    // feature Roteiro does not support yet" is exactly backwards, and an operator
-    // told it goes looking for a missing filter that is not missing.
-    //
-    // Still a warning, because the probe is the *minimum* conversation — one
-    // `user` turn — and a template that will not take that will not take a chat.
-    // But the two say opposite things about where to look, so they must not share
-    // a sentence. No template in the current registry reaches this arm (checked:
-    // `voxtral-mini-3b`, the registry's other `raise_exception` user, renders the
-    // probe); it is written for the one that will.
-    if matches!(e, rto_llama::chat_template::TemplateError::Rejected(_)) {
-        return format!(
-            "warning: `{name}`'s chat template refuses even a single-turn \
-             conversation, saying: {e}\n  \
-             The template renders — this is not a gap in Roteiro — but it declines \
-             the simplest chat there is, so chat requests to this model are likely \
-             to be refused the same way. The model is installed and usable for \
-             anything that does not need a chat prompt."
-        );
-    }
-    format!(
-        "warning: `{name}` embeds a chat template Roteiro cannot render ({e}).\n  \
-         The model is installed and usable for anything that does not need a \
-         chat prompt. Chat requests to it will fail with this same message \
-         rather than silently using a prompt it was not trained on.\n  \
-         The template is the model's own — this is a Jinja feature Roteiro does \
-         not support yet, not a fault in the model."
-    )
-}
-
-/// The install-time probe's choice of warning (#848).
-#[cfg(all(test, feature = "models", feature = "inference-local-models"))]
-mod template_probe_warning {
-    use super::unrenderable_template_warning;
-    use rto_llama::chat_template::TemplateError;
-
-    /// A template that merely **refuses** the probe is not reported as one
-    /// Roteiro cannot render.
-    ///
-    /// The false message this PR would otherwise have introduced: before
-    /// `Rejected` existed every `Err` here really was a renderer gap, so the one
-    /// sentence was true. It stopped being true the moment a template could
-    /// decline a conversation while rendering perfectly — and the sentence sends
-    /// an operator hunting for a missing Jinja filter that is not missing.
-    #[test]
-    fn a_refusal_is_not_reported_as_a_missing_jinja_feature() {
-        let w = unrenderable_template_warning(
-            "some-model",
-            &TemplateError::Rejected("No user query found in messages.".to_owned()),
-        );
-        assert!(
-            w.contains("No user query found in messages."),
-            "the template's own words are the useful part: {w}"
-        );
-        assert!(
-            !w.contains("Jinja feature Roteiro does not support yet"),
-            "a template that rendered and then declined is not an unsupported \
-             renderer, and saying so points the reader at the wrong thing: {w}"
-        );
-        assert!(
-            w.contains("not a gap in Roteiro"),
-            "the warning must say where NOT to look, or it is only less wrong: {w}"
-        );
-    }
-
-    /// A genuine renderer gap keeps the original message, in the original words.
-    ///
-    /// The negative control: splitting the arm must not cost the message that
-    /// was right all along, and "print nothing for a rejection" would pass a
-    /// test that only checked the first assertion above.
-    #[test]
-    fn a_renderer_gap_keeps_its_original_wording() {
-        let w = unrenderable_template_warning(
-            "some-model",
-            &TemplateError::Render("unknown filter: pyformat".to_owned()),
-        );
-        for claim in [
-            "some-model",
-            "unknown filter: pyformat",
-            "Jinja feature Roteiro does not support yet",
-            "not a fault in the model",
-        ] {
-            assert!(w.contains(claim), "lost `{claim}` from: {w}");
-        }
-    }
-}
-
-/// Without a local inference backend there is no renderer to check against, so
-/// there is nothing to say.
-///
-/// Gated on `models` as well, and not only on the backend, because that is what
-/// gates the sole caller (`run_model_pull`). Without it this stub survives into
-/// a build with `models` off — `--no-default-features --features execution`, one
-/// of CI's cells — where nothing calls it and `-D warnings` reports it as dead.
-#[cfg(all(feature = "models", not(feature = "inference-local-models")))]
-fn warn_if_chat_template_unrenderable(_name: &str, _dir: &std::path::Path) {}
 
 /// Open a streaming HTTPS reader for `url` starting at byte `from` (the body is
 /// never buffered whole).
@@ -9150,14 +8805,9 @@ fn run_spec_scaffold(
     emit_artifact(&md, &format!("{label} scaffold"), out)
 }
 
-/// Draft the scaffold's unfilled sections (ADR-0004 Tier 1) with whichever
-/// engine is configured: the `[provider]` server when `base_url` is set — on
-/// this machine or hosted (ADR-0028) — else the in-process llama.cpp path.
-#[cfg(any(
-    feature = "serve",
-    feature = "inference-local-models",
-    feature = "provider"
-))]
+/// Draft the scaffold's unfilled sections (ADR-0004 Tier 1) with the
+/// `[provider]` server — on this machine or hosted (ADR-0028, ADR-0033).
+#[cfg(feature = "provider")]
 fn run_spec_draft(
     cfg: &config::Loaded,
     ingest: rto_graph::IngestConfig,
@@ -9169,99 +8819,29 @@ fn run_spec_draft(
 ) -> anyhow::Result<()> {
     let (scaffold, label, ctx) = build_scaffold(ingest, topic, title, kind)?;
 
-    // An external provider names its models by its own ids, which the registry
-    // does not list, so the resolver below has nothing to resolve them against
-    // (ADR-0027).
-    #[cfg(feature = "provider")]
-    if let Some(base_url) = cfg.effective.provider.base_url.as_deref() {
-        return spec_draft_provider(
-            &cfg.effective,
-            base_url,
-            repair,
-            &scaffold,
-            &label,
-            &ctx,
-            out,
+    let Some(base_url) = cfg.effective.provider.base_url.as_deref() else {
+        anyhow::bail!(
+            "no model to draft with: set `[provider] base_url` to a model server such as Ollama \
+             and `[models] generative` to one of its models (see docs/MODEL_SETUP.md). (`spec \
+             scaffold` works with no model at all.)"
         );
-    }
-
-    // Model pick, via the one resolver (Stage 33): `[models] generative` if it
-    // pins one, else the low-tier instruct default that runs anywhere. A pin that
-    // is not a generative model is an error, not a silent fall back.
-    let choice = rto_graph::resolve_model_with(
-        rto_graph::ModelTask::Draft,
-        &cfg.effective.models.resolve(),
-    )?;
-    spec_draft_local(&choice, repair, &scaffold, &label, &ctx, out)
-}
-
-/// Draft with the local llama.cpp model the resolver chose.
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
-fn spec_draft_local(
-    choice: &rto_graph::ModelChoice,
-    repair: u8,
-    scaffold: &str,
-    label: &str,
-    ctx: &rto_spec::SpecContext,
-    out: Option<&str>,
-) -> anyhow::Result<()> {
-    use rto_graph::ModelSource;
-
-    let Some(model) = choice.model else {
-        anyhow::bail!("no generative model in the registry");
     };
-    if choice.installed == Some(false) {
-        // A **pinned** model that is not installed is a hard error naming the
-        // key, matching what `roteiro infer` has always done with a configured
-        // embedding model: the operator asked for that model specifically, and
-        // quietly producing a model-less scaffold answers a question they did not
-        // ask. An *unpinned* default that is not installed keeps the note-and-
-        // scaffold path unchanged — nothing was asked for, so nothing is refused.
-        if choice.source == ModelSource::Pinned {
-            return Err(choice
-                .require_installed()
-                .expect_err("an uninstalled pin errors")
-                .into());
-        }
-        eprintln!(
-            "note: generative model `{model}` is not installed — emitting the scaffold. \
-             Draft prose with: roteiro model pull {model}"
-        );
-        return emit_artifact(scaffold, &format!("{label} scaffold"), out);
-    }
-
-    if cfg!(debug_assertions) {
-        eprintln!(
-            "note: unoptimized build — local generation is very slow; use a \
-             release build (`cargo build --release`) for usable speed."
-        );
-    }
-    let engine = rto_llama::llama::LlamaEngine::new(
-        vec![rto_llama::llama::Served {
-            name: model.to_owned(),
-            path: rto_graph::model_dir(model).join("model.gguf"),
-            mmproj: None,
-        }],
-        0,
+    spec_draft_provider(
+        &cfg.effective,
+        base_url,
+        repair,
+        &scaffold,
+        &label,
+        &ctx,
+        out,
     )
-    .map_err(|e| anyhow::anyhow!("starting llama.cpp: {e}"))?;
-    let drafts = draft_sections(&engine, model, scaffold, ctx, repair)?;
-    eprintln!(
-        "drafted {} section(s) with {} (via {GEN_BACKEND})",
-        drafts.len(),
-        model
-    );
-    report_draft_coverage(ctx, &drafts);
-    let md = rto_spec::apply_drafts(scaffold, &drafts);
-    emit_artifact(&md, &format!("{label} draft"), out)
 }
 
 /// Draft through the external provider (ADR-0027) with `[models] generative`,
 /// which names one of the provider's models.
 ///
-/// There is no default model here, unlike the in-process path: a provider id
-/// that happens to exist on one machine names nothing on the next, so an unset
-/// key is an error naming it rather than a guess.
+/// There is no default model: a provider id that exists on one machine names
+/// nothing on the next, so an unset key is an error naming it, not a guess.
 #[cfg(feature = "provider")]
 fn spec_draft_provider(
     cfg: &config::Config,
@@ -9289,51 +8869,14 @@ fn spec_draft_provider(
     emit_artifact(&md, &format!("{label} draft"), out)
 }
 
-/// `spec draft` in a build with **no in-process generator** and no `[provider]
-/// base_url`: this build has nothing to draft with.
-///
-/// It deliberately does not emit a bare scaffold:
-/// `spec scaffold` is the command for that, and quietly substituting it here
-/// would answer a question nobody asked.
-#[cfg(all(
-    feature = "provider",
-    not(any(feature = "serve", feature = "inference-local-models"))
-))]
-fn spec_draft_local(
-    _choice: &rto_graph::ModelChoice,
-    _repair: u8,
-    _scaffold: &str,
-    _label: &str,
-    _ctx: &rto_spec::SpecContext,
-    _out: Option<&str>,
-) -> anyhow::Result<()> {
-    anyhow::bail!(
-        "no model to draft with: set `[provider] base_url` to a model server such as Ollama \
-         and `[models] generative` to one of its models (see docs/MODEL_SETUP.md). (`spec \
-         scaffold` works with no model at all.)"
-    )
-}
-
-/// The generation backend label shown after drafting.
-#[cfg(any(feature = "serve", feature = "inference-local-models"))]
-const GEN_BACKEND: &str = "llama.cpp";
-
 /// Max tokens generated per drafted section.
-#[cfg(any(
-    feature = "serve",
-    feature = "inference-local-models",
-    feature = "provider"
-))]
+#[cfg(feature = "provider")]
 const DRAFT_MAX_TOKENS: u32 = 800;
 
 /// Draft each unfilled section of `scaffold` with `model` on `engine` — the
 /// in-process llama.cpp engine or the external provider (ADR-0027), which answer
 /// the same request and are held to the same `<think>` rule.
-#[cfg(any(
-    feature = "serve",
-    feature = "inference-local-models",
-    feature = "provider"
-))]
+#[cfg(feature = "provider")]
 fn draft_sections(
     engine: &dyn rto_llama::Engine,
     model: &str,
@@ -9380,11 +8923,7 @@ fn draft_sections(
 
 /// One drafting request: a single user message, deterministic, capped at
 /// [`DRAFT_MAX_TOKENS`].
-#[cfg(any(
-    feature = "serve",
-    feature = "inference-local-models",
-    feature = "provider"
-))]
+#[cfg(feature = "provider")]
 fn draft_request(model: &str, content: String) -> rto_llama::ChatRequest {
     rto_llama::ChatRequest {
         tools: None,
@@ -9406,11 +8945,7 @@ fn draft_request(model: &str, content: String) -> rto_llama::ChatRequest {
 /// or decision the draft mentioned. A pass that fails or never answers ends the
 /// loop and keeps what it has: the draft itself already succeeded, so a failed
 /// improvement is not a failed command.
-#[cfg(any(
-    feature = "serve",
-    feature = "inference-local-models",
-    feature = "provider"
-))]
+#[cfg(feature = "provider")]
 fn repair_section(
     engine: &dyn rto_llama::Engine,
     model: &str,
@@ -9459,11 +8994,7 @@ fn repair_section(
 /// Report on stderr which supplied symbols and decisions the draft never
 /// mentions (ADR-0031 §1), and its style score (§2). Reports, not gates: stdout
 /// is unchanged and the exit status does not move.
-#[cfg(any(
-    feature = "serve",
-    feature = "inference-local-models",
-    feature = "provider"
-))]
+#[cfg(feature = "provider")]
 fn report_draft_coverage(ctx: &rto_spec::SpecContext, drafts: &[(String, String)]) {
     let text: Vec<&str> = drafts.iter().map(|(_, prose)| prose.as_str()).collect();
     let text = text.join("\n\n");
@@ -9475,11 +9006,7 @@ fn report_draft_coverage(ctx: &rto_spec::SpecContext, drafts: &[(String, String)
 
 /// The style line (ADR-0031 §2): the score, and each rule broken with how often.
 /// Style only — it says nothing about whether the draft is true or complete.
-#[cfg(any(
-    feature = "serve",
-    feature = "inference-local-models",
-    feature = "provider"
-))]
+#[cfg(feature = "provider")]
 fn draft_style_line(report: &rto_graph::prose::StyleReport) -> String {
     use std::fmt::Write as _;
 
@@ -9499,11 +9026,7 @@ fn draft_style_line(report: &rto_graph::prose::StyleReport) -> String {
 }
 
 /// The coverage line, or `None` when the prompt supplied nothing to cover.
-#[cfg(any(
-    feature = "serve",
-    feature = "inference-local-models",
-    feature = "provider"
-))]
+#[cfg(feature = "provider")]
 fn draft_coverage_line(cov: &rto_spec::DraftCoverage) -> Option<String> {
     use std::fmt::Write as _;
 
@@ -9535,11 +9058,7 @@ fn draft_coverage_line(cov: &rto_spec::DraftCoverage) -> Option<String> {
 ///
 /// `max_tokens` is the drafting budget, quoted because it is the number a user
 /// can raise.
-#[cfg(any(
-    feature = "serve",
-    feature = "inference-local-models",
-    feature = "provider"
-))]
+#[cfg(feature = "provider")]
 fn unanswered_draft(heading: &str, why: rto_llama::Unterminated, max_tokens: u32) -> anyhow::Error {
     let way_forward = match why {
         rto_llama::Unterminated::CutAtTokenCap => format!(
@@ -9556,11 +9075,7 @@ fn unanswered_draft(heading: &str, why: rto_llama::Unterminated, max_tokens: u32
 }
 
 /// `spec draft` without any generation backend: guide the user to enable one.
-#[cfg(not(any(
-    feature = "serve",
-    feature = "inference-local-models",
-    feature = "provider"
-)))]
+#[cfg(not(feature = "provider"))]
 fn run_spec_draft(
     _cfg: &config::Loaded,
     _ingest: rto_graph::IngestConfig,
@@ -9878,10 +9393,12 @@ struct MediaClearReport {
 
 /// Dispatch a `roteiro media` action.
 fn run_media(
+    cfg: &config::Config,
     ingest: rto_graph::IngestConfig,
     gate: rto_graph::GateThresholds,
     action: MediaAction,
 ) -> anyhow::Result<()> {
+    provide_media_engine(cfg)?;
     match action {
         MediaAction::Build {
             audio,
@@ -10079,27 +9596,15 @@ fn run_media_status(paths: &rto_graph::PathPolicy, json: bool) -> anyhow::Result
         if status.available_producers.iter().any(|p| p.kind == kind) {
             continue;
         }
-        // The model *this repository* would use, not the built-in default: a
-        // project that pinned `[models] audio` and is told to pull the default
-        // would pull the wrong model and still be unable to build. A pin that
-        // cannot be honoured is reported as itself, since "pull this" is not the
-        // fix for it.
-        let (model, why) = match resolved_media_model(kind) {
-            Ok(pair) => pair,
-            Err(err) => {
-                println!("  unavailable  {kind}: {err}");
-                continue;
-            }
-        };
         if kind.compiled_in() {
             println!(
-                "  unavailable  {kind}: the model is not installed — run \
-                 `roteiro model pull {model}`{why}"
+                "  unavailable  {kind}: no model configured — set `[models] {kind}` to a model \
+                 your provider serves, and `[provider] base_url` (ADR-0033)"
             );
         } else {
             println!(
                 "  unavailable  {kind}: this build has no {kind} generator — rebuild with \
-                 `--features {}`, then `roteiro model pull {model}`{why}",
+                 `--features {}`",
                 kind.feature(),
             );
         }
@@ -10107,41 +9612,50 @@ fn run_media_status(paths: &rto_graph::PathPolicy, json: bool) -> anyhow::Result
     Ok(())
 }
 
-/// The model `media status` should tell an operator to pull for `kind`, and the
-/// parenthetical saying where that choice came from — or the resolver's error,
-/// for a `[models]` pin that cannot be honoured.
-///
-/// Naming the *resolved* model matters here more than it looks: a project that
-/// pinned `[models] audio` and was told to pull the built-in default would pull
-/// the wrong weights and still not be able to build.
-#[cfg(feature = "models")]
-fn resolved_media_model(kind: rto_graph::MediaKind) -> Result<(String, String), String> {
-    match rto_graph::resolve_model(kind.task()) {
-        Ok(choice) => Ok((choice.label().to_owned(), format!(" ({})", choice.why()))),
-        Err(err) => Err(err.to_string()),
+/// Hand `rto-graph`'s media producers the provider engine and the model each
+/// modality uses (`[models] audio` / `[models] vision`), so `media status` and
+/// `media build` can offer them (ADR-0033). Nothing to hand over without a
+/// `[provider] base_url` or without either key; the producers then report what
+/// to configure.
+#[cfg(any(feature = "image-vision", feature = "audio-transcribe"))]
+fn provide_media_engine(cfg: &config::Config) -> anyhow::Result<()> {
+    let (audio, vision) = (cfg.models.get("audio"), cfg.models.get("vision"));
+    let Some(base_url) = cfg.provider.base_url.as_deref() else {
+        return Ok(());
+    };
+    if audio.is_none() && vision.is_none() {
+        return Ok(());
     }
+    let models: Vec<String> = audio
+        .iter()
+        .chain(vision.iter())
+        .map(|m| (*m).to_owned())
+        .collect();
+    let engine = provider_engine(cfg, base_url, models)?;
+    let host = base_url
+        .split("://")
+        .nth(1)
+        .unwrap_or(base_url)
+        .split('/')
+        .next()
+        .unwrap_or(base_url)
+        .to_owned();
+    rto_graph::media::producers::provide(rto_graph::media::producers::MediaEngine {
+        engine: std::sync::Arc::new(engine),
+        host,
+        audio_model: audio.map(str::to_owned),
+        vision_model: vision.map(str::to_owned),
+    });
+    Ok(())
 }
 
-/// Without the registry there is nothing to resolve against — and nothing a pin
-/// could be honoured *with* — so the modality's built-in default is both the
-/// only answer available and the correct one.
-///
-/// The `Result` is therefore always `Ok` here, and that is the point rather than
-/// an oversight: it is the signature the `models` twin above needs, so the one
-/// caller can stay feature-agnostic and keep reporting an unhonourable pin as
-/// itself. Removing the wrapper would split the call site in two along a seam
-/// that has nothing to do with what `media status` prints.
-///
-/// `expect` rather than `allow` so this stays honest in both directions: the
-/// item exists *only* where the lint fires, so if the twin ever gains a failure
-/// this build can share, the unfulfilled expectation says so.
-#[cfg(not(feature = "models"))]
+#[cfg(not(any(feature = "image-vision", feature = "audio-transcribe")))]
 #[expect(
     clippy::unnecessary_wraps,
-    reason = "the Result is the cfg-parallel twin's signature, not this arm's"
+    reason = "the Result is the media-feature twin's signature"
 )]
-fn resolved_media_model(kind: rto_graph::MediaKind) -> Result<(String, String), String> {
-    Ok((kind.model().to_owned(), String::new()))
+fn provide_media_engine(_cfg: &config::Config) -> anyhow::Result<()> {
+    Ok(())
 }
 
 /// Discard records, wholly or per producer. The graph is untouched.
@@ -14849,6 +14363,13 @@ fn surface_narrows(
 
 /// The no-MCP reading: nothing was restricted, so everything carried is served.
 #[cfg(all(feature = "serve", not(feature = "mcp")))]
+#[cfg_attr(
+    not(feature = "mcp"),
+    allow(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "McpSurface is `()` without mcp; with it, a non-Copy struct passed by reference"
+    )
+)]
 fn surface_narrows(
     _surface: &McpSurface,
     carried: &std::collections::BTreeSet<String>,
@@ -15935,6 +15456,13 @@ fn run_serve(
 /// workspace views as `serve` and serves the MCP router over the flattened
 /// workspace (`explain`/`search`/`path`/`debt`, per-call `project` selection).
 #[cfg(any(feature = "mcp", feature = "serve"))]
+#[cfg_attr(
+    not(feature = "mcp"),
+    allow(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "McpSurface is `()` without mcp; with it, a non-Copy struct passed by reference"
+    )
+)]
 fn run_mcp(
     ingest: rto_graph::IngestConfig,
     cfg: &config::Config,
@@ -16000,11 +15528,11 @@ fn run_serve_network(
 ) -> anyhow::Result<()> {
     let ServeWorkspaces { set, flat } = ws;
 
-    // The full model server: `/v1` (+ graph tools + Ask + UI). Only when a model is
-    // actually installed — otherwise fall through to the llama-free UI below.
+    // The full model server: `/v1` (+ graph tools + Ask + UI). Only when a
+    // provider is configured — otherwise fall through to the browse-only UI.
     #[cfg(feature = "serve")]
     {
-        if cfg.provider.base_url.is_some() || !served_models(cfg).is_empty() {
+        if cfg.provider.base_url.is_some() {
             return serve_models_endpoint(cfg, set, flat, workspace_name, opts);
         }
     }
@@ -17532,6 +17060,13 @@ fn announce_mcp_surface(surface: &McpSurface) {
 
 /// MCP serving is unavailable without the `mcp` feature.
 #[cfg(all(not(feature = "mcp"), feature = "serve"))]
+#[cfg_attr(
+    not(feature = "mcp"),
+    allow(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "McpSurface is `()` without mcp; with it, a non-Copy struct passed by reference"
+    )
+)]
 fn serve_mcp(
     _workspace: std::sync::Arc<rto_graph::Workspace>,
     _http: Option<String>,
@@ -17546,8 +17081,7 @@ fn serve_mcp(
 /// The provider model ids `serve` offers under `[provider]` (ADR-0027): the
 /// `[models]` keys `/v1` can use, generative first because the Ask panel sends
 /// `models[0]`, with duplicates dropped. `audio` and `ocr` are ingestion models,
-/// not endpoints, exactly as in [`served_models`]. Narrowed by the
-/// `[serve] models` allow-list if set, as [`served_models`] is.
+/// not endpoints. Narrowed by the `[serve] models` allow-list if set.
 #[cfg(feature = "serve")]
 fn provider_model_ids(cfg: &config::Config) -> Vec<String> {
     let wanted = cfg.serve.models.as_deref();
@@ -17563,111 +17097,23 @@ fn provider_model_ids(cfg: &config::Config) -> Vec<String> {
     ids
 }
 
-/// Serve installed generative models over the loopback, OpenAI-compatible `/v1`
-/// endpoint (ADR-0006). Serves only installed models; never downloads.
-/// Collect the installed GGUF models eligible to serve over `/v1` (ADR-0006):
-/// generative and embedding always, vision only with its `mmproj` projector;
-/// OCR/audio are sync-time ingestion models, not endpoints. Narrowed by the
-/// `[serve] models` allow-list if set. Returns the list; serving is the caller's.
-#[cfg(feature = "serve")]
-fn served_models(cfg: &config::Config) -> Vec<rto_serve::llama::Served> {
-    use rto_graph::{ModelKind, ModelTask, Platform, REGISTRY, is_installed, model_dir};
-    let host = Platform::host();
-    let wanted = cfg.serve.models.as_deref();
-    let has_file = |m: &rto_graph::ModelSpec, name: &str| {
-        m.variant_for(host)
-            .is_some_and(|v| v.files.iter().any(|f| f.name == name))
-    };
-    // What `/v1` can serve is exactly what one of its two endpoints can use:
-    // `/v1/chat/completions` (generative + vision) or `/v1/embeddings`. Asked of
-    // the capability table (Stage 33) rather than re-listed here, so a new model
-    // kind cannot become servable by being forgotten in this match.
-    let endpoint_capable =
-        |kind: ModelKind| ModelTask::Chat.capable(kind) || ModelTask::Embed.capable(kind);
-    REGISTRY
-        .iter()
-        .filter(|m| wanted.is_none_or(|w| w.iter().any(|n| n == m.name)))
-        .filter(|m| has_file(m, "model.gguf"))
-        .filter(|m| endpoint_capable(m.kind))
-        // A vision model is only servable with its multimodal projector.
-        .filter(|m| m.kind != ModelKind::Vision || has_file(m, "mmproj.gguf"))
-        .filter(|m| m.variant_for(host).is_some_and(|v| is_installed(m.name, v)))
-        .map(|m| rto_serve::llama::Served {
-            name: m.name.to_owned(),
-            path: model_dir(m.name).join("model.gguf"),
-            mmproj: has_file(m, "mmproj.gguf").then(|| model_dir(m.name).join("mmproj.gguf")),
-        })
-        .collect()
-}
-
-/// The served model ids eligible to back **chat / Ask**, in preference order.
-///
-/// Embedding models (BERT encoders like `bge-*`) are **excluded**: they cannot
-/// generate, and routing one through `/v1/chat/completions` aborts llama.cpp's
-/// decode path with a `GGML_ASSERT` (see [`rto_serve::llama`]'s chat guard). The
-/// remaining chat-capable models (generative + vision) are returned with the
-/// **default first** — the Ask UI sends `models[0]` — resolved as: the configured
-/// `[models] generative` model when it is served and generative, else the first
-/// served generative model, else the first chat-capable model. Never an embedding
-/// model. `served_ids` is the engine's served set (registry names), so every id
-/// resolves in the registry.
-///
-/// Since Stage 33 both halves come from the shared resolver rather than from a
-/// rule written here: the membership filter is
-/// [`rto_graph::ModelTask::capable`] — this function's own exclusion rule,
-/// generalised into the table every surface now shares — and the pinned default
-/// is [`rto_graph::resolve_model`], so a `[models] generative` naming an
-/// embedding model is refused here for the same reason, with the same message,
-/// as it is refused in `spec draft`.
+/// The served model ids eligible to back **chat / Ask**, in preference order:
+/// every provider id except the `[models] embedding` one, which cannot generate.
+/// The Ask UI sends `models[0]`, which is `[models] generative`.
 ///
 /// Gated on `explorer` too: the Ask model pool only exists when the explorer UI
 /// (and its `/v1/graph/capabilities` route) is compiled in.
 #[cfg(all(feature = "serve", feature = "explorer"))]
 fn chat_capable_model_ids(cfg: &config::Config, served_ids: &[String]) -> Vec<String> {
-    use rto_graph::{ModelKind, ModelTask, find_model};
-    let is_generative = |id: &str| find_model(id).is_some_and(|s| s.kind == ModelKind::Generative);
-    // Drop what cannot chat; keep generative + vision (both can). An id the
-    // registry does not know is kept, exactly as before — `served_ids` is the
-    // engine's set of registry names, so that case is unreachable, and dropping
-    // an unrecognised id would be a silent narrowing of the Ask pool.
-    // Under `[provider]` the ids are not registry names, so the registry cannot
-    // say which one embeds or which one generates — a provider id that happens to
-    // spell a registry name says nothing about the model behind it. The
-    // `[models]` keys say instead (ADR-0027).
-    let provider = cfg.provider.base_url.is_some();
-    let provider_embedding = cfg
-        .provider
-        .base_url
-        .as_ref()
-        .and(cfg.models.get("embedding"));
-    let mut ids: Vec<String> = served_ids
-        .iter()
-        .filter(|id| provider || find_model(id).is_none_or(|s| ModelTask::Chat.capable(s.kind)))
-        .filter(|id| provider_embedding != Some(id.as_str()))
-        .cloned()
-        .collect();
+    // The provider's ids are not registry names, so only the `[models]` keys can
+    // say which one embeds (ADR-0027): that one is dropped from the Ask pool.
     // `provider_model_ids` already put `[models] generative` first.
-    if provider {
-        return ids;
-    }
-    // Pick the default and rotate it to the front, preserving the order of the
-    // rest (a stable, predictable capabilities list). A pin the resolver refuses
-    // is *not* silently replaced by the first served generative model: `serve`
-    // validated it at startup and never got here.
-    // Resolved from the passed config rather than from the process-wide pins, so
-    // this stays a pure function of its arguments and the selection tests below
-    // can drive it without touching process state.
-    let pinned = rto_graph::resolve_model_with(ModelTask::Chat, &cfg.models.resolve())
-        .ok()
-        .filter(|c| c.source == rto_graph::ModelSource::Pinned)
-        .and_then(|c| c.model);
-    let default_pos = pinned
-        .and_then(|g| ids.iter().position(|id| id == g && is_generative(id)))
-        .or_else(|| ids.iter().position(|id| is_generative(id)));
-    if let Some(pos) = default_pos {
-        ids[..=pos].rotate_right(1);
-    }
-    ids
+    let embedding = cfg.models.get("embedding");
+    served_ids
+        .iter()
+        .filter(|id| embedding != Some(id.as_str()))
+        .cloned()
+        .collect()
 }
 
 #[cfg(all(test, feature = "serve", feature = "explorer"))]
@@ -17678,92 +17124,22 @@ mod chat_model_selection {
         v.iter().map(|s| (*s).to_owned()).collect()
     }
 
+    /// The `[models] embedding` id cannot generate, so it never reaches the Ask
+    /// pool; every other provider id keeps its order.
     #[test]
-    fn embedding_models_are_excluded_and_a_generative_is_default() {
-        // The bug's exact served order: bge (embedding) FIRST, then generatives.
-        // The Ask pool must drop bge and lead with a generative, so `models[0]`
-        // (what the UI sends) can never be the crashing embedding model.
-        let served = ids(&["bge-small-en-v1.5-gguf", "qwen3-0.6b", "qwen3-8b"]);
-        let out = chat_capable_model_ids(&config::Config::default(), &served);
-        assert_eq!(out, ids(&["qwen3-0.6b", "qwen3-8b"]));
-        assert!(!out.iter().any(|m| m.contains("bge")), "no embedding model");
-    }
-
-    #[test]
-    fn configured_generative_is_preferred_as_the_default() {
-        // `[models] generative` wins the default slot when served and generative.
+    fn the_embedding_model_is_excluded_and_order_is_kept() {
         let mut cfg = config::Config::default();
-        cfg.models.generative = Some("qwen3-8b".to_owned());
-        let served = ids(&["bge-small-en-v1.5-gguf", "qwen3-0.6b", "qwen3-8b"]);
-        let out = chat_capable_model_ids(&cfg, &served);
-        assert_eq!(out, ids(&["qwen3-8b", "qwen3-0.6b"]));
-    }
-
-    #[test]
-    fn a_provider_offers_its_generative_first_and_never_its_embedding_model() {
-        // Provider ids are not registry names, so only `[models]` says which one
-        // embeds (ADR-0027).
-        let mut cfg = config::Config::default();
-        cfg.provider.base_url = Some("http://127.0.0.1:11434/v1".to_owned());
-        cfg.models.generative = Some("qwen3:8b".to_owned());
-        cfg.models.vision = Some("qwen2.5vl:3b".to_owned());
-        cfg.models.embedding = Some("bge-m3".to_owned());
-        let served = super::provider_model_ids(&cfg);
-        assert_eq!(served, ids(&["qwen3:8b", "qwen2.5vl:3b", "bge-m3"]));
-        let out = chat_capable_model_ids(&cfg, &served);
-        assert_eq!(out, ids(&["qwen3:8b", "qwen2.5vl:3b"]));
-
-        // Provider ids that spell registry names are still provider ids: a
-        // vision tag matching a registry *generative* does not take the default
-        // slot, and a generative tag matching a registry *embedding* is not
-        // dropped.
-        cfg.models.generative = Some("my-chat".to_owned());
-        cfg.models.vision = Some("qwen3-0.6b".to_owned());
-        let served = super::provider_model_ids(&cfg);
-        let out = chat_capable_model_ids(&cfg, &served);
-        assert_eq!(out, ids(&["my-chat", "qwen3-0.6b"]));
-        cfg.models.generative = Some("bge-small-en-v1.5-gguf".to_owned());
-        let served = super::provider_model_ids(&cfg);
-        let out = chat_capable_model_ids(&cfg, &served);
-        assert_eq!(out, ids(&["bge-small-en-v1.5-gguf", "qwen3-0.6b"]));
-    }
-
-    #[test]
-    fn a_provider_honours_the_serve_allow_list() {
-        // `[serve] models` narrows the provider's ids exactly as it narrows the
-        // registry's, so an allow-list of one does not expose vision/embedding.
-        let mut cfg = config::Config::default();
-        cfg.provider.base_url = Some("http://127.0.0.1:11434/v1".to_owned());
-        cfg.models.generative = Some("qwen3:8b".to_owned());
-        cfg.models.vision = Some("qwen2.5vl:3b".to_owned());
-        cfg.models.embedding = Some("bge-m3".to_owned());
-        cfg.serve.models = Some(ids(&["qwen3:8b"]));
-        assert_eq!(super::provider_model_ids(&cfg), ids(&["qwen3:8b"]));
-    }
-
-    #[test]
-    fn vision_models_stay_in_the_pool_but_a_generative_leads() {
-        // Vision models can chat, so they remain — but a generative is the default.
-        let served = ids(&["bge-small-en-v1.5-gguf", "smolvlm-500m-gguf", "qwen3-0.6b"]);
-        let out = chat_capable_model_ids(&config::Config::default(), &served);
-        assert_eq!(out, ids(&["qwen3-0.6b", "smolvlm-500m-gguf"]));
-    }
-
-    #[test]
-    fn with_no_generative_a_vision_model_leads_never_an_embedding() {
-        // Only an embedding + a vision model served: the embedding is dropped and
-        // the (chat-capable) vision model becomes the default — never the encoder.
-        let served = ids(&["bge-small-en-v1.5-gguf", "smolvlm-500m-gguf"]);
-        let out = chat_capable_model_ids(&config::Config::default(), &served);
-        assert_eq!(out, ids(&["smolvlm-500m-gguf"]));
-    }
-
-    #[test]
-    fn an_embedding_only_serve_offers_no_chat_model() {
-        // Nothing chat-capable ⇒ empty pool ⇒ the UI keeps Ask disabled (no request
-        // with an embedding model is ever sent).
-        let served = ids(&["bge-small-en-v1.5-gguf"]);
-        assert!(chat_capable_model_ids(&config::Config::default(), &served).is_empty());
+        cfg.models.embedding = Some("nomic-embed-text".to_owned());
+        let served = ids(&["qwen3:8b", "nomic-embed-text", "gemma3:4b"]);
+        assert_eq!(
+            chat_capable_model_ids(&cfg, &served),
+            ids(&["qwen3:8b", "gemma3:4b"])
+        );
+        assert_eq!(
+            chat_capable_model_ids(&config::Config::default(), &served),
+            served,
+            "without an embedding key nothing is dropped"
+        );
     }
 }
 
@@ -17783,68 +17159,27 @@ fn provider_engine(
     )
 }
 
-/// The engine `serve` answers with, and the served names it logs: the external
-/// provider when `[provider] base_url` is set (ADR-0027), else the in-process
-/// llama.cpp engine over `served`.
+/// The engine `serve` answers with, and the served names it logs: the provider
+/// at `base_url` (ADR-0027, ADR-0033).
 #[cfg(feature = "serve")]
 fn serve_engine(
     cfg: &config::Config,
-    provider: Option<&str>,
-    served: Vec<rto_serve::llama::Served>,
+    base_url: &str,
 ) -> anyhow::Result<(std::sync::Arc<dyn rto_serve::Engine>, String)> {
-    Ok(if let Some(base_url) = provider {
-        let ids = provider_model_ids(cfg);
-        if ids.is_empty() {
-            anyhow::bail!(
-                "`[provider] base_url` is set but no `[models]` key names a model to \
-                 serve (or `[serve] models` allows none of them) — set \
-                 `[models] generative` to a model id your provider has \
-                 (for example `qwen3:8b`); see docs/MODEL_SETUP.md"
-            );
-        }
-        let names = ids.join(", ");
-        (
-            std::sync::Arc::new(provider_engine(cfg, base_url, ids)?),
-            names,
-        )
-    } else {
-        let names = served
-            .iter()
-            .map(|s| s.name.clone())
-            .collect::<Vec<_>>()
-            .join(", ");
-        // Keep models resident up to the configured budget (MiB → bytes), loading on
-        // demand and unloading the least-recently-used past it (ADR-0006). Unset ⇒ 0
-        // ⇒ a single resident model.
-        let budget_bytes = cfg
-            .serve
-            .memory_budget_mb
-            .unwrap_or(0)
-            .saturating_mul(1024 * 1024);
-        // The ceiling a request's context may grow to, not the window every request
-        // gets (issue #486). This argument was the literal `0` — which fell through
-        // to a hardcoded 4,096 that no configuration key could reach, on every model
-        // from one trained at 262,144 tokens to one trained at 512. Unset ⇒ 0 ⇒ each
-        // model's own trained window; a value bounds every served model at once.
-        let max_context_tokens = cfg.serve.max_context_tokens.unwrap_or(0);
-        let engine = rto_serve::llama::LlamaEngine::new_with_budget(
-            served,
-            max_context_tokens,
-            budget_bytes,
-        )
-        .map(|e| {
-            // `[serve] prefix_cache_mb` reaches the engine here and nowhere
-            // else. `0` — the default — leaves the cache inert, so a server
-            // whose operator has not asked for it behaves exactly as before.
-            e.with_prefix_cache_bytes(
-                usize::try_from(cfg.serve.prefix_cache_mb.unwrap_or(0))
-                    .unwrap_or(usize::MAX)
-                    .saturating_mul(1024 * 1024),
-            )
-        })
-        .map_err(|e| anyhow::anyhow!("starting llama.cpp: {e}"))?;
-        (std::sync::Arc::new(engine), names)
-    })
+    let ids = provider_model_ids(cfg);
+    if ids.is_empty() {
+        anyhow::bail!(
+            "`[provider] base_url` is set but no `[models]` key names a model to \
+             serve (or `[serve] models` allows none of them) — set \
+             `[models] generative` to a model id your provider has \
+             (for example `qwen3:8b`); see docs/MODEL_SETUP.md"
+        );
+    }
+    let names = ids.join(", ");
+    Ok((
+        std::sync::Arc::new(provider_engine(cfg, base_url, ids)?),
+        names,
+    ))
 }
 
 #[cfg(feature = "serve")]
@@ -17867,28 +17202,14 @@ fn serve_models_endpoint(
     // Ask panel sends `models[0]`, so a bad pin there is the one that used to be
     // silently replaced by whatever happened to be served first.
     //
-    // With an external provider (ADR-0027) `[models]` names the provider's ids,
-    // which the registry does not list, so there is nothing to resolve them
-    // against; an unknown id is the provider's 404 instead.
-    let provider = cfg.provider.base_url.as_deref();
-    if provider.is_none() {
-        rto_graph::resolve_model_with(rto_graph::ModelTask::Chat, &cfg.models.resolve())?;
-    }
-
-    let served = if provider.is_some() {
-        Vec::new()
-    } else {
-        served_models(cfg)
-    };
-    if provider.is_none() && served.is_empty() {
+    // `[models]` names the provider's ids (ADR-0033), which only the provider can
+    // check; an unknown id is the provider's 404.
+    let Some(base_url) = cfg.provider.base_url.as_deref() else {
         anyhow::bail!(
-            "no installed GGUF models to serve — pull one first \
-             (`roteiro model pull qwen3-0.6b` for chat, \
-             `roteiro model pull bge-small-en-v1.5-gguf` for embeddings, or \
-             `roteiro model pull smolvlm-500m-gguf` for vision; \
-             see `roteiro model list`)"
+            "Ask needs a model provider: set `[provider] base_url` (Ollama, `llama-server`, \
+             or a hosted API) and `[models] generative` (see docs/MODEL_SETUP.md)"
         );
-    }
+    };
 
     // Address precedence: CLI flag > `[serve] addr` > default loopback.
     let addr = addr
@@ -17904,7 +17225,7 @@ fn serve_models_endpoint(
         );
     }
 
-    let (engine, names) = serve_engine(cfg, provider, served)?;
+    let (engine, names) = serve_engine(cfg, base_url)?;
     // TLS precedence mirrors `addr`: CLI flag > `[serve]` config.
     let tls = resolve_serve_tls(
         tls_cert.or_else(|| cfg.serve.tls_cert.clone()),
@@ -18364,6 +17685,13 @@ impl GraphToolRegistry {
     ///
     /// The selection is resolved against this surface's own tool set **here**, at
     /// startup, so nothing on the request path has to ask again.
+    #[cfg_attr(
+        not(feature = "mcp"),
+        allow(
+            clippy::trivially_copy_pass_by_ref,
+            reason = "McpSurface is `()` without mcp; with it, a non-Copy struct passed by reference"
+        )
+    )]
     fn restricted(workspace: std::sync::Arc<rto_graph::Workspace>, surface: &McpSurface) -> Self {
         let carried: std::collections::BTreeSet<String> =
             served_tool_defs().into_iter().map(|t| t.name).collect();
@@ -19749,6 +19077,63 @@ fn authored_paths(nodes: &[rto_graph::Node]) -> std::collections::BTreeSet<Strin
         .collect()
 }
 
+/// A concept's `description`: a peer's own survives the round trip (§4.1);
+/// ours is the first sentence of the concept's own prose (#820 §2) — the doc
+/// comment or section text in `meta.content`, or a document's body. A code
+/// file's `meta.content` is a facts summary we generated, not prose, so it
+/// yields none.
+fn okf_description(ex: &rto_graph::Explanation, r: &OkfRender<'_>) -> Option<String> {
+    use rto_render::okf;
+    ex.meta
+        .pointer("/okf/description")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| {
+            let prose = if ex.node.kind == "file" {
+                ex.node
+                    .path
+                    .as_deref()
+                    .filter(|p| rto_graph::is_prose(p))
+                    .and_then(|p| r.bodies.get(p))
+                    .map(String::as_str)
+            } else if matches!(
+                ex.node.kind.as_str(),
+                "adr" | "blueprint" | "doc" | "site_page"
+            ) {
+                ex.node
+                    .path
+                    .as_deref()
+                    .and_then(|p| r.bodies.get(p))
+                    .map(String::as_str)
+            } else {
+                ex.meta.get("content").and_then(serde_json::Value::as_str)
+            };
+            prose.and_then(okf::first_sentence)
+        })
+}
+
+/// A concept's tags: kind and language, then a peer's own tags after ours
+/// (§4.1, #820 §5).
+fn okf_tags(ex: &rto_graph::Explanation) -> Vec<String> {
+    let mut tags = vec![format!("roteiro/kind/{}", ex.node.kind)];
+    if let Some(lang) = &ex.node.lang {
+        tags.push(format!("roteiro/lang/{lang}"));
+    }
+    // A peer's own tags survive the round trip after ours (§4.1, #820 §5).
+    if let Some(peer) = ex
+        .meta
+        .pointer("/okf/tags")
+        .and_then(serde_json::Value::as_array)
+    {
+        for tag in peer.iter().filter_map(serde_json::Value::as_str) {
+            if !tags.iter().any(|t| t == tag) {
+                tags.push(tag.to_owned());
+            }
+        }
+    }
+    tags
+}
+
 fn okf_concept<'a>(
     ex: &'a rto_graph::Explanation,
     provenance: rto_graph::Provenance,
@@ -19758,10 +19143,7 @@ fn okf_concept<'a>(
 ) -> rto_render::okf::Concept<'a> {
     use rto_render::okf;
 
-    let mut tags = vec![format!("roteiro/kind/{}", ex.node.kind)];
-    if let Some(lang) = &ex.node.lang {
-        tags.push(format!("roteiro/lang/{lang}"));
-    }
+    let tags = okf_tags(ex);
     // Who last changed *this* document, and when they did it. A concept with no
     // path, or one whose history could not be read, gets no human and the
     // bundle's own timestamp — which `okf::origin_for` turns into no
@@ -19785,7 +19167,7 @@ fn okf_concept<'a>(
         frontmatter: okf::Frontmatter {
             type_: ex.node.kind.clone(),
             title: Some(ex.node.name.clone()),
-            description: None,
+            description: okf_description(ex, r),
             resource: blob_url.clone(),
             tags,
             // Read from the source's own `status:`, not invented here — an ADR
@@ -19807,7 +19189,14 @@ fn okf_concept<'a>(
                             .map(String::as_str),
                     )
                 })
-                .flatten(),
+                .flatten()
+                // A peer's own `status` survives the round trip (§4.1, #820 §5).
+                .or_else(|| {
+                    ex.meta
+                        .pointer("/okf/status")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                }),
             // An imported concept re-emits **the peer's own** `generated` /
             // `verified` block, recovered from the meta the reader wrote. That
             // is what keeps the round trip honest: their `verified: [{ by:
@@ -19815,8 +19204,19 @@ fn okf_concept<'a>(
             // consumer learns who confirmed it. Falling through to `origin_for`
             // would re-tier every external fact to *unverified* on the way out —
             // the laundering the carried tier exists to prevent, one step later.
-            origin: okf::read::peer_origin(&ex.meta)
-                .or_else(|| Some(okf::origin_for(provenance, &at, r.tool, human.as_ref()))),
+            //
+            // Authored prose confirmed by its committer records who *drafted* it
+            // separately when the commit names a co-author (#799): `generated`
+            // is the model, `verified` the person who committed and stands
+            // behind it. ADR-0021's mapping is otherwise unchanged.
+            origin: okf::read::peer_origin(&ex.meta).or_else(|| {
+                let mut origin = okf::origin_for(provenance, &at, r.tool, human.as_ref());
+                if origin.confirms && provenance == rto_graph::Provenance::Authored {
+                    origin.generated_by =
+                        attribution.and_then(|a| okf::drafter(&a.name, &a.co_authors));
+                }
+                Some(origin)
+            }),
             // The concept's own file, then each external work it cites from the
             // reference register (ADR-0029), with `id`/`title`/`author` and a
             // `[^id]` footnote carrying its APA 7 entry or refusal.
@@ -23802,8 +23202,11 @@ mod serve_explorer_wiring {
         let tools: std::sync::Arc<dyn rto_serve::ToolRegistry> =
             std::sync::Arc::new(GraphToolRegistry::new(flat));
         let served_ids: Vec<String> = engine.models().into_iter().map(|m| m.id).collect();
-        let model_ids =
-            super::chat_capable_model_ids(&super::config::Config::default(), &served_ids);
+        // The provider's ids say nothing about which one embeds; the
+        // `[models] embedding` key does (ADR-0033).
+        let mut cfg = super::config::Config::default();
+        cfg.models.embedding = Some("bge-small-en-v1.5-gguf".to_owned());
+        let model_ids = super::chat_capable_model_ids(&cfg, &served_ids);
         let base = rto_serve::app_with_tools(engine, tools);
         let router = mount_explorer_surfaces(base, set, Some("default".to_owned()), model_ids);
 
@@ -24548,14 +23951,7 @@ mod workspace_tests {
 
 /// `spec draft`'s refusal when a generation never got past its reasoning block
 /// (#583) — the CLI half of the rule `rto_llama::thinking` holds.
-#[cfg(all(
-    test,
-    any(
-        feature = "serve",
-        feature = "inference-local-models",
-        feature = "provider"
-    )
-))]
+#[cfg(all(test, feature = "provider"))]
 mod spec_draft_refusal_tests {
     use super::{draft_coverage_line, draft_style_line, unanswered_draft};
 
@@ -25809,43 +25205,29 @@ mod worktree_discovery_tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
-    /// **`--sync-on-access` inside a hosted worktree builds THAT worktree's graph**
-    /// (issue #837).
-    ///
-    /// The hook used to receive only the `graph.db` path and walk three parents to
-    /// find the repository — true of `<repo>/.git/roteiro/graph.db`, and false of a
-    /// linked worktree, whose store is
-    /// `<main>/.git/worktrees/<name>/roteiro/graph.db`. Three parents up is
-    /// `<main>/.git/worktrees`, which is not a repository at all, so `Repo::discover`
-    /// walked up out of it and found the **main** checkout: the hook extracted the
-    /// wrong repository at the wrong revision and wrote it into the worktree's
-    /// store. That is the amendment's "serves the wrong tree" failure at a path the
-    /// amendment did not reach, and it is invisible from outside — a graph is
-    /// produced, under the right name, with plausible contents.
-    ///
-    /// So the fixture diverges the two branches and the assertions are about
-    /// *which* tree arrived, never that one did.
-    /// #815: a symlinked `raw/` is named, not skipped silently; a real
+    /// #815: a symlinked `raw/` is named whether or not it is followed; a real
     /// directory, or none at all, says nothing.
     #[cfg(unix)]
     #[test]
-    fn a_symlinked_raw_is_warned_about() {
+    fn a_symlinked_raw_is_announced() {
         let base = std::env::temp_dir().join(format!("rto-rawlink-{}", std::process::id()));
         std::fs::remove_dir_all(&base).ok();
         std::fs::create_dir_all(base.join("share")).expect("mkdir");
         std::fs::create_dir_all(base.join("repo")).expect("mkdir");
         let root = base.join("repo");
         assert!(
-            super::symlinked_raw_warning(&root).is_none(),
+            super::raw_symlink_note(&root, true).is_none(),
             "no raw/: nothing to say"
         );
         std::os::unix::fs::symlink(base.join("share"), root.join("raw")).expect("link");
-        let warning = super::symlinked_raw_warning(&root).expect("a symlinked raw/ is named");
-        assert!(warning.contains("does not follow symlinks"), "{warning}");
+        let followed = super::raw_symlink_note(&root, true).expect("a followed link is named");
+        assert!(followed.contains("following it"), "{followed}");
+        let skipped = super::raw_symlink_note(&root, false).expect("a skipped link is named");
+        assert!(skipped.contains("does not follow it"), "{skipped}");
         std::fs::remove_file(root.join("raw")).expect("unlink");
         std::fs::create_dir(root.join("raw")).expect("mkdir raw");
         assert!(
-            super::symlinked_raw_warning(&root).is_none(),
+            super::raw_symlink_note(&root, true).is_none(),
             "a real raw/ is walked"
         );
         std::fs::remove_dir_all(&base).ok();
@@ -25906,6 +25288,22 @@ mod worktree_discovery_tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
+    /// **`--sync-on-access` inside a hosted worktree builds THAT worktree's graph**
+    /// (issue #837).
+    ///
+    /// The hook used to receive only the `graph.db` path and walk three parents to
+    /// find the repository — true of `<repo>/.git/roteiro/graph.db`, and false of a
+    /// linked worktree, whose store is
+    /// `<main>/.git/worktrees/<name>/roteiro/graph.db`. Three parents up is
+    /// `<main>/.git/worktrees`, which is not a repository at all, so `Repo::discover`
+    /// walked up out of it and found the **main** checkout: the hook extracted the
+    /// wrong repository at the wrong revision and wrote it into the worktree's
+    /// store. That is the amendment's "serves the wrong tree" failure at a path the
+    /// amendment did not reach, and it is invisible from outside — a graph is
+    /// produced, under the right name, with plausible contents.
+    ///
+    /// So the fixture diverges the two branches and the assertions are about
+    /// *which* tree arrived, never that one did.
     #[cfg(any(feature = "mcp", feature = "serve", feature = "explorer"))]
     #[test]
     fn sync_on_access_builds_the_worktrees_own_graph_not_its_main_checkouts() {

@@ -505,10 +505,33 @@ impl ParsedFrontmatter {
             self.verified.first()
         }
         .or(self.generated.as_ref())?;
+        // A peer that wrote `generated` and `verified` with different actors
+        // keeps both on the way back out when the confirmation is re-emitted
+        // (#799, #820 §5): collapsing them would credit the confirmer with
+        // writing it. Without a confirmation there is no `verified` block, so
+        // `generated` carries the attribution alone, as before — splitting it
+        // there would drop the verifier's name entirely.
+        let generated_by = self
+            .generated
+            .as_ref()
+            .filter(|_| confirms)
+            .map(|(g, _)| parse_actor(g))
+            .filter(|g| *g != parse_actor(by));
+        // Its time travels with it: pairing the writer with the verifier's
+        // instant would move the generation to when it was confirmed.
+        let generated_at = self
+            .generated
+            .as_ref()
+            .filter(|_| confirms)
+            .map(|(_, g_at)| g_at)
+            .filter(|g_at| *g_at != at)
+            .cloned();
         Some(Origin {
             by: parse_actor(by),
             at: at.clone(),
             confirms,
+            generated_by,
+            generated_at,
         })
     }
 }
@@ -563,6 +586,14 @@ pub fn peer_origin(meta: &serde_json::Value) -> Option<Origin> {
             .get("confirms")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false),
+        generated_by: origin
+            .get("generated_by")
+            .and_then(serde_json::Value::as_str)
+            .map(parse_actor),
+        generated_at: origin
+            .get("generated_at")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
     })
 }
 
@@ -1350,6 +1381,12 @@ fn concept_meta(
             "at": origin.at,
             "confirms": origin.confirms,
         });
+        if let Some(generated) = &origin.generated_by {
+            meta["okf"]["origin"]["generated_by"] = serde_json::Value::from(generated.as_token());
+        }
+        if let Some(generated_at) = &origin.generated_at {
+            meta["okf"]["origin"]["generated_at"] = serde_json::Value::from(generated_at.clone());
+        }
     }
     if let Some(desc) = &c.fm.description {
         meta["okf"]["description"] = serde_json::Value::from(desc.clone());
@@ -1777,6 +1814,8 @@ mod tests {
                 by: Actor::Human("alice".to_owned()),
                 at: at.to_owned(),
                 confirms: true,
+                generated_by: None,
+                generated_at: None,
             }),
             "Alice's confirmation is re-emitted naming Alice, not re-tiered"
         );

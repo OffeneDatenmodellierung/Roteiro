@@ -127,8 +127,8 @@ pub use context::{
     tool_context,
 };
 pub use extract::{
-    Extractor, FileNodeExtractor, IngestConfig, MediaEngineGuard, Registry, RustExtractor,
-    cap_content, is_prose, language_for_path, release_media_engines,
+    Extractor, FileNodeExtractor, IngestConfig, Registry, RustExtractor, cap_content, is_prose,
+    language_for_path,
 };
 pub use findings::{
     AdvisoryDb, AnalysisRun, CommandPolicy, EnvironmentPolicy, FINDING_KEY_PREFIX, Finding,
@@ -171,8 +171,8 @@ pub use memory::{
 pub use model::{Direction, Edge, EdgeKind, FactSet, Node, NodeKind, Span};
 #[cfg(feature = "models")]
 pub use model_choice::{
-    DEFAULT_GENERATIVE, DEFAULT_OCR, ModelChoice, ModelChoiceError, ModelPins, ModelSource,
-    ModelTask, TASKS as MODEL_TASKS, resolve as resolve_model, resolve_all_with as resolve_models,
+    DEFAULT_OCR, ModelChoice, ModelChoiceError, ModelPins, ModelSource, ModelTask,
+    TASKS as MODEL_TASKS, resolve as resolve_model, resolve_all_with as resolve_models,
     resolve_with as resolve_model_with, set_model_pins,
 };
 #[cfg(feature = "models")]

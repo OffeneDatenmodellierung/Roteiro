@@ -11,9 +11,9 @@
 //! It is deliberately a *suggestion* layer (precise-where-known, fuzzy-where-
 //! suggested): every edge it produces is labelled inferred and carries a
 //! confidence score, and running it never changes derived or authored edges.
-//! Higher-quality learned embeddings (GGUF local models) are the opt-in
-//! `inference-local-models` tier from ADR-0003; this module is the fallback that
-//! keeps inference working entirely offline.
+//! Higher-quality learned embeddings come from a provider embedding model
+//! (`roteiro infer --model`, ADR-0033); this module is the fallback that keeps
+//! inference working entirely offline.
 //!
 //! Only built with `--features inference`.
 
@@ -126,9 +126,8 @@ pub fn similarity(a: &[f32], b: &[f32]) -> f64 {
 }
 
 /// A source of unit embedding vectors for text. The default [`HashEmbedder`] is
-/// the offline hashing embedding; the `inference-local-models` tier provides a
-/// llama.cpp-backed learned embedder (a local GGUF embedding model) implementing
-/// the same trait.
+/// the offline hashing embedding; `roteiro` implements the same trait over a
+/// provider embedding model (ADR-0033).
 pub trait Embedder {
     /// Embed `text` into a unit vector. All vectors from one embedder must share
     /// a dimensionality so they are comparable by [`similarity`].

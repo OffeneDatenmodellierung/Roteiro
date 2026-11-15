@@ -55,7 +55,7 @@ toml = "1.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }
 tracing-appender = "0.2"
-# `inference-local-models` only: consent-gated model download (rustls, no
+# `models` and `provider`: consent-gated model download and provider HTTP (rustls, no
 # platform TLS). Blocking + pure-Rust.
 ureq = { version = "3", optional = true }
 # Image and audio parts sent to the external model provider (ADR-0027). Already
@@ -118,18 +118,11 @@ yaml-rust2 = { version = "0.13.0", default-features = false }
 # `CDLA-Permissive-2.0` via `webpki-roots`) was already allow-listed with a
 # recorded rationale — see `deny.toml` and ADR-0017.
 #
-# **`serve` deliberately stays off**, and this is the record so that nobody
-# "completes" the job later:
-#   * it transitively builds llama.cpp from source — measured +24 s cold on 18
-#     cores, realistically **3–12 minutes on 2–4 cores**;
-#   * without `cmake` and `libclang` it does not degrade, it **panics in a build
-#     script** and `cargo install` fails. On Debian/Ubuntu `build-essential`
-#     supplies neither, so it turns zero extra packages into two;
-#   * `docs/VENDORED_DEPENDENCIES.md` records that the vendored llama.cpp has
-#     **13 published upstream advisories invisible to `cargo audit`**, which
-#     reads crate metadata and cannot see C++ vendored by a build script.
-#     Defaulting it on would ship that unmonitored surface to everyone rather
-#     than to the people who asked for inference.
+# **`serve` is on by default since ADR-0033.** It stayed off while it built
+# llama.cpp from source (minutes on small machines, a hard `cmake`/`libclang`
+# requirement, and 13 vendored advisories `cargo audit` cannot see). With the
+# in-process engine retired it is axum, tokio and rustls-on-*ring*, all already
+# vetted, so the reasons are gone and the owner put it in the default set.
 # `exec-subprocess` is on by default so that the *other* half of "prepare once,
 # then work offline" ships too. Enabling it compiles the capability to run an
 # analyzer as a child process; it does not exercise it, and three things keep
@@ -143,7 +136,7 @@ yaml-rust2 = { version = "0.13.0", default-features = false }
 #     a missing one is a named error, not a fetch.
 #   * A run records `isolation=none` in its evidence either way.
 # `serve` is the one thing that stays off, for the reasons above.
-default = ["execution", "models", "exec-subprocess", "provider", "refs-fetch"]
+default = ["execution", "models", "exec-subprocess", "provider", "refs-fetch", "serve"]
 # The `AnalyzerRunner` seam, `roteiro security ingest|list`, and — since the
 # provisioning/execution split — `security prefetch|status` (ADR-0012, ADR-0014).
 # It also carries `roteiro lint`'s command surface, because that reads types from
@@ -251,7 +244,7 @@ okf-viewer = ["explorer", "tokio/rt-multi-thread"]
 upload = ["explorer"]
 # Offline similarity inference (`roteiro infer`) — the `inferred` provenance
 # class. Adds no dependencies (pure-Rust hashing embedding; ADR-0003).
-inference = ["rto-graph/inference"]
+inference = ["rto-graph/inference", "provider"]
 # The shared model machinery: the `roteiro model` list/pull commands and the
 # consent-gated downloader (`ureq`), over rto-graph's candle-free registry.
 # Enabled by every model tier so `roteiro model pull` works without candle, and
@@ -266,25 +259,14 @@ models = ["rto-graph/models", "dep:ureq"]
 # `--allow-download`, every time — and never reached from a scan or a render.
 # Takes the `ureq` already in the default build, so it adds no package there.
 refs-fetch = ["dep:ureq"]
-# Pluggable local embedding/generative models (`roteiro infer --model`, `spec
-# draft`) via the shared **llama.cpp** engine — GGUF embedding + generative
-# models, no candle (ADR-0003 v1.1). Pulls `rto-llama` (a C/C++ toolchain).
-inference-local-models = [
-    "inference",
-    "models",
-    "dep:rto-llama",
-    "rto-llama/llama",
-]
-# The external model provider (ADR-0027): an `Engine` over a local
-# OpenAI-compatible server — Ollama, `llama-server`, LM Studio. **On by default**,
-# because it is how a stock install reaches a model at all once the in-process
-# engine is gone, and it is cheap: `rto-llama` *without* its `llama` feature is
-# the pure-Rust trait, `ureq` is already in the default set for `model pull`, and
-# `base64` is already in the lock through `rto-serve`. No C/C++ toolchain, and no
+# The model provider (ADR-0027, ADR-0028, ADR-0033): an `Engine` over an
+# OpenAI-compatible server — Ollama, `llama-server`, LM Studio, or a hosted API.
+# **On by default**: it is the only engine, since the in-process llama.cpp one was
+# retired (#969). Cheap — `rto-llama` is the pure-Rust trait, `ureq` is already in
+# the default set for `model pull`, `base64` arrives through `rto-serve`. No
 # network call a user has not configured: the default `base_url` is loopback, and
-# a hosted one is the user's choice, announced on every run (ADR-0028). It takes
-# `models` because `spec draft` reaches the shared resolver.
-provider = ["dep:rto-llama", "dep:ureq", "dep:base64", "models"]
+# a hosted one is the user's choice, announced on every run (ADR-0028).
+provider = ["dep:rto-llama", "dep:ureq", "dep:base64"]
 # Ingest text from PDF documents during `roteiro sync` (off by default; pulls a
 # large PDF/font-parsing tree). See [`rto_graph::extract`].
 pdf-text = ["rto-graph/pdf-text"]
@@ -292,15 +274,12 @@ pdf-text = ["rto-graph/pdf-text"]
 # pulls the pure-Rust ocrs/rten tree). Implies `models` so `roteiro model pull
 # ocrs-text` can fetch the OCR models with consent.
 image-ocr = ["models", "rto-graph/image-ocr"]
-# Describe images with a local GGUF vision-language model during `roteiro sync`
-# (ADR-0005 Tier B; off by default). Uses the shared llama.cpp engine via
-# `rto-graph/image-vision` (smolvlm + mmproj) — no candle.
-image-vision = ["models", "rto-graph/image-vision"]
-# Transcribe spoken-word audio (wav/mp3/flac) during `roteiro sync` (Stage 18;
-# off by default). Uses the shared llama.cpp engine via
-# `rto-graph/audio-transcribe` (voxtral + audio mmproj) — no candle. Implies
-# `models` so `roteiro model pull voxtral-mini-3b` can fetch it.
-audio-transcribe = ["models", "rto-graph/audio-transcribe"]
+# Describe images with a vision-language model through the provider, for
+# `roteiro media build` (ADR-0005 Tier B, ADR-0015, ADR-0033; off by default).
+image-vision = ["provider", "rto-graph/image-vision"]
+# Transcribe spoken-word audio through the provider (`llama-server` with an
+# audio-capable model; ADR-0033; off by default).
+audio-transcribe = ["provider", "rto-graph/audio-transcribe"]
 # Extract audio metadata — codec, sample rate, bit depth, channels, duration, tags
 # — as `derived` facts during `roteiro sync` (ADR-0016; off by default). Reads the
 # container with `symphonia`; **no model, no network and no C/C++ toolchain**, so
@@ -308,11 +287,10 @@ audio-transcribe = ["models", "rto-graph/audio-transcribe"]
 # neither `models` nor `audio-transcribe`: extraction and generation are separate
 # stories (ADR-0015 / ADR-0016).
 audio-metadata = ["rto-graph/audio-metadata"]
-# Local model serving (`roteiro serve --models`): the opt-in, loopback,
-# OpenAI-compatible `/v1` endpoint over installed models (ADR-0006). Pulls
-# `rto-serve` with its llama.cpp engine; also enables the internal llama.cpp uses
-# (`infer --model`, `spec draft`) via `inference-local-models`.
-serve = ["dep:rto-serve", "rto-serve/llama", "rto-serve/tls", "inference-local-models", "dep:tokio", "provider"]
+# `roteiro serve`: the graph, the web UI and an OpenAI-compatible `/v1` that runs
+# the graph tools in front of the provider (ADR-0006 superseded by ADR-0033). Pure
+# Rust plus *ring* for TLS since the in-process engine went, so **on by default**.
+serve = ["dep:rto-serve", "rto-serve/tls", "dep:tokio", "provider", "inference"]
 
 [lints]
 workspace = true

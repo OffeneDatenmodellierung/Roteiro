@@ -1,0 +1,125 @@
+name: Fresh resolution
+
+# Answers one question, once a week: **does the workspace still build when its
+# dependencies are resolved from the manifests rather than from our lock?**
+#
+# Every other job builds from the committed `Cargo.lock`. `cargo install roteiro`
+# without `--locked` consults no lock of ours, so a dependency that breaks its API
+# in a patch release breaks every user's install while CI stays green. That has
+# happened twice: boxlite-shared 0.10.1 (#888) and llama-cpp-2 0.1.161 (7.2.0,
+# fixed by exact pins in #976). An exact pin does not pin the pinned crate's own
+# caret dependencies, so only a fresh resolution sees the class.
+#
+# Rules, the same as `toolchain-canary.yml` and for the same reasons:
+#   1. `schedule` and `workflow_dispatch` only — an upstream publish is nobody's PR.
+#   2. Never a required check; it goes red on upstream releases, not our commits.
+#   3. The result goes to the backlog as one labelled issue, opened on failure and
+#      closed on the next clean run.
+
+on:
+  schedule:
+    - cron: "41 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: fresh-resolution
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  check-from-manifests:
+    name: Check with a freshly resolved lock
+    if: github.repository == 'OffeneDatenmodellierung/Roteiro'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.98"
+
+      # Deliberately no rust-cache: a restored target dir is built from the old
+      # lock's versions, and the point is to compile the new ones.
+      # A resolution failure is the same finding as a build failure — `cargo
+      # install` stops at it — so it is reported, not left to skip the reporter.
+      - name: Resolve from the manifests
+        id: resolve
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          cp Cargo.lock Cargo.lock.committed
+          : > lock.diff
+          rm Cargo.lock
+          cargo generate-lockfile 2>&1 | tee check.log
+          diff <(grep -A1 '^name = ' Cargo.lock.committed) <(grep -A1 '^name = ' Cargo.lock) > lock.diff || true
+
+      - name: Check every feature against the fresh lock
+        id: check
+        if: steps.resolve.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cargo check --workspace --all-targets --all-features 2>&1 | tee check.log
+
+      - name: Report to the backlog
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          OUTCOME: ${{ steps.resolve.outcome == 'failure' && 'failure' || steps.check.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          LABEL="fresh-resolution"
+          TITLE="Fresh resolution: the workspace does not build from its manifests"
+          gh label create "$LABEL" --color "F9D0C4" \
+            --description "Opened and closed by the scheduled fresh-resolution job; never gate on it" --force
+          existing="$(gh issue list --label "$LABEL" --state open --limit 1 --json number --jq '.[0].number // empty')"
+
+          if [ "$OUTCOME" != "failure" ]; then
+            if [ -n "$existing" ]; then
+              gh issue comment "$existing" --body "A fresh resolution builds again. Closed by the [fresh-resolution job](${RUN_URL})."
+              gh issue close "$existing" --reason completed
+            fi
+            echo "A fresh resolution **builds**." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          {
+            echo "Resolving from the manifests (\`cargo generate-lockfile\`), or \`cargo check --workspace --all-targets --all-features\` against the result, fails. A fresh resolution is what \`cargo install roteiro\` without \`--locked\` does. CI is unaffected: it builds from the committed lock."
+            echo
+            echo "Run: ${RUN_URL}"
+            echo
+            echo "## What to do"
+            echo
+            echo "Find the crate that moved (the lock diff below), and pin it — and any sibling it carets — exactly in the manifest that depends on it, as #887 and #976 did. Then release, so the published manifests carry the pin."
+            echo
+            echo "## Lock diff (committed → fresh)"
+            echo '```diff'
+            head -n 120 lock.diff
+            echo '```'
+            echo
+            echo "## Check output (last 120 lines)"
+            echo '```'
+            tail -n 120 check.log
+            echo '```'
+          } > issue-body.md
+
+          if [ -z "$existing" ]; then
+            gh issue create --title "$TITLE" --label "$LABEL" --body-file issue-body.md
+          else
+            gh issue edit "$existing" --body-file issue-body.md
+          fi
+
+      - name: Fail the run if the check failed
+        if: steps.resolve.outcome == 'failure' || steps.check.outcome == 'failure'
+        run: |
+          echo "::error::the workspace does not build from a fresh resolution; see the fresh-resolution issue"
+          exit 1

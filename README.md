@@ -48,9 +48,10 @@ it refuses. Roteiro has no sandbox — the opt-in microVM backend was removed
 ([ADR-0030](docs/adr/0030-remove-the-microvm-sandbox.md)). **The analyzers themselves are
 yours to install** (`semgrep`, `osv-scanner`, `cargo install cargo-audit`) — the
 guide has the commands, and `roteiro security ingest` accepts a report produced
-anywhere if you would rather install none of them. Local *inference* and
-*serving* remain opt-in (`--features inference-local-models`, `--features
-serve`).
+anywhere if you would rather install none of them. Models run in a provider
+you choose — Ollama, `llama-server`, or a hosted API — named by `[provider]
+base_url`; Roteiro runs none in its own process
+([ADR-0033](docs/adr/0033-retire-in-process-llama-cpp.md)).
 
 `roteiro lint clippy` is the other shape, and it differs twice over
 ([ADR-0020](docs/adr/0020-build-capable-sandboxed-execution.md)). It **stores
@@ -149,8 +150,8 @@ deferred; see the ADR for the field mapping and the seam.
 - `crates/rto-spec` — house-style ADR/blueprint parsing, `check` (drift gate), importers, spec authoring
 - `crates/rto-faithful` — rendering faithfulness: every claim in a rendered summary must trace to a tool finding
 - `crates/rto-render` — docs site, OKF bundle, MCP server (feature-gated)
-- `crates/rto-serve` — local OpenAI-compatible model server (llama.cpp; feature-gated)
-- `crates/rto-llama` — llama.cpp inference core (generation, embeddings, vision), shared by serving and internal uses
+- `crates/rto-serve` — the OpenAI-compatible `/v1` that runs the graph tools in front of the provider
+- `crates/rto-llama` — the `Engine` trait and its types, implemented over HTTP by the provider engine
 - `crates/roteiro` — umbrella CLI
 
 ## Community

@@ -23,9 +23,9 @@ roteiro check     # verify authored intent against the code (a drift gate)
 roteiro render …  # emit a docs site or an Obsidian vault
 ```
 
-Feature flags gate the heavier capabilities (`inference`,
-`inference-local-models`, `pdf-text`, `image-ocr`, `image-vision`, `serve`,
-`mcp`); the default build is small, needs no C++/cmake/libclang,
+Feature flags gate the heavier capabilities (`inference`, `pdf-text`,
+`image-ocr`, `image-vision`, `audio-transcribe`, `mcp`); `serve` is on by
+default. The default build is small, needs no C++/cmake/libclang,
 and makes no network call on its own. It carries `models` and `exec-subprocess`,
 so the whole of "prepare once, then work offline" — `roteiro model pull` and
 `roteiro security prefetch|status|run` — exists without a rebuild. Presence is

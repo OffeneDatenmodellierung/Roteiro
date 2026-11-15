@@ -1,9 +1,7 @@
 //! End-to-end tests for `roteiro model` and `infer --model` that need no
-//! network: the registry listing, and that a non-interactive `pull` declines
-//! rather than downloading (offline-by-default). The `model` subcommand only
-//! needs the `models` feature (no llama.cpp engine), so the list/pull tests
-//! build under it; the `infer --model` test is gated on
-//! `inference-local-models` since that command only exists with the engine.
+//! network: the registry listing (the OCR weights alone since ADR-0033), and
+//! that a non-interactive `pull` declines rather than downloading
+//! (offline-by-default). The `infer --model` test is gated on `inference`.
 #![cfg(feature = "models")]
 
 use std::path::Path;
@@ -38,10 +36,7 @@ fn model_list_shows_registry() {
     let out = roteiro(&home, &["model", "list"]);
     assert!(out.status.success(), "model list failed: {out:?}");
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        text.contains("bge-base-en-v1.5"),
-        "registry model listed: {text}"
-    );
+    assert!(text.contains("ocrs-text"), "registry model listed: {text}");
     assert!(
         text.contains("hashing embedder"),
         "notes the always-available default"
@@ -56,10 +51,10 @@ fn model_list_shows_registry() {
         text.contains("[available]"),
         "uninstalled model uses the ASCII marker: {text}"
     );
-    // The new High-tier coder pick is listed.
+    // ADR-0033: no GGUF model is offered any more.
     assert!(
-        text.contains("qwen3-coder-30b-a3b"),
-        "new coder entry listed: {text}"
+        !text.contains("qwen3"),
+        "no generative registry entry: {text}"
     );
     std::fs::remove_dir_all(&home).ok();
 }
@@ -67,14 +62,14 @@ fn model_list_shows_registry() {
 #[test]
 fn pull_is_declined_non_interactively_and_downloads_nothing() {
     let home = fresh_home("pull");
-    let out = roteiro(&home, &["model", "pull", "bge-base-en-v1.5"]);
+    let out = roteiro(&home, &["model", "pull", "ocrs-text"]);
     // Non-interactive with no `--yes`: must refuse and exit non-zero.
     assert!(!out.status.success(), "pull must decline non-interactively");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("non-interactive"), "explains why: {err}");
     assert!(err.contains("--yes"), "points at the override: {err}");
     // Nothing was written to the store.
-    let model_dir = home.join("models/bge-base-en-v1.5");
+    let model_dir = home.join("models/ocrs-text");
     assert!(
         !model_dir.join("model.safetensors").exists(),
         "no weights should be downloaded",
@@ -95,14 +90,14 @@ fn pull_rejects_unknown_model() {
 #[test]
 fn rm_refuses_politely_when_not_installed() {
     let home = fresh_home("rm-absent");
-    let out = roteiro(&home, &["model", "rm", "qwen3-8b", "--yes"]);
+    let out = roteiro(&home, &["model", "rm", "ocrs-text", "--yes"]);
     // Non-zero and explanatory — never a panic, and never a cheerful zero-byte
     // "success" for a model that was never there.
     assert!(!out.status.success(), "must exit non-zero: {out:?}");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("not installed"), "says what is wrong: {err}");
     assert!(
-        err.contains("model pull qwen3-8b"),
+        err.contains("model pull ocrs-text"),
         "points at the fix: {err}"
     );
     assert!(!err.contains("panicked"), "no panic: {err}");
@@ -127,10 +122,10 @@ fn rm_clears_an_empty_directory_left_by_an_abandoned_pull() {
     // the directory exists but holds nothing. Removal must still clear it —
     // "installed" is about the directory being there, not about it having bytes,
     // and this is the debris the command exists to clean up.
-    let dir = home.join("models/qwen3-0.6b");
+    let dir = home.join("models/ocrs-text");
     std::fs::create_dir_all(&dir).expect("mkdir");
 
-    let out = roteiro(&home, &["model", "rm", "qwen3-0.6b", "--yes", "--json"]);
+    let out = roteiro(&home, &["model", "rm", "ocrs-text", "--yes", "--json"]);
     assert!(out.status.success(), "empty dir must be removable: {out:?}");
     let report: serde_json::Value =
         serde_json::from_slice(&out.stdout).expect("json report on stdout");
@@ -147,9 +142,10 @@ fn rm_clears_an_empty_directory_left_by_an_abandoned_pull() {
 #[test]
 fn rm_frees_the_files_and_reports_what_it_reclaimed() {
     let home = fresh_home("rm-frees");
-    let dir = home.join("models/qwen3-0.6b");
+    let dir = home.join("models/ocrs-text");
     std::fs::create_dir_all(&dir).expect("mkdir");
-    std::fs::write(dir.join("model.gguf"), vec![0u8; 3 * 1024 * 1024]).expect("weights");
+    std::fs::write(dir.join("text-detection.rten"), vec![0u8; 3 * 1024 * 1024]).expect("weights");
+    std::fs::write(dir.join("text-recognition.rten"), b"").expect("weights");
     // An orphaned partial from an abandoned pull must go with the model.
     std::fs::write(dir.join("model.partial"), vec![0u8; 512 * 1024]).expect("partial");
     std::fs::write(dir.join("model.partial.json"), b"{}").expect("sidecar");
@@ -162,17 +158,22 @@ fn rm_frees_the_files_and_reports_what_it_reclaimed() {
         "list reports installed size: {text}"
     );
 
-    let out = roteiro(&home, &["model", "rm", "qwen3-0.6b", "--yes", "--json"]);
+    let out = roteiro(&home, &["model", "rm", "ocrs-text", "--yes", "--json"]);
     assert!(out.status.success(), "rm failed: {out:?}");
     let report: serde_json::Value =
         serde_json::from_slice(&out.stdout).expect("json report on stdout");
-    assert_eq!(report["model"], "qwen3-0.6b");
+    assert_eq!(report["model"], "ocrs-text");
     assert_eq!(report["freed_bytes"], 3 * 1024 * 1024 + 512 * 1024 + 2);
     assert_eq!(report["freed"], "3.5 MiB", "human-readable figure too");
     let files: Vec<String> = serde_json::from_value(report["files"].clone()).expect("files listed");
     assert_eq!(
         files,
-        vec!["model.gguf", "model.partial", "model.partial.json"],
+        vec![
+            "model.partial",
+            "model.partial.json",
+            "text-detection.rten",
+            "text-recognition.rten"
+        ],
         "the orphaned partial is cleaned up with the model"
     );
     assert!(!dir.exists(), "the model directory is gone");
@@ -182,11 +183,11 @@ fn rm_frees_the_files_and_reports_what_it_reclaimed() {
 #[test]
 fn rm_declines_non_interactively_without_yes() {
     let home = fresh_home("rm-consent");
-    let dir = home.join("models/qwen3-0.6b");
+    let dir = home.join("models/ocrs-text");
     std::fs::create_dir_all(&dir).expect("mkdir");
     std::fs::write(dir.join("model.gguf"), vec![0u8; 4096]).expect("weights");
 
-    let out = roteiro(&home, &["model", "rm", "qwen3-0.6b"]);
+    let out = roteiro(&home, &["model", "rm", "ocrs-text"]);
     assert!(!out.status.success(), "must not remove without consent");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("--yes"), "points at the override: {err}");
@@ -212,9 +213,9 @@ fn rm_help_is_honest_about_not_detecting_a_running_serve() {
     std::fs::remove_dir_all(&home).ok();
 }
 
-#[cfg(feature = "inference-local-models")]
+#[cfg(feature = "inference")]
 #[test]
-fn infer_with_uninstalled_model_errors() {
+fn infer_with_a_model_but_no_provider_errors() {
     // A git repo so `infer` can build a graph, but the model isn't pulled.
     let dir = fresh_home("infer");
     std::fs::write(dir.join("a.rs"), "fn a() {}\n").expect("write");
@@ -243,13 +244,19 @@ fn infer_with_uninstalled_model_errors() {
         );
     }
     let out = Command::new(BIN)
-        .args(["infer", "--model", "bge-base-en-v1.5"])
+        .args(["infer", "--model", "nomic-embed-text"])
         .current_dir(&dir)
         .env("ROTEIRO_HOME", &dir)
         .output()
         .expect("run");
-    assert!(!out.status.success(), "uninstalled model must error");
+    assert!(
+        !out.status.success(),
+        "a provider model with no provider must error"
+    );
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("not installed"), "points at model pull: {err}");
+    assert!(
+        err.contains("[provider] base_url"),
+        "names the key to set: {err}"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }

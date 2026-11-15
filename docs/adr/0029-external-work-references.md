@@ -11,8 +11,8 @@ architectural-significance: MEDIUM  # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Knowledge Graph
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "0.5"
-last-modified: 2026-11-13
+version: "0.6"
+last-modified: 2026-11-14
 confluence-url:
 ---
 
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | For Review |
 | **Architectural Significance** | MEDIUM |
 | **Domain** | Knowledge Graph |
-| **Document version** | 0.5 |
+| **Document version** | 0.6 |
 
 ## Reference
 
@@ -199,6 +199,14 @@ line the tool owns, for a person to review and move into the entry by hand. See
   ("remote output is not a graph fact"): it still is not one.
 - **The read date is an access date.** `retrieved` is an `AccessDate`, the one
   clock read in the feature, recorded as exactly what it is.
+- **A fixed work carries no access date, by decision (v0.6, #819).** `AccessDate`
+  stays reachable only through `Stability::UnarchivedAndChanging`, because that
+  is where APA 7 prints a retrieval date and the citation record is a citation.
+  *When a copy was acquired* — retrieval instant, origin URL, content hash — is
+  acquisition provenance and belongs to the corpus manifest ADR-0026 requires in
+  every storage mode ([[docs/adr/0026-research-knowledge-layer.md]]), keyed by
+  the same work id. Two stores for one document is the intended split: one says
+  how to cite it, the other which bytes were read.
 - **What the page does not state is recorded as not stated.** Each value is
   `Found::Stated` or `Found::NotStated`, which is a fact about the page read,
   not `Unknown` (nobody looked) or `AbsentFromWork` (the work has none). Moving
@@ -252,3 +260,4 @@ proposes values for a human to commit.
 | 0.3 | 2026-11-11 | §7: `roteiro refs fetch --allow-download` writes fetched values as `[[proposal]]`s below a tool-owned marker, with an access date and explicit `not-stated`; never a graph fact. |
 | 0.4 | 2026-11-13 | Consequences: autolinks are now read by the shared scanner and cite like inline links, so ADR-0021's citation of the OKF spec makes an edge. |
 | 0.5 | 2026-11-13 | Issue #819: the record gains `WorkKind::JournalArticle` and `WorkKind::Chapter` with an optional `container` (title, volume, issue, first and last page; publisher stays on the record) — additive, so every existing entry reads unchanged. **Editors are not modelled**: the research corpus that measured the gap carries none, so a required editor list would refuse all 719 works; a chapter renders APA's no-editor form. Given names accept U+2010/U+2011 hyphens. §5: the `okf-core` / `okf-validator` 0.2.6 date is settled as the crates.io publication date. |
+| 0.6 | 2026-11-14 | Issue #819 item 3, owner decision: a fixed work carries no `AccessDate`. The citation record stays APA-shaped; acquisition provenance (retrieval instant, origin URL, hash) is the ADR-0026 corpus manifest's, keyed by the work id. |

@@ -700,6 +700,17 @@ pub struct PathsConfig {
     /// lists is **excluded**: between two declarations about the same bytes, the
     /// narrower one wins.
     pub opaque: Option<Vec<String>>,
+    /// Whether `roteiro sync` walks the directory a symlinked top-level `raw/`
+    /// points at (ADR-0026, #812/#815). Unset means **yes**: shared storage is
+    /// symlinked in, and a symlink the scan silently skipped was an empty corpus
+    /// reported as success. Files behind the link are keyed `raw/…`, through the
+    /// link, and symlinks inside the target are not followed.
+    ///
+    /// Set it `false` to keep out-of-tree bytes out of the graph. Any layer may
+    /// switch it off and none can switch another layer's `false` back on: like
+    /// `exclude`, only the narrowing direction composes, so a committed project
+    /// file cannot widen what a user's machine reads.
+    pub follow_raw_symlink: Option<bool>,
 }
 
 impl PathsConfig {
@@ -707,10 +718,14 @@ impl PathsConfig {
     /// repository bytes consults.
     #[must_use]
     pub fn policy(&self) -> rto_graph::PathPolicy {
-        rto_graph::PathPolicy::new(
+        let policy = rto_graph::PathPolicy::new(
             self.exclude.clone().unwrap_or_default(),
             self.opaque.clone().unwrap_or_default(),
-        )
+        );
+        match self.follow_raw_symlink {
+            Some(follow) => policy.with_raw_symlink(follow),
+            None => policy,
+        }
     }
 }
 
@@ -1079,7 +1094,8 @@ pub struct IngestConfig {
     pub prose: Option<bool>,
     /// Extract text from PDF documents.
     pub pdf: Option<bool>,
-    /// OCR literal text from images.
+    /// OCR literal text from images. Horizontal text only: rotated text is not
+    /// read, and nothing in the node says it was skipped (#908).
     pub ocr: Option<bool>,
     /// Describe images with a vision model.
     pub vision: Option<bool>,
@@ -1258,11 +1274,17 @@ pub struct ServeConfig {
     /// Auto-register the graph tools so the served model can query the codebase
     /// (ADR-0006). Default `true`.
     pub tools: Option<bool>,
+    /// **No effect since ADR-0033** (warned about on load): the provider owns
+    /// this now. Kept so an existing config still parses.
+    ///
     /// Approximate memory budget (MiB) for models kept resident at once. The
     /// engine loads models on demand and unloads the least-recently-used once the
     /// resident set (proxied by GGUF size) exceeds this. Unset/`0` keeps a single
     /// model resident — set it higher to keep several warm and swap in real time.
     pub memory_budget_mb: Option<u64>,
+    /// **No effect since ADR-0033** (warned about on load): the provider owns
+    /// this now. Kept so an existing config still parses.
+    ///
     /// Upper bound, in tokens, on the context window any one request may be
     /// given (issue #486). Unset/`0` — the default — means **each model's own
     /// trained window**, so a request may grow to as much as the model actually
@@ -1330,6 +1352,9 @@ pub struct ServeConfig {
     /// operator's trade to make — which is why the key exists — but it is not a
     /// good trade at every size.
     pub max_client_tool_bytes: Option<usize>,
+    /// **No effect since ADR-0033** (warned about on load): the provider owns
+    /// this now. Kept so an existing config still parses.
+    ///
     /// Memory, in MiB, that preamble reuse may hold (#578). Unset/`0` — the
     /// default — turns it off.
     ///
@@ -1713,6 +1738,14 @@ impl Config {
                     over.paths.exclude.as_deref(),
                 ),
                 opaque: merge_patterns(self.paths.opaque.as_deref(), over.paths.opaque.as_deref()),
+                // `false` from either layer wins; `true` cannot undo a `false`.
+                follow_raw_symlink: match (
+                    self.paths.follow_raw_symlink,
+                    over.paths.follow_raw_symlink,
+                ) {
+                    (Some(false), _) | (_, Some(false)) => Some(false),
+                    (a, b) => b.or(a),
+                },
             },
             telemetry: self.telemetry.overlaid_with(&over.telemetry),
             workspace: self.workspace.overlaid_with(&over.workspace),
@@ -2231,6 +2264,24 @@ fn read_config(path: Option<&Path>) -> anyhow::Result<Config> {
             path.display()
         );
     }
+    for (key, set) in [
+        ("memory_budget_mb", config.serve.memory_budget_mb.is_some()),
+        (
+            "max_context_tokens",
+            config.serve.max_context_tokens.is_some(),
+        ),
+        ("prefix_cache_mb", config.serve.prefix_cache_mb.is_some()),
+    ] {
+        if set {
+            eprintln!(
+                "warning: {} sets `[serve] {key}`, which no longer does anything: the \
+                 in-process llama.cpp engine was retired, and the provider now owns context \
+                 length and memory (ADR-0033). Configure it on the provider; delete the key to \
+                 silence this.",
+                path.display()
+            );
+        }
+    }
     for key in inert_sandbox_keys(&config) {
         eprintln!(
             "warning: {} sets {key}, which no longer does anything: the microVM sandbox was \
@@ -2445,7 +2496,7 @@ mod tests {
 
                 assert_eq!(
                     reported.is_some(),
-                    resolved.source == ModelSource::Pinned,
+                    resolved.source != ModelSource::Default,
                     "{key} = {raw:?}: reported set={:?} but resolved source={:?}",
                     reported.is_some(),
                     resolved.source,
@@ -2453,7 +2504,7 @@ mod tests {
                 if let Some(reported) = reported {
                     assert_eq!(
                         Some(reported),
-                        resolved.model,
+                        resolved.provider_id.as_deref().or(resolved.model),
                         "{key} = {raw:?}: reported and resolved names differ",
                     );
                 }

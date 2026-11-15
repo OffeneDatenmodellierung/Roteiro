@@ -70,10 +70,9 @@ tree-sitter-sequel = "0.3.11"
 # `models` only: SHA-256 verification for the registry/store.
 sha2 = { version = "0.11", optional = true }
 
-# `image-vision` only (ADR-0005 Tier B, ADR-0003 v1.1): image *understanding* via
-# a GGUF vision-language model through the shared llama.cpp core (`rto-llama`) —
-# no candle. Pure-Rust trait + types build without the C++ engine; the `llama`
-# feature turns it on.
+# `image-vision` / `audio-transcribe` only: the `Engine` trait the media
+# producers call. The engine is the HTTP provider, injected by `roteiro`
+# (ADR-0033); nothing here builds C or C++.
 rto-llama = { workspace = true, optional = true }
 
 # `pdf-text` only: pure-Rust PDF text extraction (fonts/CMaps handled internally).
@@ -184,18 +183,13 @@ pdf-text = ["dep:pdf-extract"]
 # (off by default): pulls the pure-Rust `ocrs`/`rten` OCR tree. Reuses the shared
 # `models` registry to fetch the OCR models with consent. See [`crate::extract`].
 image-ocr = ["models", "dep:ocrs", "dep:rten", "dep:image"]
-# Describe images via a local GGUF vision-language model through llama.cpp
-# (ADR-0005 Tier B; ADR-0003 v1.1 — no candle). Opt-in (off by default): pulls
-# `rto-llama` (the C++ engine) + `image`. When combined with `image-ocr`, OCR
-# runs always and the VLM only on text-sparse images. See [`crate::extract`].
-image-vision = ["models", "dep:rto-llama", "rto-llama/llama", "dep:image"]
-# Transcribe spoken-word audio (wav/mp3/flac) into `meta.content` via an
-# audio-capable GGUF model through the shared llama.cpp `mtmd` core — the same
-# path as `image-vision`, with an audio projector (Stage 18; no candle). Opt-in
-# (off by default): pulls `rto-llama` (the C++ engine). Audio is decoded and
-# resampled by llama.cpp's bundled miniaudio, so no extra audio-decoding crate is
-# needed. See [`crate::extract`].
-audio-transcribe = ["models", "dep:rto-llama", "rto-llama/llama"]
+# Describe images with a vision-language model served by the provider, for
+# `roteiro media build` (ADR-0005 Tier B, ADR-0015, ADR-0033). Opt-in.
+image-vision = ["dep:rto-llama", "dep:image"]
+# Transcribe spoken-word audio with an audio-capable model served by the
+# provider (`llama-server`; Ollama takes no audio), sent as an `input_audio`
+# chat part (ADR-0033). Opt-in.
+audio-transcribe = ["dep:rto-llama"]
 # Extract audio *metadata* — codec, sample rate, bit depth, channels, duration and
 # tags — as `derived` facts, by reading the container with `symphonia` (ADR-0016).
 # Opt-in (off by default) because it adds a dependency tree, but unlike every other

@@ -158,12 +158,16 @@ pub struct PathPolicy {
     exclude: Vec<String>,
     /// Globs whose matching paths are [`PathClass::Opaque`].
     opaque: Vec<String>,
+    /// Whether a worktree sync follows a symlinked top-level `raw/` — see
+    /// [`PathPolicy::follows_raw_symlink`]. `None` is the default, which follows.
+    follow_raw_symlink: Option<bool>,
 }
 
 /// The policy a build with nothing declared uses — see [`PathPolicy::empty`].
 static EMPTY: PathPolicy = PathPolicy {
     exclude: Vec::new(),
     opaque: Vec::new(),
+    follow_raw_symlink: None,
 };
 
 impl PathPolicy {
@@ -174,7 +178,37 @@ impl PathPolicy {
     /// which is the one implementation both consult.
     #[must_use]
     pub fn new(exclude: Vec<String>, opaque: Vec<String>) -> Self {
-        Self { exclude, opaque }
+        Self {
+            exclude,
+            opaque,
+            follow_raw_symlink: None,
+        }
+    }
+
+    /// The same policy with symlink-following for `raw/` set explicitly
+    /// (`[paths] follow_raw_symlink`).
+    #[must_use]
+    pub fn with_raw_symlink(mut self, follow: bool) -> Self {
+        self.follow_raw_symlink = Some(follow);
+        self
+    }
+
+    /// Whether a worktree sync walks the directory a symlinked top-level `raw/`
+    /// points at (ADR-0026, #812/#815). **On by default** — the owner's decision
+    /// that shared storage is symlinked in — and switched off by
+    /// `[paths] follow_raw_symlink = false`.
+    ///
+    /// Files behind the link are keyed by their path *through* it (`raw/x.pdf`),
+    /// never by the target's real path, so one document has one key on every
+    /// machine whatever the share is mounted as. Only `raw/` itself is followed:
+    /// a symlink found inside the target is skipped, so the walk cannot be led
+    /// further out than the one link somebody made.
+    ///
+    /// Not part of [`PathPolicy::is_empty`] or [`PathPolicy::fingerprint`]: it
+    /// changes which files are walked, not what any one blob extracts to.
+    #[must_use]
+    pub fn follows_raw_symlink(&self) -> bool {
+        self.follow_raw_symlink.unwrap_or(true)
     }
 
     /// The empty policy: every path is [`PathClass::Extract`].

@@ -11,8 +11,8 @@ architectural-significance: HIGH    # SOFT | LOW | MEDIUM | HIGH | VERY HIGH
 domain: Developer Tooling
 decision-makers: ["The Roteiro Project Team"]
 superseded-by:
-version: "0.4"
-last-modified: 2026-11-13
+version: "0.5"
+last-modified: 2026-11-14
 confluence-url:
 ---
 
@@ -23,7 +23,7 @@ confluence-url:
 | **State** | For Review |
 | **Architectural Significance** | HIGH |
 | **Domain** | Developer Tooling |
-| **Document version** | 0.4 |
+| **Document version** | 0.5 |
 | **Related** | [[docs/adr/0021-open-knowledge-format-bundle.md]] · [[docs/adr/0022-dynamic-okf-viewer.md]] · [[docs/adr/0025-document-extraction-consent.md]] · [[docs/adr/0019-remote-model-tier.md]] · [[docs/adr/0013-agent-memory-artifact-store.md]] |
 
 ## Reference
@@ -794,6 +794,30 @@ with them, because they are about walk safety rather than key honesty: a
 **recorded resolution**, so the manifest names the path that was actually read
 rather than the link that was followed.
 
+#### The one exception in the scan: a symlinked top-level `raw/` is followed (v0.5)
+
+**Decided by the maintainer (#812, #815): a worktree sync follows a symlinked
+`raw/`, and `[paths] follow_raw_symlink = false` switches it off.** Until v0.5 the
+scan skipped the link and v0.4 only said so; shared storage that is symlinked in
+was an empty corpus.
+
+It is a scoped exception to the rule above, argued rather than assumed. The
+refusals guard against out-of-repo content arriving behind a key that looks
+tree-relative by accident. `raw/` is the one directory *designated* for
+out-of-repo content, so a `raw/…` key there is not an accident, and the key basis
+is fixed in the same change: **files behind the link are keyed by their path
+through it** (`raw/papers/a.md`), never by the target's real path, so one document
+has one key on every machine whatever the share is mounted as
+([[crates/rto-graph/src/sync.rs#raw_symlink_files]]). Walk safety is kept: only
+the link at `raw/` is honoured, a symlink inside the target is skipped (no cycle,
+and no second hop further out), and `[paths] exclude = ["raw/**"]` still wins —
+excluding `raw/` excludes what is behind the link too. A committed-only `sync`
+reads git objects, which carry no bytes behind a link, so it warns instead.
+
+Every other walk keeps refusing symlinks, and `follow_raw_symlink` composes only
+in the narrowing direction: any layer may set it `false`, and no layer can undo
+another's `false` ([[crates/roteiro/src/config.rs#PathsConfig]]).
+
 #### ⚠️ Requirement: the ingest path must screen, because the exclusion removes the screen that was doing it
 
 **This is the consequence of the exclusion that is easiest to miss, and it is a
@@ -1121,3 +1145,4 @@ ingest half of that belongs in a service of its own.
 | 0.2 | 2026-09-13 | **Resolves all three open questions; status Draft → For Review.** **Q1 — no fourth provenance class.** A model-written `knowledge/` page is `authored`. v0.1's premise that `authored` means *human* is contradicted at the definition (*"a human **or agent**"*), and [[docs/adr/0013-agent-memory-artifact-store.md]] — the precedent v0.1 pointed at — sets the test as *"deliberately wrote this in a **reviewed** file"*, refusing `authored` for agent memory because memory is unreviewed and has no source blob. A `knowledge/` page is reviewed and has one. The human/model distinction is an **actor** question, which OKF separates from the tier via `generated.by` / `verified.by`; **#799** is the render-path work that makes it honest. Step 2 must widen `Authored`'s doc comment, which enumerates ADR/blueprint/annotation and not `knowledge/`, and splitting the two actors needs a breaking `rto-render` change since `Origin` holds a single `Actor` — a **minor** under `AGENTS.md`'s `rto-*` carve-out (ADR-0001 v1.5), not a format or `Provenance` change. #801, the competing candidate for the same slot, is **closed** having independently reached *"no new provenance class"*. `authored` carries +40 in `search`, so the resolution holds only while review is genuine. **Q2 — `raw/` is local by default and excluded from the standard scan** (maintainer decision, #812/#813): a scanned `raw/` graphs each document twice, once as its summary and once as the source. With no `file:` nodes from `raw/`, committed / untracked / ignored becomes a free per-user choice, and **local** is the default because opting out stays available while opting in does not reverse — git history keeps the bytes. Reproducibility-from-the-repository-alone is **not** claimed. Three requirements follow: a **committed manifest in every mode** so an absent source is detectable rather than silent (hashed with `Repo::blob_oid`, which computes a git blob id from bytes alone and so works out of tree — not the `(path, blob id, bytes)` extraction key); **both symlink rules recorded with why they oppose**, the scan's refusals guarding a tree-relative claim that the ingest path never makes; and **the ingest path must screen**, in three parts — foreign prose (ADR-0025's carve-out was measured on this repository's own 327 prose files), PDF concealment with an honest coverage declaration, and the **distilled output**, since `knowledge/` pages are prose and prose is exempt, so a model's restatement of a foreign document would otherwise re-enter unscreened. Out-of-line storage is **decided in principle, blocked in practice** on one named question: can content be resolved and hashed from a manifest entry whose bytes are not in the object database? **Q3 — `log.md` is derived; the append-only reading is declined.** `render_log` is a pure function and `assemble` writes the file, but only `if !log.is_empty()`, and both callers pass `&[]` — so no published bundle contains it. The feed is the per-concept commit dates ADR-0021 already resolves for `verified.at`, which exist for the **authored layer only**; an ingest-time log is refused as the `SystemTime::now()` non-determinism ADR-0021 already declined. **Measured facts recorded in the body, several of which corrected this ADR's own drafts:** every extraction input path comes from git's own enumeration of one tree, so out-of-tree bytes cannot be enumerated — but `.gitignore` is **inert over a tracked path** (a committed-then-ignored `raw/` is scanned already, and `git check-ignore` reports it as not ignored), and the derived extractor **follows tracked symlinks** on the worktree overlay, storing out-of-repo bytes under a repo-relative key — a live defect in `main`, reported not fixed, absent from the committed path a bundle renders from. `block` **is** reachable for PDF input through invisible-codepoint concealment as far as the screen goes, though survival through `pdf_extract` is unverified and needs a fixture; the presentation-shaped and PDF-native classes are definitely undetected. Also: the live corpus this was framed against holds no `raw/` and no PDFs — the decision is taken before several GB enter a history that cannot forget them. |
 | 0.3 | 2026-11-13 | **The upload surface is built (#814).** Per the maintainer's amendment it is a gated mount on `roteiro serve`, not a second process: the `upload` feature plus `--allow-upload` (a flag, not a config key), with one route, `PUT /v1/raw/{name}`, that only stores bytes. Records the enumerated limits, each with a test: single-segment allowlisted names, resolve-then-verify containment against `raw/`'s startup real path, `create_new` so symlinks are never followed, a pdf/md/txt allowlist that refuses archives outright, size and count limits, no overwrite, no pipeline trigger, and a loopback-only bind enforced as a startup refusal. Restates the read-surface property as #814's comment corrected it: graph-write versus worktree-write, since `POST …/links/write` already writes the store. A source-scan test now defends it. |
 | 0.4 | 2026-11-13 | **A symlinked `raw/` is now announced, not followed (#815).** #812 decided that out-of-tree storage must at least be symlinked in, but the scan follows no symlinks: `untracked_files` keeps regular files only, gix will not descend into a symlinked directory, and a committed symlink is dropped by `walk_tree_blobs`. So `sync` exited 0 over an empty corpus. Following the link would reverse a stated rule (`collect_markdown` and the bundle walk refuse symlinks so out-of-repo content cannot arrive behind a repo-relative key) and needs a canonical key rule in the same change, so it is **left undecided here**. Until it is decided, `roteiro sync` warns when `raw/` is a symlink and names the remedy that works today: **mount the shared storage at `raw/`**, which the walker sees as a directory. |
+| 0.5 | 2026-11-14 | **A symlinked `raw/` is followed (#812, #815).** The maintainer decided the worktree sync follows it, configurably: `[paths] follow_raw_symlink` (default on; any layer may switch it off, none can switch another's `false` back on). Files behind the link are keyed `raw/…` through it, never by the target's real path; symlinks inside the target are skipped; `exclude` still wins. `sync` names the target when it follows the link and warns when it does not (committed-only, or switched off). Recorded as the scan's one exception to the symlink-refusal rule, with why. |

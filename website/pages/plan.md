@@ -19,9 +19,9 @@ roteiro spec context "rate limiting"
 <span class="c">#     links and an interview checklist — no model needed (offline)</span>
 roteiro spec scaffold "rate limiting" --kind adr --out draft-adr.md
 
-<span class="c"># 3 · Draft the prose with a local generative model, filling the</span>
-<span class="c">#     placeholders from the graph context (needs --features serve</span>
-<span class="c">#     or inference-local-models, then a pulled model)</span>
+<span class="c"># 3 · Draft the prose with your provider's generative model, filling the</span>
+<span class="c">#     placeholders from the graph context (needs [provider] base_url</span>
+<span class="c">#     and [models] generative)</span>
 roteiro spec draft draft-adr.md
 
 <span class="c"># Then verify the authored links hold against the code (CI gate)</span>

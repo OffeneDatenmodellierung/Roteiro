@@ -157,6 +157,11 @@ fn a_google_bundle_keeps_its_human_verifiers() {
             "by": "human:jsmith@acme",
             "at": "2026-07-01T09:00:00Z",
             "confirms": true,
+            // The peer's own generator, kept distinct from its verifier (#799).
+            "generated_by": "reference_agent/gemini-2.5-pro",
+            // ... and its time, so re-rendering does not move the generation
+            // to when it was verified.
+            "generated_at": "2026-06-30T14:00:00Z",
         }),
         "the peer's own verifier, verbatim — `render okf` re-emits this by name"
     );

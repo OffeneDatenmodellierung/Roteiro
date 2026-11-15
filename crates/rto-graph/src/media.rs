@@ -146,6 +146,16 @@ pub enum MediaError {
     #[cfg(feature = "models")]
     #[error(transparent)]
     ModelConfig(#[from] crate::model_choice::ModelChoiceError),
+    /// The modality is compiled in, but no provider model is configured for it
+    /// (ADR-0033). Names the keys to set.
+    #[error(
+        "no model is configured for {kind} content: set `[models] {kind}` to a model your \
+         provider serves, and `[provider] base_url` if it is not the default (ADR-0033)"
+    )]
+    NoModel {
+        /// The modality asked for.
+        kind: &'static str,
+    },
     /// A stored row could not be interpreted (database corruption).
     #[error("corrupt media record: {0}")]
     Corrupt(String),

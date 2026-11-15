@@ -1292,21 +1292,6 @@ fn review_llm_runs_on_the_configured_provider() {
     let first = requests.try_recv().expect("the provider was called");
     assert!(first.contains("\"model\":\"qwen3:8b\""), "{first}");
 
-    // `--typed-class` cannot be answered by a provider: it falls back to the
-    // reply's own class and says so, rather than changing results silently.
-    let out = roteiro(&dir, &["review", "--llm", "--typed-class"]);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "runs: {stdout}\n{stderr}");
-    assert!(
-        stderr.contains("`--typed-class`") && stderr.contains("`reply-text`"),
-        "the fallback is announced: {stderr}"
-    );
-    assert!(
-        stdout.contains("[contract-drift]") && !stdout.contains("typed class:"),
-        "and the class is the reply's, with no typed-read numbers: {stdout}"
-    );
-
     std::fs::remove_dir_all(&dir).ok();
 }
 

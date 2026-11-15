@@ -522,7 +522,7 @@ impl FindingKey {
     ///
     /// # Errors
     /// Returns [`FindingsError::MalformedKey`] if the prefix is wrong, an escape
-    /// is dangling, or there is no identity component; or the same validation
+    /// is dangling or is not one `render` emits (`\\` or `\:`), or there is no identity component; or the same validation
     /// errors [`FindingKey::new`] raises.
     pub fn parse(rendered: &str) -> Result<Self, FindingsError> {
         let segments = split_escaped(rendered)?;
@@ -587,8 +587,15 @@ fn split_escaped(rendered: &str) -> Result<Vec<String>, FindingsError> {
     let mut chars = rendered.chars();
     while let Some(ch) = chars.next() {
         match ch {
+            // Only the two escapes `render` emits are accepted, so `parse` is
+            // injective: `a\b` and `ab` no longer name one key (#798).
             '\\' => match chars.next() {
-                Some(escaped) => current.push(escaped),
+                Some(escaped @ ('\\' | ':')) => current.push(escaped),
+                Some(other) => {
+                    return Err(FindingsError::MalformedKey(format!(
+                        "{rendered:?} escapes {other:?}; only `\\\\` and `\\:` are escapes"
+                    )));
+                }
                 None => {
                     return Err(FindingsError::MalformedKey(format!(
                         "{rendered:?} ends in a dangling escape"
@@ -1235,132 +1242,35 @@ mod tests {
         }
     }
 
-    /// Records what the parser does today. **Not** a guarantee that it is right.
+    /// `parse` accepts only the escapes `render` emits (`\\` and `\:`), so it is
+    /// injective over arbitrary input, not just over the image of `render`.
     ///
-    /// `split_escaped` strips a backslash before *any* character, so a string
-    /// `render` would never emit parses to the same identity as the canonical
-    /// one. `parse` is therefore not injective over *arbitrary input strings*.
-    /// It **is** injective over the image of `render` — that is precisely what
-    /// [`key_rendering_round_trips_and_is_injective_over_generated_keys`] holds,
-    /// and `parse ∘ render` is the identity on keys. The gap is between those
-    /// two domains, and none of the inputs below is in the image of `render`.
-    /// That gap is the known `permissive-constraint` debt of review-corpus row
-    /// `3789014471`, and this test does not resolve it. (That row was cited here
-    /// by its `reviewed_sha` `4bed7d81` until #822, when the commit turned out to
-    /// have been force-pushed away; the row is re-pinned to `fec606e` and is now
-    /// named by its id, which is the field that cannot evaporate.)
-    ///
-    /// **The decision is deferred to a human — see #798 — and not settled here.**
-    /// It is tracked as its own open decision, #798, carved out of #787 so that
-    /// merging this test does not bury it: this PR settles the property, not the
-    /// semantics. #798 carries the evidence table summarised below.
-    ///
-    /// # The blast radius, measured rather than assumed
-    ///
-    /// Tightening `parse` is still a compatibility decision, but the surface it
-    /// touches was *traced*, not guessed, and it is narrow. It is **not** what
-    /// an earlier draft of this comment claimed: neither `--json` output nor any
-    /// row written by this code is exposed, because both go out through
-    /// [`FindingKey::render`] — the [`Serialize`] impl is
-    /// `serializer.serialize_str(&self.render())` (this file, `impl Serialize
-    /// for FindingKey`), and the findings insert stores `finding.key.render()`.
-    /// Both are canonical by construction. Every in-tree producer likewise
-    /// builds keys from *components* via [`FindingKey::new`] and never by
-    /// parsing a string — including the untrusted path, since a normalized
-    /// report carries `identity: Vec<String>` that `rto_exec::ingest` converts
-    /// with `new`.
-    ///
-    /// The re-verification is cheap and deliberately left to the next reader:
-    /// [`FindingKey::parse`] has exactly **two non-test production call sites** —
-    /// `finding_from_row` and the [`Deserialize`] impl.
-    ///
-    /// Every other call to it is in this module's own tests:
-    /// `key_round_trips_including_components_containing_colons`,
-    /// `key_rendering_round_trips_and_is_injective_over_generated_keys`,
-    /// `parse_is_permissive_about_escapes_pending_a_wire_format_decision` and
-    /// `key_parse_rejects_malformed_strings`.
-    ///
-    /// How that was checked, and what the check is worth. `AGENTS.md` requires a
-    /// *"nothing else does X"* to go through `roteiro search` rather than `grep`;
-    /// `roteiro search "FindingKey parse"`, `"parse rendered finding key"` and
-    /// `"finding_from_row"` each return only nodes in this file, and the inbound
-    /// `calls` edges of
-    /// `sym:rust:crates/rto-graph/src/findings.rs#FindingKey::parse` are
-    /// `#FindingKey::deserialize`, `#finding_from_row` and two `#tests::…`.
-    ///
-    /// That is **two short** of the four tests listed above, and the reason is
-    /// worth carrying: the extractor records a `calls` edge for a
-    /// `call_expression`, so an invocation written inside a macro — `assert_eq!`
-    /// in the first test, `matches!` in the last — produces none. The graph
-    /// therefore cannot, on its own, close the workspace-wide negative either: a
-    /// macro-wrapped caller in another crate would be just as invisible to it.
-    /// What actually closes it is a text search over `crates/` for
-    /// `FindingKey::parse`, which finds no hit outside this file. Neither
-    /// instrument is sufficient alone, and this comment has twice claimed more
-    /// than one of them could support.
-    ///
-    /// Only the production count carries the argument below. It is two, and the
-    /// graph, the searches and the text search agree on it.
-    ///
-    /// A stricter parser could therefore reject exactly two things in-tree:
-    ///
-    /// 1. **JSON authored outside this codebase**, and
-    /// 2. **a stored row written by something other than this code.**
-    ///
-    /// That is the whole of the *in-tree* blast radius. A third category exists
-    /// beyond it and is real: `parse` is `pub` and [`FindingKey`] is re-exported
-    /// from the crate root (`lib.rs`), so an out-of-tree caller could depend on
-    /// the permissive behaviour. Unlike the two above, that set cannot be
-    /// enumerated from this repository.
-    ///
-    /// What it is **not** is a hard constraint, and it should not be argued as
-    /// one. `AGENTS.md` carves the `rto-*` crates out on purpose: they publish
-    /// only because `crates/roteiro/Cargo.toml` depends on them by version and
-    /// crates.io rejects path-only dependencies, `roteiro` is their sole reverse
-    /// dependency, and a technically-breaking change to their surface — a
-    /// field's type, an enum variant, a signature — ships as a **minor** bump
-    /// and does **not** take a `!`. This crate's own package description agrees:
-    /// *"Implementation detail of the roteiro CLI; no API stability guarantee"*.
-    /// So semver would not block tightening `parse`; the question is whether to
-    /// break a promise that was never made, which is a judgement rather than a
-    /// rule.
-    ///
-    /// What is left is a compatibility policy question about foreign input and
-    /// out-of-tree callers — a human's call, not a test's, and #798 is where it
-    /// gets made rather than here.
-    ///
-    /// Do not read a green run here as a decision that the permissiveness is
-    /// intended: the assertions exist so that a change to it is visible rather
-    /// than silent. What they do establish meanwhile is that the permissiveness
-    /// *normalises* — whatever form came in, what goes back out is the canonical
-    /// rendering, so this code never *writes* a non-canonical key.
-    ///
-    /// That normalisation is in-memory only, and the distinction matters to the
-    /// decision: `finding_from_row` parses a row without rewriting it, so a row
-    /// some other writer put in the table stays non-canonical on disk until a
-    /// re-ingest replaces the whole layer. Reading it is what would start
-    /// failing under a stricter parser — which is case 2 above, not an exception
-    /// to it.
+    /// Before #798 a backslash before any character was stripped, so
+    /// `finding:semgrep:a\b`, `finding:semgrep:\ab` and `finding:semgrep:ab`
+    /// all parsed to one key (review-corpus row `3789014471`). The two production
+    /// callers are `finding_from_row` and `Deserialize`; nothing in-tree produces
+    /// a non-canonical key, so what is now refused is foreign-written JSON or a
+    /// row some other writer stored — loudly, rather than silently reinterpreted.
     #[test]
-    fn parse_is_permissive_about_escapes_pending_a_wire_format_decision() {
+    fn parse_refuses_escapes_render_never_emits() {
         let canonical = FindingKey::new("semgrep", &["ab"]).expect("key");
-        assert_eq!(canonical.render(), "finding:semgrep:ab");
-        // The baseline: the canonical form parses to the canonical key. Split out
-        // of the loop below so that loop holds only genuinely non-canonical input
-        // and its name describes all of it.
         assert_eq!(
             FindingKey::parse("finding:semgrep:ab").expect("parse"),
             canonical
         );
-
         for non_canonical in ["finding:semgrep:a\\b", "finding:semgrep:\\ab"] {
-            let parsed = FindingKey::parse(non_canonical).expect("parse");
-            assert_eq!(
-                parsed, canonical,
-                "{non_canonical:?} parses to the same identity as the canonical key"
+            let err = FindingKey::parse(non_canonical).expect_err("non-canonical escape");
+            assert!(
+                matches!(&err, FindingsError::MalformedKey(m) if m.contains("only")),
+                "{non_canonical:?}: {err}"
             );
-            assert_eq!(parsed.render(), canonical.render());
         }
+        // The two escapes render emits still round-trip.
+        let escaped = FindingKey::new("semgrep", &["a:b\\c"]).expect("key");
+        assert_eq!(
+            FindingKey::parse(&escaped.render()).expect("parse"),
+            escaped
+        );
     }
 
     #[test]

@@ -79,6 +79,12 @@ env:
   # well under a second without compiling anything, and it can only run if the
   # job runs.
   #
+  # That check is not guarded by `RELEASE_PR`: it runs on every PR and on every
+  # push to `main` too (#871). Guarded, it never ran where #849's inconsistent
+  # lock actually landed. It catches the window between an inconsistent merge
+  # and the next lock regeneration; a duplicate that resolves consistently is
+  # `deny.toml`'s `multiple-versions` baseline's job, not this one.
+  #
   # WHICH jobs those are is deliberately not written down here. That is a fact
   # about branch protection rather than about this file, and a count in prose
   # beside a set the file itself defines goes stale in silence: this sentence
@@ -325,8 +331,7 @@ jobs:
       # `RELEASE_PR` comment at the top of this file for what it catches, what
       # it deliberately does not, and why the job runs at all rather than being
       # skipped outright.
-      - name: Manifests and lockfile agree (release PR)
-        if: env.RELEASE_PR == 'true'
+      - name: Manifests and lockfile agree
         run: cargo metadata --locked --format-version 1 > /dev/null
       - name: Format
         if: env.RELEASE_PR != 'true'
@@ -390,21 +395,21 @@ jobs:
       # each cell that already compiles a feature set also documents it:
       #
       #   checks               --all-features         (here)
-      #   default-features     the default set        (`provider` on, local models off)
+      #   default-features     the default set        (`provider` and `serve` on)
       #   no-default-features  none, mcp, execution, okf-viewer, explorer
       #
       # Why those: the floor documents every ungated doc that cites a gated item
       # (#792's class); each single-feature cell documents that feature's docs
       # with every other feature off (#797's `explorer`-without-`mcp`); and the
-      # default set is where `provider` is on and `inference-local-models` off,
-      # which is what `review_llm` straddles (#854). They are
+      # default set is where `provider` and `serve` are on with the media
+      # features off, which is what `review_llm` straddles (#854). They are
       # also the configurations this file already compiles, so the dependency
       # metadata rustdoc needs is already built — each step costs the rustdoc
       # pass over the workspace crates, not a build.
       #
       # **Not documented**, so a reader knows the gate's shape rather than
       # assuming it is total: the other single-feature points (`models`,
-      # `provider` alone, `inference`, `inference-local-models`, `serve`,
+      # `provider` alone, `inference`, `serve`,
       # `exec-subprocess`, `refs-fetch`, `pdf-text`, the `image-*` and `audio-*`
       # media features) and every combination of two or more features other
       # than the default set. A link from a doc behind one of those to an item
@@ -509,8 +514,7 @@ jobs:
           cache-on-failure: true
       # The whole of a release PR's verification in this job — see the
       # `RELEASE_PR` comment at the top of this file.
-      - name: Manifests and lockfile agree (release PR)
-        if: env.RELEASE_PR == 'true'
+      - name: Manifests and lockfile agree
         run: cargo metadata --locked --format-version 1 > /dev/null
       # rustfmt does not evaluate `cfg`, so this cannot differ from the `checks`
       # job's formatting step. Kept anyway: it costs seconds, and it makes this
@@ -640,8 +644,8 @@ jobs:
         with:
           # Full history; see the `checks` job. This job runs `cargo test` five
           # times over five feature sets, and the corpus tests are in all five:
-          # `review_llm` is declared `#[cfg(any(feature = "serve", feature =
-          # "inference-local-models", test))]`, so `--no-default-features` does not
+          # `review_llm` is declared `#[cfg(any(feature = "provider", test))]`,
+          # so `--no-default-features` does not
           # take it out of the build — turning features off does not turn this
           # requirement off with them.
           fetch-depth: 0
@@ -667,8 +671,7 @@ jobs:
       # well. This job is a required check on `main`, so it must still RUN and
       # report — see the `checks` job for why a skipped job would be safe and is
       # still not what this file does.
-      - name: Manifests and lockfile agree (release PR)
-        if: env.RELEASE_PR == 'true'
+      - name: Manifests and lockfile agree
         run: cargo metadata --locked --format-version 1 > /dev/null
       # The floor: no feature on anywhere. First, because a failure here is the
       # one a reader should see before any of the richer sets — every other cell
@@ -942,8 +945,7 @@ jobs:
       # parseable by MSRV cargo. A lockfile regenerated in a newer format is a
       # real way for a version bump to break the MSRV build, and it is exactly
       # what this job exists to notice.
-      - name: Manifests and lockfile agree, on MSRV cargo (release PR)
-        if: env.RELEASE_PR == 'true'
+      - name: Manifests and lockfile agree, on MSRV cargo
         run: cargo metadata --locked --format-version 1 > /dev/null
       - name: Build on MSRV
         if: env.RELEASE_PR != 'true'

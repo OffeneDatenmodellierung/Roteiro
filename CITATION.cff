@@ -1,0 +1,24 @@
+# Citation metadata (Citation File Format 1.2.0); GitHub renders "Cite this repository" from it.
+# No `version` or `date-released`: they would go stale on every release. Cite a
+# release by its crates.io version (https://crates.io/crates/roteiro/versions).
+cff-version: 1.2.0
+message: "If you use Roteiro, please cite it as below."
+type: software
+title: Roteiro
+abstract: >-
+  A CLI that builds a provenance-tagged knowledge graph of a codebase — derived,
+  authored and inferred facts kept distinct — and serves it to people and agents.
+authors:
+  - given-names: Mark
+    family-names: Olliver
+  - name: The Roteiro Project Team
+repository-code: "https://github.com/OffeneDatenmodellierung/Roteiro"
+url: "https://roteiro.dev"
+license:
+  - MIT
+  - Apache-2.0
+keywords:
+  - knowledge graph
+  - provenance
+  - code intelligence
+  - architecture decision records

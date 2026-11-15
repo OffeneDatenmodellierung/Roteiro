@@ -125,7 +125,7 @@ CI (`.github/workflows/ci.yml`) enforces these; run them locally before pushing.
   proposes updates weekly under a **minimum release age — at least 48 hours, 3
   days as configured** — so a
   compromised publish has time to be caught before Roteiro depends on it. Native
-  and vendored code (llama.cpp, SQLite, tree-sitter) is outside `cargo audit`'s
+  and vendored code (SQLite, tree-sitter) is outside `cargo audit`'s
   reach and is tracked by name in
   [`docs/VENDORED_DEPENDENCIES.md`](docs/VENDORED_DEPENDENCIES.md); a change that
   vendors non-Rust code adds its row in the same PR.
@@ -141,7 +141,7 @@ CI (`.github/workflows/ci.yml`) enforces these; run them locally before pushing.
   child process; `--allow-unsandboxed` is what permits an actual run, it is
   required every time, and since the build-time gate is no longer in the default
   path it is the only gate left — do not weaken it. Keep heavy dependencies
-  (llama.cpp, PDF/OCR/vision, the model server) behind
+  (PDF/OCR, the media generators) behind
   **feature flags** so the default build stays small and needs no toolchain class
   it does not already require.
 

@@ -72,6 +72,13 @@ pub struct PathAuthor {
     /// moment the reviewer had nothing to do with, and would make the bundle
     /// differ on every render for a document nobody touched.
     pub at: i64,
+    /// That commit's `Co-Authored-By` trailers, in message order (#799).
+    ///
+    /// A property of the commit, so as deterministic as the name. The author
+    /// committed the change and stands behind it; a co-author is who else wrote
+    /// it — on this repository usually the model that drafted it, which OKF
+    /// records as `generated` beside the committer's `verified`.
+    pub co_authors: Vec<crate::authorship::CoAuthor>,
 }
 
 /// The blob id at `path` within `tree`, memoised on `(tree, path)`.
@@ -432,10 +439,21 @@ impl Repo {
                 .map(|a| a.name.to_string())
                 .filter(|n| !n.trim().is_empty());
             let at = commit.time().map_err(ge)?.seconds;
+            let co_authors = commit
+                .message_raw()
+                .map(|m| crate::authorship::co_authors(&m.to_string()))
+                .unwrap_or_default();
             for path in resolved {
                 pending.remove(path);
                 if let Some(name) = author.clone() {
-                    out.insert(path.to_owned(), PathAuthor { name, at });
+                    out.insert(
+                        path.to_owned(),
+                        PathAuthor {
+                            name,
+                            at,
+                            co_authors: co_authors.clone(),
+                        },
+                    );
                 }
             }
         }

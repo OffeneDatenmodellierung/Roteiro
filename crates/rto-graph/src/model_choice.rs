@@ -101,15 +101,6 @@ pub const TASKS: [ModelTask; 7] = [
     ModelTask::Ocr,
 ];
 
-/// The generative model `spec draft` and Ask use when `[models] generative` is
-/// unset: the low-tier **instruct** pick, which runs anywhere.
-///
-/// A literal rather than a registry search, so that adding a registry entry
-/// cannot silently move a project's default;
-/// `default_generative_is_still_the_low_tier_instruct_pick` proves the literal
-/// and the curation have not drifted apart.
-pub const DEFAULT_GENERATIVE: &str = "qwen3-0.6b";
-
 /// The OCR model `sync` uses when `[models] ocr` is unset.
 pub const DEFAULT_OCR: &str = "ocrs-text";
 
@@ -200,11 +191,8 @@ impl ModelTask {
     #[must_use]
     pub fn default_model(self) -> Option<&'static str> {
         match self {
-            Self::Embed => None,
-            Self::Draft | Self::Chat | Self::Review => Some(DEFAULT_GENERATIVE),
-            Self::Transcribe => Some(crate::media::MediaKind::Audio.model()),
-            Self::Describe => Some(crate::media::MediaKind::Vision.model()),
             Self::Ocr => Some(DEFAULT_OCR),
+            _ => None,
         }
     }
 }
@@ -308,6 +296,9 @@ pub enum ModelSource {
     Pinned,
     /// Nothing named it, so the task's built-in default applies.
     Default,
+    /// A `[models]` key named a **provider** model id (ADR-0033), passed through
+    /// unchecked: the provider owns its list, and refuses an unknown id itself.
+    Provider,
 }
 
 impl ModelSource {
@@ -317,6 +308,7 @@ impl ModelSource {
         match self {
             Self::Pinned => "pinned",
             Self::Default => "default",
+            Self::Provider => "provider",
         }
     }
 }
@@ -335,16 +327,26 @@ pub struct ModelChoice {
     ///
     /// `Some(true)` when there is nothing to install — [`ModelChoice::model`] is
     /// `None` for the compiled-in hashing embedder, which is in the binary. `None`
-    /// means the question does not apply; no resolution produces it since the
-    /// remote tier was removed (ADR-0028).
+    /// means the question does not apply: a provider model, which is not on disk
+    /// (ADR-0033).
     pub installed: Option<bool>,
+    /// The provider model id a `[models]` key named, for every task but OCR
+    /// ([`ModelSource::Provider`]).
+    pub provider_id: Option<String>,
 }
 
 impl ModelChoice {
     /// The chosen model's name, or the label of the built-in fallback.
     #[must_use]
-    pub fn label(&self) -> &'static str {
-        self.model.unwrap_or("hashing embedder (offline default)")
+    pub fn label(&self) -> String {
+        match (&self.provider_id, self.model) {
+            (Some(id), _) => id.clone(),
+            (None, Some(name)) => name.to_owned(),
+            (None, None) if self.task == ModelTask::Embed => {
+                "hashing embedder (offline default)".to_owned()
+            }
+            (None, None) => "none (no provider model configured)".to_owned(),
+        }
     }
 
     /// One sentence saying **why** this model — the string `roteiro config`
@@ -354,8 +356,12 @@ impl ModelChoice {
         let key = self.task.config_key();
         match self.source {
             ModelSource::Pinned => format!("pinned by `[models] {key}`"),
-            ModelSource::Default if self.model.is_none() => {
+            ModelSource::Provider => format!("provider model, named by `[models] {key}`"),
+            ModelSource::Default if self.task == ModelTask::Embed => {
                 format!("built-in default, no model needed (`[models] {key}` unset)")
+            }
+            ModelSource::Default if self.model.is_none() => {
+                format!("served by the provider: set `[models] {key}` (ADR-0033)")
             }
             ModelSource::Default => format!("built-in default (`[models] {key}` unset)"),
         }
@@ -387,7 +393,7 @@ impl ModelChoice {
             // Matched rather than caught by a wildcard so that a later variant
             // has to decide what it means here instead of inheriting "not
             // installed" by accident.
-            ModelSource::Default => ModelChoiceError::NotInstalled {
+            ModelSource::Default | ModelSource::Provider => ModelChoiceError::NotInstalled {
                 name: name.to_owned(),
             },
         })
@@ -466,6 +472,26 @@ pub enum ModelChoiceError {
 /// cannot use. Never falls back to the default on either.
 pub fn resolve_with(task: ModelTask, pins: &ModelPins) -> Result<ModelChoice, ModelChoiceError> {
     let key = task.config_key();
+    // Every task but OCR is served by the provider (ADR-0033): its pin is a
+    // provider id, which the registry cannot check and does not try to.
+    if task != ModelTask::Ocr {
+        return Ok(match pins.for_task(task) {
+            Some(id) => ModelChoice {
+                task,
+                model: None,
+                source: ModelSource::Provider,
+                installed: None,
+                provider_id: Some(id.to_owned()),
+            },
+            None => ModelChoice {
+                task,
+                model: None,
+                source: ModelSource::Default,
+                installed: (task == ModelTask::Embed).then_some(true),
+                provider_id: None,
+            },
+        });
+    }
     let Some(name) = pins.for_task(task) else {
         let model = task.default_model();
         return Ok(ModelChoice {
@@ -473,6 +499,7 @@ pub fn resolve_with(task: ModelTask, pins: &ModelPins) -> Result<ModelChoice, Mo
             installed: Some(model.is_none_or(is_installed_now)),
             model,
             source: ModelSource::Default,
+            provider_id: None,
         });
     };
     let spec = models::find(name).ok_or_else(|| ModelChoiceError::Unknown {
@@ -498,6 +525,7 @@ pub fn resolve_with(task: ModelTask, pins: &ModelPins) -> Result<ModelChoice, Mo
         model: Some(spec.name),
         source: ModelSource::Pinned,
         installed: Some(is_installed_now(spec.name)),
+        provider_id: None,
     })
 }
 
@@ -564,10 +592,10 @@ pub fn resolve_all_with(
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_GENERATIVE, DEFAULT_OCR, ModelChoiceError, ModelPins, ModelSource, ModelTask,
-        TASKS, pin_accepts, resolve_all_with, resolve_with,
+        DEFAULT_OCR, ModelChoiceError, ModelPins, ModelSource, ModelTask, TASKS, pin_accepts,
+        resolve_all_with, resolve_with,
     };
-    use crate::models::{ModelKind, ModelRole, REGISTRY, ResourceTier};
+    use crate::models::ModelKind;
 
     fn pins(key: &str, value: &str) -> ModelPins {
         let mut p = ModelPins::default();
@@ -583,180 +611,86 @@ mod tests {
         p
     }
 
-    /// **The byte-identical-when-unset proof.** Every task with no pin must
-    /// resolve to exactly the constant its call site held before this module
-    /// existed — `voxtral-mini-3b`, `smolvlm-500m-gguf`, `ocrs-text`,
-    /// `qwen3-0.6b`, and no model at all for `infer`. Asserted against literals
-    /// rather than against the implementation, so a change to the table cannot
-    /// quietly agree with itself.
+    /// Unset, only OCR names a registry model; Embed falls back to the built-in
+    /// hashing embedder; every other task waits for a provider model (ADR-0033).
     #[test]
-    fn resolve_unset_matches_the_previous_hard_coded_models() {
+    fn unset_tasks_resolve_to_ocr_the_hashing_embedder_or_nothing() {
         let unset = ModelPins::default();
-        let expected = [
-            (ModelTask::Embed, None),
-            (ModelTask::Draft, Some("qwen3-0.6b")),
-            (ModelTask::Chat, Some("qwen3-0.6b")),
-            (ModelTask::Review, Some("qwen3-0.6b")),
-            (ModelTask::Transcribe, Some("voxtral-mini-3b")),
-            (ModelTask::Describe, Some("smolvlm-500m-gguf")),
-            (ModelTask::Ocr, Some("ocrs-text")),
-        ];
-        for (task, model) in expected {
-            let choice = resolve_with(task, &unset).expect("unset resolves");
-            assert_eq!(choice.model, model, "{task} default");
-            assert_eq!(choice.source, ModelSource::Default, "{task} source");
-            assert!(
-                choice.why().contains("unset"),
-                "{task} explains itself: {}",
-                choice.why()
-            );
-        }
-    }
-
-    /// The default generative model is a literal so the registry cannot move it
-    /// silently — but it must still *be* the low-tier instruct pick `spec draft`
-    /// used to search for. If a smaller instruct model is curated in, this fails
-    /// and the choice becomes a decision rather than an accident.
-    #[test]
-    fn default_generative_is_still_the_low_tier_instruct_pick() {
-        let searched = REGISTRY
-            .iter()
-            .find(|m| {
-                m.kind == ModelKind::Generative
-                    && m.role == ModelRole::Instruct
-                    && m.tier == ResourceTier::Low
-            })
-            .expect("a low-tier instruct model is curated");
-        assert_eq!(searched.name, DEFAULT_GENERATIVE);
-    }
-
-    /// Every default names a real registry entry of a kind the task can use.
-    #[test]
-    fn every_default_is_a_registry_model_the_task_can_use() {
         for task in TASKS {
-            let Some(name) = task.default_model() else {
-                continue;
-            };
-            let spec = crate::models::find(name).unwrap_or_else(|| panic!("{task}: {name} exists"));
-            assert!(task.capable(spec.kind), "{task} can use {name}");
-            assert!(
-                pin_accepts(task.config_key(), spec.kind),
-                "{task}'s own default would be accepted by its key"
-            );
+            let choice = resolve_with(task, &unset).expect("unset resolves");
+            assert_eq!(choice.source, ModelSource::Default, "{task}");
+            assert_eq!(choice.provider_id, None, "{task}");
+            let expected = (task == ModelTask::Ocr).then_some(DEFAULT_OCR);
+            assert_eq!(choice.model, expected, "{task}");
         }
-        assert_eq!(DEFAULT_OCR, "ocrs-text");
-    }
-
-    /// A pin of the wrong modality is an error naming the key, **not** a silent
-    /// fallback. This is the `GGML_ASSERT` case: a vision model pinned for audio
-    /// would be handed to the ASR path, and a config that appears honoured while
-    /// something else runs is the worst available outcome.
-    #[test]
-    fn a_wrong_modality_pin_errors_and_names_the_key() {
-        let err = resolve_with(ModelTask::Transcribe, &pins("audio", "smolvlm-500m-gguf"))
-            .expect_err("a vision model cannot transcribe");
-        let ModelChoiceError::WrongKind { key, ref name, .. } = err else {
-            panic!("expected WrongKind, got {err:?}");
-        };
-        assert_eq!(key, "audio");
-        assert_eq!(name, "smolvlm-500m-gguf");
-        let text = err.to_string();
-        assert!(text.contains("[models] audio"), "names the key: {text}");
-        assert!(text.contains("vision model"), "names what it is: {text}");
+        let embed = resolve_with(ModelTask::Embed, &unset).expect("resolves");
+        assert!(embed.label().contains("hashing"), "{}", embed.label());
+        let draft = resolve_with(ModelTask::Draft, &unset).expect("resolves");
         assert!(
-            text.contains("an audio model"),
-            "names what it needs: {text}"
+            draft.why().contains("[models] generative"),
+            "{}",
+            draft.why()
         );
     }
 
-    /// The BERT-encoder case the capability filter was born from: an embedding
-    /// model pinned as the generative one.
+    /// A non-OCR pin is a provider id, passed through verbatim — including ids
+    /// the registry never held, and ids with `:` in them.
     #[test]
-    fn an_embedding_model_is_refused_as_the_generative_pin() {
-        for task in [ModelTask::Draft, ModelTask::Chat] {
-            let err = resolve_with(task, &pins("generative", "bge-small-en-v1.5-gguf"))
-                .expect_err("an encoder cannot generate");
-            assert!(
-                matches!(
-                    err,
-                    ModelChoiceError::WrongKind {
-                        key: "generative",
-                        ..
-                    }
-                ),
-                "{task}: {err:?}"
-            );
+    fn a_non_ocr_pin_is_a_provider_id_passed_through() {
+        for (task, key, id) in [
+            (ModelTask::Draft, "generative", "qwen3:8b"),
+            (ModelTask::Chat, "generative", "claude-sonnet-5-5"),
+            (ModelTask::Review, "generative", "qwen3:8b"),
+            (ModelTask::Embed, "embedding", "nomic-embed-text"),
+            (ModelTask::Transcribe, "audio", "voxtral"),
+            (ModelTask::Describe, "vision", "gemma3:4b"),
+        ] {
+            let choice = resolve_with(task, &pins(key, id)).expect("a provider id resolves");
+            assert_eq!(choice.source, ModelSource::Provider, "{task}");
+            assert_eq!(choice.provider_id.as_deref(), Some(id), "{task}");
+            assert_eq!(choice.model, None, "{task}");
+            assert_eq!(choice.label(), id);
+            assert!(choice.why().contains(key), "{}", choice.why());
         }
-    }
-
-    /// `generative` governs both `draft` and `chat`. `chat` alone would accept a
-    /// vision model — a multimodal GGUF does generate text — but `spec draft`
-    /// cannot use one, so the shared key accepts generative models only. The
-    /// alternative is a key that works for one of its two surfaces.
-    #[test]
-    fn a_shared_key_accepts_only_what_all_its_surfaces_accept() {
-        assert!(ModelTask::Chat.capable(ModelKind::Vision));
-        assert!(!ModelTask::Draft.capable(ModelKind::Vision));
-        assert!(!pin_accepts("generative", ModelKind::Vision));
-        assert!(pin_accepts("generative", ModelKind::Generative));
-        let err = resolve_with(ModelTask::Chat, &pins("generative", "smolvlm-500m-gguf"))
-            .expect_err("the key is shared with draft");
-        let text = err.to_string();
-        assert!(
-            text.contains("roteiro spec draft") && text.contains("roteiro serve / Ask"),
-            "says which surfaces the key governs: {text}"
-        );
-    }
-
-    /// An unknown name is an error, not a fallback — a typo'd model must not
-    /// resolve to the default and look honoured.
-    #[test]
-    fn an_unknown_pin_errors_rather_than_falling_back() {
-        let err = resolve_with(ModelTask::Describe, &pins("vision", "smolvlm-500m"))
-            .expect_err("no such model");
-        assert!(
-            matches!(err, ModelChoiceError::Unknown { key: "vision", .. }),
-            "{err:?}"
-        );
-        assert!(
-            err.to_string().contains("roteiro model list"),
-            "actionable: {err}"
-        );
-    }
-
-    /// A blank value is a mistake, and the useful reading of it is "unset" — an
-    /// `unknown model ""` error would be a worse answer than the default.
-    #[test]
-    fn a_blank_pin_reads_as_unset() {
-        let choice = resolve_with(ModelTask::Transcribe, &pins("audio", "   "))
-            .expect("blank is not a name");
-        assert_eq!(choice.source, ModelSource::Default);
-        assert_eq!(choice.model, Some("voxtral-mini-3b"));
-    }
-
-    /// A valid pin is honoured, and says so.
-    #[test]
-    fn a_valid_pin_is_honoured_and_reports_its_key() {
-        let choice = resolve_with(ModelTask::Draft, &pins("generative", "qwen3-8b"))
-            .expect("a generative model is valid for draft");
-        assert_eq!(choice.model, Some("qwen3-8b"));
-        assert_eq!(choice.source, ModelSource::Pinned);
-        assert_eq!(choice.why(), "pinned by `[models] generative`");
     }
 
     /// One pin moves exactly the tasks its key governs and no others.
     #[test]
     fn a_pin_moves_only_its_own_tasks() {
-        let pinned = pins("audio", "voxtral-mini-3b");
+        let pinned = pins("audio", "voxtral");
         for (task, result) in resolve_all_with(&pinned) {
             let choice = result.expect("valid");
             let expected = if task == ModelTask::Transcribe {
-                ModelSource::Pinned
+                ModelSource::Provider
             } else {
                 ModelSource::Default
             };
             assert_eq!(choice.source, expected, "{task}");
         }
+    }
+
+    /// OCR still resolves against the registry: a wrong name is an error naming
+    /// the key, never a fallback.
+    #[test]
+    fn an_ocr_pin_is_checked_against_the_registry() {
+        let err =
+            resolve_with(ModelTask::Ocr, &pins("ocr", "no-such-ocr")).expect_err("no such model");
+        assert!(
+            matches!(err, ModelChoiceError::Unknown { key: "ocr", .. }),
+            "{err:?}"
+        );
+        let ok = resolve_with(ModelTask::Ocr, &pins("ocr", DEFAULT_OCR)).expect("ocr resolves");
+        assert_eq!(ok.source, ModelSource::Pinned);
+        assert!(pin_accepts("ocr", ModelKind::Ocr));
+    }
+
+    /// A blank value reads as unset.
+    #[test]
+    fn a_blank_pin_reads_as_unset() {
+        let choice = resolve_with(ModelTask::Transcribe, &pins("audio", "   "))
+            .expect("blank is not a name");
+        assert_eq!(choice.source, ModelSource::Default);
+        assert_eq!(choice.provider_id, None);
     }
 
     /// `require_installed` on a task with no model says so instead of inventing
@@ -776,58 +710,13 @@ mod tests {
         );
     }
 
-    /// **`Review` is an amendment to this table, not a seventh bespoke rule.**
-    /// Stage 35b's reviewer resolves its model here or not at all, so the whole
-    /// of what it adds is asserted in one place: a task on the existing
-    /// `generative` key, with `Draft`'s capability, `Draft`'s default, and its own
-    /// surface string.
-    ///
-    /// The `config_key` assertion is the load-bearing one. A `review` key of its
-    /// own would have been the fourth selection rule this module exists to have
-    /// removed, and it would have let `[models] generative` and `[models] review`
-    /// disagree about which model a generative surface uses.
+    /// `Review` stays a task on the existing `generative` key.
     #[test]
     fn review_is_a_task_on_the_existing_generative_key() {
         assert_eq!(ModelTask::Review.config_key(), "generative");
         assert_eq!(ModelTask::Review.as_str(), "review");
         assert_eq!(ModelTask::Review.surface(), "roteiro review --llm");
-        assert_eq!(ModelTask::Review.default_model(), Some(DEFAULT_GENERATIVE));
-
-        // Same capability as `draft`, so the shared key's intersection is
-        // unchanged by adding it — a vision model is still refused, and it is
-        // refused for `review` too rather than only for the two older tasks.
-        assert!(ModelTask::Review.capable(ModelKind::Generative));
-        assert!(!ModelTask::Review.capable(ModelKind::Vision));
-        assert!(!ModelTask::Review.capable(ModelKind::Embedding));
-        assert!(!pin_accepts("generative", ModelKind::Vision));
-        assert!(pin_accepts("generative", ModelKind::Generative));
-
-        // A pin on the shared key reaches it, and a wrong-modality one fails for
-        // it exactly as for `draft` — no separate path to keep in step.
-        let choice = resolve_with(ModelTask::Review, &pins("generative", "qwen3-8b"))
-            .expect("a generative pin resolves");
-        assert_eq!(choice.model, Some("qwen3-8b"));
-        assert_eq!(choice.source, ModelSource::Pinned);
-        assert!(
-            choice.why().contains("[models] generative"),
-            "names the key that chose it: {}",
-            choice.why()
-        );
-        let err = resolve_with(
-            ModelTask::Review,
-            &pins("generative", "bge-small-en-v1.5-gguf"),
-        )
-        .expect_err("an encoder cannot review");
-        assert!(
-            matches!(
-                err,
-                ModelChoiceError::WrongKind {
-                    key: "generative",
-                    ..
-                }
-            ),
-            "{err:?}"
-        );
+        assert_eq!(ModelTask::Review.default_model(), None);
     }
 
     /// Every task is listed in [`TASKS`] exactly once. `TASKS` is what

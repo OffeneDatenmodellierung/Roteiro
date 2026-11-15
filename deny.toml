@@ -119,7 +119,8 @@ allow = [
 # unnoticed; that is the trade. Removing a name once its duplicate is gone keeps
 # the baseline honest — `cargo deny` reports an unused skip entry.
 #
-# Baseline, measured 2026-11-13 with `cargo deny --all-features check bans`
+# Baseline, measured 2026-11-13 with `cargo deny --all-features check bans`;
+# `nom` and `shlex` left it on 2026-11-14 with llama.cpp's bindgen (ADR-0033).
 # (dev-only duplicates are not counted: `multiple-versions-include-dev` is off).
 multiple-versions = "deny"
 skip = [
@@ -130,9 +131,7 @@ skip = [
     "digest",
     "getrandom",
     "hashbrown",
-    "nom",
     "sha2",
-    "shlex",
     "syn",
     "windows-sys",
 ]

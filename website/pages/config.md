@@ -15,16 +15,15 @@ your host, may be switched *off* by the committed project file but never *on*.
 
 <pre><code><span class="c"># roteiro.toml — every key is optional; shown with its default</span>
 
-[models]                                <span class="c"># unset ⇒ offline defaults; `roteiro config` shows what each surface resolved to</span>
-embedding  = "bge-small-en-v1.5-gguf"   <span class="c"># embedding model for `infer`</span>
-generative = "qwen3-0.6b"               <span class="c"># model for `spec draft` / serving / Ask</span>
-vision     = "smolvlm-500m-gguf"        <span class="c"># image description for `media build`</span>
-audio      = "voxtral-mini-3b"          <span class="c"># speech transcription for `media build`</span>
-ocr        = "ocrs-text"                <span class="c"># literal image text for `sync`</span>
+[models]                                <span class="c"># provider model ids, except `ocr`; `roteiro config` shows what each surface resolved to</span>
+# embedding  = "nomic-embed-text"       <span class="c"># embedding model for `infer` (unset ⇒ offline hashing embedder)</span>
+# generative = "qwen3:8b"               <span class="c"># model for `spec draft` / `review --llm` / Ask</span>
+# vision     = "gemma3:4b"              <span class="c"># image description for `media build`</span>
+# audio      = "voxtral"                <span class="c"># speech transcription for `media build` (llama-server)</span>
+ocr        = "ocrs-text"                <span class="c"># literal image text for `sync` — the one in-process model</span>
 
 [provider]                              <span class="c"># the OpenAI-compatible model server (ADR-0027/0028); unset by default</span>
 # base_url = "http://127.0.0.1:11434/v1"  <span class="c"># e.g. local Ollama, or a hosted https:// endpoint (announced on every run);</span>
-                                        <span class="c"># once set, [models] values are the provider's ids, not the registry names above.</span>
                                         <span class="c"># Credential: ROTEIRO_PROVIDER_API_KEY in the environment, never here</span>
 
 [ingest]                                <span class="c"># which blob content `sync` embeds</span>
