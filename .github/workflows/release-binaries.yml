@@ -119,7 +119,7 @@ jobs:
               lipo -create -output "dist/$stem/roteiro" \
                 target/aarch64-apple-darwin/release/roteiro \
                 target/x86_64-apple-darwin/release/roteiro
-              lipo -verify_arch "dist/$stem/roteiro" arm64 x86_64
+              for arch in arm64 x86_64; do lipo "dist/$stem/roteiro" -verify_arch "$arch"; done
               "dist/$stem/roteiro" --version
               archive="$stem.tar.gz"
               tar -C dist -czf "dist/$archive" "$stem"
