@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [8.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v7.2.2...roteiro-v8.0.0) - 2026-11-15
+
+### Added
+
+- [**breaking**] retire the in-process llama.cpp engine; every model call goes through the provider
+- *(okf)* record who drafted authored prose, emit descriptions, keep peer metadata
+- *(sync)* follow a symlinked raw/, switchable with [paths] follow_raw_symlink
+- *(provider)* OAuth access tokens via a token command, and extra headers (ADR-0032)
+
+### Fixed
+
+- clear the clippy and rustdoc failures from the first CI run
+- *(provider)* refuse token_command with no home directory instead of running from /tmp
+- *(provider)* run the token helper from home, and accept only an RFC 6750 bearer token
+
+### Other
+
+- *(ocr)* say that rotated text is not read, wherever OCR content is met
+- check the lock on every event, and resolve fresh once a week
+- Merge pull request #981 from OffeneDatenmodellierung/feat/provider-token-command
+
 ## [7.2.2](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v7.2.1...roteiro-v7.2.2) - 2026-11-13
 
 ### Fixed

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [8.0.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v7.2.2...rto-render-v8.0.0) - 2026-11-15
+
+### Added
+
+- [**breaking**] retire the in-process llama.cpp engine; every model call goes through the provider
+- *(okf)* record who drafted authored prose, emit descriptions, keep peer metadata
+
+### Fixed
+
+- close the raw-symlink opt-out gaps, keep OKF generation times, report lock failures
+
 ## [7.1.0](https://github.com/OffeneDatenmodellierung/Roteiro/compare/rto-render-v7.0.0...rto-render-v7.1.0) - 2026-11-13
 
 ### Added
