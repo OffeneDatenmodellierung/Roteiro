@@ -6,8 +6,39 @@ site-order: 1
 
 # Install & build {#build}
 
-Roteiro is a Rust workspace (MSRV 1.96). Install the lean default build from
-crates.io, or build from source with the feature tiers you want.
+Roteiro is a Rust workspace (MSRV 1.96). Download a prebuilt binary, install
+the lean default build from crates.io, or build from source with the feature
+tiers you want.
+
+## Download a binary {#download}
+
+Every release from 8.0.0 on carries prebuilt binaries on its
+[release page](https://github.com/OffeneDatenmodellierung/Roteiro/releases/latest),
+built with **every feature** (`--all-features`) — none of which opens a socket
+or runs an analyzer without your consent, exactly as in the default build.
+
+<table>
+<tr><th>Platform</th><th>File</th></tr>
+<tr><td>macOS 11+, Apple silicon (Intel Macs are not supported)</td><td><code>roteiro-&lt;version&gt;-macos-arm64.tar.gz</code></td></tr>
+<tr><td>Windows 10+, x86_64</td><td><code>roteiro-&lt;version&gt;-windows-x86_64.zip</code></td></tr>
+</table>
+
+Each has a `.sha256` beside it. The binaries are **not signed**, so the first
+run needs one step:
+
+<pre><code><span class="c"># macOS: unpack, clear the download quarantine, put it on your PATH</span>
+tar -xzf roteiro-*-macos-arm64.tar.gz
+xattr -d com.apple.quarantine roteiro-*/roteiro
+sudo mv roteiro-*/roteiro /usr/local/bin/
+
+<span class="c"># Windows (PowerShell): unpack, unblock, run from the folder or add it to PATH</span>
+Expand-Archive roteiro-*-windows-x86_64.zip -DestinationPath .
+Get-ChildItem roteiro-*\roteiro.exe | Unblock-File</code></pre>
+
+Linux users: `cargo install roteiro --locked` below — the default build needs
+only the C compiler Rust itself requires.
+
+## Install with cargo {#cargo}
 
 <pre><code><span class="c"># Lean default build — pure Rust, no network call of its own,</span>
 <span class="c"># and `roteiro model pull` included (--locked uses the published lockfile)</span>

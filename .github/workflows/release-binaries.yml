@@ -1,0 +1,148 @@
+name: Release binaries
+
+# Prebuilt `roteiro` for macOS and Windows, attached to each `roteiro-v*`
+# GitHub release, so using Roteiro does not require a Rust toolchain.
+#
+# What ships: `--all-features`. A downloaded binary cannot be rebuilt with a
+# different feature set, so it carries every capability; none of them opens a
+# socket or runs an analyzer without the consent the default build already asks
+# for (AGENTS.md, "Offline by default"). Since ADR-0033 no feature needs a C++
+# toolchain, so this is a plain `cargo build`.
+#
+#   roteiro-<version>-macos-arm64.tar.gz       Apple silicon only; Intel Macs are not supported
+#   roteiro-<version>-windows-x86_64.zip
+#   …each with a `.sha256` beside it
+#
+# Triggers:
+#   - `release: published` — release-plz creates one release per crate with
+#     its app token (so this event fires); only the `roteiro-v*` one is built.
+#   - `workflow_dispatch` with a tag — attach binaries to a release that
+#     already exists, or rebuild after a failed run.
+#   - `pull_request` touching this file — build and keep the archives as a run
+#     artifact, upload nothing. CI is Linux-only, so this is where a change to
+#     the workflow proves it still produces both archives.
+#
+# Unsigned: no Apple Developer ID or Authenticode certificate is configured, so
+# macOS Gatekeeper and Windows SmartScreen warn on first run. website/pages/
+# build.md says how to clear the warning.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing roteiro-v* release to build and attach binaries to"
+        required: true
+  pull_request:
+    paths:
+      - .github/workflows/release-binaries.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-binaries-${{ github.event.release.tag_name || inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: never
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    if: >-
+      github.repository == 'OffeneDatenmodellierung/Roteiro' &&
+      (github.event_name != 'release' || startsWith(github.event.release.tag_name, 'roteiro-v'))
+    permissions:
+      contents: write # gh release upload
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-arm64
+            os: macos-15
+            target: aarch64-apple-darwin
+          - name: windows-x86_64
+            os: windows-2025
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Refuse a tag that is not a roteiro release
+        if: github.event_name == 'workflow_dispatch' && !startsWith(inputs.tag, 'roteiro-v')
+        run: |
+          echo "::error::tag must start with roteiro-v (got '$TAG')"
+          exit 1
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.TAG || github.sha }}
+          persist-credentials: false
+
+      # Pinned with the sites in ci.yml and release-plz.yml: the binary users
+      # download is built by the compiler CI tested.
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.98"
+          targets: ${{ matrix.target }}
+
+      # Deliberately no rust-cache: a release binary is built cold, from the
+      # committed lock and nothing else.
+      - name: Build
+        run: cargo build --release --locked --all-features -p roteiro --target ${{ matrix.target }}
+
+      - name: Package
+        id: package
+        run: |
+          set -euo pipefail
+          version="$(cargo pkgid --locked -p roteiro | sed 's/.*[#@]//')"
+          if [ -n "$TAG" ] && [ "$TAG" != "roteiro-v$version" ]; then
+            echo "::error::$TAG checks out roteiro $version"
+            exit 1
+          fi
+          stem="roteiro-$version-${{ matrix.name }}"
+          mkdir -p "dist/$stem"
+          cp README.md LICENSE-MIT LICENSE-APACHE "dist/$stem/"
+          case "${{ matrix.name }}" in
+            macos-arm64)
+              cp target/aarch64-apple-darwin/release/roteiro "dist/$stem/"
+              "dist/$stem/roteiro" --version
+              archive="$stem.tar.gz"
+              tar -C dist -czf "dist/$archive" "$stem"
+              (cd dist && shasum -a 256 "$archive" > "$archive.sha256")
+              ;;
+            windows-x86_64)
+              cp target/x86_64-pc-windows-msvc/release/roteiro.exe "dist/$stem/"
+              "dist/$stem/roteiro.exe" --version
+              archive="$stem.zip"
+              (cd dist && 7z a -tzip -bso0 "$archive" "$stem" && sha256sum "$archive" > "$archive.sha256")
+              ;;
+          esac
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+
+      - name: Keep the archive (pull request)
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.package.outputs.archive }}
+          path: |
+            dist/${{ steps.package.outputs.archive }}
+            dist/${{ steps.package.outputs.archive }}.sha256
+          retention-days: 7
+
+      - name: Attach to the release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" --clobber \
+            "dist/${{ steps.package.outputs.archive }}" \
+            "dist/${{ steps.package.outputs.archive }}.sha256"
