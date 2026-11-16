@@ -63,13 +63,13 @@ Two rules worth knowing:
 
 ## 3. Check it
 
-`roteiro serve` and the explorer are not in the default build, so install with
-their features. `serve` still links the in-process engine, so it needs the same
-C++ toolchain (cmake and clang) as before:
+`roteiro serve` is in the default build; the explorer (the Ask panel) is a
+feature, and the [release binaries](../website/pages/build.md) carry both.
+`--scope all` serves every configured workspace — the recommended way to run it:
 
 ```sh
-cargo install roteiro --features serve,explorer   # explorer: the Ask panel
-roteiro serve
+cargo install roteiro --features explorer   # or download a release binary
+roteiro serve --scope all
 curl -s http://127.0.0.1:8017/v1/models
 ```
 
@@ -134,6 +134,12 @@ is `ant`, Anthropic's CLI.
 # macOS
 brew install anthropics/tap/ant
 
+# Windows (PowerShell) — x64; use windows_arm64 on Arm
+$v = "2.9.0"   # pick from github.com/anthropics/anthropic-cli/releases
+Invoke-WebRequest "https://github.com/anthropics/anthropic-cli/releases/download/v$v/ant_${v}_windows_amd64.zip" -OutFile ant.zip
+Expand-Archive ant.zip -DestinationPath "$env:LOCALAPPDATA\Programs\ant"
+# then add %LOCALAPPDATA%\Programs\ant to PATH and open a new terminal
+
 # Linux / WSL — pick VERSION from github.com/anthropics/anthropic-cli/releases
 curl -fsSL "https://github.com/anthropics/anthropic-cli/releases/download/v${VERSION}/ant_${VERSION}_$(uname -s | tr A-Z a-z)_$(uname -m | sed -e s/x86_64/amd64/ -e s/aarch64/arm64/).tar.gz" \
   | sudo tar -xz -C /usr/local/bin ant
@@ -150,7 +156,8 @@ ant auth login
 ant auth status
 ```
 
-**Point Roteiro at it** in your own `~/.roteiro/config.toml` — `token_command`
+**Point Roteiro at it** in your own `~/.roteiro/config.toml` (Windows:
+`%USERPROFILE%\.roteiro\config.toml`) — `token_command`
 is ignored in a project's `roteiro.toml`, because a committed command would run
 code from any repository you clone:
 

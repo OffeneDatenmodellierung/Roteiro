@@ -24,7 +24,8 @@ ocr        = "ocrs-text"                <span class="c"># literal image text for
 
 [provider]                              <span class="c"># the OpenAI-compatible model server (ADR-0027/0028); unset by default</span>
 # base_url = "http://127.0.0.1:11434/v1"  <span class="c"># e.g. local Ollama, or a hosted https:// endpoint (announced on every run);</span>
-                                        <span class="c"># Credential: ROTEIRO_PROVIDER_API_KEY in the environment, never here</span>
+                                        <span class="c"># Credential: ROTEIRO_PROVIDER_API_KEY in the environment, never here,</span>
+                                        <span class="c"># or token_command (user config only) — see Models → Hosted providers</span>
 
 [ingest]                                <span class="c"># which blob content `sync` embeds</span>
 prose  = true                           <span class="c"># Markdown / plain text bodies</span>

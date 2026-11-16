@@ -39,6 +39,7 @@ cd your-repo
 roteiro init                   # store + git hooks + AGENTS.md
 roteiro sync                   # build the graph
 roteiro review                 # your change, plus what the graph knows about it
+roteiro serve --scope all      # web UI + /v1 over every configured workspace
 ```
 
 The default build needs no toolchain class beyond the C compiler Rust itself
