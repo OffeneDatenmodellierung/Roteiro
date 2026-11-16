@@ -27,7 +27,7 @@ base64 = "0.23"
 # deliberately does NOT bundle a crypto provider, so we install *ring* explicitly
 # (below) — the same backend already in the tree via `ureq`, avoiding a second,
 # heavier `aws-lc-rs` C backend and its extra licence surface.
-axum-server = { version = "0.8", default-features = false, features = [
+axum-server = { version = "0.9", default-features = false, features = [
     "tls-rustls-no-provider",
 ], optional = true }
 # `tls` only: install the ring `CryptoProvider` before building the server config.
