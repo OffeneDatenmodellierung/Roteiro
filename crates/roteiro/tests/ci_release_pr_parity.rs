@@ -63,10 +63,19 @@ const REQUIRED_CONTEXTS: &[&str] = &["checks", "default-features", "msrv", "no-d
 /// It is the other half of the classification, and the pair of lists is what
 /// makes a new job impossible to add without deciding which it is.
 const NOT_REQUIRED_JOBS: &[(&str, &str)] = &[(
-    "coverage",
-    "#319: measured, not gated — `continue-on-error: true` and no agreed \
-     threshold, so nothing depends on its verdict",
+    "no-default-features-cells",
+    "the feature-off matrix: its cells report as `no-default-features (<cell>)`, \
+     and the required `no-default-features` job aggregates their result",
 )];
+
+/// The one job-level condition a required job may carry: it cannot skip.
+///
+/// An aggregating job (`no-default-features`, over the feature-off matrix)
+/// needs it — without it a failed dependency makes the aggregator `skipped`,
+/// which branch protection accepts as success. `always()` is the opposite of
+/// the conditions [`a_required_check_job_is_never_skipped_at_the_job_level`]
+/// exists to refuse.
+const NEVER_SKIPS: &str = "always()";
 
 /// Steps that legitimately run on a release PR without a `RELEASE_PR` arm.
 ///
@@ -265,7 +274,7 @@ fn a_required_check_job_is_never_skipped_at_the_job_level() {
         let Some((_, job)) = jobs.iter().find(|(name, _)| name == context) else {
             continue; // reported by the classification test
         };
-        let condition = condition(job);
+        let condition = condition(job).filter(|c| c.trim() != NEVER_SKIPS);
         assert!(
             condition.is_none(),
             "the required job `{context}` carries a job-level `if:` ({:?}). A \

@@ -119,8 +119,8 @@ env:
   # `release-plz-2026-08-19T09-59-50Z`. `github.head_ref` is empty on `push`, so
   # the `event_name` guard makes this false on `main` regardless. Note that
   # `env` is NOT available in a job-level `if:` — only in step-level ones — so
-  # the `coverage` job below spells the predicate out longhand. Do not "tidy"
-  # that into `env.RELEASE_PR`; it would silently stop matching.
+  # the `no-default-features-cells` job below spells the predicate out longhand.
+  # Do not "tidy" that into `env.RELEASE_PR`; it would silently stop matching.
   #
   # If a human pushes a real change onto a release-plz branch, it rides this
   # cheap path and is NOT fully tested. In practice release-plz regenerates the
@@ -132,22 +132,11 @@ env:
 jobs:
   # Pinned to `ubuntu-24.04` rather than `ubuntu-latest`, which resolves to the
   # same image TODAY — so this is not a version change, it is a change in what
-  # can move without a diff.
-  #
-  # It became load-bearing when the cmake/clang/libclang apt install came out of
-  # the jobs below. That step was pointless, but it did mean the build stated its
-  # own C/C++ requirements; without it, "the image already ships a
-  # bindgen-loadable libclang" is an assumption held by the runner label alone.
-  # `ubuntu-latest` advances to the next LTS on GitHub's schedule, and it would
-  # take the `serve` build with it on a commit that changed nothing.
-  #
-  # Consistent with how everything else here is fixed: every action is pinned to
-  # a SHA, and ADR-0017 asks for deliberate, monitored currency rather than
-  # whatever arrives. The obligation this creates is a real one — `ubuntu-24.04`
-  # will eventually be retired, with warnings in the run log well ahead of time —
-  # and taking that bump deliberately is the point, since it is when the probe
-  # behind the deleted step (`cmake --version`, `clang --version`, and bindgen
-  # actually loading libclang) has to be run again on the new image.
+  # can move without a diff. `ubuntu-latest` advances to the next LTS on
+  # GitHub's schedule; every action here is pinned to a SHA for the same reason
+  # (ADR-0017: deliberate, monitored currency rather than whatever arrives).
+  # `ubuntu-24.04` will eventually be retired, with warnings in the run log well
+  # ahead of time, and that bump is taken deliberately.
   checks:
     runs-on: ubuntu-24.04
     # BOUNDING A RUNAWAY JOB. Until this existed there was no `timeout-minutes`
@@ -246,87 +235,49 @@ jobs:
       # in the same commit. Do that when a release has settled, not on the day
       # it ships.
       #
-      # There are seven, and they are no longer all in this file — the last
-      # three floats have since been pinned too, so grep rather than trusting
-      # this list:
-      #
-      #   * `ci.yml` — `checks`, `default-features`, `no-default-features`,
-      #     `coverage` (four).
-      #   * `graph-artifact.yml` — `publish` (one).
-      #   * `release-plz.yml` — `release-plz-pr` and `release-plz-release`
-      #     (two). The second one publishes to crates.io; see the comment there
-      #     for why it must not lag behind `checks`.
-      #
-      # `msrv` here and both jobs in `website.yml` are pinned to the MSRV
-      # instead, and do NOT move with this bump. The one-line check that the
-      # split is still what you expect:
+      # They are spread across workflows (`ci.yml`, `graph-artifact.yml`,
+      # `release-plz.yml` — whose publish job must not lag behind `checks` —
+      # `release-binaries.yml`, `fresh-resolution.yml`), so grep rather than
+      # trusting a list here:
       #
       #   grep -rn 'toolchain: "' .github/workflows/
       #
-      # It matches this comment line too, unavoidably. Expect ten real
-      # values: seven at the pinned version, three at the MSRV.
+      # `msrv` here and both jobs in `website.yml` are pinned to the MSRV
+      # instead, and do NOT move with this bump.
       #
       # A toolchain the canary has already flagged is a toolchain this bump is
       # overdue for; see `toolchain-canary.yml`.
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: "1.98"
-          components: rustfmt, clippy
+          components: rustfmt, clippy, llvm-tools-preview
       # `cache-on-failure` defaults to false, so a job that fails saves no cache
-      # at all — the post-run save step does not execute. The runs that most
-      # need to be fast are the ones iterating on a failure, which is exactly
-      # when the default discards the work. It bites when the cache key is new
-      # (the key hashes `Cargo.lock` and the toolchain, so any bump makes one):
-      # the failing run builds ~1.4 GB of artefacts, vendored llama.cpp among
-      # them, and then throws them away.
+      # at all — the post-run save step does not execute, and the work of a cold
+      # build (a new key whenever `Cargo.lock` or the toolchain moves) is lost.
       #
-      # The per-job keys below are deliberate and stay as they are — `checks`
-      # (`--all-features`), `default-features`, `msrv` (1.96) and `coverage`
-      # (`-C instrument-coverage`) produce genuinely different artefacts, and a
-      # `shared-key` across them would thrash.
-      # Restoring (and re-saving) ~1.4 GB of build artefacts to run `cargo
-      # metadata` would cost far more than the check it serves, so a release PR
-      # skips the cache entirely rather than warming one it will not use.
+      # SAVED FROM `main` ONLY (`save-if`). Every job saving on every PR branch
+      # put the repository at 11 GB against GitHub's 10 GB cap (measured
+      # 2026-11-16), so GitHub evicted least-recently-used entries — `main`'s
+      # among them — and runs went cold at random (an 18-minute `main` run beside
+      # 7-minute ones). A PR restores `main`'s cache, which is what it shares
+      # most with; a PR that moves `Cargo.lock` rebuilds the moved crates on each
+      # push, which is the price of the cap.
+      #
+      # The per-job keys are deliberate: `checks` (`--all-features`, coverage
+      # instrumented), `default-features`, each feature-off cell and `msrv`
+      # (1.96) produce genuinely different artefacts, and a `shared-key` across
+      # them would thrash. A release PR skips the cache entirely: restoring
+      # ~1.4 GB to run `cargo metadata` would cost more than the check it serves.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         if: env.RELEASE_PR != 'true'
         with:
           cache-on-failure: true
-      # THERE IS DELIBERATELY NO apt INSTALL OF cmake/clang/libclang HERE, in
-      # this job or in `coverage` and `msrv` below. Do not add one back.
-      #
-      # The opt-in `serve` feature builds vendored llama.cpp (ADR-0006), which
-      # `--all-features` pulls in, so this job does need cmake and a libclang
-      # that bindgen can load. It does not need to *install* them: `ubuntu-24.04`
-      # already ships both, and the step that used to do it was the single
-      # largest hang surface in this file — every one of the eleven six-hour
-      # cancellations sat on it.
-      #
-      # Established on a real runner (image 20260810.271.1) rather than read off
-      # the image manifest, because the manifest does not answer the only
-      # question that matters — whether bindgen can LOAD libclang without
-      # `libclang-dev`:
-      #
-      #   cmake     /usr/local/bin/cmake, 3.31.6   (llama.cpp needs >= 3.14)
-      #   clang     /usr/bin/clang, 18.1.3         (clang-16/17/18 all present)
-      #   libclang  /usr/lib/llvm-18/lib/libclang.so.1 -> libclang-18.so.18
-      #
-      # There is no bare unversioned `libclang.so` — that symlink is precisely
-      # what `libclang-dev` would add — and it turns out not to be needed, because
-      # clang-sys searches versioned SONAMEs too. Proven rather than argued, by
-      # running bindgen 0.72.1 (the exact version `Cargo.lock` pins for
-      # `llama-cpp-sys-2`) against a header on a clean runner with nothing
-      # installed: it generated bindings and exited 0.
-      #
-      # The step was also never the cheap no-op it looked like. `apt-cache policy`
-      # on a clean runner reports `cmake: Installed: (none)`, because the
-      # preinstalled cmake comes from Kitware into /usr/local/bin rather than from
-      # dpkg — so `apt-get install cmake` really did fetch Ubuntu's older 3.28.3
-      # into /usr/bin, where /usr/local/bin shadows it on PATH. Three packages
-      # downloaded, nothing changed, and six hours available to hang doing it.
-      #
-      # If a future dependency genuinely needs a package the image lacks, add a
-      # step for THAT package with a step-level `timeout-minutes` — do not
-      # restore this one on the assumption the toolchain is missing.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # No apt step anywhere in this file: since ADR-0033 retired llama.cpp no
+      # build here needs more than the `cc` the runner ships. The apt install
+      # that used to live here was the hang behind all eleven six-hour
+      # cancellations; if a dependency ever needs a package, add a step for THAT
+      # package with a step-level `timeout-minutes` (`ci_job_timeouts.rs`).
       # The whole of a release PR's verification in this job. See the
       # `RELEASE_PR` comment at the top of this file for what it catches, what
       # it deliberately does not, and why the job runs at all rather than being
@@ -339,45 +290,6 @@ jobs:
       - name: Clippy
         if: env.RELEASE_PR != 'true'
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      # `--no-fail-fast`, and a report of which test binaries actually ran —
-      # issue #906. The two halves are one fix.
-      #
-      # Without `--no-fail-fast` cargo stops at the first failing test binary
-      # and **never runs the later ones**. The job goes red, which reads like
-      # honest reporting, but the scope it reports on is smaller than the scope
-      # it appears to cover and nothing says which part is missing. Not
-      # hypothetical: a fixed-port flake in `serve_mode_selection_cli` truncated
-      # this cell repeatedly, and `-p`-scoped runs were added beside it without
-      # anyone establishing why the full cell was not reaching those crates.
-      # Same family as #822 (a gate that never ran) and #854 (a gate covering
-      # one axis reading as coverage across all of them).
-      #
-      # THE COST, stated rather than left to be discovered: a genuinely broken
-      # commit now runs the WHOLE suite instead of stopping at the first
-      # failure, so a red run costs more wall-clock than it used to. That is the
-      # correct trade — the alternative is a red run whose coverage nobody can
-      # state — and the five sibling cells in `default-features` and
-      # `no-default-features` already pay it.
-      #
-      # The `--no-run` pass is what makes the report possible: it records which
-      # test binaries were BUILT, the log records which were STARTED, and the
-      # script compares the two. A log-only check cannot do this — a fail-fast
-      # truncation leaves the log internally consistent, because every `Running`
-      # line it contains is followed by a `test result:`. Only the compiled list
-      # knows what is missing. It compiles nothing the run below would not
-      # compile anyway, so the cost is cargo's own overhead, not a second build.
-      - name: Test
-        if: env.RELEASE_PR != 'true'
-        run: |
-          set -euo pipefail
-          cargo test --workspace --all-features --no-run --message-format=json-render-diagnostics > test-targets.json
-          cargo test --workspace --all-features --no-fail-fast 2>&1 | tee test-run.log
-      # `always()` so a red test step still states what it covered — which is the
-      # point: the run that most needs its scope written down is the one that
-      # failed. This step fails if any compiled binary was never started.
-      - name: Which test binaries actually ran
-        if: ${{ always() && env.RELEASE_PR != 'true' }}
-        run: python3 scripts/ci-test-cell-report.py --targets test-targets.json --log test-run.log
       # Broken intra-doc links — issue #783. No `RUSTDOCFLAGS` here: the lints
       # are denied in `Cargo.toml`, so this fails on a plain `cargo doc` and
       # keeps failing for anyone who runs it by hand.
@@ -417,9 +329,105 @@ jobs:
       - name: Docs (intra-doc links)
         if: env.RELEASE_PR != 'true'
         run: cargo doc --workspace --all-features --no-deps --keep-going
+      # `--no-fail-fast`, and a report of which test binaries actually ran —
+      # issue #906. The two halves are one fix.
+      #
+      # Without `--no-fail-fast` cargo stops at the first failing test binary
+      # and **never runs the later ones**. The job goes red, which reads like
+      # honest reporting, but the scope it reports on is smaller than the scope
+      # it appears to cover and nothing says which part is missing. Not
+      # hypothetical: a fixed-port flake in `serve_mode_selection_cli` truncated
+      # this cell repeatedly, and `-p`-scoped runs were added beside it without
+      # anyone establishing why the full cell was not reaching those crates.
+      # Same family as #822 (a gate that never ran) and #854 (a gate covering
+      # one axis reading as coverage across all of them).
+      #
+      # THE COST, stated rather than left to be discovered: a genuinely broken
+      # commit now runs the WHOLE suite instead of stopping at the first
+      # failure, so a red run costs more wall-clock than it used to. That is the
+      # correct trade — the alternative is a red run whose coverage nobody can
+      # state — and the five sibling cells in `default-features` and
+      # `no-default-features` already pay it.
+      #
+      # The `--no-run` pass is what makes the report possible: it records which
+      # test binaries were BUILT, the log records which were STARTED, and the
+      # script compares the two. A log-only check cannot do this — a fail-fast
+      # truncation leaves the log internally consistent, because every `Running`
+      # line it contains is followed by a `test result:`. Only the compiled list
+      # knows what is missing. It compiles nothing the run below would not
+      # compile anyway, so the cost is cargo's own overhead, not a second build.
+      #
+      # Prebuilt binaries, not `cargo install`: compiling cargo-audit and
+      # cargo-deny from source cost 3.9 of this job's 10 minutes on every run.
+      - name: Install cargo-llvm-cov, cargo-audit and cargo-deny
+        if: env.RELEASE_PR != 'true'
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: cargo-llvm-cov,cargo-audit,cargo-deny
+      # COVERAGE (#319) is measured on this job's own test run. It used to be a
+      # job of its own that built and ran the whole `--all-features` suite a
+      # second time. `show-env` instruments the workspace crates only (through
+      # `RUSTC_WRAPPER`), so the `cargo test` commands below — and the
+      # binary report that reads them — are the same commands as before. It is
+      # exported through `GITHUB_ENV` so the dogfood step reuses the
+      # instrumented build instead of compiling the workspace again. Clippy
+      # and rustdoc run above it, untouched by the wrapper.
+      - name: Instrument the test build for coverage
+        if: env.RELEASE_PR != 'true'
+        run: |
+          set -euo pipefail
+          exports="$(cargo llvm-cov show-env --export-prefix)"
+          eval "$exports"
+          sed -n 's/^export \([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' <<< "$exports" |
+            while read -r name; do printf '%s=%s\n' "$name" "${!name}"; done >> "$GITHUB_ENV"
+          cargo llvm-cov clean --profraw-only
+      - name: Test
+        if: env.RELEASE_PR != 'true'
+        run: |
+          set -euo pipefail
+          cargo test --workspace --all-features --no-run --message-format=json-render-diagnostics > test-targets.json
+          cargo test --workspace --all-features --no-fail-fast 2>&1 | tee test-run.log
+      # `always()` so a red test step still states what it covered — which is the
+      # point: the run that most needs its scope written down is the one that
+      # failed. This step fails if any compiled binary was never started.
+      - name: Which test binaries actually ran
+        if: ${{ always() && env.RELEASE_PR != 'true' }}
+        run: python3 scripts/ci-test-cell-report.py --targets test-targets.json --log test-run.log
       - name: Dogfood (roteiro check)
         if: env.RELEASE_PR != 'true'
         run: cargo run -p roteiro -- check
+      # MEASURING, NOT BLOCKING. No threshold has been agreed (#319): the 85%
+      # per-file floor in ADR-0001 is an aspiration, and switching one on blind
+      # would fail thin wiring files nobody wants to pad with ceremonial tests.
+      # `continue-on-error` keeps the number from gating a merge; remove it in
+      # the same change that adds `--fail-under-lines`, not before. It runs only
+      # after a green test step: a figure from a failed run is a partial figure,
+      # and publishing it as the figure is what this step must not do.
+      - name: Coverage (measured, not gated)
+        if: env.RELEASE_PR != 'true'
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cargo llvm-cov report --ignore-filename-regex '(tests?/|/target/)' \
+            --summary-only | tee coverage-summary.txt
+          {
+            echo '## Test coverage (measuring only — no gate)'
+            echo
+            echo 'The 85% per-file floor is **not** enforced. These numbers are'
+            echo 'the input to deciding whether it should be.'
+            echo
+            echo '```'
+            cat coverage-summary.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload the per-file coverage report
+        if: env.RELEASE_PR != 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-summary
+          path: coverage-summary.txt
+          if-no-files-found: warn
       # DO NOT "fix" this to match the deny step below. `cargo audit` reads
       # **Cargo.lock**, which lists every optional dependency regardless of which
       # features are on, so it already sees the whole feature matrix — it is
@@ -431,22 +439,21 @@ jobs:
       # Kept as the RustSec-native second opinion. Note it exits 0 on
       # `unmaintained` advisories, so `cargo deny check advisories` — which exits
       # 1 on them — is the enforcing gate of the two.
+      #
+      # The only audit in this file: `msrv` used to run a second, identical one
+      # (same `Cargo.lock`, same advisory database), which turned one new
+      # advisory into two red required checks.
       - name: Audit
         if: env.RELEASE_PR != 'true'
-        run: |
-          cargo install cargo-audit --locked
-          cargo audit
+        run: cargo audit
       # `--all-features` is what closes #318: without it the licence and advisory
       # checks only saw the default build, and everything behind `models`,
       # `serve`, `pdf-text`, `image-vision`, `audio-transcribe` … was unchecked.
       # It is a *metadata* resolution, not a build — cargo-deny never compiles
-      # anything — so this does **not** build llama.cpp or the tree-sitter
-      # grammars and costs under a second on top of the install (ADR-0017).
+      # anything — and costs under a second (ADR-0017).
       - name: Deny (licenses, bans, advisories) across the feature matrix
         if: env.RELEASE_PR != 'true'
-        run: |
-          cargo install cargo-deny --locked
-          cargo deny --all-features check
+        run: cargo deny --all-features check
 
   # The DEFAULT feature set — the configuration every user installs, and until
   # this job existed the one configuration CI never built.
@@ -460,28 +467,13 @@ jobs:
   # left behind when their only callers are gated away). Turning more features
   # on can never find that class of defect. Only building with them off can.
   #
-  # REQUIRED, not advisory. Contrast `coverage` below, which is deliberately
+  # REQUIRED, not advisory. Contrast the coverage step in `checks`, which is deliberately
   # `continue-on-error` because no threshold has been agreed and it would fail
   # on day one — an observation, not yet a rule. This job has no such excuse: it
   # is green as of the commit that adds it, so gating costs nothing today and is
   # the only thing that stops it going red unnoticed tomorrow. An advisory
   # version would reproduce the exact failure it exists to prevent — a signal
   # nobody is obliged to read.
-  #
-  # It needs NO cmake/libclang, and that is a change from how this job started
-  # (#483). It used to install them, because `rto-llama` declared a NON-optional
-  # dev-dependency on `llama-cpp-2` — and dev-dependencies are never
-  # feature-gated, so `--all-targets` built vendored llama.cpp here even at the
-  # default feature set, where no test target could name the crate. That entry is
-  # gone; the optional `[dependencies]` one, which Cargo already passes to test
-  # targets, serves them instead. `cargo tree --edges normal,dev -i
-  # llama-cpp-sys-2` at this feature set now reports no such package at all, and
-  # a cold `--all-targets` run compiles neither bindgen, clang-sys, cmake, nor
-  # llama-cpp-sys-2. Do not re-add the install step without first checking that
-  # command still says so.
-  #
-  # `cargo build`/`cargo install` at the default set never paid this either way;
-  # the cost was confined to `--all-targets`, i.e. to CI.
 
   # Pinned, not `ubuntu-latest`; see the `checks` job for why.
   default-features:
@@ -499,30 +491,27 @@ jobs:
           # nothing is the other way to get a number that is not one.
           fetch-depth: 0
       # Pinned toolchain, `master` ref of the action; see the `checks` job for
-      # why, and for what raising it involves. Bumped with the other six, in one
-      # commit, never alone — three of them now live in `graph-artifact.yml` and
-      # `release-plz.yml`, so the bump is not confined to this file.
+      # why, and for what raising it involves. Bumped with every other pin, in
+      # one commit, never alone.
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: "1.98"
-          components: rustfmt, clippy
-      # A failed run must still save its cache, as above. Skipped on a release
-      # PR for the reason given in the `checks` job.
+          components: clippy
+      # As in `checks`: saved from `main` only, kept on failure, skipped on a
+      # release PR.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         if: env.RELEASE_PR != 'true'
         with:
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # The whole of a release PR's verification in this job — see the
-      # `RELEASE_PR` comment at the top of this file.
+      # `RELEASE_PR` comment at the top of this file. Only there: on every other
+      # run `checks` performs the same check on the same commit (#871). No
+      # `cargo fmt` either — rustfmt does not evaluate `cfg`, so it cannot
+      # differ from the `checks` job's.
       - name: Manifests and lockfile agree
+        if: env.RELEASE_PR == 'true'
         run: cargo metadata --locked --format-version 1 > /dev/null
-      # rustfmt does not evaluate `cfg`, so this cannot differ from the `checks`
-      # job's formatting step. Kept anyway: it costs seconds, and it makes this
-      # job a complete statement of "the default set is healthy" rather than one
-      # that quietly depends on another job having run.
-      - name: Format
-        if: env.RELEASE_PR != 'true'
-        run: cargo fmt --all --check
       - name: Clippy (default features)
         if: env.RELEASE_PR != 'true'
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -575,7 +564,7 @@ jobs:
   # `Test (mcp only …)` step below is what exercises them; a clippy-only cell
   # would compile those arms and still never run them.
   #
-  # Three cells now, and each is a configuration the documentation offers:
+  # Five cells, and each is a configuration the documentation offers:
   #
   #   * `--no-default-features` — the floor. `crates/roteiro/Cargo.toml` promises
   #     it "still yields a binary with no analyzer surface at all"; this is what
@@ -598,13 +587,14 @@ jobs:
   #     content live in `rto_render::okf::view`, which is unconditional and so is
   #     already built and run by every job here.
   #
-  # Adding cells here rather than adding a job, deliberately: `no-default-features`
-  # is a REQUIRED status check on `main` (branch protection lists it by name), so
-  # renaming the job would leave that context permanently unreported and wedge
-  # every open PR with nothing red to look at. Cells added here are required from
-  # the commit that adds them; a new advisory job would reproduce the exact
-  # failure this issue is about — a signal nobody is obliged to read. They also
-  # share this runner's warm cargo cache with the set already built here.
+  # The cells run in parallel, as a matrix — they used to run one after another
+  # in one job, which made it the slowest in the file (10 minutes against
+  # `checks`' 10, measured 2026-11-16). Matrix cells report as
+  # `no-default-features (<cell>)`, but `no-default-features` is a REQUIRED
+  # status check on `main` (branch protection lists it by name), and a required
+  # context that names no job wedges every PR with nothing red to look at. So
+  # the required context is the small job of that name below, which fails unless
+  # every cell succeeded.
   #
   # ADR-0014 v1.2 names `--no-default-features --features execution` as a
   # supported build. Nothing compiled it, and by issue #445 it had drifted into
@@ -623,294 +613,105 @@ jobs:
   # `the_host_path_is_absent_but_names_the_feature` is gated
   # `not(exec-subprocess)` and so runs in **no other job** — it is where #445's
   # E0061 lived, and a clippy-only job would compile it and still never run it.
+  # Likewise `rto-render`'s three `cfg(not(feature = "execution"))` arms live in
+  # the `mcp` module and run only in the `mcp` cell, and the okf-viewer route
+  # tests are `#[cfg(feature = "okf-viewer")]`.
   #
-  # No cmake/libclang, for the reason spelled out on `default-features` above:
-  # `rto-llama`'s unconditional dev-dependency on `llama-cpp-2` used to drag
-  # vendored llama.cpp into every feature set's `--all-targets` build, and it is
-  # gone (#483). This job was the worst-hit — it is the feature set that should
-  # contain no llama.cpp at all, and it was building the whole C++ tree. Measured
-  # on a cold target dir at `--no-default-features --features execution`:
-  # 35.5s → 14.1s wall, 235s → 63s of CPU. Nothing left in this graph needs more
-  # than the `cc` the runner already ships (tree-sitter, libsqlite3-sys, ring).
-
-  # Pinned, not `ubuntu-latest`; see the `checks` job for why.
-  no-default-features:
+  # The `explorer` cell is not implied by the `okf-viewer` one: `okf-viewer`
+  # enables `explorer`, so that cell builds both, and this is the only cell that
+  # compiles the explorer on its own. It was broken for exactly as long as
+  # nothing built it — `serve_graph_ui` reached for a multi-threaded runtime
+  # whose feature only `okf-viewer` enabled.
+  #
+  # NOT a required check itself (the job below is), so it is skipped outright on
+  # a release PR, where a version bump turns no feature off. The predicate is
+  # longhand because `env` is not available in a job-level `if:`.
+  no-default-features-cells:
+    name: no-default-features (${{ matrix.cell }})
     runs-on: ubuntu-24.04
     # A backstop against a hung step, not a budget. See `checks` for the
     # measured durations these bounds are sized against.
-    timeout-minutes: 60
+    timeout-minutes: 30
+    if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'release-plz-')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The floor: no feature on anywhere. Every other cell builds a
+          # superset of it. Its docs step is where an ungated doc citing a
+          # gated item breaks (#792); each feature cell catches a doc behind
+          # one feature citing an item behind another (#797).
+          - cell: none
+            features: ""
+          - cell: mcp
+            features: "--features mcp"
+          - cell: execution
+            features: "--features execution"
+          - cell: okf-viewer
+            features: "--features okf-viewer"
+          - cell: explorer
+            features: "--features explorer"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Full history; see the `checks` job. This job runs `cargo test` five
-          # times over five feature sets, and the corpus tests are in all five:
-          # `review_llm` is declared `#[cfg(any(feature = "provider", test))]`,
-          # so `--no-default-features` does not
-          # take it out of the build — turning features off does not turn this
-          # requirement off with them.
+          # Full history; see the `checks` job. The corpus tests are in every
+          # cell: `review_llm` is declared `#[cfg(any(feature = "provider",
+          # test))]`, so turning features off does not turn this requirement
+          # off with them.
           fetch-depth: 0
-      # Pinned toolchain, `master` ref of the action; see the `checks` job for
-      # why, and for what raising it involves. Bumped with the other six, in one
-      # commit, never alone — three of them now live in `graph-artifact.yml` and
-      # `release-plz.yml`, so the bump is not confined to this file.
+      # Pinned toolchain, `master` ref of the action; see the `checks` job.
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: "1.98"
           components: clippy
-      # A failed run must still save its cache, as above. Skipped on a release
-      # PR for the reason given in the `checks` job.
+      # One cache per cell — they compile different dependency sets. Saved from
+      # `main` only; see the `checks` job.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        if: env.RELEASE_PR != 'true'
         with:
+          key: ${{ matrix.cell }}
           cache-on-failure: true
-      # The whole of a release PR's verification in this job — see the
-      # `RELEASE_PR` comment at the top of this file. The reason this job exists
-      # is that turning features *off* finds defects the other jobs are blind
-      # to; a version bump turns no feature off, so it moves nothing in that
-      # class, and the manifest check is the whole of what is at stake here as
-      # well. This job is a required check on `main`, so it must still RUN and
-      # report — see the `checks` job for why a skipped job would be safe and is
-      # still not what this file does.
-      - name: Manifests and lockfile agree
-        run: cargo metadata --locked --format-version 1 > /dev/null
-      # The floor: no feature on anywhere. First, because a failure here is the
-      # one a reader should see before any of the richer sets — every other cell
-      # in this job builds a superset of it.
-      - name: Clippy (no features at all)
-        if: env.RELEASE_PR != 'true'
-        run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
-      # `--no-fail-fast` for the reason `default-features` records: plain `cargo
-      # test` stops at the first failing binary, which makes the totals a lower
-      # bound rather than a measurement.
-      - name: Test (no features at all)
-        if: env.RELEASE_PR != 'true'
-        run: cargo test --workspace --no-default-features --no-fail-fast
-      # Intra-doc links in every configuration this job compiles: an ungated doc
-      # citing a gated item breaks here and nowhere else (#792), and a doc
-      # behind one feature citing an item behind another breaks only in that
-      # feature's cell (#797). See the `checks` job's docs step for the set.
-      - name: Docs (no features at all)
-        if: env.RELEASE_PR != 'true'
-        run: cargo doc --workspace --no-default-features --no-deps --keep-going
-      # The MCP server without an analyzer surface — the combination #667 found
-      # broken on `main`. The test step is where `rto-render`'s three
-      # `cfg(not(feature = "execution"))` arms actually run: they are inside the
-      # `mcp` module, so the cell above does not compile them and every other job
-      # in this file has `execution` on.
-      - name: Clippy (mcp only, no default features)
-        if: env.RELEASE_PR != 'true'
-        run: cargo clippy --workspace --all-targets --no-default-features --features mcp -- -D warnings
-      - name: Test (mcp only, no default features)
-        if: env.RELEASE_PR != 'true'
-        run: cargo test --workspace --no-default-features --features mcp --no-fail-fast
-      - name: Docs (mcp only, no default features)
-        if: env.RELEASE_PR != 'true'
-        run: cargo doc --workspace --no-default-features --features mcp --no-deps --keep-going
-      - name: Clippy (execution only, no default features)
-        if: env.RELEASE_PR != 'true'
-        run: cargo clippy --workspace --all-targets --no-default-features --features execution -- -D warnings
-      - name: Test (execution only, no default features)
-        if: env.RELEASE_PR != 'true'
-        run: cargo test --workspace --no-default-features --features execution --no-fail-fast
-      - name: Docs (execution only, no default features)
-        if: env.RELEASE_PR != 'true'
-        run: cargo doc --workspace --no-default-features --features execution --no-deps --keep-going
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --no-default-features ${{ matrix.features }} -- -D warnings
+      # `--no-fail-fast` for the reason `checks` records (#906).
+      - name: Test
+        run: cargo test --workspace --no-default-features ${{ matrix.features }} --no-fail-fast
+      - name: Docs
+        run: cargo doc --workspace --no-default-features ${{ matrix.features }} --no-deps --keep-going
 
-      # ADR-0022's viewer. Clippy AND tests, matching the cells above: the route
-      # tests are `#[cfg(feature = "okf-viewer")]`, so a clippy-only cell would
-      # compile them and never run them — the mistake the `execution` cell above
-      # records having made.
-      - name: Clippy (okf-viewer only, no default features)
-        if: env.RELEASE_PR != 'true'
-        run: cargo clippy --workspace --all-targets --no-default-features --features okf-viewer -- -D warnings
-      - name: Test (okf-viewer only, no default features)
-        if: env.RELEASE_PR != 'true'
-        run: cargo test --workspace --no-default-features --features okf-viewer --no-fail-fast
-      - name: Docs (okf-viewer only, no default features)
-        if: env.RELEASE_PR != 'true'
-        run: cargo doc --workspace --no-default-features --features okf-viewer --no-deps --keep-going
-
-      # `explorer` **without** the viewer, which is no longer implied by the cell
-      # above: `okf-viewer` now enables `explorer`, so that cell builds both and
-      # this one is the only job that compiles the explorer on its own. It was
-      # broken for exactly as long as nothing built it — folding the viewer in
-      # made `serve_graph_ui` construct a multi-threaded runtime whose feature
-      # only `okf-viewer` enabled, so `--features explorer` did not compile and
-      # `--all-features` could not tell, because it turns both on.
-      - name: Clippy (explorer only, no default features)
-        if: env.RELEASE_PR != 'true'
-        run: cargo clippy --workspace --all-targets --no-default-features --features explorer -- -D warnings
-      - name: Test (explorer only, no default features)
-        if: env.RELEASE_PR != 'true'
-        run: cargo test --workspace --no-default-features --features explorer --no-fail-fast
-      - name: Docs (explorer only, no default features)
-        if: env.RELEASE_PR != 'true'
-        run: cargo doc --workspace --no-default-features --features explorer --no-deps --keep-going
-
-  # Test coverage — MEASURING, NOT BLOCKING (issue #319).
+  # The REQUIRED `no-default-features` context: green only when every cell
+  # above succeeded.
   #
-  # The docs asserted for a long time that `cargo-llvm-cov` ran here with an 85%
-  # per-file floor. It did not: nothing in this file mentioned coverage at all,
-  # so every stage DoD citing "85% coverage" was unverifiable. This job makes the
-  # number real. It deliberately does NOT enforce a threshold yet.
-  #
-  # Why measure before gating: a *per-file* floor is stricter than most projects
-  # run, and switching one on blind would immediately fail thin wiring files that
-  # nobody wants to pad with ceremonial tests. The real numbers are what makes a
-  # threshold decision possible. Turning the floor on is a separate, deliberate
-  # change — `cargo llvm-cov --fail-under-lines N` (workspace) is the knob, and
-  # a genuine per-file floor needs a check over the per-file table below.
-  #
-  # `continue-on-error` keeps a coverage regression from blocking a merge while
-  # the number is only being observed. Remove it in the same change that adds a
-  # threshold, not before — a job that can fail but is ignored is the same class
-  # of untruth this job exists to end.
-  #
-  # Scope: `--all-features`, matching the `checks` job, so the measured surface
-  # is the surface that is tested. That builds vendored llama.cpp (`serve`),
-  # which needs cmake and a bindgen-loadable libclang — both already on the
-  # runner image, so this job installs neither; see the `checks` job for the
-  # evidence.
-  # rust-cache carries the compiled artefacts between runs. If this ever proves too slow to keep, narrow it to default features and
-  # SAY SO in the summary — a partial measurement reported as partial is honest,
-  # a gate that times out is not.
-  # Pinned, not `ubuntu-latest`; see the `checks` job for why.
-  coverage:
+  # `if: always()` is load-bearing. Without it, a failed cell makes this job
+  # `skipped` — and branch protection counts `skipped` as success, so a broken
+  # cell would merge. `always()` cannot skip, which is why
+  # `ci_release_pr_parity.rs` allows it and no other job-level condition on a
+  # required job. On a release PR the cells are skipped and this job does the
+  # manifest check, as every required job does there.
+  no-default-features:
+    needs: no-default-features-cells
+    if: always()
     runs-on: ubuntu-24.04
-    # A backstop against a hung step, not a budget. See `checks` for the
-    # measured durations these bounds are sized against.
-    timeout-minutes: 90
-    # PULL REQUESTS ONLY, and that is deliberate — this is NOT an oversight to
-    # be "fixed" back to matching `checks` and `default-features` above.
-    #
-    # This is the most expensive job in the matrix, and per the comment above it
-    # measures a number that nothing gates on: there is no ratchet (#319), and it
-    # is deliberately not a required status check. A PR is where that number is
-    # actually read, by someone deciding whether a change carries its tests. A
-    # push to `main` has no reader and no consequence — the merge has already
-    # happened, and nobody acts on a coverage delta within the minute.
-    #
-    # `checks` and `default-features` keep running on `push` for a reason that
-    # does not apply to coverage: they are the only detectors for two PRs that
-    # were green apart and red together, which is exactly how #316/#317's
-    # `EXTRACT_VERSION` collision broke `main`. Branch protection is now
-    # `strict`, so a branch must be up to date before merging and that class of
-    # break is much less likely — but less likely is not impossible, and those
-    # two jobs are cheap. This one is not.
-    #
-    # The release-plz exclusion added alongside it closes the hole that gating
-    # on `pull_request` alone left open: a release PR IS a pull request, so this
-    # job — the single most expensive in the matrix at 452s — ran in full on
-    # every version bump. Gating out the `push` half removed the cheap
-    # duplication and kept the expensive half. There is no coverage delta to
-    # read on a diff of version fields and changelog prose.
-    #
-    # This one is a JOB-level `if:`, unlike the step-level gates in the jobs
-    # that are required checks, and that asymmetry is deliberate: `coverage` is
-    # not a required status check, so nothing here depends on how branch
-    # protection treats a skipped job. It can be skipped outright for the full
-    # saving. The predicate is spelled out longhand because the `env` context
-    # is not available in a job-level `if:` — `env.RELEASE_PR` would silently
-    # never match here.
-    if: github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-plz-')
-    continue-on-error: true
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # `cargo llvm-cov` runs the whole suite, so this job needs the history
-          # for the same reason `checks` does — and for a second one specific to
-          # it: a test that returns early on a shallow clone still *counts* as
-          # having run, so the coverage figure for the corpus-replay code was
-          # measured with none of it executing (#822). Full history makes the
-          # number describe the code rather than the checkout.
-          fetch-depth: 0
-      # Pinned toolchain, `master` ref of the action; see the `checks` job for
-      # why, and for what raising it involves.
-      #
-      # This is the site where pinning was arguable, so the reasoning is here
-      # rather than left to look like an oversight. This job runs no clippy, it
-      # is `continue-on-error`, it is not a required check, and it sailed
-      # through the 1.98 roll that failed all three jobs above. The rule that
-      # would leave it floating — a job whose pass condition is behaviour
-      # rather than a lint set is cheap to float, and floating buys a free look
-      # at the new compiler — is a good rule that does not fit this job:
-      #
-      #  * It is not a behaviour job. It is an instrumentation job, and
-      #    `llvm-tools-preview` is version-locked to rustc while
-      #    `cargo-llvm-cov` is pinned below. Floating one half of that pair is
-      #    how a profraw/LLVM version mismatch arrives with nothing in the diff
-      #    to explain it.
-      #  * Its output is a number compared across runs — the un-enforced 85%
-      #    per-file floor, #319. A denominator that moves with no commit behind
-      #    it devalues the delta, which is the only thing anyone reads here.
-      #  * As a canary it is a poor one. It runs on `pull_request` only, so a
-      #    toolchain break lands red on whoever happened to have a PR open that
-      #    morning; and `continue-on-error` makes that red quiet. Misattributed
-      #    and easy to miss is the worst shape for an early warning. The canary
-      #    worth having is a scheduled, non-blocking clippy on floating stable,
-      #    which is its own workflow and its own decision.
-      #
-      # So all four sites are pinned, and the toolchain does not move anywhere
-      # in this file without a commit.
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: "1.98"
-          components: llvm-tools-preview
-      # A failed run must still save its cache, as above.
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          cache-on-failure: true
-      # No apt install of cmake/clang/libclang, deliberately — `ubuntu-24.04`
-      # ships all three and bindgen loads libclang without `libclang-dev`. The
-      # evidence, and the six-hour hang that made it worth establishing, are in
-      # the `checks` job above. Do not add one back here either.
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
-        with:
-          tool: cargo-llvm-cov
-      # `--no-fail-fast` for the reason the `checks` job records at length
-      # (#906), and it bites harder here than anywhere: `cargo llvm-cov` stopping
-      # at the first failing test binary does not merely report less, it
-      # **measures** less, and the number it then prints is a coverage figure
-      # computed from a truncated run with nothing on it saying so. This job
-      # exists to produce the input to a threshold decision; a silently partial
-      # input is worse than no input. It is the second of the two cells that
-      # lacked the flag — the other five already had it.
-      #
-      # `set -o pipefail` is the second half of the same defect and was there
-      # before this change. GitHub runs `run:` under `bash -e {0}` — **without**
-      # `pipefail` — so `cargo llvm-cov … | tee` reports `tee`'s status, and
-      # `tee` succeeds whatever cargo did. A failing measurement therefore ran on
-      # to the reporting step below, which published whatever landed in
-      # `coverage-summary.txt` under the heading "the input to deciding whether
-      # the floor should be enforced". A partial figure presented as the figure
-      # is precisely what this job must not do.
-      - name: Measure coverage (per file + workspace total)
+      # The whole of a release PR's verification in this job — see the
+      # `RELEASE_PR` comment at the top of this file.
+      - name: Manifests and lockfile agree
+        if: env.RELEASE_PR == 'true'
+        run: cargo metadata --locked --format-version 1 > /dev/null
+      - name: Every feature-off cell passed
+        if: env.RELEASE_PR != 'true'
+        env:
+          RESULT: ${{ needs.no-default-features-cells.result }}
         run: |
-          set -o pipefail
-          cargo llvm-cov --workspace --all-features --no-fail-fast \
-            --ignore-filename-regex '(tests?/|/target/)' \
-            --summary-only | tee coverage-summary.txt
-      - name: Report the numbers that a threshold decision needs
-        if: always()
-        run: |
-          {
-            echo '## Test coverage (measuring only — no gate)'
-            echo
-            echo 'The 85% per-file floor is **not** enforced. These numbers are'
-            echo 'the input to deciding whether it should be.'
-            echo
-            echo '```'
-            cat coverage-summary.txt
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-      - name: Upload the full per-file report
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: coverage-summary
-          path: coverage-summary.txt
-          if-no-files-found: warn
+          if [ "$RESULT" != success ]; then
+            echo "::error::a no-default-features cell did not succeed (result: $RESULT); see the cell jobs"
+            exit 1
+          fi
 
   # Pinned, not `ubuntu-latest`; see the `checks` job for why.
   msrv:
@@ -928,16 +729,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: "1.96"
-      # A failed run must still save its cache, as above. Skipped on a release
-      # PR for the reason given in the `checks` job.
+      # As in `checks`: saved from `main` only, kept on failure, skipped on a
+      # release PR.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         if: env.RELEASE_PR != 'true'
         with:
           cache-on-failure: true
-      # No apt install of cmake/clang/libclang, deliberately — `ubuntu-24.04`
-      # ships all three and bindgen loads libclang without `libclang-dev`. The
-      # evidence, and the six-hour hang that made it worth establishing, are in
-      # the `checks` job above. Do not add one back here either.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # The whole of a release PR's verification in this job — see the
       # `RELEASE_PR` comment at the top of this file. Running it on the 1.96
       # toolchain rather than stable earns this job something the other two
@@ -950,8 +748,3 @@ jobs:
       - name: Build on MSRV
         if: env.RELEASE_PR != 'true'
         run: cargo check --workspace --all-features
-      - name: Audit on MSRV lockfile
-        if: env.RELEASE_PR != 'true'
-        run: |
-          cargo install cargo-audit --locked
-          cargo audit
