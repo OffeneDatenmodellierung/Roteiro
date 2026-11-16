@@ -23,13 +23,17 @@ or runs an analyzer without your consent, exactly as in the default build.
 <tr><td>Windows 10+, x86_64</td><td><code>roteiro-&lt;version&gt;-windows-x86_64.zip</code></td></tr>
 </table>
 
-Each has a `.sha256` beside it. The binaries are **not signed**, so the first
-run needs one step:
+Each has a `.sha256` beside it. The macOS binary is signed with a Developer ID
+and notarized by Apple after 8.0.1; macOS checks it online the first time it
+runs. The Windows binary is **not signed**, so its first run needs one step:
 
-<pre><code><span class="c"># macOS: unpack, clear the download quarantine, put it on your PATH</span>
+<pre><code><span class="c"># macOS: unpack and put it on your PATH</span>
 tar -xzf roteiro-*-macos-arm64.tar.gz
-xattr -d com.apple.quarantine roteiro-*/roteiro
 sudo mv roteiro-*/roteiro /usr/local/bin/
+
+<span class="c"># 8.0.1 and earlier are unsigned: if macOS cannot verify the developer,</span>
+<span class="c"># clear the download quarantine once</span>
+xattr -d com.apple.quarantine /usr/local/bin/roteiro
 
 <span class="c"># Windows (PowerShell): unpack, unblock, run from the folder or add it to PATH</span>
 Expand-Archive roteiro-*-windows-x86_64.zip -DestinationPath .

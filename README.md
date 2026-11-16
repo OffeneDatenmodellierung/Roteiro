@@ -30,8 +30,9 @@ git-native and content-addressed, so the graph is shareable across a team.
 
 No Rust toolchain? Each [release](https://github.com/OffeneDatenmodellierung/Roteiro/releases/latest)
 carries a prebuilt binary for macOS (Apple silicon) and Windows (x86_64), built
-with every feature. They are unsigned, so the
-first run needs one step — see [Install](https://roteiro.dev/build.html#download).
+with every feature. The macOS one is signed and notarized after 8.0.1; the
+Windows one is unsigned, so its first run needs one step — see
+[Install](https://roteiro.dev/build.html#download).
 
 ```sh
 cargo install roteiro          # lean default build; offline unless you ask it to fetch
