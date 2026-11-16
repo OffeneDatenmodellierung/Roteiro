@@ -22,9 +22,19 @@ name: Release binaries
 #     artifact, upload nothing. CI is Linux-only, so this is where a change to
 #     the workflow proves it still produces both archives.
 #
-# Unsigned: no Apple Developer ID or Authenticode certificate is configured, so
-# macOS Gatekeeper and Windows SmartScreen warn on first run. website/pages/
-# build.md says how to clear the warning.
+# Signing:
+#   - macOS is signed with a Developer ID (hardened runtime) and notarized when
+#     the MACOS_* secrets below are set, so Gatekeeper opens it without the
+#     `xattr` step. A bare Mach-O cannot have its ticket stapled, so the first
+#     run checks it with Apple online. Without the secrets the build still ships,
+#     unsigned, with a warning on the run.
+#       MACOS_CERT_P12          base64 of the "Developer ID Application" .p12
+#       MACOS_CERT_PASSWORD     its export password
+#       MACOS_NOTARY_KEY        App Store Connect API key, the .p8 file's text
+#       MACOS_NOTARY_KEY_ID     its key ID
+#       MACOS_NOTARY_ISSUER_ID  its issuer ID
+#   - Windows is unsigned (no Authenticode certificate), so SmartScreen warns on
+#     first run; website/pages/build.md says how to clear it.
 
 on:
   release:
@@ -69,6 +79,8 @@ jobs:
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
+    env:
+      MACOS_SIGNING: ${{ secrets.MACOS_CERT_P12 != '' }}
     defaults:
       run:
         shell: bash
@@ -96,6 +108,60 @@ jobs:
       # committed lock and nothing else.
       - name: Build
         run: cargo build --release --locked --all-features -p roteiro --target ${{ matrix.target }}
+
+      - name: Sign and notarize (macOS)
+        if: matrix.name == 'macos-arm64' && env.MACOS_SIGNING == 'true'
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+          NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          bin=target/aarch64-apple-darwin/release/roteiro
+          kc="$RUNNER_TEMP/signing.keychain-db"
+          kcpw="$(openssl rand -hex 16)"
+          security create-keychain -p "$kcpw" "$kc"
+          security set-keychain-settings -lut 3600 "$kc"
+          security unlock-keychain -p "$kcpw" "$kc"
+          printf '%s' "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$kc" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$kcpw" "$kc" > /dev/null
+          # A Keychain-exported .p12 carries no chain, and codesign refuses
+          # ("unable to build chain") without the G2 intermediate. Pinned.
+          curl -fsSLo "$RUNNER_TEMP/g2.cer" https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+          echo "f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a  $RUNNER_TEMP/g2.cer" | shasum -a 256 -c -
+          security add-certificates -k "$kc" "$RUNNER_TEMP/g2.cer"
+          # shellcheck disable=SC2046 # one keychain path per word
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          identity="$(security find-identity -v -p codesigning "$kc" | awk -F'"' '/Developer ID Application/ {print $2; exit}')"
+          if [ -z "$identity" ]; then
+            echo "::error::MACOS_CERT_P12 holds no 'Developer ID Application' identity"
+            exit 1
+          fi
+          codesign --force --sign "$identity" --keychain "$kc" --options runtime --timestamp "$bin"
+          codesign --verify --strict --verbose=2 "$bin"
+
+          printf '%s\n' "$NOTARY_KEY" > "$RUNNER_TEMP/notary.p8"
+          ditto -c -k "$bin" "$RUNNER_TEMP/notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
+            --key "$RUNNER_TEMP/notary.p8" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" \
+            --wait --timeout 30m --output-format json | tee "$RUNNER_TEMP/notary.json"
+          status="$(jq -r .status "$RUNNER_TEMP/notary.json")"
+          if [ "$status" != "Accepted" ]; then
+            xcrun notarytool log "$(jq -r .id "$RUNNER_TEMP/notary.json")" \
+              --key "$RUNNER_TEMP/notary.p8" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" || true
+            echo "::error::notarization returned '$status'"
+            exit 1
+          fi
+          rm "$RUNNER_TEMP/notary.p8"
+          security delete-keychain "$kc"
+
+      - name: Warn that macOS ships unsigned
+        if: matrix.name == 'macos-arm64' && env.MACOS_SIGNING != 'true'
+        run: echo "::warning::MACOS_CERT_P12 is not set; the macOS binary is unsigned and needs the xattr step"
 
       - name: Package
         id: package
