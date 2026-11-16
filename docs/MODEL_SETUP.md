@@ -141,6 +141,7 @@ Expand-Archive ant.zip -DestinationPath "$env:LOCALAPPDATA\Programs\ant"
 # then add %LOCALAPPDATA%\Programs\ant to PATH and open a new terminal
 
 # Linux / WSL — pick VERSION from github.com/anthropics/anthropic-cli/releases
+VERSION=2.9.0
 curl -fsSL "https://github.com/anthropics/anthropic-cli/releases/download/v${VERSION}/ant_${VERSION}_$(uname -s | tr A-Z a-z)_$(uname -m | sed -e s/x86_64/amd64/ -e s/aarch64/arm64/).tar.gz" \
   | sudo tar -xz -C /usr/local/bin ant
 

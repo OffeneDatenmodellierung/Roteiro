@@ -15562,9 +15562,9 @@ fn run_serve_network(
         let _ = (cfg, &set, &flat, workspace_name, opts);
         #[cfg(feature = "serve")]
         anyhow::bail!(
-            "no installed GGUF models to serve — pull one \
-             (`roteiro model pull qwen3-0.6b`; see `roteiro model list`), or rebuild with \
-             `--features explorer` for the llama-free graph API + web UI"
+            "no provider to serve — set `[provider] base_url` (and `[models]`) in config; \
+             see docs/MODEL_SETUP.md. Or rebuild with `--features explorer` for the \
+             model-free graph API + web UI (the release binaries include it)"
         );
         #[cfg(not(feature = "serve"))]
         anyhow::bail!(

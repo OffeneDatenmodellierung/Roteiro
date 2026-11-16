@@ -36,7 +36,8 @@ Invoke-WebRequest "https://github.com/anthropics/anthropic-cli/releases/download
 Expand-Archive ant.zip -DestinationPath "$env:LOCALAPPDATA\Programs\ant"
 <span class="c"># then add %LOCALAPPDATA%\Programs\ant to PATH and open a new terminal</span>
 
-<span class="c"># Linux / WSL</span>
+<span class="c"># Linux / WSL — VERSION from github.com/anthropics/anthropic-cli/releases</span>
+VERSION=2.9.0
 curl -fsSL "https://github.com/anthropics/anthropic-cli/releases/download/v${VERSION}/ant_${VERSION}_$(uname -s | tr A-Z a-z)_$(uname -m | sed -e s/x86_64/amd64/ -e s/aarch64/arm64/).tar.gz" \
   | sudo tar -xz -C /usr/local/bin ant
 

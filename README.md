@@ -42,6 +42,12 @@ roteiro review                 # your change, plus what the graph knows about it
 roteiro serve --scope all      # web UI + /v1 over every configured workspace
 ```
 
+`roteiro serve` answers through your model provider, so set `[provider]
+base_url` first ([Models](https://roteiro.dev/models.html)). Without one it
+serves the browse-only graph UI, which needs the `explorer` feature —
+`cargo install roteiro --features explorer`, or a release binary, which carries
+every feature.
+
 The default build needs no toolchain class beyond the C compiler Rust itself
 requires — no C++, no cmake, no libclang — and makes no network call on its own.
 It includes everything needed to *prepare* for working offline —
