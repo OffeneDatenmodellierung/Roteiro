@@ -26,8 +26,8 @@ name: Release binaries
 #   - macOS is signed with a Developer ID (hardened runtime) and notarized when
 #     the MACOS_* secrets below are set, so Gatekeeper opens it without the
 #     `xattr` step. A bare Mach-O cannot have its ticket stapled, so the first
-#     run checks it with Apple online. Without the secrets the build still ships,
-#     unsigned, with a warning on the run.
+#     run checks it with Apple online. Without the secrets a release run fails
+#     rather than ship it unsigned; a pull-request run only warns.
 #       MACOS_CERT_P12          base64 of the "Developer ID Application" .p12
 #       MACOS_CERT_PASSWORD     its export password
 #       MACOS_NOTARY_KEY        App Store Connect API key, the .p8 file's text
@@ -159,9 +159,17 @@ jobs:
           rm "$RUNNER_TEMP/notary.p8"
           security delete-keychain "$kc"
 
-      - name: Warn that macOS ships unsigned
+      # The install docs promise a notarized macOS binary, so a release never
+      # ships an unsigned one; a pull request (e.g. from a fork) only warns.
+      - name: Refuse to ship macOS unsigned
         if: matrix.name == 'macos-arm64' && env.MACOS_SIGNING != 'true'
-        run: echo "::warning::MACOS_CERT_P12 is not set; the macOS binary is unsigned and needs the xattr step"
+        run: |
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            echo "::warning::MACOS_CERT_P12 is not set; this run's macOS binary is unsigned"
+          else
+            echo "::error::MACOS_CERT_P12 is not set; a release's macOS binary must be signed and notarized"
+            exit 1
+          fi
 
       - name: Package
         id: package
