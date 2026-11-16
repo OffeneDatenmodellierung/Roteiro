@@ -47,7 +47,10 @@ use yaml_rust2::Yaml;
 /// anything where somebody looks for it, and this is the job a reader — and
 /// branch protection, which lists this context by name — trusts to be the place
 /// features are off.
-const FEATURES_OFF_JOB: &str = "no-default-features";
+///
+/// The cells run as a matrix job; the required `no-default-features` context is
+/// a separate job that aggregates them (see `ci_release_pr_parity.rs`).
+const FEATURES_OFF_JOB: &str = "no-default-features-cells";
 
 /// Feature selections the project's own documentation offers, each of which some
 /// job must actually build.
@@ -262,11 +265,46 @@ fn ci_jobs() -> Option<Vec<(String, Yaml)>> {
     )
 }
 
+/// A job's `strategy.matrix.include` entries as key/value maps; one empty map
+/// for a job without a matrix, so its scripts are read once, unexpanded.
+fn matrix_cells(spec: &Yaml) -> Vec<BTreeMap<String, String>> {
+    let include = spec["strategy"]["matrix"]["include"].as_vec();
+    let Some(include) = include else {
+        return vec![BTreeMap::new()];
+    };
+    include
+        .iter()
+        .map(|cell| {
+            cell.as_hash()
+                .into_iter()
+                .flatten()
+                .filter_map(|(k, v)| Some((k.as_str()?.to_owned(), v.as_str()?.to_owned())))
+                .collect()
+        })
+        .collect()
+}
+
+/// `script` with each `${{ matrix.KEY }}` replaced by the cell's value — what
+/// the runner executes for that cell.
+fn expand(script: &str, cell: &BTreeMap<String, String>) -> String {
+    let mut out = script.to_owned();
+    for (key, value) in cell {
+        out = out.replace(&format!("${{{{ matrix.{key} }}}}"), value);
+    }
+    assert!(
+        !out.contains("${{ matrix."),
+        "a `run:` script references a matrix key its cell does not define: {out}"
+    );
+    out
+}
+
 /// Every compiling cargo invocation in `ci.yml`, tagged with the job it is in.
+/// A matrix job contributes one invocation per cell, expanded.
 fn matrix() -> Option<Vec<(String, Selection)>> {
     let jobs = ci_jobs()?;
     let mut out = Vec::new();
     for (job, spec) in jobs {
+        let cells = matrix_cells(&spec);
         let steps = spec
             .as_hash()
             .and_then(|h| h.get(&Yaml::String("steps".to_owned())))
@@ -280,8 +318,10 @@ fn matrix() -> Option<Vec<(String, Selection)>> {
             else {
                 continue;
             };
-            for selection in selections_in(script) {
-                out.push((job.clone(), selection));
+            for cell in &cells {
+                for selection in selections_in(&expand(script, cell)) {
+                    out.push((job.clone(), selection));
+                }
             }
         }
     }

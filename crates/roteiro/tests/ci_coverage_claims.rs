@@ -15,7 +15,7 @@
 //! 2. that job is still non-blocking (so the docs' "not gated" stays true), and
 //! 3. no document reinstates the claim that the floor is enforced.
 //!
-//! Making the coverage job blocking is a fine thing to do — but it has to happen
+//! Making the coverage step blocking is a fine thing to do — but it has to happen
 //! in the same change that rewrites §11, and this test is what forces the pair.
 
 use std::io::ErrorKind;
@@ -92,7 +92,7 @@ fn repo_file(rel: &str) -> Option<String> {
 
 /// `ci.yml` with every comment line dropped.
 ///
-/// The comments in the coverage job discuss `cargo llvm-cov` and
+/// The comments on the coverage step discuss `cargo llvm-cov` and
 /// `continue-on-error` at length — deliberately, since the reasoning is the point
 /// — so a naive `contains` would keep passing after the *actual* step was
 /// deleted, and this guard would be decorative. Fault injection caught exactly
@@ -122,7 +122,7 @@ fn ci_measures_coverage_without_gating_it() {
     );
     assert!(
         ci.contains("continue-on-error: true"),
-        "the coverage job must stay non-blocking while the docs say the 85% \
+        "the coverage step must stay non-blocking while the docs say the 85% \
          floor is NOT enforced. Making it blocking is fine — but rewrite \
          docs/history/BUILD_PLAN.md §11 in the same change, or the docs go back to \
          describing a pipeline that does not exist."

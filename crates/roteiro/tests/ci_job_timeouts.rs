@@ -24,7 +24,7 @@
 //! measured durations, not taste.
 //!
 //! Fault injection, both directions, confirmed against this file:
-//!   - delete `timeout-minutes` from the `coverage` job -> `coverage` is named
+//!   - delete `timeout-minutes` from the `msrv` job -> `msrv` is named
 //!     by `every_ci_job_is_bounded`
 //!   - raise `checks` to 350 -> named by `a_job_bound_is_small_enough_to_be_one`
 //!   - drop `timeout-minutes` from an apt step -> named by

@@ -1161,8 +1161,8 @@ statement about the pipeline, which made every stage DoD below that cites "85%
 coverage" unverifiable. Three separate agents reported it independently, which is
 the tell: the docs were actively misleading people trying to comply.
 
-What is true now: a **non-blocking** `coverage` job runs
-`cargo llvm-cov --workspace --all-features` and publishes the per-file table and
+What is true now: the `checks` job instruments its `--all-features` test run
+with `cargo llvm-cov` and a **non-blocking** step publishes the per-file table and
 the workspace total to the run summary. **No threshold is enforced.** The 85%
 per-file floor remains the *aspiration* recorded in ADR-0001, not a gate — and a
 per-file floor is stricter than most projects run, so switching one on blind

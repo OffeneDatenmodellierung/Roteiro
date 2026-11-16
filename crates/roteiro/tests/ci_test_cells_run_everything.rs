@@ -137,7 +137,7 @@ fn cells() -> Option<Vec<Cell>> {
     let mut out = Vec::new();
     for (workflow, text) in workflows()? {
         // `\`-continued lines are one command; `cargo llvm-cov` carries its flags
-        // over three lines in the coverage job.
+        // over two lines in the `checks` coverage step.
         for line in text.replace("\\\n", " ").lines() {
             let line = line.trim();
             if line.starts_with('#') {
@@ -156,6 +156,17 @@ fn cells() -> Option<Vec<Cell>> {
             // `--all-features` cell uses one deliberately, to record which test
             // binaries exist before running them.
             if line.contains("--no-run") {
+                continue;
+            }
+            // `cargo llvm-cov show-env|clean|report` set up or read coverage
+            // around a `cargo test` run; they run no test themselves. Plain
+            // `cargo llvm-cov` (and `llvm-cov test`) runs the suite and stays in.
+            let mut words = rest.1.split_whitespace().skip(1);
+            if subcommand == "llvm-cov"
+                && words
+                    .next()
+                    .is_some_and(|w| ["show-env", "clean", "report"].contains(&w))
+            {
                 continue;
             }
             out.push(Cell {
