@@ -39,7 +39,7 @@ clap = { version = "4.6", features = ["derive", "env"] }
 # ADR-0030 removed it. 0.41 bundles SQLite 3.54.x, which fixes CVE-2026-119375
 # (RUSTSEC-2026-0459). Not 0.42: it is younger than the 48-hour minimum release
 # age (ADR-0017).
-rusqlite = { version = "0.41", features = ["bundled"] }
+rusqlite = { version = "0.42", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
