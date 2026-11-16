@@ -40,14 +40,15 @@ roteiro review --base main</code></pre>
 
 ## Natural language — via a local model
 
-Serve your installed models over the OpenAI-compatible `/v1` endpoint, then ask
+Serve your provider's models over the OpenAI-compatible `/v1` endpoint, then ask
 in plain English. The server runs an agent loop that calls the graph's `search`,
 `context` and `path` tools and answers from what it finds — so *“what should this
 project be used for?”* is answered from your ADRs and blueprints, not guessed.
-Requires `--features serve`.
+Needs a provider ([Models](models.html)); `serve` is in the default build.
 
-<pre><code><span class="c"># Start the network server (loopback; pick another port with --addr if 8017 is taken)</span>
-roteiro serve
+<pre><code><span class="c"># Start the network server over every configured workspace — the recommended default</span>
+<span class="c"># (loopback; pick another port with --addr if 8017 is taken)</span>
+roteiro serve --scope all
 
 <span class="c"># Ask it like any OpenAI chat endpoint — grounded in your graph</span>
 curl -s http://127.0.0.1:8017/v1/chat/completions \

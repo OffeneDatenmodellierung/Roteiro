@@ -93,16 +93,17 @@ A hosted <code>base_url</code> sends repository content to that host —
 
 ## 3 · Serving mode — the network HTTP server {#serving}
 
-`roteiro serve` is the networked server: an OpenAI-compatible `/v1` API over your
-installed models, the read-only `/v1/graph` API and the [explorer](#explorer) web
-UI — all on one loopback port. Built with `--features serve` and a model
-installed, it also enables the **Ask** tab; without the model feature (or none
-installed) it degrades gracefully to the model-free graph API + UI. Binds
+`roteiro serve` is the networked server: an OpenAI-compatible `/v1` API in
+front of your provider, the read-only `/v1/graph` API and the
+[explorer](#explorer) web UI — all on one loopback port. With a
+`[provider] base_url` it also enables the **Ask** tab; without one it serves the
+model-free graph API + UI. Run it as `roteiro serve --scope all` to serve every
+configured workspace; bare `roteiro serve` serves only the repository you are in. Binds
 `[serve] addr` (default `127.0.0.1:8017`); set `[serve] tls_cert`/`tls_key` for
 in-process HTTPS.
 
-<pre><code><span class="c"># Network server on 127.0.0.1:8017 — /v1 + /v1/graph + the web UI</span>
-roteiro serve                            <span class="c"># → prints the URL to open</span>
+<pre><code><span class="c"># Network server on 127.0.0.1:8017 — /v1 + /v1/graph + the web UI, every workspace</span>
+roteiro serve --scope all                <span class="c"># → prints the URL to open</span>
 
 <span class="c"># Call /v1 on that default bind like any OpenAI endpoint</span>
 curl http://127.0.0.1:8017/v1/chat/completions \
