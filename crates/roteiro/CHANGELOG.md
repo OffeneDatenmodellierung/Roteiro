@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [8.0.2](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v8.0.1...roteiro-v8.0.2) - 2026-11-16
+
+### Other
+
+- stop compiling tools and running suites twice; parallelise the feature-off cells
+
 ## [8.0.1](https://github.com/OffeneDatenmodellierung/Roteiro/compare/roteiro-v8.0.0...roteiro-v8.0.1) - 2026-11-16
 
 ### Fixed
