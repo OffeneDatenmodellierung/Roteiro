@@ -361,7 +361,7 @@ jobs:
       # cargo-deny from source cost 3.9 of this job's 10 minutes on every run.
       - name: Install cargo-llvm-cov, cargo-audit and cargo-deny
         if: env.RELEASE_PR != 'true'
-        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with:
           tool: cargo-llvm-cov,cargo-audit,cargo-deny
       # COVERAGE (#319) is measured on this job's own test run. It used to be a
